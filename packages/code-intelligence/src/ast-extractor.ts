@@ -23,6 +23,10 @@ export interface ExtractedEntity {
   lineEnd: number
   contentHash: string
   parentClass?: string
+  /** Semantic domain tag from a `@sem domain=<tag>` line in the preceding doc comment. */
+  semDomain?: string
+  /** Semantic role tag from a `@sem role=<tag>` line in the preceding doc comment. */
+  semRole?: string
 }
 
 export interface ExtractedEdge {
@@ -215,6 +219,66 @@ function buildLogicalLine(lines: string[], startIdx: number, maxJoin = 16): stri
 }
 
 // ---------------------------------------------------------------------------
+// Doc-comment / @sem parser
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip comment markers from a single trimmed line inside a block comment.
+ * Handles the opening slash-star-star, the closing star-slash, and interior star lines.
+ */
+function stripCommentLine(rawTrimmed: string): string {
+  if (rawTrimmed.startsWith("/**")) {
+    let t = rawTrimmed.slice(3).trimStart()
+    if (t.endsWith("*/")) t = t.slice(0, -2).trimEnd()
+    return t
+  }
+  if (rawTrimmed.endsWith("*/")) {
+    let t = rawTrimmed.slice(0, -2).trimEnd()
+    if (t.startsWith("*")) t = t.slice(1).trimStart()
+    return t
+  }
+  if (rawTrimmed.startsWith("* ")) return rawTrimmed.slice(2)
+  if (rawTrimmed === "*") return ""
+  return rawTrimmed
+}
+
+/**
+ * Walk backward from entityLineIdx to find the nearest block comment above the
+ * entity declaration and parse "@sem domain=<tag> role=<tag>" from it.
+ *
+ * @sem domain=intelligence role=utilities
+ */
+function extractDocComment(lines: string[], entityLineIdx: number): { semDomain?: string; semRole?: string } {
+  let scanIdx = entityLineIdx - 1
+  // Skip blank lines between comment and declaration
+  while (scanIdx >= 0 && (lines[scanIdx] ?? "").trim() === "") scanIdx--
+  if (scanIdx < 0) return {}
+
+  const endTrimmed = (lines[scanIdx] ?? "").trim()
+  // Must end with */ to be a block comment close (or be a single-line /** ... */)
+  if (!endTrimmed.endsWith("*/")) return {}
+  const blockEnd = scanIdx
+
+  // Walk back to the /** opening
+  while (scanIdx >= 0 && !(lines[scanIdx] ?? "").trim().startsWith("/**")) scanIdx--
+  if (scanIdx < 0) return {}
+
+  // Extract and strip content lines
+  let semDomain: string | undefined
+  let semRole: string | undefined
+  for (let i = scanIdx; i <= blockEnd; i++) {
+    const text = stripCommentLine((lines[i] ?? "").trim())
+    if (text.startsWith("@sem")) {
+      const domainM = /domain=(\S+)/.exec(text)
+      const roleM = /role=(\S+)/.exec(text)
+      if (domainM?.[1]) semDomain = domainM[1]
+      if (roleM?.[1]) semRole = roleM[1]
+    }
+  }
+  return { semDomain, semRole }
+}
+
+// ---------------------------------------------------------------------------
 // Entity extraction
 // ---------------------------------------------------------------------------
 
@@ -252,6 +316,7 @@ export function extractEntities(content: string, filePath: string): ExtractedEnt
       const body = lines.slice(i, lineEnd).join("\n")
       const contentHash = createHash("sha256").update(body).digest("hex").slice(0, 16)
 
+      const { semDomain, semRole } = extractDocComment(lines, i)
       entities.push({
         name,
         kind: pat.kind,
@@ -260,6 +325,8 @@ export function extractEntities(content: string, filePath: string): ExtractedEnt
         lineEnd,
         contentHash,
         parentClass: pat.kind === "method" ? (currentClass ?? undefined) : undefined,
+        semDomain,
+        semRole,
       })
       break
     }

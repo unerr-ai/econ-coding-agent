@@ -35,6 +35,8 @@ const SCHEMA = /* sql */ `
     line_end     INTEGER NOT NULL,
     content_hash TEXT    NOT NULL,
     parent_class TEXT,
+    domain       TEXT,
+    role         TEXT,
     UNIQUE(file_path, name, kind)
   );
 
@@ -98,6 +100,8 @@ function rowToEntity(row: Record<string, unknown>, root: string): Entity {
     signature: String(row["signature"] ?? ""),
     parentClass: row["parent_class"] ? String(row["parent_class"]) : undefined,
     contentHash: String(row["content_hash"] ?? ""),
+    domain: row["domain"] ? String(row["domain"]) : undefined,
+    role: row["role"] ? String(row["role"]) : undefined,
   }
 }
 
@@ -130,6 +134,9 @@ export class BunSqliteGraph implements CodeIntelligence {
     this.db = new Database(dbPath)
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
     this.db.exec(SCHEMA)
+    // Migrations: add semantic columns to existing DBs (no-op if already present)
+    try { this.db.exec("ALTER TABLE entities ADD COLUMN domain TEXT") } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE entities ADD COLUMN role TEXT") } catch { /* already exists */ }
     this.root = root
   }
 
@@ -157,12 +164,12 @@ export class BunSqliteGraph implements CodeIntelligence {
        ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, indexed_at=unixepoch()`
     )
     const upsertEntity = this.db.prepare(
-      `INSERT INTO entities (file_path, name, kind, signature, line_start, line_end, content_hash, parent_class)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO entities (file_path, name, kind, signature, line_start, line_end, content_hash, parent_class, domain, role)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(file_path, name, kind) DO UPDATE SET
          signature=excluded.signature, line_start=excluded.line_start,
          line_end=excluded.line_end, content_hash=excluded.content_hash,
-         parent_class=excluded.parent_class`
+         parent_class=excluded.parent_class, domain=excluded.domain, role=excluded.role`
     )
     const deleteEdgesForFile = this.db.prepare(`DELETE FROM edges WHERE from_file = ?`)
     const insertEdge = this.db.prepare(
@@ -216,7 +223,9 @@ export class BunSqliteGraph implements CodeIntelligence {
             e.lineStart,
             e.lineEnd,
             e.contentHash,
-            e.parentClass ?? null
+            e.parentClass ?? null,
+            e.semDomain ?? null,
+            e.semRole ?? null
           )
           entitiesTotal++
         }

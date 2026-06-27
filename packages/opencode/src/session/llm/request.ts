@@ -77,6 +77,24 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     system.push(header, rest.join("\n"))
   }
 
+  // Z3-econ S2.0: context.assemble.before — push-based injection seam.
+  // Fires after system is assembled but before messages are built, so plugins
+  // (S2.1 memory, S2.4 recon) can prepend context without touching the DB.
+  const contextInject = yield* input.plugin.trigger(
+    "context.assemble.before",
+    {
+      sessionID: input.sessionID,
+      agent: input.agent.name,
+      model: input.model,
+      provider: input.provider,
+      message: input.user,
+    },
+    {
+      system,
+      messages: [] as Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    },
+  )
+
   const variant =
     !input.small && input.model.variants && input.user.model.variant
       ? input.model.variants[input.user.model.variant]
@@ -108,6 +126,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
               content: x,
             }),
           ),
+          // Injections from context.assemble.before (e.g. memory, recon context)
+          ...(contextInject.messages as ModelMessage[]),
           ...input.messages,
         ]
 

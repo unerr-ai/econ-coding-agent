@@ -332,4 +332,36 @@ export interface Hooks {
    * Modify tool definitions (description and parameters) sent to LLM
    */
   "tool.definition"?: (input: { toolID: string }, output: { description: string; parameters: any }) => Promise<void>
+  /**
+   * Called after system parts and model messages are assembled but before the
+   * payload is dispatched to the LLM. Plugins push additional system strings
+   * or plain-text model messages (e.g. memory injections, recon context).
+   * Injected messages are prepended immediately before the conversation history.
+   *
+   * Z3-econ S2.0: push-based context injection seam — S2.1 (memory) and
+   * S2.4 (recon) register here to make their context visible to the model.
+   *
+   * @param input  Session + model context for the current turn (read-only).
+   * @param output Mutable injection containers:
+   *   - `system`   — push strings to append to the assembled system prompt
+   *   - `messages` — push `{ role, content }` entries prepended before history
+   */
+  "context.assemble.before"?: (
+    input: {
+      sessionID: string
+      agent: string
+      model: Model
+      provider: ProviderContext
+      message: UserMessage
+    },
+    output: {
+      /** Additional strings appended to the system prompt */
+      system: string[]
+      /**
+       * Plain-text model messages injected immediately before the conversation
+       * history. Use "system" for context blocks, "user" for memory turns.
+       */
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>
+    },
+  ) => Promise<void>
 }

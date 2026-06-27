@@ -29,6 +29,10 @@ export interface Entity {
   parentClass?: string
   /** SHA-256 prefix of entity body for change detection. */
   contentHash: string
+  /** Semantic domain tag from a `@sem domain=<tag>` annotation in the entity's doc comment. */
+  domain?: string
+  /** Semantic role tag from a `@sem role=<tag>` annotation in the entity's doc comment. */
+  role?: string
 }
 
 /** A directed reference edge between two entities or files. */

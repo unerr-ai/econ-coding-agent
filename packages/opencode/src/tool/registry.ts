@@ -18,6 +18,8 @@ import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 // Z1 — econ graph tools (S1.2); remove this comment block when graduated
 import { GraphReconTool, GraphFileReadTool, GraphGetReferencesTool } from "./graph-tools"
+// Z2.3 — econ webfetch-compress tool (S2.3)
+import { WebFetchCompressTool } from "./webfetch-compress"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -112,6 +114,8 @@ export const layer = Layer.effect(
     const graphRecon = yield* GraphReconTool
     const graphFileRead = yield* GraphFileReadTool
     const graphGetRefs = yield* GraphGetReferencesTool
+    // Z2.3 — econ webfetch-compress
+    const webfetchCompress = yield* WebFetchCompressTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -222,6 +226,8 @@ export const layer = Layer.effect(
           recon: Tool.init(graphRecon),
           graphFileRead: Tool.init(graphFileRead),
           getReferences: Tool.init(graphGetRefs),
+          // Z2.3 — econ webfetch-compress (S2.3)
+          webfetchCompress: Tool.init(webfetchCompress),
         })
 
         return {
@@ -247,6 +253,8 @@ export const layer = Layer.effect(
             tool.recon,
             tool.graphFileRead,
             tool.getReferences,
+            // Z2.3 — econ webfetch-compress always available (S2.3)
+            tool.webfetchCompress,
           ],
           task: tool.task,
           read: tool.read,
