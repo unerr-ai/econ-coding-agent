@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      # Typecheck all packages via turbo
+      - name: Typecheck
+        run: bun turbo typecheck
+
+      # Lint with oxlint (root script)
+      - name: Lint
+        run: bun run lint
+
+      # Build the product binary for THIS runner only (--single), skipping the
+      # 12-target cross-compile and the Web UI bundle so PR CI stays fast.
+      - name: Build econ binary (single target)
+        working-directory: packages/opencode
+        run: bun run script/build.ts --single --skip-embed-web-ui
+        env:
+          OPENCODE_VERSION: "0.0.0-ci"
+
+      # Smoke-test the freshly built binary
+      - name: Smoke test
+        working-directory: packages/opencode
+        run: ./dist/opencode-linux-x64/bin/opencode --version
+
+      # Per-package unit tests (the econ engine)
+      - name: Test code-intelligence
+        working-directory: packages/code-intelligence
+        run: bun test --timeout 30000

@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Build self-contained econ binaries.
+  #
+  # Matrix layout:
+  #   darwin-arm64  — macos-14 (Apple Silicon), native, --single
+  #   darwin-x64    — macos-13 (Intel),          native, --single
+  #   linux         — ubuntu-latest (x64):        full build.ts (no --single)
+  #                   → cross-compiles linux-x64 + linux-arm64 in one pass;
+  #                     we archive only those two targets downstream.
+  #   windows-x64   — windows-latest,             native, --single
+  #
+  # build.ts (packages/opencode/script/build.ts) is reused verbatim:
+  #   --single           build only the native-platform target
+  #   --skip-install     skip extra bun install --os="*" --cpu="*" steps
+  #                      (safe for native builds; the setup-bun action already
+  #                       installed the current-platform native modules)
+  # -------------------------------------------------------------------------
+  build-binaries:
+    name: binary / ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: darwin-arm64
+            runner: macos-14
+            os: darwin
+            single: true
+
+          - label: darwin-x64
+            runner: macos-13
+            os: darwin
+            single: true
+
+          - label: linux
+            runner: ubuntu-latest
+            os: linux
+            single: false
+
+          - label: windows-x64
+            runner: windows-latest
+            os: windows
+            single: true
+
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      # Derive version from tag (strip leading v)
+      - name: Set version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # Build — reuse packages/opencode/script/build.ts verbatim.
+      # --skip-install is safe for native (--single) builds because setup-bun
+      # already installed the current-platform native modules.
+      # The linux matrix entry builds ALL targets (no --single) so that
+      # linux-arm64 is cross-compiled alongside linux-x64 in one pass.
+      - name: Build binary (Unix single)
+        if: ${{ matrix.single && matrix.os != 'windows' }}
+        working-directory: packages/opencode
+        run: bun run script/build.ts --single --skip-install
+        env:
+          OPENCODE_VERSION: ${{ steps.ver.outputs.version }}
+
+      - name: Build binary (Linux — all targets)
+        if: ${{ !matrix.single && matrix.os == 'linux' }}
+        working-directory: packages/opencode
+        run: bun run script/build.ts
+        env:
+          OPENCODE_VERSION: ${{ steps.ver.outputs.version }}
+
+      - name: Build binary (Windows single)
+        if: ${{ matrix.single && matrix.os == 'windows' }}
+        working-directory: packages/opencode
+        shell: pwsh
+        run: bun run script/build.ts --single --skip-install
+        env:
+          OPENCODE_VERSION: ${{ steps.ver.outputs.version }}
+
+      # -----------------------------------------------------------------------
+      # Archive — rename executable to `econ` and produce econ-<target>.{tar.gz,zip}
+      # -----------------------------------------------------------------------
+
+      - name: Archive darwin-arm64
+        if: ${{ matrix.label == 'darwin-arm64' }}
+        run: |
+          set -euo pipefail
+          BIN=packages/opencode/dist/opencode-darwin-arm64/bin/opencode
+          cp "$BIN" econ
+          tar -czf econ-darwin-arm64.tar.gz econ
+          rm econ
+          shasum -a 256 econ-darwin-arm64.tar.gz > econ-darwin-arm64.tar.gz.sha256
+          echo "=== smoke test ==="
+          packages/opencode/dist/opencode-darwin-arm64/bin/opencode --version
+
+      - name: Archive darwin-x64
+        if: ${{ matrix.label == 'darwin-x64' }}
+        run: |
+          set -euo pipefail
+          BIN=packages/opencode/dist/opencode-darwin-x64/bin/opencode
+          cp "$BIN" econ
+          tar -czf econ-darwin-x64.tar.gz econ
+          rm econ
+          shasum -a 256 econ-darwin-x64.tar.gz > econ-darwin-x64.tar.gz.sha256
+          echo "=== smoke test ==="
+          packages/opencode/dist/opencode-darwin-x64/bin/opencode --version
+
+      - name: Archive linux-x64
+        if: ${{ matrix.label == 'linux' }}
+        run: |
+          set -euo pipefail
+          BIN=packages/opencode/dist/opencode-linux-x64/bin/opencode
+          cp "$BIN" econ
+          tar -czf econ-linux-x64.tar.gz econ
+          rm econ
+          sha256sum econ-linux-x64.tar.gz > econ-linux-x64.tar.gz.sha256
+          echo "=== smoke test (linux-x64 native) ==="
+          packages/opencode/dist/opencode-linux-x64/bin/opencode --version
+
+      - name: Archive linux-arm64
+        if: ${{ matrix.label == 'linux' }}
+        run: |
+          set -euo pipefail
+          BIN=packages/opencode/dist/opencode-linux-arm64/bin/opencode
+          cp "$BIN" econ
+          tar -czf econ-linux-arm64.tar.gz econ
+          rm econ
+          sha256sum econ-linux-arm64.tar.gz > econ-linux-arm64.tar.gz.sha256
+          echo "(linux-arm64 is cross-compiled; smoke test skipped on x64 runner)"
+
+      - name: Archive windows-x64
+        if: ${{ matrix.label == 'windows-x64' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe"
+          Copy-Item $bin econ.exe
+          Compress-Archive -Path econ.exe -DestinationPath econ-windows-x64.zip
+          Remove-Item econ.exe
+          $hash = (Get-FileHash econ-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  econ-windows-x64.zip" | Out-File -Encoding ascii econ-windows-x64.zip.sha256
+          Write-Host "=== smoke test ==="
+          & "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" --version
+
+      # Upload archives + sha256 files
+      - name: Upload artifacts (darwin-arm64)
+        if: ${{ matrix.label == 'darwin-arm64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-darwin-arm64
+          path: |
+            econ-darwin-arm64.tar.gz
+            econ-darwin-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload artifacts (darwin-x64)
+        if: ${{ matrix.label == 'darwin-x64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-darwin-x64
+          path: |
+            econ-darwin-x64.tar.gz
+            econ-darwin-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload artifacts (linux)
+        if: ${{ matrix.label == 'linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux
+          path: |
+            econ-linux-x64.tar.gz
+            econ-linux-x64.tar.gz.sha256
+            econ-linux-arm64.tar.gz
+            econ-linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload artifacts (windows-x64)
+        if: ${{ matrix.label == 'windows-x64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows-x64
+          path: |
+            econ-windows-x64.zip
+            econ-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Create the GitHub Release and attach all archives + SHA256SUMS.
+  # -------------------------------------------------------------------------
+  release:
+    name: release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: release-assets/
+
+      - name: Build SHA256SUMS
+        working-directory: release-assets
+        run: |
+          cat *.sha256 | sort > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            econ ${{ github.ref_name }} — native binaries.
+
+            Install (macOS / Linux):
+            ```
+            curl -fsSL https://raw.githubusercontent.com/unerr-ai/econ-coding-agent/main/install | bash
+            ```
+
+            Verify downloads against `SHA256SUMS` below.
+          files: |
+            release-assets/econ-darwin-arm64.tar.gz
+            release-assets/econ-darwin-x64.tar.gz
+            release-assets/econ-linux-x64.tar.gz
+            release-assets/econ-linux-arm64.tar.gz
+            release-assets/econ-windows-x64.zip
+            release-assets/SHA256SUMS
