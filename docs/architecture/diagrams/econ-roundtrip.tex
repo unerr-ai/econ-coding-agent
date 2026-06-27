@@ -1,0 +1,66 @@
+% econ — how LLM round-trips collapse  (companion to ECON_ARCHITECTURE.md §11.5)
+% Standalone TikZ figure: typical agent (sequential, pull-based) vs econ (batched, push-based).
+% Build:  pdflatex econ-roundtrip.tex
+% Deps:   only `standalone` + `tikz`.
+\documentclass[border=12pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\begin{document}
+\begin{tikzpicture}[
+    font=\footnotesize\sffamily,
+    >={Latex[length=2.2mm]},
+    node distance=4.2mm,
+    step/.style ={draw, rounded corners, align=center, inner sep=4pt,
+                  minimum width=4.6cm, fill=black!4},
+    llm/.style  ={draw, rounded corners, align=center, inner sep=4pt,
+                  minimum width=4.6cm, fill=red!16},
+    free/.style ={draw, rounded corners, align=center, inner sep=4pt,
+                  minimum width=4.6cm, fill=green!12},
+    note/.style ={align=center, font=\footnotesize\itshape},
+    rt/.style   ={font=\scriptsize\bfseries, color=red!60!black},
+  ]
+
+  % ============================ LEFT: typical agent =====================
+  \node[note, text width=5cm] (lh) at (-4,8)
+    {\textbf{TYPICAL AGENT}\\(pull-based, sequential)};
+  \node[step,  below=of lh]  (l0) {prompt};
+  \node[llm,   below=of l0]  (l1) {LLM: ``I'll grep\ldots''};
+  \node[step,  below=of l1]  (l2) {grep};
+  \node[llm,   below=of l2]  (l3) {LLM: ``read file A''};
+  \node[step,  below=of l3]  (l4) {read A};
+  \node[llm,   below=of l4]  (l5) {LLM: ``read file B''};
+  \node[step,  below=of l5]  (l6) {read B \;$\cdots$};
+  \node[note, text width=5cm, below=of l6] (l7)
+    {5--15 \textbf{sequential} LLM round-trips;\\context re-sent at \textbf{full price} each time};
+
+  \draw[->] (l0)--(l1); \draw[->] (l1)--node[rt,right]{$\circlearrowright$ rt1}(l2);
+  \draw[->] (l2)--(l3); \draw[->] (l3)--node[rt,right]{$\circlearrowright$ rt2}(l4);
+  \draw[->] (l4)--(l5); \draw[->] (l5)--node[rt,right]{$\circlearrowright$ rt3}(l6);
+  \draw[->] (l6)--(l7);
+
+  % ============================ RIGHT: econ =============================
+  \node[note, text width=5cm] (rh) at (4,8)
+    {\textbf{econ}\\(push-based, batched, parallel)};
+  \node[step, below=of rh] (r0) {prompt};
+  \node[free, below=of r0] (r1) {hook injects memory + conventions\\\textbf{(0 LLM)}};
+  \node[free, below=of r1] (r2) {engine recon bundle:\\slices + callers \textbf{(0 LLM)}};
+  \node[llm,  below=of r2] (r3) {LLM: plan + act on the bundle};
+  \node[llm,  below=of r3] (r4) {executors $\times$N \,(one parallel wave)};
+  \node[llm,  below=of r4] (r5) {[if risky] brief $\rightarrow$ ORACLE once};
+  \node[free, below=of r5] (r6) {govern + apply edit \textbf{(0 LLM)}};
+  \node[note, text width=5cm, below=of r6] (r7)
+    {$\approx$3 round-trips; context \textbf{pushed} in,\\conductor cache \textbf{warm} (read $\approx$0.1$\times$)};
+
+  \draw[->] (r0)--(r1); \draw[->] (r1)--(r2);
+  \draw[->] (r2)--node[rt,right]{$\circlearrowright$ rt1}(r3);
+  \draw[->] (r3)--node[rt,right]{$\circlearrowright$ rt2}(r4);
+  \draw[->] (r4)--node[rt,right]{$\circlearrowright$ rt3 (cold)}(r5);
+  \draw[->] (r5)--(r6); \draw[->] (r6)--(r7);
+
+  % ============================ legend ==================================
+  % placed below both chains (l7 / r7) to avoid overlap
+  \node[llm,  minimum width=3cm] (lega) at (-1.6,-3.6) {paid LLM round-trip};
+  \node[free, minimum width=3cm] (legb) at ( 1.6,-3.6) {0 LLM (engine / hook)};
+
+\end{tikzpicture}
+\end{document}

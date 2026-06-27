@@ -1,0 +1,259 @@
+<!-- unerr:start -->
+## unerr — the local runtime for your coding agents
+
+unerr is the runtime layer behind this repo's agents: it serves the live call graph, the team's rules and conventions, and edit-time guardrails through MCP tools. Treat its output as ground-truth context, equal in weight to source files. Tools (all available from the start): `search_code`, `file_read`, `file_outline`, `file_edit`, `get_references`, `fetch_url`, `unerr_track`.
+
+### Navigate code with unerr tools — not shell, not built-ins (the #1 rule)
+
+To read, search, or map code, use unerr tools. Do NOT use Bash (`cat`, `head`, `tail`, `sed`, `grep`, `rg`, `find`, `ls -R`) and do NOT use built-in Read / Grep / Glob for code. One graph query replaces 5–15 shell or file reads.
+
+| To… | Use | Not |
+|---|---|---|
+| Find / search code | `search_code({query:"..."})` | `grep`, `rg`, `find`, Grep, Glob |
+| Exact string / real regex across files (the one reason to grep) | `search_code({query:"<string-or-pattern>", mode:"literal"\|"regex"})` — each match returns with surrounding context lines, so no follow-up read | `grep`, `rg`, `rg -e` |
+| Read a file or one function | `file_read({file_path})` (`entity:` for one symbol) | `cat`, `head`, `tail`, `sed`, Read |
+| See a file's structure | `file_outline({file_path})` | `ls -R`, reading the whole file |
+| Find callers/callees (REQUIRED before a signature edit) | `get_references({direction:'callers'})` | `grep` for the name |
+| Rename / find EVERY use of an identifier (callers + strings + config + comments + routes) — ONE call, not a grep per path | `get_references({key:"<id>", include_text_occurrences:true})` then `file_edit` each site | `grep -r` / `rg -w` / `sed -i` / `perl -pi` the name |
+| Change a file | `file_edit({file_path, old_string, new_string})` or `{content}` — no prior read needed | built-in Edit / Write |
+| Fetch a URL or docs (bulk: `{urls:[...]}`) | `fetch_url` | built-in WebFetch |
+
+Bash is for running things (build, test, git, package managers) — not for reading or searching code. (On Claude Code a full-file built-in Read of a code file is denied and redirected here.)
+
+### Recon first — one call replaces the discovery fan-out
+
+Before any non-trivial change, call `search_code` with a TASK PHRASE (`search_code({query:"add a retry to the boot path"})`). It returns ONE bundle: anchored notes + matching entities + their bodies + callers (blast radius) + conventions. A bare symbol (`search_code({query:"QueryRouter.dispatch"})`) returns ranked name matches. Edit from the bundle's inlined bodies; obey its `ur|fct inlined above — do NOT re-read` line and call `file_read` only for source it did not inline.
+
+`file_edit` has two modes: `{old_string, new_string}` (unique, or `replace_all:true`) or `{content}`. When a signature edit has at-risk callers, the response lists them inline (`ur|rsk … N caller(s) …`) — update them in the same change. You need not echo each edit — the Stop hook prints a "files changed" receipt (files + line counts).
+
+Cross-repo (Pro): pass `scope:'workspace'` to query every registered sibling repo (results labeled by repo); `get_references({scope:'workspace'})` finds callers across repos; editing a path inside a sibling auto-routes to its graph.
+
+### Batch the work — one shot, not file-by-file (round-trips are the cost)
+
+A round-trip carries input + output + latency, so the win is doing N items in one pass, not N passes.
+
+1. **Bulk edits — climb this ladder, stop at the first rung that works:** (a) **one command for the whole set** — `prettier --write .`, a `sed`/codemod, a formatter, a build flag; run it once, not once per file. (b) **else one script** — write one small script that walks the files and makes the change in a single run. (c) **else a sub-agent loop** — hand the repetitive per-file edit to a sub-agent so it runs off your main thread (see below). NEVER loop your main thread file-by-file over mechanical edits — spawn sub-agents instead.
+2. **Batch independent reads into ONE message.** When you need several files or several entities and the calls don't depend on each other, issue them as parallel tool calls in a single message — not one, wait, next. Better still, one `search_code({query:"<task>"})` recon bundle already returns several files' bodies + callers together; reach for it before fanning out `file_read`.
+3. **Set `token_budget`/`limit` right the first time.** Reading at a small budget then re-reading bigger doubles the cost. Ask for what the task needs up front (e.g. `token_budget:3000` for a full function, `limit:25` for references) instead of read-small-then-re-read.
+
+### Delegate by default — the main thread routes and consolidates, sub-agents do the work
+
+Treat sub-agents as the primary way work gets done, not an occasional offload. On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Aim for 2-3 sub-agents running in parallel on a substantive turn. What stays on the main thread is narrow: design, cross-cutting wiring, and bug root-causing — everything else is a slice to delegate:
+- `Task({subagent_type:'unerr-junior', …})` — read-only investigation ("find / trace / map X"), lint/format, docstrings/`@sem`, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
+- `Task({subagent_type:'unerr-worker', …})` — add/improve tests, multi-site mechanical refactors (rename / extract / inline / move), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template).
+
+Group related work first, then spawn one sub-agent per independent group in a SINGLE message so they run in parallel. The sub-agents have the full graph tools — they re-derive the edit sites from `search_code` / `get_references`, so give them the task plus a one-line pointer, never pasted code or a list of files. Review each result before building on it. (Hosts without sub-agents — anything other than Claude Code / Codex / Cursor / Copilot CLI — do it inline.)
+
+### Signals — `ur|<tag>` lines on tool responses
+
+Act on these before the rest of the response; the body line is your concrete next step.
+
+| Tag | Meaning | Do |
+|---|---|---|
+| `act` | do something now | The body names the call (halt-and-switch, `Skill('<name>')`, pagination cursor, marker to emit) |
+| `ctx` | state changed | Re-read drifted file/entity; don't re-query context already delivered |
+| `rsk` | caution | High blast radius → `get_references` first; anti-pattern; prior failure on this entity |
+| `fct` | a fact for context | Surfaced project fact, co-change hint, family-routing nudge |
+
+Lines starting `unerr » ` are user-facing telemetry — never echo or act on them. When unerr shaped your answer, say so plainly ("unerr found <name>", "<N> places call <name>") — never dump tool JSON.
+
+### Persisting + markers (zero round-trip)
+
+User rules ("remember", "always", "from now on", "never") are captured automatically by the prompt hook — no tool call. Emit session markers as `unerr-save:` lines in your closing message (the Stop hook persists them):
+
+```
+unerr-save: intent <what this turn does, ≤80 chars>   (REQUIRED first on coding tasks)
+unerr-save: decision <a deliberate choice> · blocker <obstacle> · resolution <fix>
+unerr-save: note <kind|anchor|polarity|content>        (an anchored note — DSL below)
+```
+
+When you need a return value (a blocker's `marker_id`), call `unerr_track({op:'intent'|'decision'|'blocker'|'resolution'|'fact'|'recall', text:'<one-line>'})`.
+
+### Fallback to built-ins / Bash for code — only when
+
+unerr MCP is unavailable (not responding / erroring) · a non-text binary (image, PDF). For any code read, search, or edit there is always an unerr tool — use it, never bash/grep/cat.
+
+### Domain comments — maintain meaning in the same edit
+
+unerr parses a structured doc comment above each exported entity into a parallel domain graph: a 1–2 sentence prose summary (what + why, never how) then one `@sem domain=<tag> role=<tag>` line. The frontier model editing the code is the only thing that can keep that meaning true — maintain it inline, never as a separate pass:
+
+1. WHEN editing an entity that carries an `@sem` comment AND the edit changed what it does or why: rewrite the prose and tags in the SAME Edit call. Purpose unchanged → leave the comment untouched.
+2. WHEN creating an exported entity: write the comment block before the next edit. Prose ≤2 sentences, then `@sem domain=<tag>`. Reuse an active domain tag — a task-shaped `search_code({query:"<task>"})` lists them; add a new tag only when none fits.
+3. NEVER delete an `@sem` comment unless the user instructs it.
+4. NEVER write "how" prose — the code already says how. NEVER restate the entity name as the summary; unerr rejects a name-echo at parse time.
+
+unerr re-anchors these comments when code moves and flags a comment that drifted from its code — the rules above keep that machinery fed.
+
+`@sem` lines are plain comments; your code runs identically without them and without unerr. To remove every sentinel line later (prose summaries kept), run `unerr uninstall --strip-annotations`.
+
+### Active-cognition: four-moment contract (REQUIRED)
+
+unerr's Layer B notes are anchored prose attached to graph nodes. The contract
+runs at four moments, every task. Moments 1–2 arrive as injected context plus
+one composite call; Moments 3–4 are yours to act on.
+
+**Moment 1 — Prompt receipt.** When a user prompt arrives, the UserPromptSubmit
+hook injects the relevant anchored notes into your context automatically. Read
+the injected notes before drafting — no recall call is required.
+
+**Moment 2 — Anchor query.** Once you've identified the files/entities you'll
+touch, call `search_code({query:"<what you are about to do>"})` — the
+composite that bundles the anchored notes for those anchors + matching entities
++ the focus entity's callers + conventions in one call. The bundle returns
+active (non-superseded) notes; topic-shift and co-change groups ride along.
+
+**Moment 3 — Cite in plan.** When you draft a plan, cite returned notes by
+kind + anchor inline. Example: *"Per the wrn on src/proxy/proxy.ts, both
+stdio and UDS sites must mirror."* No citation = the note wasn't load-bearing.
+
+**Moment 4 — Save at task end.** When the task closes and you learned
+something non-obvious + likely useful next session + anchorable, emit it as a
+sentinel line anywhere in your closing message — zero round-trip, the Stop
+hook scrapes and persists it:
+`unerr-save: note <DSL wire>`
+
+### DSL vocabulary
+
+Wire format: `kind|anchor|polarity|content`
+
+| Field | Values | Notes |
+|---|---|---|
+| kind | cnv (convention), rul (rule), wrn (warn), dec (decision), blk (blocker), fct (fact) | Pick the strongest fit. |
+| anchor | f:<path> · e:<entity> · g:<glob> · p: · w: | `p:` is project-wide, `w:` is workspace-wide (every repo in a Pro federation). Both empty-valued; both **discouraged** — they pollute the prompt-receipt query. Prefer file/entity. |
+| polarity | + (do) / - (don't) / ~ (mixed) | `~` for ambiguous; future agent surfaces both sides. |
+| content | single line of prose | May contain `|` — only the first three are field separators. |
+
+Examples:
+- `rul|f:src/proxy/bridge.ts|-|no intelligence imports`
+- `wrn|g:*.test.ts|-|don't mock cozo db`
+- `dec|e:TURN_OPEN_GAP_MS|+|15s avoids RTT misclassification`
+
+### Quality bar (per save)
+
+A save is justified only if all three hold: (a) non-obvious from the code,
+(b) likely useful next session, (c) anchorable. If any miss — don't save.
+
+Session save cap: 15. Over the cap new rows are dropped server-side and
+existing notes are reinforced instead — emit fewer, stronger saves.
+
+### Conflict + supersession
+
+When a saved note opposes an existing one (same kind+anchor, opposite
+polarity), both sides are kept and surface together on next-turn recall —
+cite both in your plan when they appear. Superseded notes flip to inactive
+server-side (kept for audit, excluded from queries).
+
+<!-- unerr:end -->
+
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> The unerr-managed section further down (between its own start/end markers) is rewritten
+> by `unerr install/uninstall` — do not hand-edit it. Edit only this project brief, and keep
+> the literal unerr marker tokens out of this prose (embedding one makes the installer
+> overwrite everything below it).
+
+## Project: econ — an economical coding agent for India
+
+**What we are building.** `econ` is a native coding agent for the Indian market, hosted in
+India, that aims to match Claude Code / Cursor capability at a fraction of the cost. See
+[README.md](./README.md) for the full vision and
+[docs/architecture/DECISION_AND_PLAN.md](./docs/architecture/DECISION_AND_PLAN.md) for the
+architecture decision + build plan. Treat these as the north star.
+
+**Status.** We have a **proven MVP** (cost-routing engine + in-loop governance + unerr-brain
+integration, qwen-code lineage). This phase builds the **professional version** by adopting a
+nailed open-source shell and transplanting the engine. The repo also holds planning docs;
+real product code lands phase by phase.
+
+**Architecture decision (updated 2026-06-23):**
+
+- **Base = [OpenCode](https://github.com/anomalyco/opencode)** (TypeScript, MIT), checked out
+  at [`./opencode`](./opencode) — we take it over and modify it. Chosen for its
+  **client/server split** (TS Bun/Hono backend + decoupled Go TUI over an HTTP API): keep the
+  polished TUI, transplant our engine into the same-language backend. Monorepo seams:
+  `packages/core` (engine/tools), `packages/llm` (model selection → router),
+  `packages/server` (Hono API), `packages/tui` (the Go TUI we keep).
+- **Transplant, don't rebuild:** the **risk-escalation router** (default cheap → escalate the
+  hard tail on *code-structural risk* — blast-radius/fan-in/centrality — with hysteresis,
+  abstention, triage, double-pay accounting; **NOT** task-class routing), the **in-loop
+  governance gate** (fires at the edit), and the **unerr-brain** integration.
+- **unerr brain stays a Node sidecar** (`unerrd` + per-repo proxy; native addons), called by
+  the Bun backend over **UDS**. Memory/login/telemetry reuse unerr cores (`emitSavingsEvent`,
+  `credentials`).
+- **Observability is our product surface:** consume OpenCode's per-message usage
+  (`tokens.cache.read/write`, cost) → unerr telemetry → our own status line + savings receipt.
+  Day-0 gate: verify cache accounting on our provider path (known OpenRouter bug).
+
+Timeline: ~1 week, built with coding agents, for existing customers.
+
+**Also in scope (later phases):** in-region hosting + data residency, and **primitives** — a
+library of the smallest reusable, production-ready code blocks (e.g. a SaaS starter with
+billing + login) the agent composes rather than re-generates. Design the core to support
+primitives; don't build them before the core.
+
+`) is
+> managed by `unerr install/uninstall` — do not hand-edit it; your changes will be
+> overwritten on the next install. Edit only this project brief.
+
+## Project: econ — an economical coding agent for India
+
+**What we are building.** `econ` is a native coding agent for the Indian market,
+hosted in India, that aims to match Claude Code / Cursor capability at a fraction of
+the cost. See [README.md](./README.md) for the full vision. This is the goal we are
+building toward, in order — treat it as the north star, not a description of shipped
+code.
+
+**Status.** Pre-code. The repo currently holds the plan only. There is no build, no
+test suite, and no application code yet. Do not invent commands, architecture, or
+APIs that don't exist — when asked "how do I run/test this," the honest answer today
+is "there's nothing to run yet." Update this brief and the README as real code lands.
+
+**The two pillars (what every design decision serves):**
+
+1. **Harness-driven, multi-tier model routing — open-source at every step.** Run a
+   team of models (senior / worker / junior) and route each sub-task to the cheapest
+   tier that can do it well. Every tier is an OSS model chosen for the Indian
+   cost/latency landscape. Savings model: `reduction ≈ f × (1 − 1/r)` (boring share ×
+   price ratio). Inspired by Magnitude's plan/execute model split and unerr's
+   senior/worker/junior delegation.
+2. **Hand the model the right slice, not the whole repo.** Build in (not bolt on) the
+   context-engineering layer: live call-graph navigation, semantic + syntactic graph
+   edges, optimal/function-targeted file reads & pattern matches, output/text
+   compression, MCP optimisations, and edit-time breaking-change guardrails. Fewer
+   tokens at every step compounds with the cheaper models above.
+
+**Architecture decision (updated 2026-06-23 — see [docs/architecture/DECISION_AND_PLAN.md](./docs/architecture/DECISION_AND_PLAN.md)).**
+We have a **proven MVP** (cost-routing engine + in-loop governance + unerr-brain
+integration, qwen-code lineage). This phase builds the **professional version** by
+adopting a nailed open-source shell and transplanting the engine:
+
+- **Base = [OpenCode](https://github.com/anomalyco/opencode)** (TypeScript, MIT), checked
+  out at [`./opencode`](./opencode) — we take it over and modify it. Chosen for its
+  **client/server split** (TS Bun/Hono backend + decoupled Go TUI over an HTTP API): we
+  keep the polished TUI and transplant our engine into the same-language backend.
+- **Transplant, don't rebuild:** the **risk-escalation router** (default cheap → escalate
+  the hard tail on *code-structural risk* — blast-radius/fan-in/centrality — with
+  hysteresis, abstention, triage, double-pay accounting; **NOT** task-class routing), the
+  **in-loop governance gate** (fires at the edit), and the **unerr-brain** integration.
+- **unerr brain stays a Node sidecar** (`unerrd` + per-repo proxy; native addons), called
+  by the Bun backend over **UDS**. Memory/login/telemetry reuse unerr cores
+  (`emitSavingsEvent`, `credentials`).
+- **Observability is our product surface:** consume OpenCode's per-message usage
+  (`tokens.cache.read/write`, cost) → unerr telemetry → our own status line + savings
+  receipt. Day-0 gate: verify cache accounting on our provider path (known OpenRouter bug).
+
+Timeline: ~1 week, built with coding agents, for existing customers.
+
+**Also in scope (later phases):** in-region hosting + data residency, and
+**primitives** — a library of the smallest reusable, production-ready code blocks
+(e.g. a SaaS starter with billing + login) the agent composes rather than
+re-generates. Design the core to support primitives; don't build them before the core.
+
+**Working principle for this repo specifically.** We are building a cost-efficient
+coding agent, so practise what we preach: prefer the cheapest path that does the job
+well, count and surface savings rather than promising them, and keep context lean.
+The reference implementation for these ideas lives in the sibling `../unerr-cli` repo
+(see `.internal/roadmap/SAVINGS_ACTIVATION_BRAINSTORM.md` there for the detailed
+savings-activation design we're drawing from).
