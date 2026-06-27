@@ -177,3 +177,99 @@ export * from "./triage.js"
 export * from "./reasoner.js"
 export * from "./brief.js"
 export * from "./double-pay.js"
+
+// econ S4.3 specialists · S4.2/S4.4 fan-out
+export {
+  SPECIALISTS,
+  TIER_AGENT,
+  DIGEST_CONTRACT,
+  getSpecialist,
+  specialistsForTier,
+  listSpecialists,
+  dispatchSpecialist,
+  type SpecialistTier,
+  type Specialist,
+  type SpecialistInvocation,
+} from "./specialists.js"
+export {
+  BATCH_THEN_FANOUT_RULE,
+  isReadOnly,
+  callsConflict,
+  planWaves,
+  isSingleWave,
+  type FanoutCall,
+} from "./fanout.js"
+
+// econ S6.3 governance gate (guardrail + edit-impact + boundary, lifted from unerr-cli)
+export {
+  evaluateEdit,
+  createGuardrailState,
+  DEFAULT_GUARDRAIL_CONFIG,
+  type GuardrailVerdict,
+  type GuardrailInput,
+  type AdvisoryCheck,
+  type GuardrailConfig,
+  type GuardrailState,
+  type GuardrailDecision,
+} from "./guardrail.js"
+export {
+  computeEditImpact,
+  detectSignatureChange,
+  renderInlineBlastRadius,
+  toCallerAtRisk,
+  buildSuggestion,
+  isTestFilePath,
+  DEFAULT_EDIT_IMPACT_CONFIG,
+  type CallerAtRisk,
+  type CascadeWarning,
+  type SignatureChangeType,
+  type EditImpactGraph,
+  type EditImpactConfig,
+} from "./edit-impact.js"
+export {
+  computeBoundaryViolations,
+  parseImports,
+  resolveImportPath,
+  DEFAULT_LAYER_RULES,
+  DEFAULT_BOUNDARY_CHECK_CONFIG,
+  type BoundaryViolation,
+  type LayerRule,
+  type BoundaryCheckConfig,
+} from "./boundary.js"
+
+// econ S6.1/6.2/6.4/6.5/6.6 — deferred unerr-runtime surface (scaffolds behind CodeIntelligence)
+export {
+  parseSentinels,
+  InMemoryMemoryStore,
+  type NoteKind,
+  type Polarity,
+  type AnchoredNote,
+  type FourMoment,
+  type MemoryStore,
+} from "./memory.js"
+export { detectConventions, type ConventionRule, type ConventionDetector } from "./conventions.js"
+export { decayConfidence, DEFAULT_DECAY_CONFIG, type DecayConfig } from "./decay.js"
+export { buildResumeStrip, type SessionStateLike, type ResumeStrip } from "./continuity.js"
+
+// econ S7.1 telemetry · S7.3 savings receipt (the proof surface)
+export {
+  TelemetryStore,
+  emitUsageEvent,
+  installUsageSink,
+  inferTier,
+  type UsageEvent,
+  type UsageEventTokens,
+  type UsageTier,
+  type UsageTotals,
+  type StatusSnapshot,
+  type RawUsage,
+} from "./telemetry.js"
+export {
+  buildReceipt,
+  formatReceipt,
+  type SavingsReceipt,
+  type ReceiptInput,
+  type ReceiptCatch,
+  type FrontierBaseline,
+  type TierSplitRow,
+} from "./receipt.js"

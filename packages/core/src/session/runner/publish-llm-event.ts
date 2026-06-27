@@ -12,6 +12,28 @@ type Input = {
   readonly model: ModelV2.Ref
 }
 
+// econ S7.1: per-turn usage → telemetry sink.
+// The runner forwards each completed turn's usage (cost + tokens + model) to an
+// optional process-level sink so econ's proof surface (telemetry store, status
+// line, savings receipt) can record it. Kept dependency-free — a plain global
+// hook rather than an import — so `@opencode-ai/core` stays decoupled from the
+// observability package; `installUsageSink` (code-intelligence/telemetry.ts)
+// registers the sink at app bootstrap. No-op until a sink is installed.
+type EconUsagePayload = {
+  sessionID: string
+  turnId?: string
+  model: string
+  cost?: number
+  tokens?: {
+    input?: number
+    output?: number
+    reasoning?: number
+    cache?: { read?: number; write?: number }
+  }
+}
+const econUsageSink = (): ((raw: EconUsagePayload) => void) | undefined =>
+  (globalThis as { __econUsageSink?: (raw: EconUsagePayload) => void }).__econUsageSink
+
 const safe = (value: number | undefined) => Math.max(0, Number.isFinite(value) ? (value ?? 0) : 0)
 
 const tokens = (usage: Usage | undefined) => {
@@ -390,18 +412,35 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         })
         return
       }
-      case "step-finish":
+      case "step-finish": {
         yield* flush()
         assistantActive = false
+        const turnAssistantID = yield* startAssistant()
+        const turnTokens = tokens(event.usage)
         yield* events.publish(SessionEvent.Step.Ended, {
           sessionID: input.sessionID,
           timestamp: yield* timestamp,
-          assistantMessageID: yield* startAssistant(),
+          assistantMessageID: turnAssistantID,
           finish: event.reason,
           cost: event.usage?.cost ?? 0,
-          tokens: tokens(event.usage),
+          tokens: turnTokens,
+        })
+        // econ S7.1: forward this turn's usage to the telemetry sink (no-op when
+        // unregistered). Tier is left to the sink (inferTier / router tag).
+        econUsageSink()?.({
+          sessionID: input.sessionID,
+          turnId: turnAssistantID,
+          model: `${input.model.providerID}/${input.model.id}`,
+          cost: event.usage?.cost ?? 0,
+          tokens: {
+            input: turnTokens.input,
+            output: turnTokens.output,
+            reasoning: turnTokens.reasoning,
+            cache: { read: turnTokens.cache.read, write: turnTokens.cache.write },
+          },
         })
         return
+      }
       case "finish":
         return
       case "provider-error":

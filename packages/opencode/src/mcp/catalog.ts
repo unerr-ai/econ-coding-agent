@@ -39,7 +39,18 @@ export function defs(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }
 
-export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
+export function convertTool(
+  mcpTool: MCPToolDef,
+  client: Client,
+  timeout?: number,
+  // econ S6.3 (Z3 patch — see docs/sprint0/S0.5-mcp-perm-scope.md): optional fail-safe
+  // governance/permission hook. Makes the gate a property of the MCP tool DEFINITION,
+  // not the caller's responsibility — any path that uses convertTool() (the session
+  // wrapper, a future CLI, tests, refactors) runs governance before the MCP call and
+  // can no longer silently bypass it. Optional + additive, so existing callers are
+  // unchanged; the session layer remains the primary gate.
+  onBeforeExecute?: (toolName: string) => Promise<void>,
+): Tool {
   const inputSchema: JSONSchema7 = {
     ...(mcpTool.inputSchema as JSONSchema7),
     type: "object",
@@ -51,6 +62,8 @@ export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: numbe
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(inputSchema),
     execute: async (args: unknown, options) => {
+      // econ S6.3: run the governance/permission hook before the MCP call (fail-safe).
+      if (onBeforeExecute) await onBeforeExecute(mcpTool.name)
       const result = await client.callTool(
         {
           name: mcpTool.name,
