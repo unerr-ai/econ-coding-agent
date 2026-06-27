@@ -1,0 +1,14 @@
+/** Toy fixture: Calculator class with basic arithmetic methods. */
+export class Calculator {
+  add(a: number, b: number): number {
+    return a + b
+  }
+
+  subtract(a: number, b: number): number {
+    return a - b
+  }
+
+  multiply(a: number, b: number): number {
+    return a * b
+  }
+}

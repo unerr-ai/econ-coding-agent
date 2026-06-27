@@ -398,7 +398,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
           timestamp: yield* timestamp,
           assistantMessageID: yield* startAssistant(),
           finish: event.reason,
-          cost: 0,
+          cost: event.usage?.cost ?? 0,
           tokens: tokens(event.usage),
         })
         return
