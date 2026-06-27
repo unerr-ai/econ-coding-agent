@@ -7,6 +7,7 @@ import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
 import { Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
+import { AgentV2 } from "../../agent"
 import { Catalog } from "../../catalog"
 import { Credential } from "../../credential"
 import { Integration } from "../../integration"
@@ -170,28 +171,46 @@ export const supported = (model: ModelV2.Info) =>
     model.api.package === "@ai-sdk/anthropic" ||
     (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
 
-/** Resolves models from the catalog belonging to the current Location runtime. */
+/**
+ * Resolves models from the catalog belonging to the current Location runtime.
+ *
+ * Priority order when no explicit session.model is set:
+ *   1. session.model — per-session override stored in session state
+ *   2. active agent's model ref — lets a configured conductor tier own the default
+ *   3. catalog.model.default() — site-wide default from opencode.json `model` key
+ *   4. first supported available model — last-resort fallback
+ *
+ * @sem domain=configuration role=resolver
+ */
 export const locationLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const catalog = yield* Catalog.Service
     const credentials = yield* Credential.Service
     const integrations = yield* Integration.Service
+    const agents = yield* AgentV2.Service
     return Service.of({
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {
+        // When no explicit model is set, prefer the active agent's model ref so that
+        // a conductor agent (default_agent in opencode.json) drives model selection.
+        const agentModel = session.model
+          ? undefined
+          : (yield* agents.resolve(session.agent))?.model
+        const effectiveModel = session.model ?? agentModel
+
         // Location plugins populate and filter the catalog asynchronously during layer startup.
-        const defaultModel = session.model ? undefined : yield* catalog.model.default()
-        const selected = session.model
+        const defaultModel = effectiveModel ? undefined : yield* catalog.model.default()
+        const selected = effectiveModel
           ? (yield* catalog.model.available()).find(
-              (model) => model.providerID === session.model?.providerID && model.id === session.model.id,
+              (m) => m.providerID === effectiveModel.providerID && m.id === effectiveModel.id,
             )
           : defaultModel && supported(defaultModel)
             ? defaultModel
             : (yield* catalog.model.available()).find(supported)
-        if (!selected && session.model)
+        if (!selected && effectiveModel)
           return yield* new ModelUnavailableError({
-            providerID: session.model.providerID,
-            modelID: session.model.id,
+            providerID: effectiveModel.providerID,
+            modelID: effectiveModel.id,
           })
         if (!selected) return yield* new ModelNotSelectedError({ sessionID: session.id })
         const connection = yield* integrations.connection.forIntegration(Integration.ID.make(selected.providerID))

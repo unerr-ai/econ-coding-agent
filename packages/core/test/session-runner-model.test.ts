@@ -1,8 +1,10 @@
 import { describe, expect } from "bun:test"
 import { LLM } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
-import { ConfigProvider, DateTime, Effect } from "effect"
+import { ConfigProvider, DateTime, Effect, Layer } from "effect"
 import { Headers } from "effect/unstable/http"
+import { AgentV2 } from "@opencode-ai/core/agent"
+import { Catalog } from "@opencode-ai/core/catalog"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -346,4 +348,129 @@ describe("SessionRunnerModel", () => {
       expect(SessionRunnerModel.supported(model({ type: "native", settings: {} }))).toBe(false)
     }),
   )
+})
+
+// ---------------------------------------------------------------------------
+// locationLayer — conductor-default wiring (S1.1)
+// ---------------------------------------------------------------------------
+
+// Minimal conductor model: @ai-sdk/openai-compatible so supported() returns true.
+const conductorModelInfo = new ModelV2.Info({
+  id: ModelV2.ID.make("qwen/qwen3-coder"),
+  providerID: ProviderV2.ID.make("openrouter"),
+  name: "Qwen3 Coder",
+  api: {
+    type: "aisdk",
+    package: "@ai-sdk/openai-compatible",
+    url: "https://openrouter.ai/api/v1",
+    id: ModelV2.ID.make("qwen/qwen3-coder"),
+    settings: { apiKey: "placeholder-key" },
+  },
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  request: { headers: {}, body: { apiKey: "placeholder-key" }, generation: {}, options: {} },
+  variants: [],
+  time: { released: 0 },
+  cost: [],
+  status: "active",
+  enabled: true,
+  limit: { context: 131072, output: 8192 },
+})
+
+// Minimal mock services for locationLayer — only the paths exercised by the
+// conductor-default resolution are populated; unexpected calls die loudly.
+const catalogLayer = Layer.succeed(
+  Catalog.Service,
+  Catalog.Service.of({
+    transform: () => Effect.die("catalog.transform: not used in this test"),
+    reload: () => Effect.die("catalog.reload: not used in this test"),
+    provider: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.succeed([]),
+      available: () => Effect.succeed([]),
+    },
+    model: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.succeed([conductorModelInfo]),
+      // Only conductor model available; no site-wide catalog default.
+      available: () => Effect.succeed([conductorModelInfo]),
+      default: () => Effect.succeed(undefined),
+      small: () => Effect.succeed(undefined),
+    },
+  } as unknown as Catalog.Interface),
+)
+
+const integrationLayer = Layer.succeed(
+  Integration.Service,
+  Integration.Service.of({
+    transform: () => Effect.die("integration.transform: not used in this test"),
+    reload: () => Effect.die("integration.reload: not used in this test"),
+    get: () => Effect.succeed(undefined),
+    list: () => Effect.succeed([]),
+    connection: {
+      forIntegration: () => Effect.succeed(undefined),
+      key: () => Effect.die("integration.connection.key: not used in this test"),
+      oauth: () => Effect.die("integration.connection.oauth: not used in this test"),
+      update: () => Effect.die("integration.connection.update: not used in this test"),
+      remove: () => Effect.die("integration.connection.remove: not used in this test"),
+    },
+    attempt: {
+      status: () => Effect.die("integration.attempt.status: not used in this test"),
+      complete: () => Effect.die("integration.attempt.complete: not used in this test"),
+      cancel: () => Effect.die("integration.attempt.cancel: not used in this test"),
+    },
+  } as unknown as Integration.Interface),
+)
+
+const credentialLayer = Layer.succeed(
+  Credential.Service,
+  Credential.Service.of({
+    all: () => Effect.succeed([]),
+    list: () => Effect.succeed([]),
+    get: () => Effect.succeed(undefined),
+    create: () => Effect.die("credential.create: not used in this test"),
+    update: () => Effect.die("credential.update: not used in this test"),
+    remove: () => Effect.die("credential.remove: not used in this test"),
+  }),
+)
+
+describe("SessionRunnerModel.locationLayer", () => {
+  it.effect("picks the conductor agent model when no session.model is set (S1.1 default-conductor)", () => {
+    // Wire deps into locationLayer AND keep them in scope so the test body can
+    // yield AgentV2.Service directly to set up the conductor default.
+    const depsLayer = Layer.mergeAll(AgentV2.layer, catalogLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayer.pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      // Wire "conductor" as the default agent with openrouter/qwen/qwen3-coder.
+      const agents = yield* AgentV2.Service
+      yield* agents.transform((editor) => {
+        editor.update(AgentV2.ID.make("conductor"), (agent) => {
+          agent.model = {
+            id: ModelV2.ID.make("qwen/qwen3-coder"),
+            providerID: ProviderV2.ID.make("openrouter"),
+          }
+          agent.mode = "primary"
+        })
+        editor.default(AgentV2.ID.make("conductor"))
+      })
+
+      // Session with no explicit model and no explicit agent — should resolve via
+      // the default agent's model ref, not the catalog default (which is undefined).
+      const session = SessionV2.Info.make({
+        id: SessionV2.ID.make("ses_conductor_default"),
+        projectID: ProjectV2.ID.global,
+        title: "conductor default test",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+        location: { directory: AbsolutePath.make("/project") },
+      })
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(session)
+
+      // Resolved model must carry the conductor's provider and model id.
+      expect(resolved).toMatchObject({ id: "qwen/qwen3-coder", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
 })

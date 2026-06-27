@@ -139,3 +139,5 @@ export interface CodeIntelligence {
 // Re-exports for consumers
 // ---------------------------------------------------------------------------
 export { BunSqliteGraph } from "./bun-sqlite-graph.js"
+export { makeReconTool, makeFileReadTool, makeGetReferencesTool } from "./tools.js"
+export type { GraphToolDef } from "./tools.js"

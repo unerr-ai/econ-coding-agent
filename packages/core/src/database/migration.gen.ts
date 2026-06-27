@@ -40,5 +40,7 @@ export const migrations = (
     import("./migration/20260622142730_simplify_session_context_epoch"),
     import("./migration/20260622170816_reset_v2_session_state"),
     import("./migration/20260622202450_simplify_session_input"),
+    // Z3 — S1.3: canonical state table
+    import("./migration/20260627000001_s1_3_canonical_state"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

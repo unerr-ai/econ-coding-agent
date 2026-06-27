@@ -173,3 +173,32 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
   snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
   baseline_seq: integer().notNull(),
 })
+
+// Z3 — canonical-state: persisted ledger/scratchpad/attempts keyed by session,
+// lives OUTSIDE session_message so it survives compaction.
+export type CanonicalStateKind = "ledger" | "scratchpad" | "attempt"
+
+export const SessionCanonicalStateTable = sqliteTable(
+  "session_canonical_state",
+  {
+    // For scratchpad rows, id is deterministic: `${session_id}:scratchpad:${key}`
+    // which enables INSERT OR REPLACE (onConflictDoUpdate on PK) for upsert semantics.
+    // For ledger/attempt rows, id is generated (random suffix ensures uniqueness).
+    id: text().primaryKey(),
+    session_id: text()
+      .$type<SessionSchema.ID>()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    kind: text().$type<CanonicalStateKind>().notNull(),
+    key: text().notNull(),
+    seq: integer().notNull(),
+    payload: text({ mode: "json" }).notNull().$type<Record<string, unknown>>(),
+    time_created: integer()
+      .notNull()
+      .$default(() => Date.now()),
+  },
+  (table) => [
+    index("session_canonical_state_session_idx").on(table.session_id),
+    index("session_canonical_state_session_kind_seq_idx").on(table.session_id, table.kind, table.seq),
+  ],
+)

@@ -10,7 +10,8 @@
     "customConditions": ["browser"],
     "paths": {
       "@/*": ["./src/*"],
-      "@test/*": ["./test/*"]
+      "@test/*": ["./test/*"],
+      "@opencode-ai/code-intelligence": ["../code-intelligence/src/index.ts"]
     }
   }
 }

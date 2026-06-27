@@ -269,6 +269,26 @@ export default {
       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
+      // Z3 — S1.3: canonical state (ledger / scratchpad / attempts), survives compaction
+      yield* tx.run(`
+        CREATE TABLE IF NOT EXISTS \`session_canonical_state\` (
+          \`id\` text PRIMARY KEY,
+          \`session_id\` text NOT NULL,
+          \`kind\` text NOT NULL,
+          \`key\` text NOT NULL,
+          \`seq\` integer NOT NULL,
+          \`payload\` text NOT NULL,
+          \`time_created\` integer NOT NULL,
+          CONSTRAINT \`fk_session_canonical_state_session_id_fk\`
+            FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(
+        `CREATE INDEX IF NOT EXISTS \`session_canonical_state_session_idx\` ON \`session_canonical_state\` (\`session_id\`);`,
+      )
+      yield* tx.run(
+        `CREATE INDEX IF NOT EXISTS \`session_canonical_state_session_kind_seq_idx\` ON \`session_canonical_state\` (\`session_id\`, \`kind\`, \`seq\`);`,
+      )
     })
   },
 } satisfies Omit<DatabaseMigration.Migration, "id">

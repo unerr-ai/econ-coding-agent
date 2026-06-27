@@ -16,6 +16,8 @@ import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
+// Z1 — econ graph tools (S1.2); remove this comment block when graduated
+import { GraphReconTool, GraphFileReadTool, GraphGetReferencesTool } from "./graph-tools"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -106,6 +108,10 @@ export const layer = Layer.effect(
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const agent = yield* Agent.Service
+    // Z1 — econ graph tools
+    const graphRecon = yield* GraphReconTool
+    const graphFileRead = yield* GraphFileReadTool
+    const graphGetRefs = yield* GraphGetReferencesTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -212,6 +218,10 @@ export const layer = Layer.effect(
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          // Z1 — econ graph tools (S1.2)
+          recon: Tool.init(graphRecon),
+          graphFileRead: Tool.init(graphFileRead),
+          getReferences: Tool.init(graphGetRefs),
         })
 
         return {
@@ -233,6 +243,10 @@ export const layer = Layer.effect(
             tool.patch,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+            // Z1 — econ graph tools always available (S1.2)
+            tool.recon,
+            tool.graphFileRead,
+            tool.getReferences,
           ],
           task: tool.task,
           read: tool.read,
