@@ -20,7 +20,7 @@ ts-dist
 /result
 refs
 Session.vim
-/opencode.json
+# econ: opencode.json is our tracked product config (tier wiring); upstream ignored it
 a.out
 target
 .scripts

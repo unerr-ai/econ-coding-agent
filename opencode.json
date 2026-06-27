@@ -1,0 +1,114 @@
+{
+  "$schema": "./packages/opencode/opencode.schema.json",
+
+  "// econ conductor tier (S1.1)": [
+    "The conductor is a mid-size (~30B) non-thinking OSS model that handles",
+    "every turn by default. It is cost-efficient (~100-200x cheaper than frontier",
+    "models) and keeps the prompt cache warm across turns.",
+    "A live run requires OPENROUTER_API_KEY to be set."
+  ],
+
+  "default_agent": "conductor",
+
+  "// econ small_model (S8.3)": [
+    "Cheap stateless model for incidental tasks (title generation, summaries).",
+    "Pinned to the executor tier so housekeeping never pays conductor/oracle rates."
+  ],
+  "small_model": "openrouter/qwen/qwen3-8b",
+
+  "agents": {
+    "conductor": {
+      "model": "openrouter/qwen/qwen3-coder",
+      "description": "econ default conductor: mid-tier OSS model for everyday coding turns (S1.1)",
+      "mode": "primary"
+    },
+    "oracle": {
+      "model": "openrouter/deepseek/deepseek-r1",
+      "description": "econ oracle tier: frontier reasoning model for high-risk turns (S3.2, escalateAbove=70)",
+      "mode": "primary"
+    },
+    "reasoner": {
+      "model": "openrouter/qwen/qwen3-30b-a3b:thinking",
+      "description": "econ reasoner tier: mid-size thinking model for hard steps needing CoT (S3.7); placeholder — swap for any Qwen3-thinking or DeepSeek-R1-distill variant on OpenRouter",
+      "mode": "primary"
+    },
+    "executor": {
+      "model": "openrouter/qwen/qwen3-8b",
+      "description": "econ executor tier: cheap ~9B stateless tool-caller for delegable executor-tier specialists — recon/lint/docstrings (S4.1); spawned per-task via the task tool, returns a digest. Placeholder — swap for any small (~7-9B) tool-calling OSS model on OpenRouter.",
+      "mode": "subagent"
+    }
+  },
+
+  "// econ safe permission defaults (S8.3 hardening)": [
+    "Hardened defaults: read-only tools are allowed; mutating, network, and",
+    "out-of-project actions require confirmation or are denied. Precedence is",
+    "last-match-wins (findLast in src/permission/index.ts), so the bash wildcard",
+    "is first and the specific deny patterns that override it come after.",
+    "Loosen per-project as trust is established."
+  ],
+  "permission": {
+    "read": "allow",
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "lsp": "allow",
+    "todowrite": "allow",
+    "question": "allow",
+    "task": "allow",
+    "edit": "ask",
+    "webfetch": "ask",
+    "websearch": "ask",
+    "doom_loop": "ask",
+    "skill": "ask",
+    "external_directory": "deny",
+    "bash": {
+      "*": "ask",
+      "ls *": "allow",
+      "cat *": "allow",
+      "pwd": "allow",
+      "git status": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git push*": "ask",
+      "curl *": "ask",
+      "wget *": "ask",
+      "sudo *": "deny",
+      "rm -rf *": "deny",
+      "rm -fr *": "deny"
+    }
+  },
+
+  "providers": {
+    "openrouter": {
+      "name": "OpenRouter",
+      "env": ["OPENROUTER_API_KEY"],
+      "api": {
+        "type": "aisdk",
+        "package": "@ai-sdk/openai-compatible",
+        "url": "https://openrouter.ai/api/v1"
+      }
+    }
+  },
+
+  "// econ in-region inference + data residency (S8.1) — GATED": [
+    "Real in-region (India) OSS endpoints are not yet provisioned; this is the",
+    "scaffolding contract. To route a tier to in-region infra, add a provider",
+    "below pointing at the India gateway (OpenAI-compatible), e.g.:",
+    "  \"providers\": { \"econ-in\": { \"name\": \"econ India\", \"env\": [\"ECON_IN_API_KEY\"],",
+    "    \"api\": { \"type\": \"aisdk\", \"package\": \"@ai-sdk/openai-compatible\",",
+    "    \"url\": \"https://<india-gateway>/v1\" } }",
+    "then point the tier's agent model at \"econ-in/<model>\". The per-tier",
+    "fallback chain + data-residency policy lives in",
+    "packages/code-intelligence/src/region.ts (DEFAULT_REGION_CONFIG, resolveTierChain,",
+    "selectEndpoint). See docs/sprint8/in-region.md."
+  ],
+
+  "// econ model fallback (S8.3)": [
+    "Fallback is expressed config-first: each tier's ordered endpoint chain is held",
+    "in region.ts (in-region preferred, global OpenRouter as fallback). OpenCode has",
+    "no native per-model failover field, so runtime auto-failover on a 5xx is a GATED",
+    "minimal wrapper (documented in docs/sprint8/harden.md) — we did NOT modify",
+    "model.ts/router.ts. The safe always-available baseline today is the openrouter",
+    "provider above; small_model is pinned so housekeeping degrades cheaply."
+  ]
+}

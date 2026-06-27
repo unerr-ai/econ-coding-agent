@@ -273,3 +273,58 @@ export {
   type FrontierBaseline,
   type TierSplitRow,
 } from "./receipt.js"
+
+// econ S5.1 checkpoint-writer · S5.2 task-tree · S5.3 goal-judge (long-horizon)
+export {
+  DEFAULT_CHECKPOINT_CONFIG,
+  createCheckpointState,
+  shouldCheckpoint,
+  buildCheckpoint,
+  checkpointIfNeeded,
+  type CheckpointConfig,
+  type CheckpointSnapshot,
+  type CheckpointState,
+} from "./checkpoint.js"
+export {
+  createTaskTree,
+  addTask,
+  updateStatus,
+  setDecision,
+  findNode,
+  collectDecisions,
+  serializeTaskTree,
+  deserializeTaskTree,
+  renderTaskTree,
+  type TaskStatus,
+  type TaskNode,
+  type TaskTree,
+} from "./task-tree.js"
+export {
+  DEFAULT_GOAL_JUDGE_CONFIG,
+  createGoalJudgeState,
+  makeStubJudge,
+  runUntilGoal,
+  type GoalContext,
+  type Judge,
+  type GoalJudgeConfig,
+  type GoalJudgeState,
+  type GoalOutcome,
+} from "./goal-judge.js"
+
+// econ S8.1 in-region inference + data residency
+export {
+  DEFAULT_RESIDENCY_POLICY,
+  DEFAULT_REGION_CONFIG,
+  parseRegionConfig,
+  resolveTierChain,
+  checkResidency,
+  selectEndpoint,
+  type Region,
+  type EconTier,
+  type DataClass,
+  type ResidencyMode,
+  type RegionEndpoint,
+  type ResidencyPolicy,
+  type RegionConfig,
+  type ResidencyCheck,
+} from "./region.js"

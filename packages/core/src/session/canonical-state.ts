@@ -68,6 +68,16 @@ export interface Interface {
    * as a synthetic context message after compaction/restart.
    */
   readonly rebuildContext: (sessionID: SessionSchema.ID) => Effect.Effect<string>
+  /**
+   * Persist the serialized task tree for this session via the reserved scratchpad
+   * key "__task_tree__" so it survives compaction/restart.
+   */
+  readonly setTaskTree: (sessionID: SessionSchema.ID, treeJson: string) => Effect.Effect<void>
+  /**
+   * Reload the serialized task tree for this session from the reserved scratchpad
+   * key "__task_tree__"; returns undefined when no tree has been persisted yet.
+   */
+  readonly loadTaskTree: (sessionID: SessionSchema.ID) => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionCanonicalState") {}
@@ -241,6 +251,46 @@ export const layer = Layer.effect(
         }
 
         return parts.join("\n")
+      }),
+
+      // Persist the serialized task tree under the reserved scratchpad key so it
+      // survives compaction/restart — delegates to the same upsert path as setScratchpad.
+      setTaskTree: Effect.fn("SessionCanonicalState.setTaskTree")(function* (sessionID, treeJson) {
+        const seq = yield* nextSeq(sessionID)
+        yield* db
+          .insert(SessionCanonicalStateTable)
+          .values({
+            id: `${sessionID}:scratchpad:__task_tree__`,
+            session_id: sessionID,
+            kind: "scratchpad",
+            key: "__task_tree__",
+            seq,
+            payload: { value: treeJson } as Record<string, unknown>,
+            time_created: Date.now(),
+          })
+          .onConflictDoUpdate({
+            target: SessionCanonicalStateTable.id,
+            set: {
+              seq,
+              payload: { value: treeJson } as Record<string, unknown>,
+              time_created: Date.now(),
+            },
+          })
+          .run()
+          .pipe(Effect.orDie)
+      }),
+
+      // Reload the serialized task tree from the reserved scratchpad key; returns
+      // undefined when no tree has been persisted yet for this session.
+      loadTaskTree: Effect.fn("SessionCanonicalState.loadTaskTree")(function* (sessionID) {
+        const row = yield* db
+          .select()
+          .from(SessionCanonicalStateTable)
+          .where(eq(SessionCanonicalStateTable.id, `${sessionID}:scratchpad:__task_tree__`))
+          .get()
+          .pipe(Effect.orDie)
+        if (!row) return undefined
+        return (row.payload as { value: string }).value
       }),
     })
   }),
