@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/icon.png" alt="econ" width="120" />
+</p>
+
 <h1 align="center">econ</h1>
 
 <p align="center">
@@ -18,6 +22,12 @@
   <a href="#the-economics">Economics</a> ·
   <a href="#roadmap">Roadmap</a> ·
   <a href="docs/architecture/ECON_ARCHITECTURE.md">Full design doc</a>
+</p>
+
+<p align="center">
+  <sub>a coding agent by</sub>
+  <br />
+  <a href="https://github.com/unerr-ai"><img src="public/unerr-wordmark.png" alt="unerr" height="26" /></a>
 </p>
 
 ---
@@ -345,8 +355,16 @@ before the core.
 
 ## License & attribution
 
-econ is released under the [MIT License](LICENSE). It is a fork of
+econ is built by **[unerr](https://github.com/unerr-ai)** and released under the
+[MIT License](LICENSE). It is a fork of
 [OpenCode](https://github.com/anomalyco/opencode) (© opencode / anomalyco, MIT); portions of
 this software derive from OpenCode and that copyright notice is preserved in
 [`LICENSE`](LICENSE). The cost-routing engine, context-intelligence layer, and the
 integration are econ's own work.
+
+<p align="center">
+  <br />
+  <a href="https://github.com/unerr-ai"><img src="public/icon.png" alt="unerr" width="44" /></a>
+  <br />
+  <sub>built by <a href="https://github.com/unerr-ai">unerr</a></sub>
+</p>
