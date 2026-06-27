@@ -145,3 +145,35 @@ export interface CodeIntelligence {
 export { BunSqliteGraph } from "./bun-sqlite-graph.js"
 export { makeReconTool, makeFileReadTool, makeGetReferencesTool } from "./tools.js"
 export type { GraphToolDef } from "./tools.js"
+
+// econ S3.1: risk scoring
+export {
+  computeRisk,
+  computeTurnRisk,
+  type RiskGraph,
+  type RiskFactors,
+  type RiskResult,
+  type EntityRisk,
+  type TurnRiskResult,
+} from "./risk.js"
+
+// econ S3.2: risk-escalation router (incl. S3.7 reasoner tier)
+export {
+  routeTurn,
+  defaultRouterState,
+  defaultRouterConfig,
+  type Tier,
+  type RouterState,
+  type RouterConfig,
+  type RouterInput,
+  type RouterOutput,
+} from "./router.js"
+
+// econ S3.3 abstention · S3.4 compiled brief · S3.5 triage · S3.6 double-pay · S3.7 reasoner
+// Router/oracle decision surface — the modules feeding routeTurn's hooks and the
+// oracle escalation path. (S2 compression modules stay path-internal to the plugins.)
+export * from "./abstention.js"
+export * from "./triage.js"
+export * from "./reasoner.js"
+export * from "./brief.js"
+export * from "./double-pay.js"

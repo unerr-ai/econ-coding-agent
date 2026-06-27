@@ -7,6 +7,14 @@ import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
 import { Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
+// econ S3.2: risk-escalation router — pure function imported from code-intelligence
+import {
+  routeTurn,
+  defaultRouterConfig,
+  defaultRouterState,
+  type RouterConfig,
+  type RouterState,
+} from "@opencode-ai/code-intelligence"
 import { AgentV2 } from "../../agent"
 import { Catalog } from "../../catalog"
 import { Credential } from "../../credential"
@@ -51,6 +59,34 @@ export class UnsupportedApiError extends Schema.TaggedErrorClass<UnsupportedApiE
 ) {}
 
 export type Error = ModelNotSelectedError | ModelUnavailableError | VariantUnavailableError | UnsupportedApiError
+
+// ---------------------------------------------------------------------------
+// econ S3.2 — Risk-escalation router types
+// ---------------------------------------------------------------------------
+
+/**
+ * Supplies the code-structural risk score (0–100) for the current turn.
+ * Default implementation returns 0 (conductor tier, degrade-open).
+ *
+ * @sem domain=routing role=interface
+ */
+export type RiskProvider = (session: SessionSchema.Info) => Effect.Effect<number, never>
+
+/**
+ * Configuration for locationLayerWith (S3.2 risk-escalation router).
+ * All fields optional — omit for degrade-open defaults.
+ *
+ * @sem domain=routing role=interface
+ */
+export interface RouterLayerConfig {
+  /**
+   * Supplies the code-structural risk score 0–100 for each turn.
+   * Default: always returns 0 → conductor tier when no signal available.
+   */
+  riskProvider?: RiskProvider
+  /** Hysteresis band overrides. Default: { escalateAbove: 70, deescalateBelow: 40 }. */
+  routerConfig?: RouterConfig
+}
 
 export interface Interface {
   readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
@@ -172,55 +208,108 @@ export const supported = (model: ModelV2.Info) =>
     (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
 
 /**
- * Resolves models from the catalog belonging to the current Location runtime.
+ * Builds the model-resolution layer with an injected risk provider and optional
+ * hysteresis config. The risk provider is the only injectable needed for tests —
+ * all router logic is internal.
  *
- * Priority order when no explicit session.model is set:
- *   1. session.model — per-session override stored in session state
- *   2. active agent's model ref — lets a configured conductor tier own the default
- *   3. catalog.model.default() — site-wide default from opencode.json `model` key
- *   4. first supported available model — last-resort fallback
+ * Priority order for model resolution:
+ *   1. session.model — explicit per-session override (always wins, skips router)
+ *   2. Risk-routed tier agent model (S3.2):
+ *      risk > 70  → oracle agent model
+ *      risk < 40  → conductor agent model
+ *      40–70      → hysteresis holds current tier (no flap)
+ *   3. session's active agent model (S1.1 fallback when tier agent unconfigured)
+ *   4. catalog.model.default()
+ *   5. first supported available model
  *
- * @sem domain=configuration role=resolver
+ * Degrade-open: if riskProvider is omitted or returns 0, conductor is always
+ * selected — identical to the pre-S3.2 S1.1 behavior.
+ *
+ * Hysteresis state is kept in an in-memory Map (per layer instance, keyed by
+ * sessionID). Resets on process restart → safe degrade-open to conductor.
+ * Rationale for in-memory vs S1.3 SQLite: router state is transient; a restart
+ * losing the tier is acceptable (lands on conductor, not oracle — cost-safe).
+ * Migrate to canonical-state (S1.3) in S5 if cross-restart persistence matters.
+ *
+ * Extension hooks accepted but unused in this sprint:
+ *   abstain  (S3.3) — hold tier without recording a transition
+ *   forceTier (S3.5) — triage bypass
+ * These are wired into routeTurn's input shape; callers inject them later.
+ *
+ * @sem domain=routing role=resolver
  */
-export const locationLayer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const catalog = yield* Catalog.Service
-    const credentials = yield* Credential.Service
-    const integrations = yield* Integration.Service
-    const agents = yield* AgentV2.Service
-    return Service.of({
-      resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {
-        // When no explicit model is set, prefer the active agent's model ref so that
-        // a conductor agent (default_agent in opencode.json) drives model selection.
-        const agentModel = session.model
-          ? undefined
-          : (yield* agents.resolve(session.agent))?.model
-        const effectiveModel = session.model ?? agentModel
+export const locationLayerWith = (config: RouterLayerConfig = {}) => {
+  const riskProvider: RiskProvider = config.riskProvider ?? (() => Effect.succeed(0))
+  const routerCfg: RouterConfig = config.routerConfig ?? defaultRouterConfig
 
-        // Location plugins populate and filter the catalog asynchronously during layer startup.
-        const defaultModel = effectiveModel ? undefined : yield* catalog.model.default()
-        const selected = effectiveModel
-          ? (yield* catalog.model.available()).find(
-              (m) => m.providerID === effectiveModel.providerID && m.id === effectiveModel.id,
-            )
-          : defaultModel && supported(defaultModel)
-            ? defaultModel
-            : (yield* catalog.model.available()).find(supported)
-        if (!selected && effectiveModel)
-          return yield* new ModelUnavailableError({
-            providerID: effectiveModel.providerID,
-            modelID: effectiveModel.id,
-          })
-        if (!selected) return yield* new ModelNotSelectedError({ sessionID: session.id })
-        const connection = yield* integrations.connection.forIntegration(Integration.ID.make(selected.providerID))
-        return yield* resolve(
-          session,
-          selected,
-          connection,
-          connection?.type === "credential" ? yield* credentials.get(connection.id) : undefined,
-        )
-      }),
-    })
-  }),
-)
+  // Per-session hysteresis state lives in the layer closure (in-memory).
+  const routerStateMap = new Map<string, RouterState>()
+
+  return Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const credentials = yield* Credential.Service
+      const integrations = yield* Integration.Service
+      const agents = yield* AgentV2.Service
+      return Service.of({
+        resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {
+          // econ S3.2: risk-escalation router fork.
+          // Only engages when no explicit session.model override is present.
+          // DEGRADE-OPEN: riskProvider defaults to 0 → conductor when no signal.
+          let routedAgentModel: typeof session.model | undefined = undefined
+          if (!session.model) {
+            const risk = yield* riskProvider(session)
+            const prevState = routerStateMap.get(session.id) ?? defaultRouterState
+            const { tier, state: nextState } = routeTurn({ risk, state: prevState }, routerCfg)
+            routerStateMap.set(session.id, nextState)
+            // Map tier → agent. Yields undefined if the tier agent is not configured
+            // in opencode.json — falls through to the S1.1 agent-model chain below.
+            routedAgentModel = (yield* agents.resolve(AgentV2.ID.make(tier)))?.model
+          }
+
+          // S1.1 resolution chain (kept intact as fallback):
+          //   session.model > routed tier agent model (S3.2) > session agent model > undefined
+          const agentModel = session.model
+            ? undefined
+            : routedAgentModel ?? (yield* agents.resolve(session.agent))?.model
+          const effectiveModel = session.model ?? agentModel
+
+          // Location plugins populate and filter the catalog asynchronously during layer startup.
+          const defaultModel = effectiveModel ? undefined : yield* catalog.model.default()
+          const selected = effectiveModel
+            ? (yield* catalog.model.available()).find(
+                (m) => m.providerID === effectiveModel.providerID && m.id === effectiveModel.id,
+              )
+            : defaultModel && supported(defaultModel)
+              ? defaultModel
+              : (yield* catalog.model.available()).find(supported)
+          if (!selected && effectiveModel)
+            return yield* new ModelUnavailableError({
+              providerID: effectiveModel.providerID,
+              modelID: effectiveModel.id,
+            })
+          if (!selected) return yield* new ModelNotSelectedError({ sessionID: session.id })
+          const connection = yield* integrations.connection.forIntegration(Integration.ID.make(selected.providerID))
+          return yield* resolve(
+            session,
+            selected,
+            connection,
+            connection?.type === "credential" ? yield* credentials.get(connection.id) : undefined,
+          )
+        }),
+      })
+    }),
+  )
+}
+
+/**
+ * Default location layer: resolves models from the catalog with the S3.2
+ * risk-escalation router active (degrade-open — no risk provider → conductor
+ * tier; oracle tier requires the `oracle` agent in opencode.json).
+ *
+ * Replaces the pre-S3.2 locationLayer while preserving all S1.1 behaviours.
+ *
+ * @sem domain=routing role=resolver
+ */
+export const locationLayer = locationLayerWith({})

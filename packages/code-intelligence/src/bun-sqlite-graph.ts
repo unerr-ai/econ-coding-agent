@@ -12,6 +12,8 @@ import { join, relative, extname } from "node:path"
 import { createHash } from "node:crypto"
 import { extractEntities, extractEdges, detectLanguage } from "./ast-extractor.js"
 import type { CodeIntelligence, Entity, Reference, ReconBundle } from "./index.js"
+import { computeRisk } from "./risk.js"
+import type { RiskGraph } from "./risk.js"
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -318,25 +320,44 @@ export class BunSqliteGraph implements CodeIntelligence {
   // -------------------------------------------------------------------------
 
   /**
-   * Risk score for editing filePath: ratio of max entity fan-in to a
-   * soft ceiling of 20 callers, clamped to [0, 1].
+   * Return all entities whose source file matches filePath. Accepts relative
+   * paths (resolved against root) or absolute paths. Satisfies the
+   * RiskGraph.getEntitiesInFile contract used by computeRisk.
+   *
+   * @sem domain=intelligence role=query
+   */
+  async getEntitiesInFile(filePath: string): Promise<Entity[]> {
+    const absPath = filePath.startsWith("/") ? filePath : join(this.root, filePath)
+    const rows = this.db
+      .prepare("SELECT * FROM entities WHERE file_path = ?")
+      .all(absPath) as Record<string, unknown>[]
+    return rows.map((r) => rowToEntity(r, this.root))
+  }
+
+  /**
+   * Multi-factor 0–100 code-structural risk score for editing filePath,
+   * normalized to [0, 1] for backward compatibility. Delegates to
+   * computeRisk (risk.ts): factors are blast-radius, fan-in, centrality,
+   * and body complexity. Returns the max score across all entities in the
+   * file so a file containing even one high-risk entity is flagged.
    *
    * @sem domain=intelligence role=analysis
    */
   async riskScore(filePath: string): Promise<number> {
-    const absPath = filePath.startsWith("/") ? filePath : join(this.root, filePath)
-    const row = this.db
-      .prepare(
-        `SELECT MAX(cnt) as max_fans FROM (
-           SELECT COUNT(*) as cnt FROM edges e
-           JOIN entities en ON en.name = e.to_entity
-           WHERE en.file_path = ?
-           GROUP BY e.to_entity
-         )`
-      )
-      .get(absPath) as { max_fans: number | null } | null
-    const maxFans = row?.max_fans ?? 0
-    return Math.min(1, maxFans / 20)
+    const entities = await this.getEntitiesInFile(filePath)
+    if (entities.length === 0) return 0
+
+    // BunSqliteGraph satisfies RiskGraph structurally (getEntity,
+    // getCallers, getReferences, getEntitiesInFile are all implemented).
+    const g = this as unknown as RiskGraph
+    let maxScore = 0
+    for (const entity of entities) {
+      const { score } = await computeRisk(g, entity)
+      if (score > maxScore) maxScore = score
+    }
+
+    // Divide by 100 to maintain the existing [0, 1] return contract
+    return Math.min(1, maxScore / 100)
   }
 
   // -------------------------------------------------------------------------
