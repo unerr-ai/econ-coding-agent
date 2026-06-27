@@ -51,7 +51,7 @@ import { MAX_STEPS_PROMPT } from "./max-steps"
  *   - [ ] Bound provider retries and repeated identical tool calls.
  *
  * - Runtime context assembly
- *   - Track V1 runtime-context parity canonically in `specs/v2/session.md`.
+ *   - Track V1 runtime-context parity canonically in `CONTEXT.md` (session runtime).
  *
  * - One provider turn
  *   - [x] Translate every projected V2 Session message variant into canonical
