@@ -48,6 +48,7 @@ const makeModel = (id: string, providerID: string) =>
 
 const conductorModelInfo = makeModel("qwen/qwen3-coder", "openrouter")
 const oracleModelInfo = makeModel("deepseek/deepseek-r1", "openrouter")
+const triageModelInfo = makeModel("triage/tiny-model", "openrouter")
 
 // ---------------------------------------------------------------------------
 // Stub service layers (mirror the S1.1 test setup)
@@ -68,6 +69,27 @@ const bothModelsLayer = Layer.succeed(
       get: () => Effect.succeed(undefined),
       all: () => Effect.succeed([conductorModelInfo, oracleModelInfo]),
       available: () => Effect.succeed([conductorModelInfo, oracleModelInfo]),
+      default: () => Effect.succeed(undefined),
+      small: () => Effect.succeed(undefined),
+    },
+  } as unknown as Catalog.Interface),
+)
+
+/** Catalog serving conductor, oracle, and a triage-tier model. */
+const allModelsLayer = Layer.succeed(
+  Catalog.Service,
+  Catalog.Service.of({
+    transform: () => Effect.die("catalog.transform: not used"),
+    reload: () => Effect.die("catalog.reload: not used"),
+    provider: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.succeed([]),
+      available: () => Effect.succeed([]),
+    },
+    model: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.succeed([conductorModelInfo, oracleModelInfo, triageModelInfo]),
+      available: () => Effect.succeed([conductorModelInfo, oracleModelInfo, triageModelInfo]),
       default: () => Effect.succeed(undefined),
       small: () => Effect.succeed(undefined),
     },
@@ -255,6 +277,144 @@ describe("SessionRunnerModel.locationLayerWith — S3.2 risk router", () => {
 
       // Oracle agent has no model → falls back to session.agent (undefined) →
       // agents.resolve(undefined) → default agent (conductor) → conductor model
+      expect(resolved).toMatchObject({ id: "qwen/qwen3-coder", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AC-3.1 / AC-3.2 — cheap-first triage bias
+// ---------------------------------------------------------------------------
+
+describe("SessionRunnerModel.locationLayerWith — AC-3.1/AC-3.2 triage bias", () => {
+  const triageModelRef = { id: ModelV2.ID.make("triage/tiny-model"), providerID: ProviderV2.ID.make("openrouter") }
+
+  it.effect("first turn, no pin, triage enabled → routes to the triage model", () => {
+    // High risk so a non-triage route would pick oracle — proves triage wins on turn 1.
+    const stubRiskProvider: SessionRunnerModel.RiskProvider = () => Effect.succeed(85)
+    const depsLayer = Layer.mergeAll(AgentV2.layer, allModelsLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayerWith({
+      riskProvider: stubRiskProvider,
+      triageConfig: { enabled: true, model: triageModelRef },
+    }).pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(makeSession("ses_triage_first_turn"))
+
+      expect(resolved).toMatchObject({ id: "triage/tiny-model", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+
+  it.effect("second turn falls through to the normal risk route, not triage", () => {
+    const stubRiskProvider: SessionRunnerModel.RiskProvider = () => Effect.succeed(85)
+    const depsLayer = Layer.mergeAll(AgentV2.layer, allModelsLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayerWith({
+      riskProvider: stubRiskProvider,
+      triageConfig: { enabled: true, model: triageModelRef },
+    }).pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const models = yield* SessionRunnerModel.Service
+      const session = makeSession("ses_triage_second_turn")
+      yield* models.resolve(session) // turn 1: triage
+      const resolved = yield* models.resolve(session) // turn 2: normal risk route
+
+      // Risk=85 > escalateAbove=70 → oracle, not the triage model.
+      expect(resolved).toMatchObject({ id: "deepseek/deepseek-r1", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+
+  it.effect("user pin present → triage is NOT applied (existing precedence preserved)", () => {
+    const stubRiskProvider: SessionRunnerModel.RiskProvider = () => Effect.succeed(85)
+    const depsLayer = Layer.mergeAll(AgentV2.layer, allModelsLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayerWith({
+      riskProvider: stubRiskProvider,
+      triageConfig: { enabled: true, model: triageModelRef },
+    }).pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const sessionWithModel = SessionV2.Info.make({
+        id: SessionV2.ID.make("ses_triage_user_pin"),
+        projectID: ProjectV2.ID.global,
+        title: "user pin wins over triage",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+        location: { directory: AbsolutePath.make("/project") },
+        model: { id: ModelV2.ID.make("qwen/qwen3-coder"), providerID: ProviderV2.ID.make("openrouter") },
+      })
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(sessionWithModel)
+
+      expect(resolved).toMatchObject({ id: "qwen/qwen3-coder", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+
+  it.effect("heavy first prompt suppresses triage, letting the risk route escalate", () => {
+    const stubRiskProvider: SessionRunnerModel.RiskProvider = () => Effect.succeed(85)
+    const depsLayer = Layer.mergeAll(AgentV2.layer, allModelsLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayerWith({
+      riskProvider: stubRiskProvider,
+      triageConfig: {
+        enabled: true,
+        model: triageModelRef,
+        promptProvider: () => Effect.succeed("refactor across every service in the monorepo"),
+      },
+    }).pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(makeSession("ses_triage_heavy_prompt"))
+
+      // Heavy prompt → triage skipped → risk=85 > escalateAbove=70 → oracle.
+      expect(resolved).toMatchObject({ id: "deepseek/deepseek-r1", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+
+  it.effect("triage disabled → normal risk routing, even on the first turn", () => {
+    const stubRiskProvider: SessionRunnerModel.RiskProvider = () => Effect.succeed(10)
+    const depsLayer = Layer.mergeAll(AgentV2.layer, allModelsLayer, integrationLayer, credentialLayer)
+    const testLayer = SessionRunnerModel.locationLayerWith({
+      riskProvider: stubRiskProvider,
+      triageConfig: { enabled: false, model: triageModelRef },
+    }).pipe(Layer.provideMerge(depsLayer))
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(makeSession("ses_triage_disabled"))
+
+      // Risk=10 < deescalateBelow=40 → conductor (S3.2 route), not the triage model.
+      expect(resolved).toMatchObject({ id: "qwen/qwen3-coder", provider: "openrouter" })
+    }).pipe(Effect.provide(testLayer))
+  })
+
+  it.effect("degrade-open: no triageConfig → identical to pre-triage S3.2 behaviour", () => {
+    const testLayer = makeTestLayer(10)
+
+    return Effect.gen(function* () {
+      const agents = yield* AgentV2.Service
+      yield* wireAgents(agents)
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(makeSession("ses_triage_absent"))
+
       expect(resolved).toMatchObject({ id: "qwen/qwen3-coder", provider: "openrouter" })
     }).pipe(Effect.provide(testLayer))
   })

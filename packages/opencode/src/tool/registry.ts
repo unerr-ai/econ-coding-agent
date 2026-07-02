@@ -17,9 +17,10 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 // Z1 — econ graph tools (S1.2); remove this comment block when graduated
-import { GraphReconTool, GraphFileReadTool, GraphGetReferencesTool } from "./graph-tools"
-// Z2.3 — econ webfetch-compress tool (S2.3)
-import { WebFetchCompressTool } from "./webfetch-compress"
+import { GraphReconTool, GraphGetReferencesTool, GraphSearchCodeTool, GraphFileOutlineTool } from "./graph-tools"
+import { CompactionRefetchTool } from "./compaction-refetch"
+import { ToolJsonSchema } from "./json-schema"
+// Z2.3 — webfetch-compress folded into the webfetch tool (Sprint 6.2)
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -84,6 +85,33 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
 
+// Sprint 4 Phase-1: tool ids hidden from the model-facing advertised list.
+// These remain in all() — still executable by id at zero cost, just filtered from
+// the model's advertised list. recon/get_references/grep/glob all fold into the
+// unified `search` tool (modes: default / refs / literal|regex / glob). webfetch is
+// now the compressed impl (Sprint 6), so it is advertised — no longer hidden.
+export const HIDDEN_FROM_MODEL = new Set<string>([
+  GraphReconTool.id,           // "recon"          → search (default task bundle)
+  GraphGetReferencesTool.id,   // "get_references" → search (mode:refs)
+  GrepTool.id,                 // "grep"           → search (mode:literal|regex)
+  GlobTool.id,                 // "glob"           → search (mode:glob)
+])
+
+// AC-7.1 — progressive tool-schema disclosure. Heavier/less-frequently-used tools that
+// still get advertised unconditionally (unlike websearch/apply_patch/lsp/plan, which are
+// already gated by flags/model by design — left untouched here). When
+// `RuntimeFlags.experimentalCompactToolCatalog` is on, `tools()` shrinks each of these to
+// a one-line description + name/type-only parameter schema; `expand_tool_schema` resolves
+// the full contract on demand. Always-on core tools (read/edit/write/shell/task/todo/
+// search/webfetch) are deliberately excluded so the model can call them immediately.
+export const CATALOG_TOOL_IDS = new Set<string>([
+  SkillTool.id,
+  QuestionTool.id,
+  GraphFileOutlineTool.id,
+  CompactionRefetchTool.id,
+  InvalidTool.id,
+])
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -112,10 +140,11 @@ export const layer = Layer.effect(
     const agent = yield* Agent.Service
     // Z1 — econ graph tools
     const graphRecon = yield* GraphReconTool
-    const graphFileRead = yield* GraphFileReadTool
     const graphGetRefs = yield* GraphGetReferencesTool
-    // Z2.3 — econ webfetch-compress
-    const webfetchCompress = yield* WebFetchCompressTool
+    const graphSearchCode = yield* GraphSearchCodeTool
+    const graphFileOutline = yield* GraphFileOutlineTool
+    // AC-6.2 — recoverable transcript: read-only, cheap, always available.
+    const compactionRefetch = yield* CompactionRefetchTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -224,11 +253,45 @@ export const layer = Layer.effect(
           plan: Tool.init(plan),
           // Z1 — econ graph tools (S1.2)
           recon: Tool.init(graphRecon),
-          graphFileRead: Tool.init(graphFileRead),
           getReferences: Tool.init(graphGetRefs),
-          // Z2.3 — econ webfetch-compress (S2.3)
-          webfetchCompress: Tool.init(webfetchCompress),
+          searchCode: Tool.init(graphSearchCode),
+          fileOutline: Tool.init(graphFileOutline),
+          compactionRefetch: Tool.init(compactionRefetch),
         })
+
+        // AC-7.1 — meta-tool that resolves a catalog-compacted tool's full JSON Schema
+        // + description on demand. Built as a raw Tool.Def (bypassing Tool.define/
+        // Tool.init, same as fromPlugin above) since it only needs a read-only lookup
+        // over the tools already constructed in this scope.
+        const toolById = new Map<string, Tool.Def>([...Object.values(tool), ...custom].map((t) => [t.id, t]))
+        const ExpandToolSchemaParameters = Schema.Struct({
+          tool: Schema.String.annotate({ description: "The tool id shown in its compact catalog entry." }),
+        })
+        const expandToolSchema: Tool.Def<typeof ExpandToolSchemaParameters> = {
+          id: "expand_tool_schema",
+          description:
+            "Return the full parameter JSON Schema and description for a tool that appears in " +
+            "compact-catalog form (one-line summary, no parameter schema). Call this before " +
+            "invoking a compact-catalog tool whose argument names or types aren't obvious from " +
+            "its compact entry.",
+          parameters: ExpandToolSchemaParameters,
+          execute: (args) =>
+            Effect.sync(() => {
+              const target = toolById.get(args.tool)
+              if (!target) {
+                return { title: "unknown tool", output: `No tool registered with id "${args.tool}".`, metadata: {} }
+              }
+              return {
+                title: target.id,
+                output: JSON.stringify(
+                  { id: target.id, description: target.description, parameters: ToolJsonSchema.fromTool(target) },
+                  null,
+                  2,
+                ),
+                metadata: {},
+              }
+            }),
+        }
 
         return {
           custom,
@@ -251,10 +314,13 @@ export const layer = Layer.effect(
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
             // Z1 — econ graph tools always available (S1.2)
             tool.recon,
-            tool.graphFileRead,
             tool.getReferences,
-            // Z2.3 — econ webfetch-compress always available (S2.3)
-            tool.webfetchCompress,
+            tool.searchCode,
+            tool.fileOutline,
+            // AC-6.2 — recoverable transcript: read-only, cheap, always available.
+            tool.compactionRefetch,
+            // AC-7.1 — only advertised once the compact catalog is actually in play.
+            ...(flags.experimentalCompactToolCatalog ? [expandToolSchema] : []),
           ],
           task: tool.task,
           read: tool.read,
@@ -288,6 +354,9 @@ export const layer = Layer.effect(
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
       const filtered = (yield* all()).filter((tool) => {
+        // Phase-1 de-registration: keep in all(), hide from model prompt.
+        if (HIDDEN_FROM_MODEL.has(tool.id)) return false
+
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
@@ -313,11 +382,30 @@ export const layer = Layer.effect(
             output.parameters === tool.parameters || output.jsonSchema !== tool.jsonSchema
               ? output.jsonSchema
               : undefined
+          const description = [
+            output.description,
+            tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n")
+
+          // AC-7.1 — progressive tool-schema disclosure: shrink catalog-eligible tools to
+          // a one-line description + name/type-only schema. Off by default; a plugin
+          // override (jsonSchema set above) always wins over this compaction.
+          if (flags.experimentalCompactToolCatalog && CATALOG_TOOL_IDS.has(tool.id)) {
+            return {
+              id: tool.id,
+              description: compactDescription(description, tool.id),
+              parameters: output.parameters,
+              jsonSchema: compactJsonSchema(jsonSchema ?? ToolJsonSchema.fromTool(tool)),
+              execute: tool.execute,
+              formatValidationError: tool.formatValidationError,
+            }
+          }
+
           return {
             id: tool.id,
-            description: [output.description, tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined]
-              .filter(Boolean)
-              .join("\n"),
+            description,
             parameters: output.parameters,
             jsonSchema,
             execute: tool.execute,
@@ -435,6 +523,31 @@ function normalizeZodJsonSchema(value: unknown): unknown {
 
 function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// AC-7.1 — collapse a tool's full JSON Schema to its top-level {name: type} contract:
+// drops nested $defs/enums/per-property descriptions (the bulk of the token cost) while
+// keeping property names, `required`, and top-level types so the model can still form a
+// syntactically valid call without a round trip through expand_tool_schema.
+function compactJsonSchema(schema: JSONSchema7): JSONSchema7 {
+  const properties = schema.properties
+  if (!properties) return { type: "object", additionalProperties: true }
+  const compactProperties: Record<string, JSONSchema7Definition> = Object.fromEntries(
+    Object.entries(properties).map(([key, def]): [string, JSONSchema7Definition] =>
+      typeof def === "boolean" ? [key, def] : [key, { type: def.type } as JSONSchema7],
+    ),
+  )
+  return {
+    type: "object",
+    properties: compactProperties,
+    ...(schema.required ? { required: schema.required } : {}),
+    additionalProperties: true,
+  }
+}
+
+function compactDescription(description: string, id: string): string {
+  const firstLine = description.split("\n")[0]?.trim() || description.trim()
+  return `${firstLine} [compact catalog entry — call expand_tool_schema({tool:"${id}"}) for the full parameter schema before using unfamiliar arguments]`
 }
 
 export const node = LayerNode.make(layer.pipe(Layer.provide(Ripgrep.defaultLayer)), [

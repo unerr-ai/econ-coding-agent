@@ -35,8 +35,11 @@ export function SubagentFooter() {
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    // Current-context fullness, matching SessionCompaction.isOverflow: input + output +
+    // reasoning only. cache.read/write are cumulative billing counters, not context size —
+    // including them here would show a "% used" figure that never matches when
+    // auto-compaction actually fires.
+    const tokens = last.tokens.input + last.tokens.output + last.tokens.reasoning
     if (tokens <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]

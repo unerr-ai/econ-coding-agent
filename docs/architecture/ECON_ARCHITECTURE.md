@@ -1,8 +1,8 @@
 # econ — System Architecture & Capability Narrative
 
-**Status:** Design finalized 2026-06-24; base + integration path decided 2026-06-27 (see
-[DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md) — adopt a pinned stable open-source agent shell,
-merge the engine in, then diverge). This document describes the architecture we have agreed to
+**Status:** Design finalized 2026-06-24. econ is built on a forked, pinned open-source agent
+shell (OpenCode) with our engine merged in and then diverged. This document describes the
+architecture we have agreed to
 build: a multi-tier model "team" with a mid-tier **conductor** that holds the working context,
 a large-tier **oracle** consulted only with a compiled brief, and cheap **executors** that run
 the high-frequency tool work — all sitting on top of a native context-intelligence layer (code
@@ -14,9 +14,9 @@ It is written to be read two ways. The **plain-language framing** at the top of 
 is for product, business, and everyday users — what the capability is and why it matters. The
 **Under the hood** subsections go technical for engineers building it.
 
-> Companion docs: [README.md](../../README.md) (the vision) and
-> [DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md) (the base-platform decision and build plan).
-> This doc is the *system design* those two point at.
+> Companion docs: [README.md](../../README.md) (the vision) and the per-feature build docs in
+> [../features/](../features/) (how each capability is built, with status). This doc is the
+> *system design* those point at.
 
 ---
 
@@ -134,8 +134,8 @@ into a compact, structured summary — task tree, decisions made, open threads �
 recent turns are kept verbatim; the window is then rebuilt from that checkpoint plus the live
 slice, so the task continues coherently instead of degrading or blowing up. This is the
 "state is a cache of the store" rule applied across *time*, and it is what lets econ run
-ultra-long tasks a single-window agent cannot. (See [DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md)
-for how it is built.)
+ultra-long tasks a single-window agent cannot. (See
+[../features/05-long-horizon.md](../features/05-long-horizon.md) for how it is built.)
 
 **The compiled brief — the new load-bearing artifact.** The oracle never sees the raw
 transcript. The conductor (helped by the code graph) distills:
@@ -169,7 +169,7 @@ the codebase*.
 ### Under the hood
 
 This is econ's risk-escalation router (the moat — see also
-[DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md) §"The router"):
+[../features/03-risk-router.md](../features/03-risk-router.md)):
 
 - **Signal = the graph, not the text.** Blast-radius / fan-in, call-graph centrality,
   cyclomatic complexity → one **0–100 risk score**. (A model-routing proxy cannot compute this;
@@ -358,7 +358,7 @@ re-derives its own edit sites from the code graph — never paste it files):
 
 These specialists are *delegation* — an axis that layers on top of the conductor/oracle spine.
 The two-tier cheap/oracle loop ships first; the specialist library expands behind it (see
-[DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md) and §15 — Phasing).
+[../features/04-model-team.md](../features/04-model-team.md)).
 
 ---
 
@@ -884,28 +884,7 @@ Two things, held together, make econ defensible:
 
 ---
 
-## 15. Phasing (how this gets built without boiling the ocean)
-
-The full topology above is the destination. It is built in the order that ships value earliest
-(aligned with [DECISION_AND_PLAN.md](./DECISION_AND_PLAN.md)):
-
-| Phase | What lands | Topology state |
-|---|---|---|
-| **1 — Comparable core** | plan → edit → verify loop on OSS models | single capable tier (the conductor, effectively) |
-| **2 — Context engine** | code graph, recon bundle, compression, pruning, optimal reads | the slice-delivery substrate |
-| **3 — Routing** | risk-escalation router + the oracle as the escalation target | **conductor + oracle** spine live |
-| **3b — Executors & specialists** | stateless executor tier + the specialist sub-agent library | full **three-role** team |
-| **3c — Long-horizon** | checkpointing + compaction for 100–200-step tasks | ultra-long jobs survive the window |
-| **4 — Memory & guardrails** | anchored memory, conventions, in-loop governance gate | safety + cross-session continuity |
-| **5 — Observability** | status line + savings receipt + unified telemetry | the proof surface |
-| **6 — India hosting** | in-region inference + data residency | the market wedge |
-
-> Design the core to support the later pieces (executors, specialists, primitives); don't build
-> them before the spine exists.
-
----
-
-## 16. Glossary
+## 15. Glossary
 
 - **Conductor** — the mid-tier model that drives the job and holds the working context.
 - **Oracle** — the large/frontier model, consulted rarely with a compiled brief.

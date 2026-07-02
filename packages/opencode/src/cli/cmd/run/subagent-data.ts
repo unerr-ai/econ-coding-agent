@@ -1,5 +1,6 @@
 import type { Event, Message, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 import * as Locale from "@/util/locale"
+import { Token } from "@/util/token"
 import {
   bootstrapSessionData,
   createSessionData,
@@ -11,6 +12,16 @@ import type { FooterSubagentState, FooterSubagentTab, StreamCommit } from "./typ
 
 export const SUBAGENT_BOOTSTRAP_LIMIT = 200
 export const SUBAGENT_CALL_BOOTSTRAP_LIMIT = 80
+
+// AC-8.2 / CTX-3.1 (docs/design/cross-tier-context.md §3.3, §7): the two
+// constants above remain the raw SDK over-fetch cap (session.messages() only
+// takes a message count), but the payload that actually reaches a spawned
+// executor's bootstrap context is now bounded by a TOKEN budget sized to the
+// child model's context window — see resolveSubagentTokenBudget and
+// selectSubagentBootstrapMessages, wired into bootstrapSubagentCalls below.
+export const SUBAGENT_TOKEN_BUDGET_DEFAULT = 60_000
+const SUBAGENT_TOKEN_BUDGET_FRACTION = 0.5
+const SUBAGENT_TOOL_OUTPUT_COMPRESS_CHARS = 400
 
 const SUBAGENT_COMMIT_LIMIT = 80
 const SUBAGENT_CALL_LIMIT = 32
@@ -759,29 +770,166 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
   return changed
 }
 
+function estimateBootstrapPartTokens(part: Part): number {
+  if (part.type === "text" || part.type === "reasoning") {
+    return Token.estimate(part.text ?? "")
+  }
+
+  if (part.type === "tool") {
+    const inputStr = JSON.stringify(part.state.input ?? {})
+    const outputStr = part.state.status === "completed" ? part.state.output : ""
+    return Token.estimate(part.tool) + Token.estimate(inputStr) + Token.estimate(outputStr) + 8
+  }
+
+  return Token.estimate(JSON.stringify(part))
+}
+
+function estimateBootstrapMessageTokens(message: BootstrapChildMessage): number {
+  return message.parts.reduce((sum, part) => sum + estimateBootstrapPartTokens(part), 4)
+}
+
+/**
+ * budget = min(configured-or-default, fraction × childModel.limit.context).
+ * With no usable child model context limit, falls back to configuredBudget
+ * (or SUBAGENT_TOKEN_BUDGET_DEFAULT) so callers stay backward-compatible.
+ *
+ * @sem domain=infrastructure role=context-budget
+ */
+export function resolveSubagentTokenBudget(input: {
+  childModelContextLimit?: number
+  configuredBudget?: number
+}): number {
+  const base = input.configuredBudget ?? SUBAGENT_TOKEN_BUDGET_DEFAULT
+  const limit = input.childModelContextLimit
+
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) {
+    return base
+  }
+
+  return Math.min(base, Math.round(limit * SUBAGENT_TOKEN_BUDGET_FRACTION))
+}
+
+function compressCompletedToolPart(part: ToolPart): ToolPart {
+  if (part.state.status !== "completed") {
+    return part
+  }
+
+  const output = part.state.output
+  if (output.length <= SUBAGENT_TOOL_OUTPUT_COMPRESS_CHARS * 2) {
+    return part
+  }
+
+  const head = output.slice(0, SUBAGENT_TOOL_OUTPUT_COMPRESS_CHARS)
+  const tail = output.slice(-SUBAGENT_TOOL_OUTPUT_COMPRESS_CHARS)
+  const omitted = output.length - head.length - tail.length
+
+  return {
+    ...part,
+    state: {
+      ...part.state,
+      output: `${head}\n… [compressed: ${omitted} chars omitted] …\n${tail}`,
+    },
+  }
+}
+
+function compressBootstrapMessage(message: BootstrapChildMessage): BootstrapChildMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => (part.type === "tool" ? compressCompletedToolPart(part) : part)),
+  }
+}
+
+export interface SubagentBootstrapSelection {
+  messages: BootstrapChildMessage[]
+  estimatedTokens: number
+  droppedMessages: number
+  compressed: boolean
+}
+
+/**
+ * Degrades a fetched message batch to fit `tokenBudget` in three stages,
+ * stopping at the first one that fits: SELECT (already fits, unchanged) ->
+ * COMPRESS (shrink verbose completed-tool output, keep every message) ->
+ * DROP (remove whole oldest messages, never mid-tool-call, until it fits).
+ *
+ * @sem domain=infrastructure role=context-budget
+ */
+export function selectSubagentBootstrapMessages(
+  messages: BootstrapChildMessage[],
+  tokenBudget: number,
+): SubagentBootstrapSelection {
+  if (messages.length === 0) {
+    return { messages, estimatedTokens: 0, droppedMessages: 0, compressed: false }
+  }
+
+  const total = messages.reduce((sum, message) => sum + estimateBootstrapMessageTokens(message), 0)
+  if (total <= tokenBudget) {
+    return { messages, estimatedTokens: total, droppedMessages: 0, compressed: false }
+  }
+
+  let working = messages
+  let workingTokens = total
+  let compressed = false
+
+  const afterCompress = messages.map(compressBootstrapMessage)
+  const compressedTokens = afterCompress.reduce((sum, message) => sum + estimateBootstrapMessageTokens(message), 0)
+  if (compressedTokens < total) {
+    working = afterCompress
+    workingTokens = compressedTokens
+    compressed = true
+  }
+
+  if (workingTokens <= tokenBudget) {
+    return { messages: working, estimatedTokens: workingTokens, droppedMessages: 0, compressed }
+  }
+
+  let droppedMessages = 0
+  let start = 0
+  while (start < working.length - 1 && workingTokens > tokenBudget) {
+    workingTokens -= estimateBootstrapMessageTokens(working[start])
+    start += 1
+    droppedMessages += 1
+  }
+
+  return {
+    messages: working.slice(start),
+    estimatedTokens: Math.max(0, workingTokens),
+    droppedMessages,
+    compressed: compressed || droppedMessages > 0,
+  }
+}
+
 export function bootstrapSubagentCalls(input: {
   data: SubagentData
   sessionID: string
   messages: BootstrapChildMessage[]
   thinking: boolean
   limits: Record<string, number>
+  childModelContextLimit?: number
+  tokenBudget?: number
 }) {
   if (!knownSession(input.data, input.sessionID) || input.messages.length === 0) {
     return false
   }
+
+  const budget = resolveSubagentTokenBudget({
+    childModelContextLimit: input.childModelContextLimit,
+    configuredBudget: input.tokenBudget,
+  })
+  const selection = selectSubagentBootstrapMessages(input.messages, budget)
 
   const detail = ensureDetail(input.data, input.sessionID)
   const before = queueSnapshot(detail.data)
   const beforeCallCount = detail.data.call.size
   bootstrapSessionData({
     data: detail.data,
-    messages: input.messages,
+    messages: selection.messages,
     permissions: detail.data.permissions,
     questions: detail.data.questions,
   })
   const changed = bootstrapChildMessages({
     detail,
-    messages: input.messages,
+    messages: selection.messages,
     thinking: input.thinking,
     limits: input.limits,
   })

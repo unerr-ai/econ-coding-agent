@@ -263,8 +263,11 @@ export function Prompt(props: PromptProps) {
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    // Current-context fullness, matching SessionCompaction.isOverflow: input + output +
+    // reasoning only. cache.read/write are cumulative billing counters, not context size —
+    // including them here would show a "% used" figure that never matches when
+    // auto-compaction actually fires.
+    const tokens = last.tokens.input + last.tokens.output + last.tokens.reasoning
     if (tokens <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
@@ -1082,6 +1085,23 @@ export function Prompt(props: PromptProps) {
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         variant,
         parts: nonTextParts.filter((x) => x.type === "file"),
+      })
+    } else if (
+      inputText.startsWith("/") &&
+      ["compact", "summarize"].includes(inputText.split("\n")[0].split(" ")[0].slice(1))
+    ) {
+      // AC-4.5: `/compact [focus]` (alias `/summarize`) typed directly with a
+      // trailing free-text focus. The no-arg case is still reachable via the
+      // command palette's instant-dispatch "session.compact" entry.
+      move.startSubmit()
+      const firstLine = inputText.split("\n")[0]
+      const [, ...focusWords] = firstLine.split(" ")
+      const focus = focusWords.join(" ").trim()
+      void sdk.client.session.summarize({
+        sessionID,
+        providerID: selectedModel.providerID,
+        modelID: selectedModel.modelID,
+        ...(focus ? { focus } : {}),
       })
     } else {
       move.startSubmit()

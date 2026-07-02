@@ -427,3 +427,63 @@ Recent work
     ])
   })
 })
+
+describe("toLLMMessages — oracle tier (econ AC-8.1)", () => {
+  const turn = (n: number) =>
+    new SessionMessage.User({
+      id: id(`turn-${n}`),
+      type: "user",
+      text: `Turn ${n}`,
+      time: { created },
+    })
+  const tenTurns = Array.from({ length: 10 }, (_, i) => turn(i + 1))
+  const text = (content: Message["content"]) => (content[0] as { text?: string }).text ?? ""
+
+  test("compiles the head into a brief and keeps only the recent tail verbatim", () => {
+    const messages = toLLMMessages(tenTurns, model, true)
+
+    // 4 head turns compiled into one brief message + 6 tail turns kept verbatim.
+    expect(messages).toHaveLength(7)
+    expect(messages[0]?.role).toBe("user")
+    const briefText = text(messages[0]!.content)
+    expect(briefText).toContain("<oracle-brief>")
+    for (let n = 1; n <= 4; n++) expect(briefText).toContain(`Turn ${n}`)
+
+    expect(messages.slice(1).map((message) => text(message.content))).toEqual([
+      "Turn 5",
+      "Turn 6",
+      "Turn 7",
+      "Turn 8",
+      "Turn 9",
+      "Turn 10",
+    ])
+  })
+
+  test("never forwards the older raw transcript to the oracle", () => {
+    const messages = toLLMMessages(tenTurns, model, true)
+    const nonBriefTexts = messages.slice(1).map((message) => text(message.content))
+    for (let n = 1; n <= 4; n++) expect(nonBriefTexts).not.toContain(`Turn ${n}`)
+    expect(text(messages[0]!.content)).toContain("<oracle-brief>")
+  })
+
+  test("yields a byte-stable brief for a fixed input context", () => {
+    const first = toLLMMessages(tenTurns, model, true)
+    const second = toLLMMessages(tenTurns, model, true)
+    expect(first).toEqual(second)
+  })
+
+  test("leaves conductor/mid-tier turns unchanged", () => {
+    const oracleOff = toLLMMessages(tenTurns, model, false)
+    const oracleOmitted = toLLMMessages(tenTurns, model)
+    expect(oracleOff).toHaveLength(10)
+    expect(oracleOmitted).toEqual(oracleOff)
+    expect(oracleOff.map((message) => text(message.content))).toEqual(tenTurns.map((_, i) => `Turn ${i + 1}`))
+  })
+
+  test("degrades to full verbatim context when the conversation is too short to compress", () => {
+    const short = tenTurns.slice(0, 3)
+    const messages = toLLMMessages(short, model, true)
+    expect(messages).toHaveLength(3)
+    expect(messages.map((message) => text(message.content))).toEqual(["Turn 1", "Turn 2", "Turn 3"])
+  })
+})

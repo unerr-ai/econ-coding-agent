@@ -12,6 +12,7 @@ import { join, relative, extname } from "node:path"
 import { createHash } from "node:crypto"
 import { extractEntities, extractEdges, detectLanguage } from "./ast-extractor.js"
 import type { CodeIntelligence, Entity, Reference, ReconBundle } from "./index.js"
+import type { AnchoredNote } from "./memory.js"
 import { computeRisk } from "./risk.js"
 import type { RiskGraph } from "./risk.js"
 
@@ -55,6 +56,16 @@ const SCHEMA = /* sql */ `
   CREATE INDEX IF NOT EXISTS idx_edges_from_ent ON edges(from_entity);
   CREATE INDEX IF NOT EXISTS idx_edges_to_ent   ON edges(to_entity);
   CREATE INDEX IF NOT EXISTS idx_edges_from_file ON edges(from_file);
+
+  CREATE TABLE IF NOT EXISTS notes (
+    anchor     TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'fct',
+    polarity   TEXT NOT NULL DEFAULT '+',
+    content    TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY(anchor, kind, content)
+  );
+  CREATE INDEX IF NOT EXISTS idx_notes_anchor ON notes(anchor);
 `
 
 // ---------------------------------------------------------------------------
@@ -365,8 +376,47 @@ export class BunSqliteGraph implements CodeIntelligence {
   // -------------------------------------------------------------------------
 
   /**
+   * Persist a single anchored note. Upserts on (anchor, kind, content) —
+   * re-saving the same note is idempotent; only polarity is updated.
+   *
+   * @sem domain=intelligence role=indexing
+   */
+  async upsertNote(note: AnchoredNote): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO notes (anchor, kind, polarity, content)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(anchor, kind, content) DO UPDATE SET polarity=excluded.polarity`,
+      )
+      .run(note.anchor, note.kind, note.polarity, note.content)
+  }
+
+  /**
+   * Return all notes whose anchor is in the given list. Cheap index scan;
+   * returns an empty array when the list is empty or no matches exist.
+   *
+   * @sem domain=intelligence role=query
+   */
+  async getNotesForAnchors(anchors: string[]): Promise<AnchoredNote[]> {
+    if (anchors.length === 0) return []
+    const placeholders = anchors.map(() => "?").join(", ")
+    const rows = this.db
+      .prepare(
+        `SELECT anchor, kind, polarity, content FROM notes WHERE anchor IN (${placeholders})`,
+      )
+      .all(...anchors) as Array<{ anchor: string; kind: string; polarity: string; content: string }>
+    return rows.map((r) => ({
+      anchor: r.anchor,
+      kind: r.kind as AnchoredNote["kind"],
+      polarity: r.polarity as AnchoredNote["polarity"],
+      content: r.content,
+    }))
+  }
+
+  /**
    * TODO: implement via semantic search over the entity graph + anchored notes
-   * from unerr brain. Currently returns a simple name-search result.
+   * from unerr brain. Currently returns a simple name-search result with notes
+   * populated from the local notes store for the matched entity file anchors.
    *
    * @sem domain=intelligence role=analysis
    */
@@ -380,7 +430,10 @@ export class BunSqliteGraph implements CodeIntelligence {
       const refs = await this.getReferences(e.name)
       references.push(...refs)
     }
-    return { entities, references, notes: [] }
+    // Populate notes from the store for file anchors of matched entities.
+    const anchors = [...new Set(entities.map((e) => `f:${e.filePath}`))]
+    const notes = await this.getNotesForAnchors(anchors)
+    return { entities, references, notes }
   }
 
   /**

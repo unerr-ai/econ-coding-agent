@@ -5,6 +5,8 @@
  * @sem domain=intelligence role=interface
  */
 
+import type { AnchoredNote } from "./memory.js"
+
 // ---------------------------------------------------------------------------
 // Shared value types
 // ---------------------------------------------------------------------------
@@ -53,8 +55,8 @@ export interface ReconBundle {
   entities: Entity[]
   /** References among the matched entities. */
   references: Reference[]
-  /** Prose notes / conventions anchored to matched files. */
-  notes: string[]
+  /** Anchored notes surfaced from the notes store for the matched file anchors. */
+  notes: AnchoredNote[]
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +137,31 @@ export interface CodeIntelligence {
    */
   index(repoPath: string): Promise<{ files: number; entities: number; edges: number }>
 
+  /**
+   * Return all entities whose source file matches filePath. Accepts relative
+   * (resolved against indexed root) or absolute paths.
+   *
+   * @sem domain=intelligence role=query
+   */
+  getEntitiesInFile(filePath: string): Promise<Entity[]>
+
+  /**
+   * Fetch all anchored notes whose anchor matches one of the given anchor
+   * strings (e.g. "f:src/foo.ts", "e:myFunction"). Returns an empty array
+   * when no matching notes exist in the store.
+   *
+   * @sem domain=intelligence role=query
+   */
+  getNotesForAnchors(anchors: string[]): Promise<AnchoredNote[]>
+
+  /**
+   * Persist a single anchored note to the backing store. Upserts on
+   * (anchor, kind, content) so re-saves are idempotent.
+   *
+   * @sem domain=intelligence role=indexing
+   */
+  upsertNote(note: AnchoredNote): Promise<void>
+
   /** Release resources (close DB connection). */
   close(): void
 }
@@ -143,7 +170,7 @@ export interface CodeIntelligence {
 // Re-exports for consumers
 // ---------------------------------------------------------------------------
 export { BunSqliteGraph } from "./bun-sqlite-graph.js"
-export { makeReconTool, makeFileReadTool, makeGetReferencesTool } from "./tools.js"
+export { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool } from "./tools.js"
 export type { GraphToolDef } from "./tools.js"
 
 // econ S3.1: risk scoring
@@ -252,17 +279,21 @@ export { decayConfidence, DEFAULT_DECAY_CONFIG, type DecayConfig } from "./decay
 export { buildResumeStrip, type SessionStateLike, type ResumeStrip } from "./continuity.js"
 
 // econ S7.1 telemetry · S7.3 savings receipt (the proof surface)
+// econ AC-5.2 efficiency metrics loop (tokens-per-task, re-read rate, post-compaction signal)
 export {
   TelemetryStore,
   emitUsageEvent,
   installUsageSink,
   inferTier,
+  EfficiencyMetrics,
   type UsageEvent,
   type UsageEventTokens,
   type UsageTier,
   type UsageTotals,
   type StatusSnapshot,
   type RawUsage,
+  type EfficiencyMetricsSnapshot,
+  type CompactionOutcomeEvent,
 } from "./telemetry.js"
 export {
   buildReceipt,
@@ -273,6 +304,19 @@ export {
   type FrontierBaseline,
   type TierSplitRow,
 } from "./receipt.js"
+// econ AC-0.4 cache-hit-rate meter + AC-8.4 per-tier rollup / cross-tier transitions
+export {
+  computeCacheHitRate,
+  recordCacheHit,
+  TierCacheRollup,
+  TIER_CACHE_HIT_TARGET,
+  type CacheHitEvent,
+  type CacheHitInput,
+  type CrossTierTransitionEvent,
+  type TierCacheStats,
+  type TierCacheSnapshot,
+  type TierCacheRollupSignal,
+} from "./cache-meter.js"
 
 // econ S5.1 checkpoint-writer · S5.2 task-tree · S5.3 goal-judge (long-horizon)
 export {

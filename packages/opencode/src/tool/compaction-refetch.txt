@@ -1,0 +1,16 @@
+Re-fetch the raw body a compaction pass dropped from context.
+
+When context is compacted, a completed tool result is either replaced with a
+short synthesis (masked) or dropped from the conversation entirely (pruned).
+The raw output is never deleted from storage — only hidden from the model. A
+masked observation's synthesis line ends with a
+`[pointer: sessionID/messageID/partID — re-fetch via compaction_refetch]` hint;
+use that messageID and partID here to pull the original body back on demand.
+
+Usage notes:
+- Read-only and cheap — no LLM call, no side effects.
+- Only works for a part in THIS session, and only if it is still `completed`
+  (a pending or failed tool call has no retained body).
+- Pass `startLine`/`endLine` (1-indexed, inclusive) to pull back a slice
+  instead of the whole retained body, when you only need part of a large
+  result.

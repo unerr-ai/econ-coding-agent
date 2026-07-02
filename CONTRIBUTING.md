@@ -56,8 +56,10 @@ bun dev serve --port 8080
 | `opencode.json` | Tier wiring — which model runs at which tier |
 | `.opencode/plugins/` | Plugins and hooks |
 | `packages/opencode/` | Core server business logic (Hono API, tools, session) |
-| `docs/architecture/` | Design decisions and architecture docs |
-| `docs/sprint*/` | Per-sprint build notes |
+| `docs/architecture/` | The system-design narrative (ECON_ARCHITECTURE.md) + diagrams |
+| `docs/features/` | How each feature is built + its status (one doc per feature) |
+| `docs/design/` | Deeper per-topic design notes (models, tooling, adaptive-compute, compaction) |
+| `docs/strategy/` | The business case (positioning, economics, confidential compute) |
 
 Point new contributors at `docs/architecture/ECON_ARCHITECTURE.md` first.
 

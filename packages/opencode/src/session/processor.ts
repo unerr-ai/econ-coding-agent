@@ -747,11 +747,22 @@ export const layer = Layer.effect(
                 messageID: ctx.assistantMessage.parentID,
               })
               .pipe(Effect.ignore, Effect.forkIn(scope))
-            if (
-              !ctx.assistantMessage.summary &&
-              isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
-            ) {
-              ctx.needsCompaction = true
+            if (!ctx.assistantMessage.summary) {
+              const cfgNow = yield* config.get()
+              if (isOverflow({ cfg: cfgNow, tokens: usage.tokens, model: ctx.model })) {
+                // AC-1.5: never cut a compaction in mid-tool-call — only fire at a
+                // clean task boundary. A "tool-calls" finish reason means this
+                // agentic turn still has more steps queued; defer instead of
+                // interrupting the current step's stream via needsCompaction.
+                const boundaryOnly = cfgNow.compaction?.task_boundary_only !== false
+                if (boundaryOnly && value.reason === "tool-calls") {
+                  yield* Effect.logWarning("approaching context limit — will compact at next safe point", {
+                    "session.id": ctx.assistantMessage.sessionID,
+                  })
+                } else {
+                  ctx.needsCompaction = true
+                }
+              }
             }
             return
           }

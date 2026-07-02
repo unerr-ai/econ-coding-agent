@@ -1008,4 +1008,47 @@ describe("session HttpApi", () => {
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
+
+  // AC-6.1: /pin route — thin wrapper over SessionCompaction.setPinned.
+  it.instance(
+    "serves the pin-part route to protect a tool part from pruning",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "pin" })
+        const message = yield* createTextMessage(session.id, "first")
+
+        const svc = yield* Session.Service
+        const part = yield* svc.updatePart({
+          id: PartID.ascending(),
+          messageID: message.info.id,
+          sessionID: session.id,
+          type: "tool",
+          callID: crypto.randomUUID(),
+          tool: "todowrite",
+          state: {
+            status: "completed",
+            input: {},
+            output: "content",
+            title: "done",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+        })
+
+        const pinned = yield* requestJson<boolean>(
+          pathFor(SessionPaths.pinPart, { sessionID: session.id, messageID: message.info.id, partID: part.id }),
+          { method: "POST", headers, body: JSON.stringify({ pinned: true }) },
+        )
+        expect(pinned).toBe(true)
+
+        const unpinned = yield* requestJson<boolean>(
+          pathFor(SessionPaths.pinPart, { sessionID: session.id, messageID: message.info.id, partID: part.id }),
+          { method: "POST", headers, body: JSON.stringify({ pinned: false }) },
+        )
+        expect(unpinned).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
 })

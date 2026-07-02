@@ -95,7 +95,21 @@ export class LocationServiceMap extends LayerMap.Service<LocationServiceMap>()("
       Layer.provide(questions),
       Layer.provide(image),
     )
-    const model = SessionRunnerModel.locationLayer.pipe(Layer.provide(services))
+    // econ AC-3.3: use the opencode-supplied RouterLayerConfig (triage bias +
+    // S3.2 risk router config) instead of the dormant locationLayer default,
+    // when the opencode layer has injected one (see
+    // SessionRunnerModel.RouterLayerConfigTag — config reading and
+    // Provider.parseModel both happen there, never in core). No injection →
+    // `{}`, identical to pre-AC-3.3 behaviour.
+    const model = Layer.unwrap(
+      Effect.gen(function* () {
+        // RouterLayerConfigTag holds a DEFERRED resolver (an Effect) rather than
+        // a resolved object: the opencode producer reads instance-scoped Config,
+        // which is only valid here (InstanceRef live), not at app construction.
+        const routerLayerConfig = yield* yield* SessionRunnerModel.RouterLayerConfigTag
+        return SessionRunnerModel.locationLayerWith(routerLayerConfig)
+      }),
+    ).pipe(Layer.provide(services))
     const runner = SessionRunnerLLM.defaultLayer.pipe(
       Layer.provide(services),
       Layer.provide(model),

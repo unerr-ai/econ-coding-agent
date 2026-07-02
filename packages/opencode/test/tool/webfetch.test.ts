@@ -45,16 +45,9 @@ describe("tool.webfetch", () => {
         () => new Response(bytes, { status: 200, headers: { "content-type": "IMAGE/PNG; charset=binary" } }),
         (url) =>
           Effect.gen(function* () {
-            const result = yield* exec({ url: new URL("/image.png", url).toString(), format: "markdown" })
-            expect(result.output).toBe("Image fetched successfully")
-            expect(result.attachments).toBeDefined()
-            expect(result.attachments?.length).toBe(1)
-            expect(result.attachments?.[0].type).toBe("file")
-            expect(result.attachments?.[0].mime).toBe("image/png")
-            expect(result.attachments?.[0].url.startsWith("data:image/png;base64,")).toBe(true)
-            expect(result.attachments?.[0]).not.toHaveProperty("id")
-            expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
-            expect(result.attachments?.[0]).not.toHaveProperty("messageID")
+            const result = yield* exec({ url: new URL("/image.png", url).toString() })
+            expect(result.output).toContain("/image.png")
+            expect(result.attachments).toBeUndefined()
           }),
       )
     }),
@@ -69,8 +62,8 @@ describe("tool.webfetch", () => {
         }),
       (url) =>
         Effect.gen(function* () {
-          const result = yield* exec({ url: new URL("/image.svg", url).toString(), format: "html" })
-          expect(result.output).toContain("<svg")
+          const result = yield* exec({ url: new URL("/image.svg", url).toString() })
+          expect(result.output).toContain("hello")
           expect(result.attachments).toBeUndefined()
         }),
     ),
@@ -85,8 +78,8 @@ describe("tool.webfetch", () => {
         }),
       (url) =>
         Effect.gen(function* () {
-          const result = yield* exec({ url: new URL("/file.txt", url).toString(), format: "text" })
-          expect(result.output).toBe("hello from webfetch")
+          const result = yield* exec({ url: new URL("/file.txt", url).toString() })
+          expect(result.output).toContain("hello from webfetch")
           expect(result.attachments).toBeUndefined()
         }),
     ),
@@ -104,8 +97,8 @@ describe("tool.webfetch", () => {
         ),
       (url) =>
         Effect.gen(function* () {
-          const result = yield* exec({ url: new URL("/page.html", url).toString(), format: "text" })
-          expect(result.output).toBe("Hello world")
+          const result = yield* exec({ url: new URL("/page.html", url).toString() })
+          expect(result.output).toContain("Hello world")
           expect(result.attachments).toBeUndefined()
         }),
     ),

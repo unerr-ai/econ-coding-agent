@@ -25,8 +25,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       }
     }
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    // Current-context fullness, matching SessionCompaction.isOverflow: input + output +
+    // reasoning only. cache.read/write are cumulative billing counters, not context
+    // size — including them here would show a "% used" figure that never matches when
+    // auto-compaction actually fires.
+    const tokens = last.tokens.input + last.tokens.output + last.tokens.reasoning
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     return {
       tokens,

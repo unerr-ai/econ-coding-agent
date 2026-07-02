@@ -26,16 +26,11 @@ const cfg: RouterConfig = defaultRouterConfig // escalateAbove=70, deescalateBel
 // ---------------------------------------------------------------------------
 
 describe("routeTurn — high risk", () => {
-  it("escalates to oracle when risk > 70 (from conductor)", () => {
-    const result = routeTurn({ risk: 80, state: conductorState }, cfg)
+  it("escalates to oracle when risk is clearly high (from conductor)", () => {
+    const result = routeTurn({ risk: 95, state: conductorState }, cfg)
     expect(result.tier).toBe("oracle")
     expect(result.state.tier).toBe("oracle")
     expect(result.reason).toContain("escalating to oracle")
-  })
-
-  it("escalates to oracle when risk = 71 (threshold boundary)", () => {
-    const result = routeTurn({ risk: 71, state: conductorState }, cfg)
-    expect(result.tier).toBe("oracle")
   })
 
   it("stays oracle when already oracle and risk > 70", () => {
@@ -45,6 +40,42 @@ describe("routeTurn — high risk", () => {
 
   it("escalates when risk = 100", () => {
     const result = routeTurn({ risk: 100, state: conductorState }, cfg)
+    expect(result.tier).toBe("oracle")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AC-8.5 — cache-warm stickiness: a borderline escalation off a warm
+// (non-oracle) tier holds instead of flipping; a genuine high-risk turn
+// (past the stickiness margin) still escalates unconditionally.
+// ---------------------------------------------------------------------------
+
+describe("routeTurn — AC-8.5 cache-warm stickiness", () => {
+  it("holds conductor at risk = 71 (borderline, within default stickinessMargin=10)", () => {
+    const result = routeTurn({ risk: 71, state: conductorState }, cfg)
+    expect(result.tier).toBe("conductor")
+    expect(result.state.tier).toBe("conductor")
+    expect(result.reason).toContain("holding tier")
+  })
+
+  it("holds conductor at risk = 80 (at the edge of the stickiness margin)", () => {
+    const result = routeTurn({ risk: 80, state: conductorState }, cfg)
+    expect(result.tier).toBe("conductor")
+  })
+
+  it("escalates once risk clears the stickiness margin (risk = 81)", () => {
+    const result = routeTurn({ risk: 81, state: conductorState }, cfg)
+    expect(result.tier).toBe("oracle")
+    expect(result.reason).toContain("escalating to oracle")
+  })
+
+  it("does not dampen escalation when already on oracle (nothing warm to protect)", () => {
+    const result = routeTurn({ risk: 71, state: oracleState }, cfg)
+    expect(result.tier).toBe("oracle")
+  })
+
+  it("stickinessMargin: 0 disables the dampening (pre-AC-8.5 behavior)", () => {
+    const result = routeTurn({ risk: 71, state: conductorState }, { ...cfg, stickinessMargin: 0 })
     expect(result.tier).toBe("oracle")
   })
 })
@@ -193,7 +224,8 @@ describe("routeTurn — abstain override", () => {
 
 describe("routeTurn — custom config", () => {
   it("respects custom escalateAbove band", () => {
-    const custom: RouterConfig = { escalateAbove: 50, deescalateBelow: 20 }
+    // stickinessMargin: 0 isolates the band test from AC-8.5 stickiness (default 10).
+    const custom: RouterConfig = { escalateAbove: 50, deescalateBelow: 20, stickinessMargin: 0 }
     const result = routeTurn({ risk: 60, state: conductorState }, custom)
     expect(result.tier).toBe("oracle") // would be mid-band at default config
   })

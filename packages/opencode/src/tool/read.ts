@@ -9,6 +9,9 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+import { ensureGraphReady } from "./graph-tools"
+import { makeFileReadTool } from "@opencode-ai/code-intelligence"
+import { withMeta, recordToolCall } from "./_shared"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -32,6 +35,12 @@ export const Parameters = Schema.Struct({
   }),
   limit: Schema.optional(NonNegativeInt).annotate({
     description: "The maximum number of lines to read (defaults to 2000)",
+  }),
+  entity: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional entity name or key. If provided, returns that entity's profile (signature, kind, " +
+      "line range) from the in-process code graph instead of raw file content. Falls back to a " +
+      "normal raw read of the file when the entity isn't in the graph.",
   }),
 })
 
@@ -258,6 +267,29 @@ export const ReadTool = Tool.define<
         always: ["*"],
         metadata: {},
       })
+
+      // econ graph-aware read (Sprint 6.1): when `entity` is supplied, return that entity's
+      // profile (signature / kind / line range) from the in-process code graph instead of the raw
+      // file. Placed after the read-permission gate so it honors the same permissions; on a graph
+      // miss (entity absent, or daemon not yet indexed) it falls through to the full raw read below,
+      // so the call always succeeds. Records an econ meter entry on the graph path.
+      if (params.entity) {
+        const profile = yield* Effect.promise(() =>
+          ensureGraphReady().then((graph) =>
+            makeFileReadTool(graph, instance.directory).execute({ path: filepath, entity: params.entity }),
+          ),
+        ).pipe(Effect.catch(() => Effect.succeed<string | undefined>(undefined)))
+        if (profile && !profile.startsWith("Entity not found in graph:")) {
+          const meta = withMeta(profile, profile)
+          recordToolCall({ tool: "read", ...meta })
+          return {
+            title,
+            output: profile,
+            metadata: { preview: profile.slice(0, 200), truncated: false, loaded: [filepath] },
+          }
+        }
+        // entity not in graph → fall through to the raw read below (raw fallback).
+      }
 
       if (!stat) return yield* miss(filepath)
 

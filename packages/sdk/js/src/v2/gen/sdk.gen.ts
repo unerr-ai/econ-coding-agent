@@ -116,6 +116,8 @@ import type {
   Part as Part2,
   PartDeleteErrors,
   PartDeleteResponses,
+  PartPinErrors,
+  PartPinResponses,
   PartUpdateErrors,
   PartUpdateResponses,
   PathGetErrors,
@@ -4378,6 +4380,47 @@ export class Part extends HeyApiClient {
     )
     return (options?.client ?? this.client).patch<PartUpdateResponses, PartUpdateErrors, ThrowOnError>({
       url: "/session/{sessionID}/message/{messageID}/part/{partID}",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Pin or unpin a part
+   */
+  public pin<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      messageID: string
+      partID: string
+      directory?: string
+      workspace?: string
+      pinned: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "messageID" },
+            { in: "path", key: "partID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "pinned" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<PartPinResponses, PartPinErrors, ThrowOnError>({
+      url: "/session/{sessionID}/message/{messageID}/part/{partID}/pin",
       ...options,
       ...params,
       headers: {

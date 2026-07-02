@@ -4,7 +4,15 @@
  */
 
 import { describe, it, expect } from "bun:test"
-import { triageRepo, MIN_SAMPLE_SIZE, MIN_DISCRIMINATION, type TriageStats } from "../src/triage.js"
+import {
+  triageRepo,
+  MIN_SAMPLE_SIZE,
+  MIN_DISCRIMINATION,
+  isHeavyPrompt,
+  decideTriageTurn,
+  DEFAULT_ESCALATE_ON,
+  type TriageStats,
+} from "../src/triage.js"
 import { routeTurn, defaultRouterState } from "../src/router.js"
 
 // ---------------------------------------------------------------------------
@@ -235,5 +243,79 @@ describe("routeTurn integration — forceTier from triage overrides risk logic",
       forceTier: triage.forceTier,
     })
     expect(routeResult.tier).toBe("oracle")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isHeavyPrompt — AC-3.2 heavy-prompt classifier
+// ---------------------------------------------------------------------------
+
+describe("isHeavyPrompt — matches escalate_on signals", () => {
+  it("matches multi_file_edit phrasing", () => {
+    expect(isHeavyPrompt("please refactor across the whole codebase", DEFAULT_ESCALATE_ON)).toBe(true)
+    expect(isHeavyPrompt("migrate the auth module to the new SDK", DEFAULT_ESCALATE_ON)).toBe(true)
+    expect(isHeavyPrompt("rename this variable everywhere", DEFAULT_ESCALATE_ON)).toBe(true)
+  })
+
+  it("matches high_risk phrasing", () => {
+    expect(isHeavyPrompt("this touches production payment flows", DEFAULT_ESCALATE_ON)).toBe(true)
+    expect(isHeavyPrompt("delete the legacy auth tables", DEFAULT_ESCALATE_ON)).toBe(true)
+  })
+
+  it("matches explicit_plan_request phrasing", () => {
+    expect(isHeavyPrompt("plan the migration to the new router", DEFAULT_ESCALATE_ON)).toBe(true)
+    expect(isHeavyPrompt("write an RFC for the new caching layer", DEFAULT_ESCALATE_ON)).toBe(true)
+  })
+
+  it("returns false for a light, single-file prompt", () => {
+    expect(isHeavyPrompt("fix the typo in the README", DEFAULT_ESCALATE_ON)).toBe(false)
+  })
+
+  it("returns false for empty/undefined text", () => {
+    expect(isHeavyPrompt("", DEFAULT_ESCALATE_ON)).toBe(false)
+    expect(isHeavyPrompt("   ", DEFAULT_ESCALATE_ON)).toBe(false)
+  })
+
+  it("only matches signals present in the escalate_on list", () => {
+    // "plan the" would match explicit_plan_request, but it's excluded here.
+    expect(isHeavyPrompt("plan the migration", ["high_risk"])).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// decideTriageTurn — AC-3.1/AC-3.2 per-turn triage bias
+// ---------------------------------------------------------------------------
+
+describe("decideTriageTurn — cheap-first bias for the session's first turn", () => {
+  it("applies triage on a light first turn when enabled", () => {
+    const result = decideTriageTurn({ isFirstTurn: true, enabled: true, prompt: "fix the typo in the README" })
+    expect(result.applyTriage).toBe(true)
+  })
+
+  it("does not apply triage when disabled", () => {
+    const result = decideTriageTurn({ isFirstTurn: true, enabled: false, prompt: "fix the typo in the README" })
+    expect(result.applyTriage).toBe(false)
+    expect(result.reason).toContain("disabled")
+  })
+
+  it("does not apply triage on a later turn", () => {
+    const result = decideTriageTurn({ isFirstTurn: false, enabled: true, prompt: "fix the typo in the README" })
+    expect(result.applyTriage).toBe(false)
+    expect(result.reason).toContain("first turn")
+  })
+
+  it("does not apply triage when the first prompt matches an escalate_on signal", () => {
+    const result = decideTriageTurn({
+      isFirstTurn: true,
+      enabled: true,
+      prompt: "refactor across every service in the monorepo",
+    })
+    expect(result.applyTriage).toBe(false)
+    expect(result.reason).toContain("escalate_on")
+  })
+
+  it("degrade-open: applies triage when no prompt text is available", () => {
+    const result = decideTriageTurn({ isFirstTurn: true, enabled: true })
+    expect(result.applyTriage).toBe(true)
   })
 })

@@ -61,8 +61,9 @@ describe("getSessionContextMetrics", () => {
 
     expect(metrics.totalCost).toBe(1.75)
     expect(metrics.context?.message.id).toBe("a2")
-    expect(metrics.context?.total).toBe(500)
-    expect(metrics.context?.usage).toBe(50)
+    // Fullness excludes cumulative cache.read/write (25+25) — matches SessionCompaction.isOverflow.
+    expect(metrics.context?.total).toBe(450)
+    expect(metrics.context?.usage).toBe(45)
     expect(metrics.context?.providerLabel).toBe("OpenAI")
     expect(metrics.context?.modelLabel).toBe("GPT-4.1")
   })

@@ -315,3 +315,107 @@ export class TelemetryStore {
     this._events = []
   }
 }
+
+// ---------------------------------------------------------------------------
+// AC-5.2 — efficiency metrics loop
+// ---------------------------------------------------------------------------
+
+/** Session-level snapshot of the AC-5.2 efficiency counters — the roll-up the
+ * receipt reads to answer "did the context engineering actually help". Cache-
+ * hit rate is intentionally not duplicated here: read it from
+ * `TelemetryStore.cacheHitRatio()` or the AC-8.4 `TierCacheRollup` snapshot
+ * (cache-meter.ts) and merge at the call site — one meter, reused. */
+export interface EfficiencyMetricsSnapshot {
+  tasksRecorded: number
+  totalTaskTokens: number
+  /** totalTaskTokens / tasksRecorded, 0 when no task has been recorded yet. */
+  tokensPerTask: number
+  totalFileReads: number
+  /** File reads beyond each path's first — reads that should have been a context/cache reuse. */
+  reReadCount: number
+  /** reReadCount / totalFileReads, 0 when no reads recorded yet. */
+  reReadRate: number
+  compactions: number
+  productiveCompactions: number
+  /** productiveCompactions / compactions; undefined when no compaction has fired yet. */
+  postCompactionSuccessRate?: number
+}
+
+/** One post-compaction continuation signal — a plain counted boolean, not an
+ * LLM judge (AC-5.2 explicitly rules out judged success). */
+export interface CompactionOutcomeEvent {
+  sessionID: string
+  timestamp: number
+  /** True when the session recorded at least one more productive turn after the compaction fired. */
+  productiveContinuation: boolean
+}
+
+/**
+ * In-memory accumulator for the AC-5.2 efficiency metrics: tokens-per-task,
+ * file re-read rate, and post-compaction continuation. Pure counters — no
+ * I/O, no LLM judgement — so the receipt can prove the context-engineering
+ * layer helped instead of assuming it did. Mirrors `TelemetryStore` /
+ * `DoublePayLedger`'s accumulate-then-`snapshot` shape.
+ *
+ * @sem domain=observability role=accounting
+ */
+export class EfficiencyMetrics {
+  private _taskTokens = 0
+  private _tasksRecorded = 0
+  private _fileReads = new Map<string, number>()
+  private _compactions = 0
+  private _productiveCompactions = 0
+
+  /** Record one completed task's total token spend. */
+  recordTask(tokens: number): void {
+    this._taskTokens += nonNeg(tokens)
+    this._tasksRecorded += 1
+  }
+
+  /** Record one file read; a path seen again this session is a re-read. */
+  recordFileRead(path: string): void {
+    this._fileReads.set(path, (this._fileReads.get(path) ?? 0) + 1)
+  }
+
+  /**
+   * Record whether the session kept making progress after a compaction
+   * fired, and optionally forward the event to a telemetry sink (same
+   * injected-`emit` convention as `recordCacheHit` / `recordEscalation`).
+   */
+  recordCompactionOutcome(
+    input: { sessionID: string; productiveContinuation: boolean; timestamp?: number },
+    emit?: (event: CompactionOutcomeEvent) => void,
+  ): CompactionOutcomeEvent {
+    this._compactions += 1
+    if (input.productiveContinuation) this._productiveCompactions += 1
+    const event: CompactionOutcomeEvent = {
+      sessionID: input.sessionID,
+      timestamp: input.timestamp ?? Date.now(),
+      productiveContinuation: input.productiveContinuation,
+    }
+    emit?.(event)
+    return event
+  }
+
+  /** Point-in-time snapshot of all AC-5.2 counters — safe to log or fold into the receipt. */
+  snapshot(): EfficiencyMetricsSnapshot {
+    let totalFileReads = 0
+    let reReadCount = 0
+    for (const count of this._fileReads.values()) {
+      totalFileReads += count
+      if (count > 1) reReadCount += count - 1
+    }
+    return {
+      tasksRecorded: this._tasksRecorded,
+      totalTaskTokens: this._taskTokens,
+      tokensPerTask: this._tasksRecorded > 0 ? this._taskTokens / this._tasksRecorded : 0,
+      totalFileReads,
+      reReadCount,
+      reReadRate: totalFileReads > 0 ? reReadCount / totalFileReads : 0,
+      compactions: this._compactions,
+      productiveCompactions: this._productiveCompactions,
+      postCompactionSuccessRate:
+        this._compactions > 0 ? this._productiveCompactions / this._compactions : undefined,
+    }
+  }
+}

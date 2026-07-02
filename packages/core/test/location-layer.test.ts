@@ -189,6 +189,68 @@ describe("LocationServiceMap", () => {
     ),
   )
 
+  it.live("AC-3.3: an injected RouterLayerConfigTag triageConfig routes the first turn to the triage model", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          // The triage-tier model is deliberately configured as unavailable: if
+          // routeTurn's S3.2 default path were taken instead of AC-3.3 triage,
+          // resolve() would succeed against the (unconfigured) default model
+          // rather than fail specifically on this ref — a discriminating check
+          // that the injected triageConfig was actually applied.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(dir.path, "opencode.json"),
+              JSON.stringify({
+                providers: {
+                  unavailable: {
+                    name: "Unavailable",
+                    api: { type: "native", settings: {} },
+                    models: { "triage-chat": { disabled: true } },
+                  },
+                },
+              }),
+            ),
+          )
+
+          const triageModel = { id: ModelV2.ID.make("triage-chat"), providerID: ProviderV2.ID.make("unavailable") }
+          // RouterLayerConfigTag holds a deferred resolver (an Effect), so the
+          // injected value is wrapped in Effect.succeed.
+          const routerLayerConfig = Layer.succeed(
+            SessionRunnerModel.RouterLayerConfigTag,
+            Effect.succeed({
+              triageConfig: { model: triageModel, enabled: true },
+            }),
+          )
+
+          const failure = yield* SessionRunnerModel.Service.use((models) =>
+            models.resolve(
+              SessionV2.Info.make({
+                id: SessionV2.ID.make("ses_ac33_triage"),
+                projectID: ProjectV2.ID.global,
+                title: "test",
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+                location,
+              }),
+            ),
+          ).pipe(Effect.provide(LocationServiceMap.get(location)), Effect.provide(routerLayerConfig), Effect.flip)
+
+          expect(failure).toMatchObject({
+            _tag: "SessionRunnerModel.ModelUnavailableError",
+            providerID: "unavailable",
+            modelID: "triage-chat",
+          })
+        }),
+      ),
+    ),
+  )
+
   it.live("installs public plugins into a location", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

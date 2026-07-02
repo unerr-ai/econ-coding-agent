@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { ToolJsonSchema } from "../../src/tool/json-schema"
 
 // Each tool exports its parameters schema at module scope so this test can
@@ -84,10 +84,17 @@ describe("tool parameters", () => {
     })
 
     test("does not expose defaulted optional keys as nullable", () => {
-      expect(toJsonSchema(WebFetch)).toMatchObject({
+      // A defaulted optional (Literals + withDecodingDefault) must render as a plain
+      // typed enum with `default`, never as a nullable `anyOf:[…, {type:"null"}]`.
+      const Defaulted = Schema.Struct({
+        format: Schema.Literals(["text", "markdown", "html"])
+          .annotate({ default: "markdown" })
+          .pipe(Schema.withDecodingDefault(Effect.succeed("markdown" as const))),
+      })
+      expect(toJsonSchema(Defaulted)).toMatchObject({
         properties: { format: { type: "string", enum: ["text", "markdown", "html"], default: "markdown" } },
       })
-      expect(toJsonSchema(WebFetch).properties?.format).not.toHaveProperty("anyOf")
+      expect(toJsonSchema(Defaulted).properties?.format).not.toHaveProperty("anyOf")
     })
   })
 
@@ -261,14 +268,15 @@ describe("tool parameters", () => {
   })
 
   describe("webfetch", () => {
-    test("defaults omitted format to markdown", () => {
-      expect(parse(WebFetch, { url: "https://example.com" })).toEqual({
+    test("accepts url only", () => {
+      expect(parse(WebFetch, { url: "https://example.com" })).toMatchObject({
         url: "https://example.com",
-        format: "markdown",
       })
-      expect(parse(WebFetch, { url: "https://example.com", format: undefined })).toEqual({
+    })
+    test("accepts url with prompt", () => {
+      expect(parse(WebFetch, { url: "https://example.com", prompt: "find pricing" })).toMatchObject({
         url: "https://example.com",
-        format: "markdown",
+        prompt: "find pricing",
       })
     })
   })

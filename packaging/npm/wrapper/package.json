@@ -1,0 +1,27 @@
+{
+  "name": "@unerr-ai/econ",
+  "version": "0.0.0-PLACEHOLDER",
+  "description": "econ — an economical coding agent. Matches Claude Code / Cursor capability at a fraction of the cost by routing each sub-task to the cheapest model tier that can do it well.",
+  "bin": {
+    "econ": "bin/econ.js"
+  },
+  "files": [
+    "bin/econ.js"
+  ],
+  "optionalDependencies": {
+    "@unerr-ai/econ-darwin-x64": "0.0.0-PLACEHOLDER",
+    "@unerr-ai/econ-darwin-arm64": "0.0.0-PLACEHOLDER",
+    "@unerr-ai/econ-linux-x64": "0.0.0-PLACEHOLDER",
+    "@unerr-ai/econ-linux-arm64": "0.0.0-PLACEHOLDER",
+    "@unerr-ai/econ-windows-x64": "0.0.0-PLACEHOLDER"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/unerr-ai/econ-coding-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unerr-ai/econ-coding-agent.git"
+  }
+}

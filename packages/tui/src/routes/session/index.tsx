@@ -68,6 +68,7 @@ import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
+import { getContextFullness } from "../../util/context-usage"
 import { formatTranscript } from "../../util/transcript"
 import { sessionEpilogue } from "../../util/presentation"
 import { setPreLayoutSiblingMargin } from "../../util/layout"
@@ -91,6 +92,7 @@ const GO_UPSELL_ACCOUNT_RATE_LIMIT_LAST_SEEN_AT = "go_upsell_account_rate_limit_
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_DONT_SHOW = "go_upsell_account_rate_limit_dont_show"
 const GO_UPSELL_WINDOW = 86_400_000 // 24 hrs
 const GO_UPSELL_PROVIDERS = new Set(["opencode", "opencode-go"])
+const usageMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
 export const alwaysSeparate = new WeakSet<BoxRenderable>()
 
@@ -119,6 +121,9 @@ const sessionBindingCommands = [
   "session.timeline",
   "session.fork",
   "session.compact",
+  "session.context",
+  "session.usage",
+  "session.pin",
   "session.unshare",
   "session.undo",
   "session.redo",
@@ -574,6 +579,136 @@ export function Session() {
           modelID: selectedModel.modelID,
           providerID: selectedModel.providerID,
         })
+        dialog.clear()
+      },
+    },
+    {
+      title: "Show context breakdown",
+      value: "session.context",
+      category: "Session",
+      slash: {
+        name: "context",
+      },
+      run: async () => {
+        const last = messages().findLast(
+          (msg): msg is AssistantMessage => msg.role === "assistant" && msg.tokens.output > 0,
+        )
+        if (!last) {
+          await DialogAlert.show(dialog, "Context", "No assistant response yet — nothing to measure.")
+          return
+        }
+        const model = Model.get(providers(), last.providerID, last.modelID)
+        const fullness = getContextFullness({
+          tokens: last.tokens,
+          model,
+          compaction: sync.data.config.compaction,
+        })
+        if (!model || fullness.limit === undefined || fullness.usable === undefined || fullness.reserved === undefined) {
+          await DialogAlert.show(dialog, "Context", "Model context limit unknown — cannot compute a breakdown.")
+          return
+        }
+
+        // Best-effort estimate: per-message token cost isn't tracked, so
+        // "Messages (live)" uses char-length / 4 as a proxy over every
+        // message this session still holds. The TUI has no reachable API to
+        // distinguish messages folded into a compaction summary from live
+        // ones (server-side `session.context` isn't wired to this SDK
+        // client yet), so Summary is reported qualitatively, not counted
+        // separately from the estimate above.
+        const all = messages()
+        const charLen = (id: string) =>
+          (sync.data.part[id] ?? []).reduce(
+            (sum, part) => (part.type === "text" && !part.synthetic ? sum + part.text.length : sum),
+            0,
+          )
+        const messagesEstimate = Math.round(all.reduce((sum, m) => sum + charLen(m.id), 0) / 4)
+        const fixedOverheadEstimate = Math.max(0, fullness.tokens - messagesEstimate)
+        const free = Math.max(0, fullness.usable - fullness.tokens)
+        const compacted = session()?.time.compacting !== undefined
+
+        const lines = [
+          "Context breakdown (current request — items marked ~ are estimated)",
+          "",
+          `  System + tools + MCP + memory (~ remainder): ~${fixedOverheadEstimate.toLocaleString()} tok`,
+          `  Messages, live (~ from transcript chars): ~${messagesEstimate.toLocaleString()} tok`,
+          `  Summary (compacted): ${compacted ? "this session has been compacted at least once, counted above" : "none yet"}`,
+          `  Free until auto-compact: ~${free.toLocaleString()} tok`,
+          `  Reserved (auto-compact buffer): ${fullness.reserved.toLocaleString()} tok`,
+          "",
+          `Window: ${fullness.limit.toLocaleString()} • ${fullness.tokens.toLocaleString()} used (${fullness.percentOfWindow}%) • compacts at ~${fullness.compactsAtPercent}%`,
+        ]
+        await DialogAlert.show(dialog, "Context", lines.join("\n"))
+      },
+    },
+    {
+      title: "Show session usage",
+      value: "session.usage",
+      category: "Session",
+      slash: {
+        name: "usage",
+      },
+      run: async () => {
+        // Session-level tokens/cost are server-aggregated totals (same
+        // fields the sidebar reads `cost` from), so no per-message summing
+        // is needed here.
+        const totals = session()?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        const cost = session()?.cost ?? 0
+
+        const lines = [
+          "Session usage",
+          "",
+          `  Tokens: ${totals.input.toLocaleString()} in • ${totals.output.toLocaleString()} out • ${totals.cache.read.toLocaleString()} cache read • ${totals.cache.write.toLocaleString()} cache write`,
+          `  Cost: ${usageMoney.format(cost)}`,
+          "",
+          "  Per-tier breakdown (conductor/oracle/triage/summarizer): not yet available",
+          "  — TODO(Phase 5): wire per-turn tier tagging into message metadata.",
+          "  Reclaimed tokens/$ (prune vs summary): not yet available",
+          "  — TODO(Phase 5): wire prune/summary reclaim accounting.",
+        ]
+        await DialogAlert.show(dialog, "Usage", lines.join("\n"))
+      },
+    },
+    {
+      title: "Pin the plan",
+      value: "session.pin",
+      category: "Session",
+      slash: {
+        name: "pin",
+      },
+      run: async () => {
+        // AC-6.1: pin the most recent plan (TodoWrite tool call) so pruning
+        // and summarization skip it. There is no tracked "selected message"
+        // concept in the TUI today, so /pin targets the plan — the concrete
+        // protected-region case called out in the design (the agent's own
+        // TODO list) — rather than an arbitrary message.
+        let target: { messageID: string; partID: string } | undefined
+        for (const message of messages()) {
+          const parts = sync.data.part[message.id] ?? []
+          for (const part of parts) {
+            if (part.type === "tool" && part.tool === "todowrite") {
+              target = { messageID: message.id, partID: part.id }
+            }
+          }
+        }
+        if (!target) {
+          toast.show({ message: "No plan (TodoWrite) found to pin yet", variant: "warning" })
+          dialog.clear()
+          return
+        }
+        await sdk.client.part
+          .pin({
+            sessionID: route.sessionID,
+            messageID: target.messageID,
+            partID: target.partID,
+            pinned: true,
+          })
+          .then(() => toast.show({ message: "Plan pinned — protected from pruning and summarization", variant: "success" }))
+          .catch((error) => {
+            toast.show({
+              message: error instanceof Error ? error.message : "Failed to pin the plan",
+              variant: "error",
+            })
+          })
         dialog.clear()
       },
     },

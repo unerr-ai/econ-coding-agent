@@ -322,7 +322,14 @@ describe("briefFromContext", () => {
         kind: "reference",
       },
     ],
-    notes: ["Per rul on src/router.ts: always check fan-in before any edit."],
+    notes: [
+      {
+        anchor: "f:src/router.ts",
+        kind: "rul",
+        polarity: "+",
+        content: "Per rul on src/router.ts: always check fan-in before any edit.",
+      },
+    ],
   }
 
   const canonical: CanonicalStateFragment = {

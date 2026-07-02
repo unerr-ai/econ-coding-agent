@@ -192,6 +192,9 @@ export const CompactionPart = Schema.Struct({
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
+  // AC-4.5: optional `/compact [focus]` free text, carried on the task marker
+  // (like `tail_start_id`) from create() through to the summarize step.
+  focus: Schema.optional(Schema.String),
 }).annotate({ identifier: "CompactionPart" })
 export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
 

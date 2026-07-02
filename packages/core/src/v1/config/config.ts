@@ -149,20 +149,88 @@ export const Info = Schema.Struct({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
       prune: Schema.optional(Schema.Boolean).annotate({
-        description: "Enable pruning of old tool outputs (default: false)",
+        description: "Enable pruning of old tool outputs (default: true — econ flips this ON)",
       }),
       tail_turns: Schema.optional(NonNegativeInt).annotate({
         description:
           "Number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction (default: 2)",
       }),
-      preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
-        description: "Maximum number of tokens from recent turns to preserve verbatim after compaction",
+      preserve_recent_tokens: Schema.optional(Schema.NullOr(NonNegativeInt)).annotate({
+        description:
+          "Maximum number of tokens from recent turns to preserve verbatim after compaction (default: null)",
       }),
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      threshold_pct: Schema.optional(Schema.NullOr(Schema.Number)).annotate({
+        description:
+          "Fraction of the context window at which to trigger compaction. Null uses an absolute-headroom trigger instead (default: null)",
+      }),
+      model: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+        description:
+          "Cheap summarizer model to use for compaction, in provider/model format. Null falls back to 'small_model' (default: null)",
+      }),
+      min_reduction: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Minimum number of tokens a compaction summary must free; aborts the compaction otherwise (default: 8000)",
+      }),
+      min_gap_messages: Schema.optional(NonNegativeInt).annotate({
+        description: "Minimum number of messages required between two compactions (default: 8)",
+      }),
+      observation_masking: Schema.optional(Schema.Boolean).annotate({
+        description: "Mask consumed tool-result bodies instead of dropping them entirely (default: true)",
+      }),
+      keep_raw_tool_results: Schema.optional(NonNegativeInt).annotate({
+        description: "Number of most recent tool outputs to keep raw and unmasked (default: 5)",
+      }),
+      task_boundary_only: Schema.optional(Schema.Boolean).annotate({
+        description: "Only run compaction at a task boundary; never mid-tool-call or mid-step (default: true)",
+      }),
+      nudge_pct: Schema.optional(Schema.Number).annotate({
+        description: "Fraction of the context window at which to proactively nudge the user (default: 0.8)",
+      }),
+      recoverable: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Keep pointers back to the retained raw head in the compaction summary so dropped content can be re-fetched (default: true)",
+      }),
+      min_turns_before_compact: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Minimum number of turns before auto-compaction is allowed, suppressing it on brand-new sessions (default: 3)",
+      }),
     }),
   ),
+  protected: Schema.optional(
+    Schema.Struct({
+      plan: Schema.optional(Schema.Boolean).annotate({
+        description: "Protect the active plan/TODO list from pruning or summarization (default: true)",
+      }),
+      paths: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description: "Glob patterns for files/paths the user pins as protected from compaction (default: [])",
+      }),
+      keep_all_user_messages: Schema.optional(Schema.Boolean).annotate({
+        description: "Preserve raw user turns verbatim during compaction (default: true)",
+      }),
+    }),
+  ).annotate({
+    description: "Regions of context pinned or protected from pruning and summarization during compaction",
+  }),
+  triage: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable the cheap-first triage tier for initial interactions (default: true)",
+      }),
+      model: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+        description:
+          "Model to use for triage turns, in provider/model format. Null falls back to 'small_model' (default: null)",
+      }),
+      escalate_on: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description:
+          'Conditions that escalate a triage turn to the full tier (default: ["multi_file_edit", "high_risk", "explicit_plan_request"])',
+      }),
+    }),
+  ).annotate({
+    description: "Cheap-first triage tier configuration for initial interactions",
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),
@@ -175,6 +243,11 @@ export const Info = Schema.Struct({
       }),
       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
         description: "Continue the agent loop when a tool call is denied",
+      }),
+      redirect_bash_reads: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "econ: short-circuit read-shaped bash commands (ls/cat/find/grep/head/tail/wc/…) with a " +
+          "result that redirects the model to the read/search/file_outline tools instead of running them.",
       }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",

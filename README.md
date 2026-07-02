@@ -36,11 +36,11 @@
 > [OpenCode](https://github.com/anomalyco/opencode) (TypeScript/Bun, MIT) that we have
 > taken over and into which we are transplanting a cost-routing engine and a native
 > context-intelligence layer. The polished client/server shell + Go TUI are kept; the
-> engine lands in the same-language backend. Built across sprints **S0–S8** (see
-> [`docs/sprint*`](docs/)); proven today by an extensive unit/integration test suite with
+> engine lands in the same-language backend. Built feature by feature (see
+> [`docs/features/`](docs/features/)); proven today by an extensive unit/integration test suite with
 > stub providers. **Not yet validated on a live in-region OSS-model deployment** — that
 > and the production India hosting are the next milestones. This README describes what is
-> built and where it is going; the per-sprint notes track the exact state.
+> built and where it is going; the per-feature notes track the exact state.
 
 ---
 
@@ -267,8 +267,10 @@ packages/
   sdk/ plugin/ cli/ …  ← upstream packages
 .opencode/plugins/     ← econ-* lifecycle hooks (Z1)
 opencode.json          ← tier/agent wiring + region config (our tracked product config)
-docs/architecture/     ← the design: ECON_ARCHITECTURE.md, DECISION_AND_PLAN.md, IMPLEMENTATION_PLAN.md
-docs/sprint0..8/        ← per-task build notes
+docs/architecture/     ← the system design: ECON_ARCHITECTURE.md (+ diagrams/)
+docs/features/          ← how each feature is built + its status (folded, one doc per feature)
+docs/design/            ← deeper per-topic design notes (models, tooling, adaptive-compute, compaction)
+docs/strategy/          ← the business case (positioning, economics, confidential-compute)
 ```
 
 ---
@@ -344,11 +346,12 @@ before the core.
 
 - [`docs/architecture/ECON_ARCHITECTURE.md`](docs/architecture/ECON_ARCHITECTURE.md) — the
   full system design + capability narrative (plain-language framing + "under the hood").
-- [`docs/architecture/DECISION_AND_PLAN.md`](docs/architecture/DECISION_AND_PLAN.md) — why
-  OpenCode, and the base-platform + build plan.
-- [`docs/architecture/IMPLEMENTATION_PLAN.md`](docs/architecture/IMPLEMENTATION_PLAN.md) — the
-  sprint-by-sprint plan (S0–S8).
-- [`docs/sprint0`](docs/) … [`docs/sprint8`](docs/) — per-task build notes.
+- [`docs/features/`](docs/features/) — how each feature is built, with the integration-zone
+  model + verified OpenCode seam table ([`docs/features/README.md`](docs/features/README.md)).
+- [`docs/design/`](docs/design/) — deeper design notes (models, tooling & context-opt,
+  adaptive compute, auto-compaction).
+- [`docs/strategy/`](docs/strategy/) — positioning & market, economics, confidential compute.
+- [`docs/README.md`](docs/README.md) — the docs index.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md)
 
 ---

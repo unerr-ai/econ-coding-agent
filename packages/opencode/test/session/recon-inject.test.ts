@@ -106,6 +106,13 @@ function makePlugin(hooks: Record<string, (input: any, output: any) => Promise<v
 // (duplicated here so the test has no runtime dependency on the plugin file).
 // ---------------------------------------------------------------------------
 
+interface ReconNote {
+  anchor: string
+  kind: string
+  polarity: string
+  content: string
+}
+
 interface ReconBundle {
   entities: Array<{
     name: string
@@ -117,7 +124,8 @@ interface ReconBundle {
     role?: string
   }>
   references: Array<{ fromEntity: string; toEntity: string; kind: string }>
-  notes: string[]
+  /** Sprint 2B: notes is now AnchoredNote[] (was string[]). */
+  notes: ReconNote[]
 }
 
 function formatBundle(task: string, bundle: ReconBundle): string | null {
@@ -153,7 +161,10 @@ function formatBundle(task: string, bundle: ReconBundle): string | null {
 
   if (bundle.notes && bundle.notes.length > 0) {
     lines.push("NOTES:")
-    for (const n of bundle.notes) lines.push(`  ${n}`)
+    for (const n of bundle.notes) {
+      const text = typeof n === "string" ? n : `[${n.kind}|${n.anchor}|${n.polarity}] ${n.content}`
+      lines.push(`  ${text}`)
+    }
   }
 
   lines.push("=== END RECON ===")

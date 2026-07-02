@@ -29,6 +29,7 @@ import {
   ListQuery,
   MessagesQuery,
   PermissionResponsePayload,
+  PinPartPayload,
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -285,6 +286,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           modelID: ctx.payload.modelID,
         },
         auto: ctx.payload.auto ?? false,
+        // AC-4.5: deliver `/compact [focus]` through to the compaction
+        // service, which appends it to the summary prompt.
+        focus: ctx.payload.focus,
       })
       yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
       return true
@@ -408,6 +412,23 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* session.updatePart(payload)
     })
 
+    // AC-6.1: thin route over SessionCompaction.setPinned — the `/pin` TUI
+    // command calls this to protect a plan/TodoWrite tool call (or other
+    // tool part) from pruning and summarization.
+    const pinPart = Effect.fn("SessionHttpApi.pinPart")(function* (ctx: {
+      params: { sessionID: SessionID; messageID: MessageID; partID: PartID }
+      payload: typeof PinPartPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const part = yield* compactSvc.setPinned({
+        sessionID: ctx.params.sessionID,
+        messageID: ctx.params.messageID,
+        partID: ctx.params.partID,
+        pinned: ctx.payload.pinned,
+      })
+      return part !== undefined
+    })
+
     return handlers
       .handle("list", list)
       .handle("status", status)
@@ -436,5 +457,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
       .handle("updatePart", updatePart)
+      .handle("pinPart", pinPart)
   }),
 )

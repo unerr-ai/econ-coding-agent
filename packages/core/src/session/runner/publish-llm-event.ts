@@ -1,4 +1,5 @@
 import { ToolOutput, type LLMEvent, type ProviderMetadata, type ToolResultValue, type Usage } from "@opencode-ai/llm"
+import { recordCacheHit, inferTier } from "@opencode-ai/code-intelligence"
 import { DateTime, Effect } from "effect"
 import { EventV2 } from "../../event"
 import { ModelV2 } from "../../model"
@@ -90,6 +91,9 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
   let assistantActive = false
   let assistantFailed = false
   let providerFailed = false
+  // AC-0.4: count finished turns so recordCacheHit can tell a cold first
+  // turn (no warm cache to hit yet) from a later turn that should be warm.
+  let turnsFinished = 0
 
   const startAssistant = Effect.fnUntraced(function* () {
     if (assistantMessageID !== undefined) return assistantMessageID
@@ -438,6 +442,30 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
             reasoning: turnTokens.reasoning,
             cache: { read: turnTokens.cache.read, write: turnTokens.cache.write },
           },
+        })
+        // AC-0.4: measure this turn's cache-hit rate and WARN when a
+        // warm-cache-eligible turn (not the first) falls below 80%.
+        // AC-8.4: tag the turn's tier so TierCacheRollup (cache-meter.ts) can
+        // aggregate hit-rate/cost per tier and detect cross-tier transitions.
+        // `inferTier` is the same name-heuristic fallback `emitUsageEvent`
+        // already uses when the router hasn't tagged a turn — it is the best
+        // signal available at this call site today.
+        // TODO(AC-8.x): once the S3.2 router tags turns with an authoritative
+        // tier (model.ts), thread that through `Input` and prefer it here
+        // instead of inferring from the model id.
+        turnsFinished += 1
+        recordCacheHit({
+          sessionID: input.sessionID,
+          turnId: turnAssistantID,
+          tokens: {
+            cacheRead: turnTokens.cache.read,
+            cacheWrite: turnTokens.cache.write,
+            input: turnTokens.input,
+          },
+          isFirstTurn: turnsFinished === 1,
+          tier: inferTier(`${input.model.providerID}/${input.model.id}`),
+          modelID: `${input.model.providerID}/${input.model.id}`,
+          cost: event.usage?.cost ?? 0,
         })
         return
       }

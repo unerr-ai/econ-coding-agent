@@ -66,6 +66,9 @@ export const SummarizePayload = Schema.Struct({
   providerID: ProviderV2.ID,
   modelID: ModelV2.ID,
   auto: Schema.optional(Schema.Boolean),
+  // AC-4.5: optional free-text focus for `/compact [focus]` — appended to
+  // the summary prompt by the compaction service.
+  focus: Schema.optional(Schema.String),
 })
 export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"]))
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
@@ -73,6 +76,12 @@ export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.f
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
 export const PermissionResponsePayload = Schema.Struct({
   response: PermissionV1.Reply,
+})
+// AC-6.1: pin/protect a message part (e.g. a plan/TodoWrite tool call) so
+// pruning and summarization skip it — the data mechanism the TUI `/pin`
+// command calls.
+export const PinPartPayload = Schema.Struct({
+  pinned: Schema.Boolean,
 })
 
 export const SessionPaths = {
@@ -102,6 +111,7 @@ export const SessionPaths = {
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
   updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
+  pinPart: `${root}/:sessionID/message/:messageID/part/:partID/pin`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -440,6 +450,20 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "part.update",
             description: "Update a part in a message.",
+          }),
+        ),
+        HttpApiEndpoint.post("pinPart", SessionPaths.pinPart, {
+          params: { sessionID: SessionID, messageID: MessageID, partID: PartID },
+          query: WorkspaceRoutingQuery,
+          payload: PinPartPayload,
+          success: described(Schema.Boolean, "Successfully set part pinned state"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "part.pin",
+            summary: "Pin or unpin a part",
+            description:
+              "Toggle a tool part (e.g. the plan/TodoWrite call) as protected so pruning and summarization skip it.",
           }),
         ),
       )

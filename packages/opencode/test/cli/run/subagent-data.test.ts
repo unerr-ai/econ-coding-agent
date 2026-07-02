@@ -6,7 +6,10 @@ import {
   bootstrapSubagentData,
   createSubagentData,
   reduceSubagentData,
+  resolveSubagentTokenBudget,
+  selectSubagentBootstrapMessages,
   snapshotSubagentData,
+  SUBAGENT_TOKEN_BUDGET_DEFAULT,
 } from "@/cli/cmd/run/subagent-data"
 
 type SessionMessage = Parameters<typeof bootstrapSubagentData>[0]["messages"][number]
@@ -482,6 +485,91 @@ describe("run subagent data", () => {
       "_Thinking:_ planning next steps",
       "hello world",
     ])
+  })
+
+  test("select→compress keeps a token-budgeted executor payload under budget without blind truncation", () => {
+    const bigOutput = "x".repeat(4_000)
+
+    const oldMessages: ChildMessage[] = Array.from({ length: 12 }, (_, index) =>
+      childMessage({
+        messageID: `msg-old-${index}`,
+        sessionID: "child-1",
+        role: "assistant",
+        parts: [
+          {
+            id: `tool-old-${index}`,
+            messageID: `msg-old-${index}`,
+            sessionID: "child-1",
+            type: "tool",
+            callID: `call-old-${index}`,
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: `echo ${index}` },
+              output: bigOutput,
+              title: `Step ${index}`,
+              metadata: {},
+              time: { start: index, end: index + 1 },
+            },
+          },
+        ],
+      }),
+    )
+
+    const recentMessage = childMessage({
+      messageID: "msg-recent",
+      sessionID: "child-1",
+      role: "assistant",
+      parts: [
+        {
+          id: "txt-recent",
+          messageID: "msg-recent",
+          sessionID: "child-1",
+          type: "text",
+          text: "final answer",
+          time: { start: 100, end: 101 },
+        },
+      ],
+    })
+
+    const messages = [...oldMessages, recentMessage]
+    const budget = 2_000
+
+    const selection = selectSubagentBootstrapMessages(messages, budget)
+
+    // Degrades — compress and/or drop — rather than being left over budget.
+    expect(selection.estimatedTokens).toBeLessThanOrEqual(budget)
+    expect(selection.compressed).toBe(true)
+    // select→compress, not blind truncation: some payload always survives,
+    // and the most recent turn is never the one sacrificed.
+    expect(selection.messages.length).toBeGreaterThan(0)
+    expect(selection.messages.length).toBeLessThan(messages.length)
+    expect(selection.messages.at(-1)).toEqual(recentMessage)
+
+    // Never cut mid-tool-call: every surviving tool part still has a
+    // complete (if shortened) state — never a partial/undefined field.
+    for (const message of selection.messages) {
+      for (const part of message.parts) {
+        if (part.type === "tool" && part.state.status === "completed") {
+          expect(typeof part.state.output).toBe("string")
+          expect(typeof part.state.input).toBe("object")
+        }
+      }
+    }
+  })
+
+  test("resolveSubagentTokenBudget caps the executor payload to a fraction of the child model's context window", () => {
+    // gpt-oss-20b's 131k window: fraction × 131k (65.5k) exceeds the 60k
+    // default, so the default binds — target payload stays ≤ ~60k.
+    expect(resolveSubagentTokenBudget({ childModelContextLimit: 131_000 })).toBe(SUBAGENT_TOKEN_BUDGET_DEFAULT)
+    // No child model limit available — falls back to the sane default.
+    expect(resolveSubagentTokenBudget({})).toBe(SUBAGENT_TOKEN_BUDGET_DEFAULT)
+    // Small context window — the fraction binds instead of the default.
+    expect(resolveSubagentTokenBudget({ childModelContextLimit: 8_000 })).toBe(4_000)
+    // An explicit configured budget below the fraction still wins (min()).
+    expect(resolveSubagentTokenBudget({ childModelContextLimit: 131_000, configuredBudget: 10_000 })).toBe(10_000)
+    // Invalid/non-positive limits are ignored, not propagated as a budget of 0.
+    expect(resolveSubagentTokenBudget({ childModelContextLimit: -5 })).toBe(SUBAGENT_TOKEN_BUDGET_DEFAULT)
   })
 
   test("marks a running tab cancelled when the child session aborts", () => {

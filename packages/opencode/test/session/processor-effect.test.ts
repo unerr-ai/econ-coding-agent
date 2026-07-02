@@ -420,6 +420,65 @@ it.live("session.processor effect tests stop after token overflow requests compa
   ),
 )
 
+// AC-1.5: task-boundary-aware trigger — overflow detected mid-turn (a step that
+// still has more work queued, i.e. finish reason "tool-calls") must defer
+// compaction instead of cutting the agentic turn short. Same overflow numbers as
+// the "stop after token overflow requests compaction" test above, but this time
+// the finish reason is non-terminal, so the result must be "continue", not
+// "compact".
+it.live("session.processor effect tests defers compaction mid-turn on a non-terminal finish reason", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.push(reply().usage({ input: 100, output: 0 }).tool("lookup", { query: "weather" }))
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "compact")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const base = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "compact" }],
+          tools: {
+            lookup: tool({
+              description: "Look up information",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async (input) => ({
+                title: "Weather lookup",
+                output: `result:${input.query}`,
+                metadata: { source: "test" },
+              }),
+            }),
+          },
+        })
+
+        expect(value).toBe("continue")
+        expect(handle.message.finish).toBe("tool-calls")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests capture reasoning from http mock", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

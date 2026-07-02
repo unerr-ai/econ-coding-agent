@@ -34,8 +34,12 @@ type Metrics = {
   context: Context | undefined
 }
 
+// Current-context fullness, matching SessionCompaction.isOverflow: input + output +
+// reasoning only. cache.read/write are cumulative billing counters, not context size —
+// including them here would show a "% used" figure that never matches when
+// auto-compaction actually fires.
 const tokenTotal = (msg: AssistantMessage) => {
-  return msg.tokens.input + msg.tokens.output + msg.tokens.reasoning + msg.tokens.cache.read + msg.tokens.cache.write
+  return msg.tokens.input + msg.tokens.output + msg.tokens.reasoning
 }
 
 const lastAssistantWithTokens = (messages: Message[]) => {

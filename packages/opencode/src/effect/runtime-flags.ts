@@ -48,6 +48,12 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   experimentalEventSystem: enabledByExperimental("OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"),
   experimentalWorkspaces: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
   experimentalIconDiscovery: enabledByExperimental("OPENCODE_EXPERIMENTAL_ICON_DISCOVERY"),
+  // AC-7.1 — progressive tool-schema disclosure: default OFF. Compact-catalog tools
+  // advertise a name + one-line description + name/type-only parameter schema instead
+  // of their full JSON Schema; `expand_tool_schema` fetches the full contract on demand.
+  // Kept experimental because OpenAI-compatible providers need a schema they can form a
+  // valid call from, and the compact schema is intentionally lossy on nested detail.
+  experimentalCompactToolCatalog: enabledByExperimental("OPENCODE_EXPERIMENTAL_COMPACT_TOOL_CATALOG"),
   outputTokenMax: positiveInteger("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"),
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),

@@ -2510,6 +2510,7 @@ export type SessionSummarizeData = {
   body?: {
     providerID: string
     modelID: string
+    focus?: string
   }
   path: {
     /**

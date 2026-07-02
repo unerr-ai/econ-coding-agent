@@ -14,12 +14,15 @@ const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+
+This is a typed state snapshot, not free prose. Each section is a required field — fill it with the literal fact asked for, never a paraphrase, and never drop a field (write "(none)" when empty).
+
 <template>
 ## Goal
-- [single-sentence task summary]
+- [goal: single-sentence durable objective, not what was just done]
 
 ## Constraints & Preferences
-- [user constraints, preferences, specs, or "(none)"]
+- [constraints: numeric values, security requirements, and user preferences verbatim — e.g. "retries=3" stays "retries=3", never "retries were configured", or "(none)"]
 
 ## Progress
 ### Done
@@ -32,22 +35,24 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 - [blockers or "(none)"]
 
 ## Key Decisions
-- [decision and why, or "(none)"]
+- [decisions: each decision paired with its rationale/why, or "(none)"]
 
 ## Next Steps
-- [ordered next actions or "(none)"]
+- [todos: ordered pending work / next actions, or "(none)"]
 
 ## Critical Context
-- [important technical facts, errors, open questions, or "(none)"]
+- Last Error: [last_error: the most recent unresolved error message verbatim, or "(none)"]
+- [other critical technical facts or open questions, or "(none)"]
 
 ## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
+- [files: exact file or directory paths touched or relevant, verbatim, with why it matters, or "(none)"]
 </template>
 
 Rules:
-- Keep every section, even when empty.
+- Keep every section, even when empty — write "(none)", never delete a section.
+- Fill Goal, Constraints & Preferences, Key Decisions, Next Steps, Critical Context (incl. Last Error), and Relevant Files with the literal facts requested, never a paraphrase.
 - Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Preserve exact file paths, commands, numeric values, error strings, and identifiers verbatim when known — never restate a specific value in vaguer language.
 - Do not mention the summary process or that context was compacted.`
 
 type Entry = {
@@ -166,8 +171,8 @@ const select = (
 export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
   [
     input.previousSummary
-      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
-      : "Create a new anchored summary from the conversation history.",
+      ? `Update the typed state snapshot below in place using the conversation history above: keep every field that is still true verbatim, drop items that are now stale, and fold in only what is new. Do not re-summarize or restate the previous snapshot as prose — merge into it, never produce a summary of a summary.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
+      : "Create a new typed state snapshot from the conversation history.",
     SUMMARY_TEMPLATE,
     ...input.context,
   ].join("\n\n")

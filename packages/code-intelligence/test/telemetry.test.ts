@@ -17,8 +17,9 @@ import {
   emitUsageEvent,
   inferTier,
   installUsageSink,
+  EfficiencyMetrics,
 } from "../src/telemetry.ts"
-import type { RawUsage } from "../src/telemetry.ts"
+import type { RawUsage, CompactionOutcomeEvent } from "../src/telemetry.ts"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -395,5 +396,92 @@ describe("installUsageSink", () => {
     dispose()
     // Events recorded before disposal remain
     expect(store.count).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// EfficiencyMetrics (AC-5.2)
+// ---------------------------------------------------------------------------
+
+describe("EfficiencyMetrics", () => {
+  it("rolls up tokens-per-task across multiple recorded tasks", () => {
+    const metrics = new EfficiencyMetrics()
+    metrics.recordTask(1000)
+    metrics.recordTask(3000)
+    metrics.recordTask(2000)
+
+    const snapshot = metrics.snapshot()
+    expect(snapshot.tasksRecorded).toBe(3)
+    expect(snapshot.totalTaskTokens).toBe(6000)
+    expect(snapshot.tokensPerTask).toBe(2000)
+  })
+
+  it("tokensPerTask is 0 when no task has been recorded", () => {
+    expect(new EfficiencyMetrics().snapshot().tokensPerTask).toBe(0)
+  })
+
+  it("clamps negative/non-finite task token counts to 0", () => {
+    const metrics = new EfficiencyMetrics()
+    metrics.recordTask(-500)
+    metrics.recordTask(Number.POSITIVE_INFINITY)
+    metrics.recordTask(100)
+    const snapshot = metrics.snapshot()
+    expect(snapshot.totalTaskTokens).toBe(100)
+    expect(snapshot.tasksRecorded).toBe(3)
+  })
+
+  it("counts duplicate reads of the same file as re-reads", () => {
+    const metrics = new EfficiencyMetrics()
+    metrics.recordFileRead("src/a.ts")
+    metrics.recordFileRead("src/b.ts")
+    metrics.recordFileRead("src/a.ts")
+    metrics.recordFileRead("src/a.ts")
+
+    const snapshot = metrics.snapshot()
+    expect(snapshot.totalFileReads).toBe(4)
+    // a.ts read 3x -> 2 re-reads; b.ts read 1x -> 0 re-reads
+    expect(snapshot.reReadCount).toBe(2)
+    expect(snapshot.reReadRate).toBeCloseTo(0.5)
+  })
+
+  it("reReadRate is 0 when no files have been read", () => {
+    expect(new EfficiencyMetrics().snapshot().reReadRate).toBe(0)
+  })
+
+  it("reReadCount is 0 when every file is read exactly once", () => {
+    const metrics = new EfficiencyMetrics()
+    metrics.recordFileRead("src/a.ts")
+    metrics.recordFileRead("src/b.ts")
+    const snapshot = metrics.snapshot()
+    expect(snapshot.reReadCount).toBe(0)
+    expect(snapshot.reReadRate).toBe(0)
+  })
+
+  it("records a post-compaction continuation signal as a plain counter, not a judged score", () => {
+    const metrics = new EfficiencyMetrics()
+    metrics.recordCompactionOutcome({ sessionID: SESSION, productiveContinuation: true })
+    metrics.recordCompactionOutcome({ sessionID: SESSION, productiveContinuation: false })
+    metrics.recordCompactionOutcome({ sessionID: SESSION, productiveContinuation: true })
+
+    const snapshot = metrics.snapshot()
+    expect(snapshot.compactions).toBe(3)
+    expect(snapshot.productiveCompactions).toBe(2)
+    expect(snapshot.postCompactionSuccessRate).toBeCloseTo(2 / 3)
+  })
+
+  it("postCompactionSuccessRate is undefined when no compaction has fired yet", () => {
+    expect(new EfficiencyMetrics().snapshot().postCompactionSuccessRate).toBeUndefined()
+  })
+
+  it("forwards the compaction outcome event through the emit callback", () => {
+    const metrics = new EfficiencyMetrics()
+    const received: CompactionOutcomeEvent[] = []
+    const event = metrics.recordCompactionOutcome(
+      { sessionID: SESSION, productiveContinuation: true, timestamp: TS },
+      (e) => received.push(e),
+    )
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(event)
+    expect(event.timestamp).toBe(TS)
   })
 })

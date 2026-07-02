@@ -399,6 +399,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   return tools
 })
 
+// Sorts an assembled tool map by id so the same enabled-tool set always serializes to
+// the same key order in the model request, independent of the async resolution order
+// its sources produced this turn (custom-tool glob scan, MCP client connect order,
+// MCP.tools() concurrency). Callers apply this once, right before the tools object is
+// handed to the model — after any turn-specific additions (e.g. StructuredOutput).
+//
+// @sem domain=session role=cache-stability
+export function orderToolsForCache<T>(tools: Record<string, T>): Record<string, T> {
+  const ordered: Record<string, T> = {}
+  for (const id of Object.keys(tools).sort()) ordered[id] = tools[id]!
+  return ordered
+}
+
 function toRecord(value: unknown) {
   if (isRecord(value)) return value
   return {}

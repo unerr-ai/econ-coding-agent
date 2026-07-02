@@ -190,7 +190,10 @@ export function briefFromContext(
   opts?: { problem?: string; tokenBudget?: number },
 ): OracleBrief {
   // Anchored notes come first — they carry conventions the oracle must honour.
-  const noteSlices = recon.notes.filter((n) => n.trim().length > 0)
+  // notes is now AnchoredNote[]; serialise each to a compact one-line string.
+  const noteSlices = recon.notes
+    .filter((n) => n.content && n.content.trim().length > 0)
+    .map((n) => `[${n.kind}|${n.anchor}|${n.polarity}] ${n.content}`)
 
   // Entity signatures: concise structural slices (no full bodies).
   const entitySlices = recon.entities.map((e) => {

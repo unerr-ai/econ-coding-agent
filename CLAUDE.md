@@ -22,7 +22,7 @@ Bash is for running things (build, test, git, package managers) — not for read
 
 ### Recon first — one call replaces the discovery fan-out
 
-Before any non-trivial change, call `search_code` with a TASK PHRASE (`search_code({query:"add a retry to the boot path"})`). It returns ONE bundle: anchored notes + matching entities + their bodies + callers (blast radius) + conventions. A bare symbol (`search_code({query:"QueryRouter.dispatch"})`) returns ranked name matches. Edit from the bundle's inlined bodies; obey its `ur|fct inlined above — do NOT re-read` line and call `file_read` only for source it did not inline.
+Before any non-trivial change, call `search_code` with a TASK PHRASE (`search_code({query:"add a retry to the boot path"})`). It returns a CODE-STRUCTURE recon bundle: the focus entity with its body (for a clear single-entity edit), its callers (blast radius), matching entities, and conventions. Anchored notes arrive automatically via prompt injection or explicitly via recall — they don't travel inside recon. For additional bodies, use `file_read({entity:'<key>'})`, `search_code({query, include_body:true})`, or pass the `cache_ref` from the response's `ur|cache-ref` marker for zero-recompute. A bare symbol (`search_code({query:"QueryRouter.dispatch"})`) returns ranked name matches.
 
 `file_edit` has two modes: `{old_string, new_string}` (unique, or `replace_all:true`) or `{content}`. When a signature edit has at-risk callers, the response lists them inline (`ur|rsk … N caller(s) …`) — update them in the same change. You need not echo each edit — the Stop hook prints a "files changed" receipt (files + line counts).
 
@@ -38,9 +38,10 @@ A round-trip carries input + output + latency, so the win is doing N items in on
 
 ### Delegate by default — the main thread routes and consolidates, sub-agents do the work
 
-Treat sub-agents as the primary way work gets done, not an occasional offload. On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Aim for 2-3 sub-agents running in parallel on a substantive turn. What stays on the main thread is narrow: design, cross-cutting wiring, and bug root-causing — everything else is a slice to delegate:
-- `Task({subagent_type:'unerr-junior', …})` — read-only investigation ("find / trace / map X"), lint/format, docstrings/`@sem`, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
-- `Task({subagent_type:'unerr-worker', …})` — add/improve tests, multi-site mechanical refactors (rename / extract / inline / move), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template).
+Treat sub-agents as the primary way work gets done, not an occasional offload. On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Run as many sub-agents in parallel as the turn has independent slices — one per slice, no fixed cap. The worker tier (a capable mid-tier model) is the DEFAULT executor — route the majority of scoped coding to it, not just mechanical chores. What stays on the main thread is narrow: architecture / algorithm design, a new public interface, cross-cutting wiring, and bug root-causing — everything else is a slice to delegate:
+- `Task({subagent_type:'unerr-junior', …})` — read-only investigation (find / trace / map X), web research & docs/API/changelog lookup, codebase Q&A (where / which / how), inventory & audit (find-all / list-all usages), log & error-output triage, bug reproduction (run repro, report — no edit), lint/format, docstrings/`@sem`, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
+- `Task({subagent_type:'unerr-worker', …})` — scoped feature implementation from a clear spec (add a flag, wire X into Y, implement a handler — the bulk of ordinary coding), add/improve tests, multi-site mechanical refactor (rename / extract / inline / move), codemods (one bulk find-replace across many files), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template).
+Tier by reasoning, not by size: scoped execution — even across many files — stays with the worker. Escalate to the senior only when the change needs novel design judgement (a new algorithm, architecture, or public interface) or root-causing a bug; deterministic mechanical breadth (codemods, caller propagation, renames) stays with the worker regardless of file count.
 
 Group related work first, then spawn one sub-agent per independent group in a SINGLE message so they run in parallel. The sub-agents have the full graph tools — they re-derive the edit sites from `search_code` / `get_references`, so give them the task plus a one-line pointer, never pasted code or a list of files. Review each result before building on it. (Hosts without sub-agents — anything other than Claude Code / Codex / Cursor / Copilot CLI — do it inline.)
 
@@ -145,6 +146,8 @@ server-side (kept for audit, excluded from queries).
 
 <!-- unerr:end -->
 
+
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -159,8 +162,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **What we are building.** `econ` is a native coding agent for the Indian market, hosted in
 India, that aims to match Claude Code / Cursor capability at a fraction of the cost. See
 [README.md](./README.md) for the full vision and
-[docs/architecture/DECISION_AND_PLAN.md](./docs/architecture/DECISION_AND_PLAN.md) for the
-architecture decision + build plan. Treat these as the north star.
+[docs/architecture/ECON_ARCHITECTURE.md](./docs/architecture/ECON_ARCHITECTURE.md) for the
+system design (the per-feature build docs live in [docs/features/](./docs/features/)). Treat
+these as the north star.
 
 **Status.** We have a **proven MVP** (cost-routing engine + in-loop governance + unerr-brain
 integration, qwen-code lineage). This phase builds the **professional version** by adopting a
@@ -193,6 +197,46 @@ library of the smallest reusable, production-ready code blocks (e.g. a SaaS star
 billing + login) the agent composes rather than re-generates. Design the core to support
 primitives; don't build them before the core.
 
+## Documentation — where to look, where to write
+
+Docs live under `docs/`, organized **by feature, not by sprint** (there are no `sprintN/`
+folders — don't recreate them). Four layers; keep each doc in the layer that matches its
+altitude:
+
+| Layer | Holds | The one narrative/index |
+|---|---|---|
+| `docs/architecture/` | the single system-design narrative + TikZ `diagrams/` | [`ECON_ARCHITECTURE.md`](./docs/architecture/ECON_ARCHITECTURE.md) — the *design*, no build plan |
+| `docs/features/` | one doc per feature: what it is, the OpenCode seams it touches, its status | [`features/README.md`](./docs/features/README.md) — index + zones + verified seam table |
+| `docs/design/` | deeper per-topic design notes (models, tooling/context-opt, adaptive-compute, auto-compaction) | — |
+| `docs/strategy/` | the business case (positioning & market, economics, confidential compute) | — |
+| root | [`docs/README.md`](./docs/README.md) is the docs index — start there | — |
+
+**Lookup order** (before writing a doc, read the relevant existing one — don't start a new
+file): docs index → the feature doc for the area (`features/NN-*.md`) → its design note in
+`design/` → the system narrative for cross-cutting design → `strategy/` for business/market
+questions. Feature docs are numbered by build order (`00`→`07`); the number is the spine.
+
+**Creation & maintenance rules** (keep the standard; don't let it drift):
+1. **Consolidate, don't fragment.** A new capability extends the **existing** feature doc for
+   its area — do not add a per-task file. Only create a new top-level doc when a genuinely new
+   feature/topic has no home; put it in the right layer and add it to `docs/README.md` (and to
+   `features/README.md` if it's a feature).
+2. **One home per fact.** State a fact/table/number once in its owning doc and cross-reference
+   it; never duplicate a section across docs. When merging, dedupe narrative overlap but drop
+   no unique data.
+3. **`architecture/ECON_ARCHITECTURE.md` stays design-only** — no phasing tables, day plans, or
+   sprint/build-order content (that lives in `features/`). Keep its plain-language + "under the
+   hood" two-track voice.
+4. **Feature docs preserve build substance** — file paths, seams (`file.ts:line`), config
+   blocks, `**Status:**`/done-when markers, and tests. They are the build record.
+5. **Diagrams where they clarify.** Match the house style: ASCII box/arrow diagrams (as in the
+   existing feature docs) or a fenced ` ```mermaid ` block; one focused diagram per doc beats
+   several. Preserve existing diagrams.
+6. **Cross-link with correct relative paths** and no dead `#anchor` fragments. When you move,
+   merge, or delete a doc, fix every inbound link (repo-wide: `README.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`, `opencode.json` comments, and sibling docs) and never leave a stale
+   "kept in place / see OLD_NAME.md" provenance line.
+
 `) is
 > managed by `unerr install/uninstall` — do not hand-edit it; your changes will be
 > overwritten on the next install. Edit only this project brief.
@@ -224,7 +268,7 @@ is "there's nothing to run yet." Update this brief and the README as real code l
    compression, MCP optimisations, and edit-time breaking-change guardrails. Fewer
    tokens at every step compounds with the cheaper models above.
 
-**Architecture decision (updated 2026-06-23 — see [docs/architecture/DECISION_AND_PLAN.md](./docs/architecture/DECISION_AND_PLAN.md)).**
+**Architecture decision (updated 2026-06-23 — see [docs/architecture/ECON_ARCHITECTURE.md](./docs/architecture/ECON_ARCHITECTURE.md)).**
 We have a **proven MVP** (cost-routing engine + in-loop governance + unerr-brain
 integration, qwen-code lineage). This phase builds the **professional version** by
 adopting a nailed open-source shell and transplanting the engine:

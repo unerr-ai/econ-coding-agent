@@ -1250,7 +1250,9 @@ export const layer = Layer.effect(
           }
 
           if (task?.type === "compaction") {
-            const result = yield* compaction.process({
+            // AC-1.1: route through the prune-first ladder instead of jumping
+            // straight to the LLM summarize step.
+            const result = yield* compaction.compact({
               messages: msgs,
               parentID: lastUser.id,
               sessionID,
@@ -1266,8 +1268,19 @@ export const layer = Layer.effect(
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
           ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
+            // AC-1.5: never compact mid-step — a "tool-calls" finish reason means
+            // this agentic turn still has more steps queued. Defer to the next
+            // clean task boundary instead of preempting it.
+            const cfgNow = yield* config.get()
+            const boundaryOnly = cfgNow.compaction?.task_boundary_only !== false
+            if (boundaryOnly && lastFinished.finish === "tool-calls") {
+              yield* Effect.logWarning("approaching context limit — will compact at next safe point", {
+                "session.id": sessionID,
+              })
+            } else {
+              yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+              continue
+            }
           }
 
           const agent = yield* agents.get(lastUser.agent)
@@ -1351,6 +1364,12 @@ export const layer = Layer.effect(
               })
             }
 
+            // AC-7.2/AC-8.3 — sort tool keys by id right before the tools object is
+            // handed to the model, so the same enabled-tool set always serializes to
+            // the same byte-stable prefix regardless of source resolution order this
+            // turn. See SessionTools.orderToolsForCache for why this is needed.
+            const orderedTools = SessionTools.orderToolsForCache(tools)
+
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
@@ -1376,7 +1395,7 @@ export const layer = Layer.effect(
                 ...modelMsgs,
                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
               ],
-              tools,
+              tools: orderedTools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })

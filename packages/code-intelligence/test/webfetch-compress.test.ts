@@ -82,11 +82,11 @@ describe("S2.3 webfetch-compress pipeline", () => {
 
   // ── 1. Size reduction ────────────────────────────────────────────────────
 
-  it("reduces a large HTML doc to < 40% of its original size after extract+split+rank", () => {
+  it("reduces a large HTML doc to < 40% of its original size after extract+split+rank", async () => {
     const html = makeHtmlDoc()
     expect(html.length).toBeGreaterThan(10_000) // fixture is large
 
-    const { markdown, originalLength } = htmlToMarkdown(html)
+    const { markdown, originalLength } = await htmlToMarkdown(html)
     const passages = splitMarkdownIntoPassages(markdown)
     const ranked = rankPassagesByPrompt(passages, { prompt: "BM25 ranking algorithm", topK: 3 })
 
@@ -103,9 +103,9 @@ describe("S2.3 webfetch-compress pipeline", () => {
 
   // ── 2. BM25 relevance ───────────────────────────────────────────────────
 
-  it("BM25-ranked top passage heading relates to the query", () => {
+  it("BM25-ranked top passage heading relates to the query", async () => {
     const html = makeHtmlDoc()
-    const { markdown } = htmlToMarkdown(html)
+    const { markdown } = await htmlToMarkdown(html)
     const passages = splitMarkdownIntoPassages(markdown)
 
     const ranked = rankPassagesByPrompt(passages, {
@@ -121,14 +121,14 @@ describe("S2.3 webfetch-compress pipeline", () => {
 
   // ── 3. Hash cache — second call is a cache hit ───────────────────────────
 
-  it("cache returns same result without recompute on second call", () => {
+  it("cache returns same result without recompute on second call", async () => {
     const html = makeHtmlDoc()
     const htmlHash = contentHash(html)
     const prompt = "oauth2 token flow"
     const topK = 5
 
     // First pass: compute and store
-    const { markdown, originalLength } = htmlToMarkdown(html)
+    const { markdown, originalLength } = await htmlToMarkdown(html)
     const passages = splitMarkdownIntoPassages(markdown)
     const ranked = rankPassagesByPrompt(passages, { prompt, topK })
     const output = ranked.map((p) => p.text).join("\n\n---\n\n")

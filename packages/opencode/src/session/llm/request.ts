@@ -55,9 +55,14 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
+  // Resolve the final tool set the model will receive (post-HIDDEN, post-permission) once, so the
+  // generated tool-usage block (Sprint 5b §10.1) lists exactly those ids; reused as `tools` below.
+  const resolvedTools = resolveTools(input)
+  const toolBlock = SystemPrompt.toolUsage(Object.keys(resolvedTools))
   const system = [
     [
-      ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+      ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.select(input.model, input.agent)),
+      ...(toolBlock ? [toolBlock] : []),
       ...input.system,
       ...(input.user.system ? [input.user.system] : []),
     ]
@@ -165,7 +170,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   )
 
-  const tools = resolveTools(input)
+  const tools = resolvedTools
   if (
     input.model.providerID.includes("github-copilot") &&
     Object.keys(tools).length === 0 &&

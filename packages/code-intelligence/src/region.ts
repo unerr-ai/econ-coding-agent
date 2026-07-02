@@ -127,12 +127,13 @@ export const DEFAULT_RESIDENCY_POLICY: ResidencyPolicy = {
 export const DEFAULT_REGION_CONFIG: RegionConfig = {
   residency: DEFAULT_RESIDENCY_POLICY,
   tiers: {
-    conductor: [{ providerId: "openrouter", model: "qwen/qwen3-coder", region: "global" }],
-    oracle: [{ providerId: "openrouter", model: "deepseek/deepseek-r1", region: "global" }],
+    conductor: [{ providerId: "openrouter", model: "qwen/qwen3.7-plus", region: "global" }],
+    oracle: [{ providerId: "openrouter", model: "z-ai/glm-5.2", region: "global" }],
     reasoner: [
-      { providerId: "openrouter", model: "qwen/qwen3-30b-a3b:thinking", region: "global" },
+      // Shares the oracle model (GLM 5.2) for now — see opencode.json reasoner agent.
+      { providerId: "openrouter", model: "z-ai/glm-5.2", region: "global" },
     ],
-    executor: [{ providerId: "openrouter", model: "qwen/qwen3-8b", region: "global" }],
+    executor: [{ providerId: "openrouter", model: "openai/gpt-oss-20b", region: "global" }],
   },
 }
 

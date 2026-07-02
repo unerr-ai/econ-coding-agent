@@ -8,10 +8,12 @@ import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
 import { Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
 // econ S3.2: risk-escalation router — pure function imported from code-intelligence
+// econ AC-3.1/AC-3.2: cheap-first triage bias for a session's first turn
 import {
   routeTurn,
   defaultRouterConfig,
   defaultRouterState,
+  decideTriageTurn,
   type RouterConfig,
   type RouterState,
 } from "@opencode-ai/code-intelligence"
@@ -73,8 +75,34 @@ export type Error = ModelNotSelectedError | ModelUnavailableError | VariantUnava
 export type RiskProvider = (session: SessionSchema.Info) => Effect.Effect<number, never>
 
 /**
- * Configuration for locationLayerWith (S3.2 risk-escalation router).
- * All fields optional — omit for degrade-open defaults.
+ * Supplies the first user prompt's text for AC-3.2 heavy-prompt detection.
+ * Default: no producer wired → prompt is treated as absent, so isHeavyPrompt
+ * never fires and triage stays applied on the first turn (degrade-open).
+ *
+ * @sem domain=routing role=interface
+ */
+export type TriagePromptProvider = (session: SessionSchema.Info) => Effect.Effect<string | undefined, never>
+
+/**
+ * Configuration for the AC-3.1/AC-3.2 cheap-first triage bias. Omit entirely
+ * to keep the pre-triage S3.2 risk-route behaviour unchanged (degrade-open).
+ *
+ * @sem domain=routing role=interface
+ */
+export interface TriageLayerConfig {
+  /** cfg.triage.enabled — default true once this config object is supplied. */
+  enabled?: boolean
+  /** Resolved triage-tier model reference: cfg.triage.model ?? cfg.small_model, parsed by the caller. */
+  model?: ModelV2.Ref
+  /** cfg.triage.escalate_on override; defaults to code-intelligence's DEFAULT_ESCALATE_ON. */
+  escalateOn?: readonly string[]
+  /** Supplies the first prompt's text for isHeavyPrompt. Omit → never heavy. */
+  promptProvider?: TriagePromptProvider
+}
+
+/**
+ * Configuration for locationLayerWith (S3.2 risk-escalation router +
+ * AC-3.1/AC-3.2 triage bias). All fields optional — omit for degrade-open defaults.
  *
  * @sem domain=routing role=interface
  */
@@ -86,7 +114,33 @@ export interface RouterLayerConfig {
   riskProvider?: RiskProvider
   /** Hysteresis band overrides. Default: { escalateAbove: 70, deescalateBelow: 40 }. */
   routerConfig?: RouterConfig
+  /** AC-3.1/AC-3.2 cheap-first triage bias for the session's first turn. Omit → disabled (degrade-open). */
+  triageConfig?: TriageLayerConfig
 }
+
+/**
+ * AC-3.3: injection point for a RouterLayerConfig, supplied by the opencode
+ * layer where config reading (cfg.triage/cfg.small_model, which only exist on
+ * the opencode-side Config, not core's) and model-string parsing
+ * (Provider.parseModel) happen — core only ever consumes the resolved shape
+ * here, never reads triage config or parses model strings itself (layering
+ * rule). Absent from context → the caller falls back to `{}` (degrade-open,
+ * identical to pre-AC-3.3 dormant behaviour).
+ *
+ * The value is a DEFERRED resolver (an Effect), not a resolved object: the
+ * opencode producer reads instance-scoped Config (Config.get() dies unless
+ * InstanceRef is live in the running fiber), which is unavailable at
+ * app-layer construction time. The consumer (see location-layer.ts) runs the
+ * resolver per-location, where InstanceRef IS live, so the config read
+ * happens at the right scope. Resolving eagerly at construction crashes the
+ * whole server with "InstanceRef not provided".
+ *
+ * @sem domain=routing role=interface
+ */
+export const RouterLayerConfigTag = Context.Reference<Effect.Effect<RouterLayerConfig>>(
+  "@opencode/v2/SessionRunnerModel.RouterLayerConfig",
+  { defaultValue: () => Effect.succeed({}) },
+)
 
 export interface Interface {
   readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
@@ -208,39 +262,51 @@ export const supported = (model: ModelV2.Info) =>
     (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
 
 /**
- * Builds the model-resolution layer with an injected risk provider and optional
- * hysteresis config. The risk provider is the only injectable needed for tests —
- * all router logic is internal.
+ * Builds the model-resolution layer with an injected risk provider, optional
+ * hysteresis config, and an optional AC-3.1/AC-3.2 triage bias. The risk
+ * provider and triage config are the only injectables needed for tests — all
+ * router/triage logic is internal.
  *
  * Priority order for model resolution:
  *   1. session.model — explicit per-session override (always wins, skips router)
- *   2. Risk-routed tier agent model (S3.2):
+ *   2. Triage-tier model (AC-3.1/AC-3.2, session's first turn only):
+ *      triageConfig.model set, enabled, first turn, prompt not heavy → triageConfig.model
+ *      (cfg.triage.model ?? cfg.small_model, resolved by the caller)
+ *   3. Risk-routed tier agent model (S3.2):
  *      risk > 70  → oracle agent model
  *      risk < 40  → conductor agent model
  *      40–70      → hysteresis holds current tier (no flap)
- *   3. session's active agent model (S1.1 fallback when tier agent unconfigured)
- *   4. catalog.model.default()
- *   5. first supported available model
+ *   4. session's active agent model (S1.1 fallback when tier agent unconfigured)
+ *   5. catalog.model.default()
+ *   6. first supported available model
  *
  * Degrade-open: if riskProvider is omitted or returns 0, conductor is always
- * selected — identical to the pre-S3.2 S1.1 behavior.
+ * selected. If triageConfig (or its .model) is omitted, disabled, not the
+ * first turn, or the first prompt matches an escalate_on signal, triage never
+ * applies and behaviour is identical to the pre-triage S3.2 behavior.
  *
  * Hysteresis state is kept in an in-memory Map (per layer instance, keyed by
  * sessionID). Resets on process restart → safe degrade-open to conductor.
+ * "First turn" for triage purposes is derived from this same map (no entry
+ * yet for the session) — also resets on restart, which lands back on triage
+ * rather than a stale mid-session tier (cost-safe).
  * Rationale for in-memory vs S1.3 SQLite: router state is transient; a restart
  * losing the tier is acceptable (lands on conductor, not oracle — cost-safe).
  * Migrate to canonical-state (S1.3) in S5 if cross-restart persistence matters.
  *
- * Extension hooks accepted but unused in this sprint:
- *   abstain  (S3.3) — hold tier without recording a transition
- *   forceTier (S3.5) — triage bypass
- * These are wired into routeTurn's input shape; callers inject them later.
+ * Extension hooks:
+ *   triageConfig (AC-3.1/AC-3.2) — wired above; the .promptProvider producer
+ *     that supplies live prompt text is left for a later caller to inject.
+ *   abstain  (S3.3) — hold tier without recording a transition; unused here
+ *   forceTier (S3.5, routeTurn's raw bypass) — unused here; triage instead
+ *     short-circuits before routeTurn is called
  *
  * @sem domain=routing role=resolver
  */
 export const locationLayerWith = (config: RouterLayerConfig = {}) => {
   const riskProvider: RiskProvider = config.riskProvider ?? (() => Effect.succeed(0))
   const routerCfg: RouterConfig = config.routerConfig ?? defaultRouterConfig
+  const triageCfg = config.triageConfig
 
   // Per-session hysteresis state lives in the layer closure (in-memory).
   const routerStateMap = new Map<string, RouterState>()
@@ -259,13 +325,38 @@ export const locationLayerWith = (config: RouterLayerConfig = {}) => {
           // DEGRADE-OPEN: riskProvider defaults to 0 → conductor when no signal.
           let routedAgentModel: typeof session.model | undefined = undefined
           if (!session.model) {
-            const risk = yield* riskProvider(session)
-            const prevState = routerStateMap.get(session.id) ?? defaultRouterState
-            const { tier, state: nextState } = routeTurn({ risk, state: prevState }, routerCfg)
-            routerStateMap.set(session.id, nextState)
-            // Map tier → agent. Yields undefined if the tier agent is not configured
-            // in opencode.json — falls through to the S1.1 agent-model chain below.
-            routedAgentModel = (yield* agents.resolve(AgentV2.ID.make(tier)))?.model
+            // econ AC-3.1/AC-3.2: triage bias — only on the session's first turn
+            // seen by this layer instance (no hysteresis state recorded yet),
+            // and only when a triage config + resolved model were supplied.
+            // DEGRADE-OPEN: missing triageConfig/.model, disabled, a later
+            // turn, or a heavy first prompt all fall straight through to the
+            // S3.2 risk-route below — never crashes the turn.
+            const isFirstTurn = !routerStateMap.has(session.id)
+            let triageApplied = false
+            if (triageCfg?.model && isFirstTurn) {
+              const prompt = triageCfg.promptProvider ? yield* triageCfg.promptProvider(session) : undefined
+              const decision = decideTriageTurn({
+                isFirstTurn,
+                enabled: triageCfg.enabled ?? true,
+                prompt,
+                escalateOn: triageCfg.escalateOn,
+              })
+              if (decision.applyTriage) {
+                routedAgentModel = triageCfg.model
+                routerStateMap.set(session.id, defaultRouterState)
+                triageApplied = true
+              }
+            }
+
+            if (!triageApplied) {
+              const risk = yield* riskProvider(session)
+              const prevState = routerStateMap.get(session.id) ?? defaultRouterState
+              const { tier, state: nextState } = routeTurn({ risk, state: prevState }, routerCfg)
+              routerStateMap.set(session.id, nextState)
+              // Map tier → agent. Yields undefined if the tier agent is not configured
+              // in opencode.json — falls through to the S1.1 agent-model chain below.
+              routedAgentModel = (yield* agents.resolve(AgentV2.ID.make(tier)))?.model
+            }
           }
 
           // S1.1 resolution chain (kept intact as fallback):

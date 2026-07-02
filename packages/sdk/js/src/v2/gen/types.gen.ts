@@ -2010,8 +2010,28 @@ export type Config = {
     auto?: boolean
     prune?: boolean
     tail_turns?: number
-    preserve_recent_tokens?: number
+    preserve_recent_tokens?: number | null
     reserved?: number
+    threshold_pct?: number | null
+    model?: string | null
+    min_reduction?: number
+    min_gap_messages?: number
+    observation_masking?: boolean
+    keep_raw_tool_results?: number
+    task_boundary_only?: boolean
+    nudge_pct?: number
+    recoverable?: boolean
+    min_turns_before_compact?: number
+  }
+  protected?: {
+    plan?: boolean
+    paths?: Array<string>
+    keep_all_user_messages?: boolean
+  }
+  triage?: {
+    enabled?: boolean
+    model?: string | null
+    escalate_on?: Array<string>
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -9900,6 +9920,7 @@ export type SessionSummarizeData = {
     providerID: string
     modelID: string
     auto?: boolean
+    focus?: string
   }
   path: {
     sessionID: string
@@ -10270,6 +10291,44 @@ export type PartUpdateResponses = {
 }
 
 export type PartUpdateResponse = PartUpdateResponses[keyof PartUpdateResponses]
+
+export type PartPinData = {
+  body?: {
+    pinned: boolean
+  }
+  path: {
+    sessionID: string
+    messageID: string
+    partID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/message/{messageID}/part/{partID}/pin"
+}
+
+export type PartPinErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type PartPinError = PartPinErrors[keyof PartPinErrors]
+
+export type PartPinResponses = {
+  /**
+   * Successfully set part pinned state
+   */
+  200: boolean
+}
+
+export type PartPinResponse = PartPinResponses[keyof PartPinResponses]
 
 export type SyncStartData = {
   body?: never

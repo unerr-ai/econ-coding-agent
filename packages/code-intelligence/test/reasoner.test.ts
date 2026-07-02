@@ -89,7 +89,9 @@ describe("routeTurn — reasoner activation via hardStep", () => {
 
   it("selects oracle (not reasoner) when risk > escalateAbove even with hardStep=true", () => {
     // High-risk always overrides hardStep: oracle via risk band, not reasoner.
-    const result = routeTurn({ risk: 80, state: conductorState, hardStep: true }, cfg)
+    // stickinessMargin: 0 isolates this from AC-8.5 stickiness (default 10) —
+    // that behavior is covered separately in router.test.ts.
+    const result = routeTurn({ risk: 80, state: conductorState, hardStep: true }, { ...cfg, stickinessMargin: 0 })
     expect(result.tier).toBe("oracle")
     expect(result.reason).toContain("escalating to oracle")
   })

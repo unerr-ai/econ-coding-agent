@@ -11,8 +11,16 @@
  *   oracle     — frontier; activated when risk > 70 or reasoner already tried
  *
  * Hysteresis bands (defaults):
- *   risk > 70  → escalate to oracle (overrides hardStep)
- *   risk < 40  → de-escalate to conductor
+ *   risk > 70  → escalate to oracle (overrides hardStep), UNLESS AC-8.5
+ *                stickiness holds: current tier isn't oracle and risk is
+ *                only borderline above 70 (within stickinessMargin, default
+ *                10) — econ's topology keeps a sticky mid tier warm and
+ *                treats oracle as a stateless brief-fed detour, so a
+ *                borderline turn holds rather than cold-flushing that KV
+ *                cache for a round trip. Risk clearly above the margin
+ *                always escalates — never suppressed.
+ *   risk < 40  → de-escalate to conductor (never dampened — leaving the
+ *                stateless oracle tier costs nothing)
  *   40–70      → hold current tier (no-flap zone)
  *   reasoner state with no hardStep signal → maps to conductor in mid-band
  *
@@ -55,6 +63,17 @@ export interface RouterConfig {
    * Default: 40.
    */
   deescalateBelow: number
+  /**
+   * AC-8.5: extra risk margin above escalateAbove required to escalate away
+   * from the current tier when that tier isn't already oracle — a "last
+   * tier used" stickiness signal (RouterInput.state.tier) that discourages
+   * a needless flip off the warm sticky mid tier for a borderline turn.
+   * Risk > escalateAbove + stickinessMargin always escalates regardless —
+   * a genuine high-risk turn is never held back for cache economy.
+   * Optional so existing partial RouterConfig literals keep compiling;
+   * routeTurn falls back to 10 when omitted.
+   */
+  stickinessMargin?: number
 }
 
 /** Input to routeTurn. */
@@ -109,6 +128,7 @@ export const defaultRouterState: RouterState = { tier: "conductor" }
 export const defaultRouterConfig: RouterConfig = {
   escalateAbove: 70,
   deescalateBelow: 40,
+  stickinessMargin: 10,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +141,9 @@ export const defaultRouterConfig: RouterConfig = {
  * Evaluation order:
  *   1. forceTier (S3.5 triage override) — immediate return, bypasses everything
  *   2. abstain (S3.3) — hold current tier without counting as a transition
- *   3. risk > escalateAbove → oracle (always; overrides hardStep)
+ *   3. risk > escalateAbove → oracle (overrides hardStep), unless AC-8.5
+ *      stickiness holds a borderline turn (risk within stickinessMargin,
+ *      current tier not already oracle) on its current tier instead
  *   4. hardStep=true → decideReasoner (reasoner or oracle if alreadyTriedReasoner)
  *   5. risk < deescalateBelow → conductor
  *   6. mid-band → hold current tier (no flap); "reasoner" maps to "conductor" when
@@ -131,7 +153,7 @@ export const defaultRouterConfig: RouterConfig = {
  */
 export function routeTurn(input: RouterInput, config: RouterConfig = defaultRouterConfig): RouterOutput {
   const { risk, state, abstain = false, forceTier, hardStep = false, alreadyTriedReasoner = false } = input
-  const { escalateAbove, deescalateBelow } = config
+  const { escalateAbove, deescalateBelow, stickinessMargin = 10 } = config
 
   // 1. Triage override (S3.5): bypass all risk logic.
   if (forceTier !== undefined) {
@@ -151,8 +173,21 @@ export function routeTurn(input: RouterInput, config: RouterConfig = defaultRout
     }
   }
 
-  // 3. High risk → oracle (takes precedence over hardStep).
+  // 3. High risk → oracle (takes precedence over hardStep) — unless AC-8.5
+  //    stickiness holds: the current tier isn't already oracle (nothing to
+  //    protect there — it's a stateless brief-fed detour) and risk is only
+  //    borderline above escalateAbove (within stickinessMargin). Risk
+  //    clearly above the margin always escalates — safety first, never
+  //    suppressed by cache economy.
   if (risk > escalateAbove) {
+    const stickyHold = state.tier !== "oracle" && risk <= escalateAbove + stickinessMargin
+    if (stickyHold) {
+      return {
+        tier: state.tier,
+        reason: `risk=${risk} borderline above escalateAbove=${escalateAbove} (within stickinessMargin=${stickinessMargin}): holding tier="${state.tier}" to avoid a cold cache flip`,
+        state: { tier: state.tier },
+      }
+    }
     return {
       tier: "oracle",
       reason: `risk=${risk} > escalateAbove=${escalateAbove}: escalating to oracle`,

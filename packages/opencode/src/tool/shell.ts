@@ -16,6 +16,7 @@ import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
+import { compressShellOutput } from "./shell-compress/index"
 import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -183,6 +184,38 @@ function prefix(text: string) {
   if (!match) return text
   if (match.index === 0) return
   return text.slice(0, match.index)
+}
+
+// econ: leading executables whose sole job is reading / listing / searching the tree. When
+// experimental.redirect_bash_reads is on (ShellTool.execute), a command led by one of these is
+// NOT run as bash — the model is redirected to the read / search / file_outline tools. This is the
+// deterministic enforcement of "reads never go through bash": the model can't silently shell out,
+// and the redirect teaches it in-loop so it stops retrying the same denied command.
+const READ_SHAPED = new Set([
+  "ls", "ll", "la", "dir", "cat", "bat", "tac", "nl", "head", "tail", "more", "less", "view",
+  "find", "fd", "tree", "grep", "rg", "egrep", "fgrep", "ag", "ack", "wc", "du", "stat", "exa", "eza",
+])
+
+export function readShapedCommand(command: string): string | undefined {
+  const lead = command.trim().replace(/^[(!\s]+/, "").split(/[\s;|&<>]+/)[0] ?? ""
+  const bin = (lead.split("/").pop() ?? lead).toLowerCase()
+  if (!READ_SHAPED.has(bin)) return undefined
+  // Don't hijack a read-led command that also mutates or writes a file to disk. A file-write
+  // redirect (`> out`, `>> log`) blocks; a benign fd redirect (`2>/dev/null`, `2>&1`, `>/dev/null`)
+  // does not — those are normal on read commands and must still be redirected.
+  if (/(^|\s)(rm|mv|cp|chmod|chown|mkdir|touch|tee|dd)\b|-delete\b|>>?\s*(?!&|\/dev\/null\b)\S/.test(command))
+    return undefined
+  return bin
+}
+
+function bashReadRedirect(bin: string): string {
+  return [
+    `econ: bash is not the way to read the codebase, so \`${bin}\` was not run. Use the read tools instead:`,
+    `- read <path> — a file with line numbers, or a directory's entries when <path> is a directory`,
+    `- search "<what you want>" — find code by concept, exact text (mode:literal/regex), or filenames (mode:glob)`,
+    `- file_outline <file> — a file's entities + imports before you read it`,
+    `Re-issue your request with one of these tools.`,
+  ].join("\n")
 }
 
 function pathArgs(list: Part[], ps: boolean, cmd = false) {
@@ -438,6 +471,7 @@ export const ShellTool = Tool.define(
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
+      let stderrFull = ""
       let last = ""
       const list: Chunk[] = []
       let used = 0
@@ -484,7 +518,7 @@ export const ShellTool = Tool.define(
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
           yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
+            Stream.runForEach(Stream.decodeText(handle.stdout), (chunk) => {
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
               used += size
@@ -530,6 +564,16 @@ export const ShellTool = Tool.define(
             }),
           )
 
+          // Capture stderr separately for merge-before-classify (tsc/cargo/pytest/eslint etc.)
+          // Uses handle.stderr to avoid the gotcha of reading both stderr and all simultaneously.
+          yield* Effect.forkScoped(
+            Stream.runForEach(Stream.decodeText(handle.stderr), (chunk) => {
+              return Effect.sync(() => {
+                stderrFull += chunk
+              })
+            }),
+          )
+
           const abort = Effect.callback<void>((resume) => {
             if (ctx.abort.aborted) return resume(Effect.void)
             const handler = () => resume(Effect.void)
@@ -566,10 +610,22 @@ export const ShellTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
-      const end = tail(raw, limits.maxLines, limits.maxBytes)
-      if (end.cut) cut = true
-      if (!file && end.cut) {
-        file = yield* trunc.write(raw)
+      // Compress: ANSI-strip + command-aware strategy selection, before truncation.
+      // raw = stdout tail; stderrFull = stderr captured separately.
+      // shouldMergeStderr (inside compressShellOutput) decides whether to dedup-merge
+      // stderr into stdout before classify (tsc/cargo/pytest/eslint/…).
+      // trunc.write saves the full combined (stdout+stderr) output for user reference.
+      const compressed = compressShellOutput(input.command, raw, stderrFull || undefined, code ?? undefined)
+      const combined = stderrFull ? raw + "\n" + stderrFull : raw
+      // The truncation safety net (truncated flag + full-output file save) keys off the RAW output
+      // size, not the compressed view: large output must always be preserved to a file and flagged
+      // as truncated, even when compression shrinks the shown text below the cap. `end` still bounds
+      // the compressed text that is actually displayed.
+      const rawCut = tail(combined, limits.maxLines, limits.maxBytes).cut
+      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
+      if (end.cut || rawCut) cut = true
+      if (!file && cut) {
+        file = yield* trunc.write(combined)
       }
 
       let output = end.text
@@ -609,6 +665,20 @@ export const ShellTool = Tool.define(
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
               const instanceCtx = yield* InstanceState.context
+              // econ: keep bash out of the read path. A read-shaped command (ls/cat/find/grep/wc/…)
+              // is short-circuited with a result that points the model at read/search/file_outline —
+              // not run, no permission prompt, no deny-retry loop. econ's opencode.json turns it on;
+              // skipped under `bun test` (NODE_ENV=test) so the discovered config can't redirect the
+              // ls/cat commands the upstream shell suite runs through bash.
+              if (process.env.NODE_ENV !== "test" && (yield* config.get()).experimental?.redirect_bash_reads === true) {
+                const readBin = readShapedCommand(params.command)
+                if (readBin)
+                  return {
+                    title: params.command,
+                    output: bashReadRedirect(readBin),
+                    metadata: { econ_redirect: readBin } as Record<string, unknown>,
+                  }
+              }
               const cwd = params.workdir
                 ? yield* resolvePath(params.workdir, instanceCtx.directory, shell)
                 : instanceCtx.directory

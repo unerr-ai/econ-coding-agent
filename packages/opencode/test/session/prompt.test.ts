@@ -31,6 +31,7 @@ import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
+import { SessionCanonicalState } from "@opencode-ai/core/session/canonical-state"
 import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
@@ -209,6 +210,9 @@ function makePrompt(input?: { processor?: "blocking" }) {
         )
   const compact = SessionCompaction.layer.pipe(
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+    // AC-6.3: SessionCompaction now depends on SessionCanonicalState (execution-frontier
+    // checkpoint). Provide the raw layer so it shares the test harness's Database via deps.
+    Layer.provide(SessionCanonicalState.layer),
     Layer.provideMerge(proc),
     Layer.provideMerge(deps),
   )

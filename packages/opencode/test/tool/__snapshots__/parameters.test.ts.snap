@@ -257,6 +257,10 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "entity": {
+      "description": "Optional entity name or key. If provided, returns that entity's profile (signature, kind, line range) from the in-process code graph instead of raw file content. Falls back to a normal raw read of the file when the entity isn't in the graph.",
+      "type": "string",
+    },
     "filePath": {
       "description": "The absolute path to the file or directory to read",
       "type": "string",
@@ -377,22 +381,28 @@ exports[`tool parameters JSON Schema (wire shape) webfetch 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "format": {
-      "default": "markdown",
-      "description": "The format to return the content in (text, markdown, or html). Defaults to markdown.",
-      "enum": [
-        "text",
-        "markdown",
-        "html",
-      ],
+    "cache_ref": {
+      "description": "Opaque reference returned by a prior call. When present, skip the fetch and return the next page of previously-ranked passages at ~0 cost.",
       "type": "string",
     },
-    "timeout": {
-      "description": "Optional timeout in seconds (max 120)",
+    "limit": {
+      "description": "Maximum passages to return in this response. When set, enables paginated mode: response includes meta.cache_ref, meta.total, meta.more. Default is all passages.",
+      "type": "number",
+    },
+    "offset": {
+      "description": "0-based passage offset within the cached result set (default 0). Only used with cache_ref.",
+      "type": "number",
+    },
+    "prompt": {
+      "description": "Query / task description used to BM25-rank the extracted passages by relevance. Omit to return the top passages in document order.",
+      "type": "string",
+    },
+    "top_k": {
+      "description": "Maximum number of passages to rank and cache (default 50). Returned as-is when \`limit\` is absent; first page is returned when \`limit\` is set.",
       "type": "number",
     },
     "url": {
-      "description": "The URL to fetch content from",
+      "description": "The URL to fetch content from (must start with http:// or https://).",
       "type": "string",
     },
   },
@@ -407,8 +417,20 @@ exports[`tool parameters JSON Schema (wire shape) websearch 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "cache_ref": {
+      "description": "Opaque ref from a prior call — returns the next cached page at ~0 cost.",
+      "type": "string",
+    },
     "contextMaxCharacters": {
-      "description": "Maximum characters for context string optimized for LLMs (default: 10000)",
+      "description": "Maximum characters for context string (passed to provider; BM25 pruning is applied on top)",
+      "type": "number",
+    },
+    "depth": {
+      "description": "0 (default) = return BM25-pruned lean snippets only, no page fetches. K (1–5) = auto-fetch the top-K result URLs in parallel, BM25-rank passages cross-document, and return only the relevant passages with per-source provenance. Raw pages are never returned.",
+      "type": "number",
+    },
+    "limit": {
+      "description": "Items per page (default 5 for snippets, 15 for depth passages).",
       "type": "number",
     },
     "livecrawl": {
@@ -423,9 +445,17 @@ exports[`tool parameters JSON Schema (wire shape) websearch 1`] = `
       "description": "Number of search results to return (default: 8)",
       "type": "number",
     },
+    "offset": {
+      "description": "0-based item offset for pagination (default 0). Used with cache_ref.",
+      "type": "number",
+    },
     "query": {
       "description": "Websearch query",
       "type": "string",
+    },
+    "token_budget": {
+      "description": "Approximate token budget for the response (default 2000). Limits results/passages returned.",
+      "type": "number",
     },
     "type": {
       "description": "Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search",

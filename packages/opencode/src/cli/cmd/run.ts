@@ -25,6 +25,7 @@ import { Filesystem } from "@/util/filesystem"
 import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
+import { econStepCost, econModelLabel, type EconTokens } from "../../../../code-intelligence/src/econ-cost"
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -679,20 +680,30 @@ export const RunCommand = effectCmd({
         // created, and replies issued from inside the loop must use that client.
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
+          // Latest tokens/model seen per assistant messageID, econ's own per-model
+          // breakdown alongside upstream step_finish events (which carry no model id).
+          const messageModels = new Map<string, { providerID: string; modelID: string; tokens: EconTokens }>()
           let error: string | undefined
 
           for await (const event of events.stream) {
             if (
               event.type === "message.updated" &&
               event.properties.sessionID === sessionID &&
-              event.properties.info.role === "assistant" &&
-              args.format !== "json" &&
-              toggles.get("start") !== true
+              event.properties.info.role === "assistant"
             ) {
-              UI.empty()
-              UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
-              UI.empty()
-              toggles.set("start", true)
+              const info = event.properties.info
+              messageModels.set(info.id, {
+                providerID: info.providerID,
+                modelID: info.modelID,
+                tokens: info.tokens,
+              })
+
+              if (args.format !== "json" && toggles.get("start") !== true) {
+                UI.empty()
+                UI.println(`> ${info.agent} · ${info.modelID}`)
+                UI.empty()
+                toggles.set("start", true)
+              }
             }
 
             if (event.type === "message.part.updated") {
@@ -725,7 +736,19 @@ export const RunCommand = effectCmd({
               }
 
               if (part.type === "step-finish") {
-                if (emit("step_finish", { part })) continue
+                const model = messageModels.get(part.messageID)
+                const enriched = model
+                  ? {
+                      providerID: model.providerID,
+                      modelID: model.modelID,
+                      econCost: econStepCost({
+                        modelID: model.modelID,
+                        providerID: model.providerID,
+                        tokens: part.tokens,
+                      }),
+                    }
+                  : {}
+                if (emit("step_finish", { part, ...enriched })) continue
               }
 
               if (part.type === "text" && part.time?.end) {
@@ -798,6 +821,43 @@ export const RunCommand = effectCmd({
               }
             }
           }
+
+          if (messageModels.size > 0) {
+            const zeroTokens = (): EconTokens => ({ input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
+            const addTokens = (target: EconTokens, tokens: EconTokens) => {
+              target.input += tokens.input
+              target.output += tokens.output
+              target.reasoning += tokens.reasoning
+              target.cache.read += tokens.cache.read
+              target.cache.write += tokens.cache.write
+            }
+
+            const models: Record<string, { label: string; tokens: EconTokens; cost: number }> = {}
+            const cumulative = { tokens: zeroTokens(), cost: 0 }
+            for (const { modelID, providerID, tokens } of messageModels.values()) {
+              const cost = econStepCost({ modelID, providerID, tokens })
+              const bucket = models[modelID] ?? { label: econModelLabel(modelID), tokens: zeroTokens(), cost: 0 }
+              addTokens(bucket.tokens, tokens)
+              bucket.cost += cost
+              models[modelID] = bucket
+              addTokens(cumulative.tokens, tokens)
+              cumulative.cost += cost
+            }
+
+            if (!emit("cost_breakdown", { cumulative, models })) {
+              UI.empty()
+              for (const [modelID, bucket] of Object.entries(models)) {
+                const total = bucket.tokens.input + bucket.tokens.output + bucket.tokens.reasoning
+                UI.println(UI.Style.TEXT_DIM + `${bucket.label} · ${total} tok · $${bucket.cost.toFixed(4)}`)
+              }
+              const cumulativeTotal = cumulative.tokens.input + cumulative.tokens.output + cumulative.tokens.reasoning
+              UI.println(
+                UI.Style.TEXT_DIM + `cumulative · ${cumulativeTotal} tok · $${cumulative.cost.toFixed(4)}` + UI.Style.TEXT_NORMAL,
+              )
+              UI.empty()
+            }
+          }
+
           return error
         }
         const cwd = args.attach ? (directory ?? sess.directory ?? (await current(sdk))) : (directory ?? root)

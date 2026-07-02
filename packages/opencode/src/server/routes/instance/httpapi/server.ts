@@ -27,6 +27,7 @@ import { Project } from "@/project/project"
 import { Vcs } from "@/project/vcs"
 import { ProviderAuth } from "@/provider/auth"
 import { Provider } from "@/provider/provider"
+import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { Question } from "@/question"
 import { SessionCompaction } from "@/session/compaction"
 import { Instruction } from "@/session/instruction"
@@ -200,6 +201,44 @@ type RouteRequirements =
   | HttpRouter.Request<"Requires", unknown>
   | HttpRouter.Request<"GlobalRequires", never>
 
+// econ AC-3.3: resolves cfg.triage.model ?? cfg.small_model (opencode-only
+// Config fields — core's Config schema doesn't carry them) via
+// Provider.parseModel and injects the result into core's location layer
+// through SessionRunnerModel.RouterLayerConfigTag. Core never reads triage
+// config or parses model strings itself (layering rule).
+// TODO(AC-3.3 promptProvider): left unset here — supplying the current
+// turn's first-prompt text needs a seam behind session/prompt.ts, which is
+// out of scope for this construction site. Turn-zero triage still fires;
+// only the AC-3.2 heavy-first-prompt suppression stays dormant until wired.
+const routerLayerConfigNode = LayerNode.make(
+  Layer.effect(
+    SessionRunnerModel.RouterLayerConfigTag,
+    // Provide a DEFERRED resolver, not a resolved value. The outer effect runs
+    // at app-layer construction and only captures the Config service (safe);
+    // the inner effect — which calls config.get() (dies unless InstanceRef is
+    // live in the running fiber) — runs later, when the location layer unwraps
+    // this reference per-instance. Resolving eagerly here crashed the whole
+    // server with "InstanceRef not provided".
+    Effect.map(Config.Service, (config) =>
+      Effect.gen(function* () {
+        const cfg = yield* config.get()
+        const triageModelString = cfg.triage?.model ?? cfg.small_model ?? undefined
+        const triageConfig: SessionRunnerModel.TriageLayerConfig | undefined = triageModelString
+          ? {
+              model: ((parsed) => ({ id: parsed.modelID, providerID: parsed.providerID }))(
+                Provider.parseModel(triageModelString),
+              ),
+              enabled: cfg.triage?.enabled !== false,
+              escalateOn: cfg.triage?.escalate_on,
+            }
+          : undefined
+        return { triageConfig }
+      }),
+    ),
+  ),
+  [Config.node],
+)
+
 const app = LayerNode.group([
   Npm.node,
   FSUtil.node,
@@ -215,6 +254,7 @@ const app = LayerNode.group([
   Plugin.node,
   ModelsDev.node,
   Provider.node,
+  routerLayerConfigNode,
   ProviderAuth.node,
   Agent.node,
   Skill.node,

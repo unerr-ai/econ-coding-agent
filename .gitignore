@@ -35,3 +35,6 @@ tsconfig.tsbuildinfo
 
 # econ local state
 .unerr/
+
+# npm packaging staging output (built by packaging/npm/build-npm-packages.mjs)
+packaging/npm/dist/
