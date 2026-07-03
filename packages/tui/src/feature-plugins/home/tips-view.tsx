@@ -27,7 +27,6 @@ type Shortcuts = {
   messagesPageUp: TipShortcut
   messagesToggleConceal: TipShortcut
   modelCycleRecent: TipShortcut
-  modelList: TipShortcut
   sessionExport: TipShortcut
   sessionInterrupt: TipShortcut
   sessionList: TipShortcut
@@ -117,7 +116,6 @@ export function Tips(props: { api: TuiPluginApi; connected?: boolean }) {
     messagesPageUp: configShortcut(props.api, "session.page.up"),
     messagesToggleConceal: configShortcut(props.api, "session.toggle.conceal"),
     modelCycleRecent: useCommandShortcut("model.cycle_recent"),
-    modelList: useCommandShortcut("model.list"),
     sessionExport: configShortcut(props.api, "session.export"),
     sessionInterrupt: configShortcut(props.api, "session.interrupt"),
     sessionList: useCommandShortcut("session.list"),
@@ -172,7 +170,6 @@ const TIPS: Tip[] = [
   (shortcuts) => press(shortcuts.inputPaste(), "to paste images from your clipboard into the prompt"),
   (shortcuts) => `Use ${commandText("/editor", shortcuts.editorOpen())} to compose messages in your external editor`,
   "Run {highlight}/init{/highlight} to auto-generate project rules based on your codebase",
-  (shortcuts) => `Use ${commandText("/models", shortcuts.modelList())} to see and switch between available AI models`,
   (shortcuts) => `Use ${commandText("/themes", shortcuts.themeList())} to switch between ${themeCount} built-in themes`,
   (shortcuts) => `Use ${commandText("/new", shortcuts.sessionNew())} to start a fresh conversation session`,
   (shortcuts) => `Use ${commandText("/sessions", shortcuts.sessionList())} to list, pin, and continue sessions`,

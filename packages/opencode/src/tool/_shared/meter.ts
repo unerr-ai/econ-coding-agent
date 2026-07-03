@@ -39,8 +39,9 @@ const _records: ToolCallRecord[] = []
 /**
  * Record one tool call's token accounting.
  *
- * Today this emits a structured debug line and appends to an in-process array.
- * TODO(econ-telemetry): replace the console.debug sink below with a call to
+ * Today this emits a structured debug line (stderr) and appends to an
+ * in-process array.
+ * TODO(econ-telemetry): replace the console.error sink below with a call to
  * the savings telemetry module (emitSavingsEvent / emitUsageEvent) once it is
  * wired into packages/opencode.  The ToolCallRecord shape is intentionally
  * minimal so the upgrade is a one-liner.
@@ -48,8 +49,11 @@ const _records: ToolCallRecord[] = []
  */
 export function recordToolCall(record: ToolCallRecord): void {
   _records.push(record)
-  // Structured log — picked up by any log aggregator watching stderr.
-  console.debug("[econ:meter]", JSON.stringify(record))
+  // Structured log on stderr — console.debug/console.log both write to
+  // stdout, which corrupts `opencode run --format json` NDJSON. Use
+  // console.error (stderr) so the signal survives without polluting the
+  // machine-readable stdout stream.
+  console.error("[econ:meter]", JSON.stringify(record))
 }
 
 /**

@@ -106,3 +106,99 @@ export function econStepCost(input: {
 export function econModelLabel(modelID: string): string {
   return LABELS[modelID] ?? modelID
 }
+
+// ---------------------------------------------------------------------------
+// Executor self-host break-even model (OL-M.3)
+//
+// ECON_COST_MATRIX prices the executor at $0/M, which only holds once
+// self-host utilization is high enough to amortize the GPU's fixed monthly
+// cost away. Below that volume a managed endpoint is actually cheaper. This
+// section is an additive, opt-in layer on top of econStepCost — it does not
+// change the matrix or econStepCost's behaviour.
+// ---------------------------------------------------------------------------
+
+/** Tunable inputs for the executor break-even model; all optional, defaulting to the plan's calibrated shape. */
+export interface ExecutorBreakEvenOptions {
+  /** Effective fixed monthly cost ($) amortized across the executor's self-host capacity — a dedicated inference GPU card (e.g. cloud L40S-class ~$0.7/hr ≈ $500/mo, or owned+power amortized over 3yr ≈ $400–500/mo), not a token-level figure. */
+  fixedMonthlyCostUsd?: number
+  /** Managed-endpoint comparison floor ($/M tokens), low end of the plan's ~$0.05/$0.20 band. */
+  managedFloorLowUsdPerM?: number
+  /** Managed-endpoint comparison floor ($/M tokens), high end of the plan's ~$0.05/$0.20 band. */
+  managedFloorHighUsdPerM?: number
+}
+
+/**
+ * Default self-host executor break-even parameters, calibrated to a real
+ * dedicated inference-GPU card (~$500/mo) rather than reverse-fit to a
+ * target token price. At realistic volumes (≤100M tok/mo) self-host
+ * marginal cost is $5–500/M — well above the managed $0.05–0.20/M floor, so
+ * a managed endpoint wins. Self-host only reaches parity at multi-billion
+ * tok/mo: break-even vs. the low managed floor ($0.05/M) ≈ 10B tok/mo, vs.
+ * the high floor ($0.20/M) ≈ 2.5B tok/mo — near full utilization of a
+ * single card. Override via {@link ExecutorBreakEvenOptions} once real
+ * hosting-bill numbers are known.
+ *
+ * @sem domain=observability role=accounting
+ */
+export const EXECUTOR_BREAK_EVEN_DEFAULTS: Required<ExecutorBreakEvenOptions> = {
+  fixedMonthlyCostUsd: 500,
+  managedFloorLowUsdPerM: 0.05,
+  managedFloorHighUsdPerM: 0.2,
+}
+
+/**
+ * Amortized self-host $/M-token rate for the executor tier at a given
+ * monthly volume — the honest number behind the matrix's "$0" executor row,
+ * which only holds at high utilization. Cost falls off as roughly
+ * fixedCost/volume, so it rises sharply below break-even and only nears the
+ * managed floor at multi-billion tok/mo volume. Non-positive volume returns
+ * Infinity (no amortization base).
+ *
+ * @sem domain=observability role=accounting
+ */
+export function executorMarginalCostPerMTokens(
+  monthlyTokens: number,
+  opts?: ExecutorBreakEvenOptions,
+): number {
+  if (monthlyTokens <= 0) return Infinity
+  const fixed = opts?.fixedMonthlyCostUsd ?? EXECUTOR_BREAK_EVEN_DEFAULTS.fixedMonthlyCostUsd
+  return fixed / (monthlyTokens / 1_000_000)
+}
+
+/**
+ * Monthly token volume at which the self-host executor rate crosses a
+ * managed-endpoint comparison rate (defaults to the plan's low floor,
+ * $0.05/M) — below this volume a managed endpoint is the cheaper choice.
+ *
+ * @sem domain=observability role=accounting
+ */
+export function executorBreakEvenMonthlyTokens(
+  opts?: ExecutorBreakEvenOptions & { managedRateUsdPerM?: number },
+): number {
+  const fixed = opts?.fixedMonthlyCostUsd ?? EXECUTOR_BREAK_EVEN_DEFAULTS.fixedMonthlyCostUsd
+  const rate =
+    opts?.managedRateUsdPerM ??
+    opts?.managedFloorLowUsdPerM ??
+    EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorLowUsdPerM
+  return (fixed / rate) * 1_000_000
+}
+
+/**
+ * Real executor cost for one step's tokens at a given monthly volume — the
+ * additive, opt-in honest figure the savings receipt should show instead of
+ * the matrix's aspirational $0. Leaves {@link ECON_COST_MATRIX} and
+ * {@link econStepCost} untouched; volume-blind callers keep seeing $0.
+ *
+ * @sem domain=observability role=accounting
+ */
+export function executorEffectiveCost(input: {
+  monthlyTokens: number
+  tokens: EconTokens
+  opts?: ExecutorBreakEvenOptions
+}): number {
+  const rate = executorMarginalCostPerMTokens(input.monthlyTokens, input.opts)
+  const { tokens } = input
+  const total =
+    tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+  return (total * rate) / 1_000_000
+}

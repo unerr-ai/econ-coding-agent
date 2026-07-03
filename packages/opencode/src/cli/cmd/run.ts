@@ -26,6 +26,20 @@ import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@openc
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
 import { econStepCost, econModelLabel, type EconTokens } from "../../../../code-intelligence/src/econ-cost"
+import { computeCacheHitRate } from "../../../../code-intelligence/src/cache-meter"
+import { TelemetryStore, emitUsageEvent, inferTier, tierFromAgent } from "../../../../code-intelligence/src/telemetry"
+import { DoublePayLedger } from "../../../../code-intelligence/src/double-pay"
+import { buildReceipt, formatReceipt, type FrontierBaseline } from "../../../../code-intelligence/src/receipt"
+
+// OL-6.2: frontier reference pricing for the savings receipt's "vs frontier"
+// comparison — Claude Opus 4 per-million-token rates, the same reference
+// receipt.test.ts prices its fixtures against. Not a real-time price feed;
+// update alongside that fixture if the reference model changes.
+const FRONTIER_BASELINE: FrontierBaseline = {
+  model: "claude-opus-4",
+  inputPerMTok: 15,
+  outputPerMTok: 75,
+}
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -162,15 +176,6 @@ export const RunCommand = effectCmd({
       .option("share", {
         type: "boolean",
         describe: "share the session",
-      })
-      .option("model", {
-        type: "string",
-        alias: ["m"],
-        describe: "model to use in the format of provider/model",
-      })
-      .option("agent", {
-        type: "string",
-        describe: "agent to use",
       })
       .option("format", {
         type: "string",
@@ -576,78 +581,14 @@ export const RunCommand = effectCmd({
         process.exit(1)
       }
 
+      // OL-4.1: --agent/--model are no longer user-settable CLI flags — the
+      // live tier-router is the only thing that picks agent/model, so these
+      // resolvers always defer to the default (undefined).
       async function localAgent() {
-        if (!args.agent) return undefined
-        const name = args.agent
-
-        const entry = await Effect.runPromise(
-          agentSvc.get(name).pipe(Effect.provideService(InstanceRef, localInstance)),
-        )
-        if (!entry) {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" not found. Falling back to default agent`,
-          )
-          return undefined
-        }
-        if (entry.mode === "subagent") {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
-          )
-          return undefined
-        }
-        return name
+        return undefined
       }
 
-      async function attachAgent(sdk: OpencodeClient) {
-        if (!args.agent) return undefined
-        const name = args.agent
-
-        const modes = await sdk.app
-          .agents(undefined, { throwOnError: true })
-          .then((x) => x.data ?? [])
-          .catch(() => undefined)
-
-        if (!modes) {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `failed to list agents from ${args.attach}. Falling back to default agent`,
-          )
-          return undefined
-        }
-
-        const agent = modes.find((a) => a.name === name)
-        if (!agent) {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" not found. Falling back to default agent`,
-          )
-          return undefined
-        }
-
-        if (agent.mode === "subagent") {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
-          )
-          return undefined
-        }
-
-        return name
-      }
-
-      async function pickAgent(sdk: OpencodeClient) {
-        if (!args.agent) return undefined
-        if (args.attach) {
-          return attachAgent(sdk)
-        }
-
+      async function pickAgent(_sdk: OpencodeClient) {
         return localAgent()
       }
 
@@ -682,8 +623,24 @@ export const RunCommand = effectCmd({
           const toggles = new Map<string, boolean>()
           // Latest tokens/model seen per assistant messageID, econ's own per-model
           // breakdown alongside upstream step_finish events (which carry no model id).
-          const messageModels = new Map<string, { providerID: string; modelID: string; tokens: EconTokens }>()
+          const messageModels = new Map<
+            string,
+            { providerID: string; modelID: string; tokens: EconTokens; agent?: string }
+          >()
+          // OL-0.1: turn-phase telemetry state (turn_phase events below) — a step
+          // counter and the last-seen agent, both derived from events already on
+          // this stream, so no new server-side event type is needed.
+          let turnStep = 0
+          let lastAgent: string | undefined
           let error: string | undefined
+          // OL-3.6: cheap-tier spend discarded when a turn escalates and has to
+          // be re-run on a higher tier (double-pay). The current router only
+          // escalates at turn-open (no intra-turn re-run), so nothing on this
+          // stream increments it yet — it stays 0 until a later slice (QE veto
+          // / abstention re-run) emits an escalation this loop can fold in
+          // here. Wired now so cost_breakdown's net figure needs no second
+          // migration when that lands.
+          let discarded = 0
 
           for await (const event of events.stream) {
             if (
@@ -696,6 +653,7 @@ export const RunCommand = effectCmd({
                 providerID: info.providerID,
                 modelID: info.modelID,
                 tokens: info.tokens,
+                agent: info.agent,
               })
 
               if (args.format !== "json" && toggles.get("start") !== true) {
@@ -706,9 +664,42 @@ export const RunCommand = effectCmd({
               }
             }
 
+            // OL-0.1: agent tier switches already publish this event (see
+            // createUserMessage in session/prompt.ts) — surface it as a turn_phase
+            // "switch" instead of adding a second signal for the same fact. Only a
+            // real switch (a prior agent on this stream) is a "switch" — the first
+            // agent assignment on a fresh session isn't one.
+            if (event.type === "session.next.agent.switched" && event.properties.sessionID === sessionID) {
+              const toAgent = event.properties.agent
+              if (lastAgent !== undefined && lastAgent !== toAgent) {
+                emit("turn_phase", {
+                  phase: "switch",
+                  step: turnStep,
+                  fromAgent: lastAgent,
+                  toAgent,
+                })
+              }
+              lastAgent = toAgent
+            }
+
             if (event.type === "message.part.updated") {
               const part = event.properties.part
               if (part.sessionID !== sessionID) continue
+
+              if (part.type === "tool" && part.tool === "task" && part.state.status === "completed") {
+                // No dedicated "verify" tool — same text-field heuristic as
+                // packages/eval/src/loop-scorer.ts calledVerifyTask.
+                const fields = Object.values(part.state.input ?? {}).filter((v): v is string => typeof v === "string")
+                const isVerify = fields.some((v) => /verify|typecheck|test/i.test(v))
+                const known = messageModels.get(part.messageID)
+                emit("turn_phase", {
+                  phase: isVerify ? "verify" : "delegate",
+                  step: turnStep,
+                  agent: known?.agent,
+                  model: known?.modelID,
+                  tool: part.tool,
+                })
+              }
 
               if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
                 if (emit("tool_use", { part })) continue
@@ -732,6 +723,18 @@ export const RunCommand = effectCmd({
               }
 
               if (part.type === "step-start") {
+                // A step only exists once the model call actually starts, so
+                // gating turn_phase here (not on message.updated) keeps a request
+                // that errors before any step runs (e.g. an unresolvable model)
+                // from emitting a phase the turn never reached.
+                turnStep++
+                const known = messageModels.get(part.messageID)
+                emit("turn_phase", {
+                  phase: turnStep === 1 ? "plan" : "execute",
+                  step: turnStep,
+                  agent: known?.agent,
+                  model: known?.modelID,
+                })
                 if (emit("step_start", { part })) continue
               }
 
@@ -832,28 +835,63 @@ export const RunCommand = effectCmd({
               target.cache.write += tokens.cache.write
             }
 
-            const models: Record<string, { label: string; tokens: EconTokens; cost: number }> = {}
+            const models: Record<
+              string,
+              { label: string; tokens: EconTokens; cost: number; cacheHitRate: number }
+            > = {}
             const cumulative = { tokens: zeroTokens(), cost: 0 }
-            for (const { modelID, providerID, tokens } of messageModels.values()) {
+            // OL-6.2: mirror the per-model buckets into a TelemetryStore as we
+            // go, so the human-readable path can render the real savings
+            // receipt (buildReceipt/formatReceipt) without a second pass over
+            // messageModels.
+            const telemetryStore = new TelemetryStore()
+            for (const { modelID, providerID, tokens, agent } of messageModels.values()) {
               const cost = econStepCost({ modelID, providerID, tokens })
-              const bucket = models[modelID] ?? { label: econModelLabel(modelID), tokens: zeroTokens(), cost: 0 }
+              const bucket =
+                models[modelID] ?? { label: econModelLabel(modelID), tokens: zeroTokens(), cost: 0, cacheHitRate: 0 }
               addTokens(bucket.tokens, tokens)
               bucket.cost += cost
               models[modelID] = bucket
               addTokens(cumulative.tokens, tokens)
               cumulative.cost += cost
+              // #110: the router tags each message with its authoritative agent — prefer it over the
+              // model-name heuristic (reasoner and oracle share glm-5.2, so inferTier(model) can't
+              // distinguish them). Fall back to inferTier only for a non-econ agent.
+              const agentTier = agent ? tierFromAgent(agent) : "unknown"
+              emitUsageEvent(telemetryStore, {
+                sessionID,
+                model: modelID,
+                tier: agentTier !== "unknown" ? agentTier : inferTier(modelID),
+                cost,
+                tokens: {
+                  input: tokens.input,
+                  output: tokens.output,
+                  reasoning: tokens.reasoning,
+                  cache: { read: tokens.cache.read, write: tokens.cache.write },
+                },
+              })
             }
+            // OL-3.7: oracle cache-hit-rate — the one cost lever on a tier whose
+            // per-token price can't be shopped down, so compute it for every
+            // tier (not just the oracle) once each bucket's tokens are final.
+            for (const bucket of Object.values(models)) {
+              bucket.cacheHitRate = computeCacheHitRate({ cacheRead: bucket.tokens.cache.read, input: bucket.tokens.input })
+            }
+            // OL-3.6: net = cumulative spend minus cheap-tier spend discarded by
+            // mid-turn escalations (`discarded`, 0 today — see declaration above).
+            const net = cumulative.cost - discarded
 
-            if (!emit("cost_breakdown", { cumulative, models })) {
+            if (!emit("cost_breakdown", { cumulative, models, discarded, net })) {
+              // OL-6.2: the machine-readable `cost_breakdown` NDJSON event above
+              // is unchanged (--format json never reaches this branch); only the
+              // human-readable surface below moves from bare per-model lines to
+              // the formatted savings receipt.
+              const ledger = new DoublePayLedger()
+              const receipt = buildReceipt({ store: telemetryStore, ledger, baseline: FRONTIER_BASELINE })
               UI.empty()
-              for (const [modelID, bucket] of Object.entries(models)) {
-                const total = bucket.tokens.input + bucket.tokens.output + bucket.tokens.reasoning
-                UI.println(UI.Style.TEXT_DIM + `${bucket.label} · ${total} tok · $${bucket.cost.toFixed(4)}`)
+              for (const line of formatReceipt(receipt).split("\n")) {
+                UI.println(UI.Style.TEXT_DIM + line + UI.Style.TEXT_NORMAL)
               }
-              const cumulativeTotal = cumulative.tokens.input + cumulative.tokens.output + cumulative.tokens.reasoning
-              UI.println(
-                UI.Style.TEXT_DIM + `cumulative · ${cumulativeTotal} tok · $${cumulative.cost.toFixed(4)}` + UI.Style.TEXT_NORMAL,
-              )
               UI.empty()
             }
           }
@@ -884,7 +922,8 @@ export const RunCommand = effectCmd({
             const result = await client.session.command({
               sessionID,
               agent,
-              model: args.model,
+              // OL-4.1: no user-facing --model flag; router auto-selects.
+              model: undefined,
               command: args.command,
               arguments: message,
               variant: args.variant,
@@ -898,7 +937,8 @@ export const RunCommand = effectCmd({
             return
           }
 
-          const model = pick(args.model)
+          // OL-4.1: no user-facing --model flag; router auto-selects.
+          const model = pick(undefined)
           const result = await client.session.prompt({
             sessionID,
             agent,
@@ -915,7 +955,8 @@ export const RunCommand = effectCmd({
           return
         }
 
-        const model = pick(args.model)
+        // OL-4.1: no user-facing --model flag; router auto-selects.
+        const model = pick(undefined)
         const { runInteractiveMode } = await import("./run/runtime")
         try {
           await runInteractiveMode({
@@ -943,7 +984,8 @@ export const RunCommand = effectCmd({
       }
 
       if (interactive && !args.attach && !args.session && !args.continue) {
-        const model = pick(args.model)
+        // OL-4.1: no user-facing --model flag; router auto-selects.
+        const model = pick(undefined)
         const { runInteractiveLocalMode } = await import("./run/runtime")
         const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
           const { Server } = await import("@/server/server")
@@ -962,7 +1004,8 @@ export const RunCommand = effectCmd({
             session,
             share,
             createSession: createFreshSession,
-            agent: args.agent,
+            // OL-4.1: no user-facing --agent flag; router auto-selects.
+            agent: undefined,
             model,
             variant: args.variant,
             replay,
@@ -1028,8 +1071,9 @@ export async function runMini(input: MiniCommandInput) {
     session: input.session,
     fork: input.fork,
     share: undefined,
-    model: input.model,
-    agent: input.agent,
+    // OL-4.1: RunCommand no longer accepts a user-facing model/agent — the
+    // router auto-selects; MiniCommandInput.model/agent are kept for source
+    // compatibility with internal callers but are no longer forwarded here.
     format: "default",
     file: undefined,
     title: undefined,

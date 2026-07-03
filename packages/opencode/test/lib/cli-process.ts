@@ -90,7 +90,9 @@ export type RunHandle = {
 export type SpawnOpts = { readonly timeoutMs?: number; readonly env?: Record<string, string> }
 
 // Typed equivalent of constructing argv for `opencode run`. New flags should
-// land here so tests stay grep-able and refactor-safe.
+// land here so tests stay grep-able and refactor-safe. `model`/`agent` are no
+// longer CLI flags (OL-4.1) — they flow into the per-call injected config
+// instead (see `runOpts`).
 export type RunOpts = SpawnOpts & {
   readonly model?: string
   readonly agent?: string
@@ -199,8 +201,7 @@ export function withCliFixture<A, E>(
         .pipe(Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(20)))), Effect.ignore),
     )
 
-    const configJson = JSON.stringify(testProviderConfig(llm.url))
-    const env = isolatedEnv(home, configJson)
+    const env = isolatedEnv(home, JSON.stringify(testProviderConfig(llm.url)))
 
     const spawn = Effect.fn("opencode.spawn")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
@@ -247,10 +248,11 @@ export function withCliFixture<A, E>(
     })
 
     const runArgs = (message: string, opts?: RunOpts) => {
+      // OL-4.1 removed the user-facing `--model`/`--agent` flags from `opencode
+      // run` (the live tier-router picks the model) — `opts.model`/`opts.agent`
+      // flow into the injected config instead, via `runOpts` below.
       const argv: string[] = ["run"]
       if (opts?.printLogs) argv.push("--print-logs")
-      argv.push("--model", opts?.model ?? testModelID)
-      if (opts?.agent) argv.push("--agent", opts.agent)
       if (opts?.format) argv.push("--format", opts.format)
       if (opts?.command) argv.push("--command", opts.command)
       if (opts?.extraArgs) argv.push(...opts.extraArgs)
@@ -259,14 +261,16 @@ export function withCliFixture<A, E>(
     }
 
     const runOpts = (opts?: RunOpts): SpawnOpts | undefined => {
-      if (!opts?.permission) return opts
+      // Always (re)inject the config so `opts.model` selects the resolved
+      // default model (`Provider.defaultModel` reads config's top-level
+      // `model` field) with no CLI flag needed — see testProviderConfig.
       return {
         ...opts,
         env: {
-          ...opts.env,
+          ...opts?.env,
           OPENCODE_CONFIG_CONTENT: JSON.stringify({
-            ...testProviderConfig(llm.url),
-            permission: opts.permission,
+            ...testProviderConfig(llm.url, opts?.model),
+            ...(opts?.permission ? { permission: opts.permission } : {}),
           }),
         },
       }

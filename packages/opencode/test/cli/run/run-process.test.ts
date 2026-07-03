@@ -120,14 +120,36 @@ describe("opencode run (non-interactive subprocess)", () => {
           expect(typeof evt.type).toBe("string")
           expect(typeof evt.sessionID).toBe("string")
         }
-        expect(events.map((event) => event.type)).toEqual(["step_start", "text", "step_finish"])
+        expect(events.map((event) => event.type)).toEqual([
+          "turn_phase",
+          "step_start",
+          "text",
+          "step_finish",
+          "cost_breakdown",
+        ])
         expect(events.map(({ timestamp: _, sessionID: __, ...event }) => event)).toEqual([
-          { type: "step_start", part: expect.objectContaining({ type: "step-start" }) },
-          {
+          expect.objectContaining({
+            type: "turn_phase",
+            phase: "plan",
+            step: 1,
+            agent: expect.any(String),
+            model: expect.any(String),
+          }),
+          expect.objectContaining({ type: "step_start", part: expect.objectContaining({ type: "step-start" }) }),
+          expect.objectContaining({
             type: "text",
             part: expect.objectContaining({ type: "text", text: "structured output" }),
-          },
-          { type: "step_finish", part: expect.objectContaining({ type: "step-finish" }) },
+          }),
+          // step_finish also carries providerID/modelID/econCost (see run.ts `loop`'s
+          // `enriched` spread) alongside `part` — objectContaining tolerates them here.
+          expect.objectContaining({ type: "step_finish", part: expect.objectContaining({ type: "step-finish" }) }),
+          expect.objectContaining({
+            type: "cost_breakdown",
+            cumulative: expect.any(Object),
+            models: expect.any(Object),
+            discarded: expect.any(Number),
+            net: expect.any(Number),
+          }),
         ])
         expect(result.stdout.endsWith("\n")).toBe(true)
         expect(
@@ -183,14 +205,17 @@ describe("opencode run (non-interactive subprocess)", () => {
         expect(result.exitCode).toBe(0)
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.map((event) => event.type)).toEqual([
+          "turn_phase",
           "step_start",
           "reasoning",
           "text",
           "tool_use",
           "step_finish",
+          "turn_phase",
           "step_start",
           "text",
           "step_finish",
+          "cost_breakdown",
         ])
         expect(events.find((event) => event.type === "reasoning")?.part).toEqual(
           expect.objectContaining({ type: "reasoning", text: "reasoning" }),
@@ -228,15 +253,20 @@ describe("opencode run (non-interactive subprocess)", () => {
         const events = opencode.parseJsonEvents(result.stdout)
         expect(result.exitCode).toBe(0)
         expect(events.map((event) => event.type)).toEqual([
+          "turn_phase",
           "step_start",
           "text",
           "tool_use",
           "step_finish",
+          "turn_phase",
           "step_start",
           "step_finish",
+          "cost_breakdown",
         ])
-        expect(events[1]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
-        expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))
+        expect(events[2]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
+        // -1 is now cost_breakdown (emitted after the loop ends); the terminal
+        // step-finish is the event just before it.
+        expect(events.at(-2)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))
       }),
     60_000,
   )

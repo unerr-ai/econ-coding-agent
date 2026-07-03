@@ -61,6 +61,130 @@ export const Parameters = Schema.Struct({
   }),
 })
 
+const DIGEST_OUTCOME_MAX_CHARS = 480
+const DIGEST_ANCHOR_MAX_COUNT = 8
+const DIGEST_ANCHOR_MAX_CHARS = 160
+const DIGEST_FOLLOWUP_MAX_COUNT = 5
+const DIGEST_FOLLOWUP_MAX_CHARS = 160
+
+function truncateText(text: string, max: number): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= max) return trimmed
+  return trimmed.slice(0, Math.max(0, max - 1)).trimEnd() + "…"
+}
+
+// Matches either a backtick-quoted span or a bare path token (>=1 path
+// separator, file extension, optional :line or :line-line suffix).
+const ANCHOR_RE =
+  /`([^`\n]{1,160})`|((?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,10}(?::\d+(?:-\d+)?)?)/g
+
+function extractAnchors(text: string): string[] {
+  const anchors: string[] = []
+  const seen = new Set<string>()
+  ANCHOR_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = ANCHOR_RE.exec(text))) {
+    const backticked = match[1]
+    const candidate = (backticked ?? match[2] ?? "").trim()
+    if (!candidate) continue
+    // A backtick span only counts as an anchor if it looks like a path or a
+    // dotted entity reference (e.g. `TaskTool.execute`), not arbitrary code.
+    if (backticked && !/[./]/.test(candidate)) continue
+    if (candidate.length > DIGEST_ANCHOR_MAX_CHARS) continue
+    if (seen.has(candidate)) continue
+    seen.add(candidate)
+    anchors.push(candidate)
+    if (anchors.length >= DIGEST_ANCHOR_MAX_COUNT) break
+  }
+  return anchors
+}
+
+function extractFollowUps(text: string): string[] {
+  const followUps: string[] = []
+  const seen = new Set<string>()
+  const push = (raw: string) => {
+    const value = truncateText(raw, DIGEST_FOLLOWUP_MAX_CHARS)
+    if (!value || seen.has(value)) return
+    seen.add(value)
+    followUps.push(value)
+  }
+  let inSection = false
+  for (const raw of text.split(/\r?\n/)) {
+    if (followUps.length >= DIGEST_FOLLOWUP_MAX_COUNT) break
+    const line = raw.trim()
+    if (!line) {
+      inSection = false
+      continue
+    }
+    // A bare "Follow-ups:" / "TODO:" / "Next steps:" heading opens a section
+    // whose subsequent bullet lines are collected until a blank line.
+    if (/^(?:follow[- ]?ups?|todo|next steps?)\s*[:-]?\s*$/i.test(line)) {
+      inSection = true
+      continue
+    }
+    const inline = /\b(?:follow[- ]?ups?|todo|next steps?)\b\s*[:-]\s*(.+)/i.exec(line)
+    if (inline) {
+      push(inline[1] ?? "")
+      inSection = false
+      continue
+    }
+    const bullet = /^(?:[-*]|\d+[.)])\s+(.+)/.exec(line)
+    if (inSection && bullet) {
+      push(bullet[1] ?? "")
+      continue
+    }
+    if (!bullet) inSection = false
+  }
+  return followUps
+}
+
+// Marks the start of a follow-up section (heading or inline "Follow-up: ...")
+// so extractOutcome can stop before it instead of folding it into the outcome.
+const FOLLOWUP_START_RE = /^(?:follow[- ]?ups?|todo|next steps?)\s*[:-]?\s*(?:.+)?$/i
+
+function extractOutcome(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const cutoff = lines.findIndex((line) => FOLLOWUP_START_RE.test(line))
+  const body = cutoff === -1 ? lines : lines.slice(0, cutoff)
+  const source = body.length > 0 ? body : lines
+  return truncateText(source.slice(0, 3).join(" "), DIGEST_OUTCOME_MAX_CHARS)
+}
+
+/**
+ * Compresses a child sub-agent's final message into a bounded OUTCOME /
+ * ANCHORS / FOLLOW-UPS digest (briefs, not transcripts) so a large child
+ * transcript can't blow up the parent conductor's context; never throws.
+ *
+ * @sem domain=infrastructure role=digest
+ */
+function digestChildText(text: string): string {
+  try {
+    const outcome = extractOutcome(text) || "(no output)"
+    const anchors = extractAnchors(text)
+    const followUps = extractFollowUps(text)
+    const lines = [`OUTCOME: ${outcome}`]
+    if (anchors.length > 0) lines.push(`ANCHORS: ${anchors.join(", ")}`)
+    if (followUps.length > 0) {
+      lines.push("FOLLOW-UPS:")
+      for (const item of followUps) lines.push(`- ${item}`)
+    }
+    return lines.join("\n")
+  } catch {
+    return `OUTCOME: ${truncateText(text, DIGEST_OUTCOME_MAX_CHARS) || "(no output)"}`
+  }
+}
+
+/**
+ * Wraps a child task's state into the `<task>` envelope the parent
+ * conductor sees, compressing the child's final text into a bounded digest
+ * (see `digestChildText`) so a big sub-agent transcript stays cheap to
+ * integrate; canned "running" status text passes through unchanged.
+ *
+ * @sem domain=infrastructure role=digest
+ */
 function renderOutput(input: {
   sessionID: SessionID
   state: "running" | "completed" | "error"
@@ -68,11 +192,12 @@ function renderOutput(input: {
   text: string
 }) {
   const tag = input.state === "error" ? "task_error" : "task_result"
+  const text = input.state === "running" ? input.text : digestChildText(input.text)
   return [
     `<task id="${input.sessionID}" state="${input.state}">`,
     ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
     `<${tag}>`,
-    input.text,
+    text,
     `</${tag}>`,
     "</task>",
   ].join("\n")

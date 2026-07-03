@@ -204,6 +204,7 @@ export * from "./triage.js"
 export * from "./reasoner.js"
 export * from "./brief.js"
 export * from "./double-pay.js"
+export * from "./model-registry.js"
 
 // econ S4.3 specialists · S4.2/S4.4 fan-out
 export {

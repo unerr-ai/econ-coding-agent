@@ -14,6 +14,9 @@ import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
+import { resolveTier, isEconTierAgent } from "./tier-router"
+import { probeTurnRisk } from "../tool/graph-tools"
+import { detectAbstention } from "../../../code-intelligence/src/abstention"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
@@ -655,13 +658,42 @@ export const layer = Layer.effect(
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
       const agentName = input.agent
-      const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
+      let ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
         const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
         const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
+      }
+
+      // OL-3.1: automatic tier routing — the B-into-A router seam (OL-0.3 decision). Only the
+      // top-level user turn is auto-routed: a caller that pinned an agent (a delegated subtask) or a
+      // model keeps its explicit choice. The router may lift the default conductor to the reasoner/
+      // oracle for a hard turn; reassigning `ag` carries the tier's model, prompt delta, and switch
+      // telemetry coherently. If the chosen tier's agent can't be resolved, the conductor stands.
+      if (!input.agent && !input.model && isEconTierAgent(ag.name)) {
+        const promptText = input.parts.map((p) => (p.type === "text" ? p.text : "")).join("\n")
+        // OL-3.5: escalate when the previous turn's assistant output abstained ([[ABSTAIN]]/[[UNSURE]]/
+        // low-confidence). Best-effort: any failure to read history leaves priorAbstained false, so
+        // abstention never breaks a turn — it only adds an escalation.
+        const priorMatch = yield* sessions
+          .findMessage(input.sessionID, (m) => m.info.role === "assistant")
+          .pipe(Effect.orDie)
+        const priorAbstained = Option.isSome(priorMatch)
+          ? detectAbstention({
+              text: priorMatch.value.parts.map((p) => (p.type === "text" ? p.text : "")).join("\n"),
+            }).abstained
+          : false
+        // OL-3.3: code-structural risk from the live graph (blast-radius / fan-in / centrality of
+        // the entities the prompt names). Best-effort and bounded — probeTurnRisk swallows a cold
+        // graph, an index-latency timeout, or any error into 0, so risk only ever adds an escalation.
+        const risk = yield* Effect.promise(() => probeTurnRisk(promptText))
+        const decision = resolveTier({ sessionID: input.sessionID, prompt: promptText, priorAbstained, risk })
+        if (decision.tier !== ag.name) {
+          const tierAgent = yield* agents.get(decision.tier)
+          if (tierAgent) ag = tierAgent
+        }
       }
 
       const current = yield* db
@@ -702,6 +734,7 @@ export const layer = Layer.effect(
           messageID: SessionMessage.ID.create(),
           timestamp: DateTime.makeUnsafe(info.time.created),
           agent: info.agent,
+          source: "system",
         })
       }
       if (
@@ -718,6 +751,7 @@ export const layer = Layer.effect(
             providerID: ProviderV2.ID.make(info.model.providerID),
             variant: ModelV2.VariantID.make(info.model.variant ?? "default"),
           },
+          source: "system",
         })
       }
 
@@ -1293,6 +1327,16 @@ export const layer = Layer.effect(
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+          // OL-0.1: turn-phase telemetry — structured-log twin of the turn_phase
+          // NDJSON events run.ts derives from message/tool events on this same
+          // step boundary, so the phase is visible from the log sink too.
+          yield* Effect.logInfo("turn_phase", {
+            "session.id": sessionID,
+            phase: step === 1 ? "plan" : "execute",
+            step,
+            agent: agent.name,
+            model: model.id,
+          })
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),

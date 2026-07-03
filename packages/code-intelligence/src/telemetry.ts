@@ -15,6 +15,9 @@
  * @sem domain=observability role=ingestion
  */
 
+import { ECON_MODELS, modelProfile, tiersForModel } from "./model-registry"
+import type { EconTier } from "./region"
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -110,6 +113,25 @@ const CHEAP_HINTS = ["haiku", "mini", "nano", "flash", "qwen", "8b", "7b", "smal
 /** Substrings that mark the mid reasoner tier. */
 const REASONER_HINTS = ["32b", "reason", "r1", "sonnet", "medium", "70b", "deepseek"]
 
+/** Higher-tier-wins rank for collapsing a model's econ tiers to one UsageTier. */
+const ECON_TIER_RANK: Record<EconTier, number> = { conductor: 0, executor: 0, reasoner: 1, oracle: 2 }
+
+/** Map one econ abstract tier to the UsageTier label the receipt uses. */
+const usageTierForEconTier = (tier: EconTier): UsageTier =>
+  tier === "oracle" ? "oracle" : tier === "reasoner" ? "reasoner" : "cheap"
+
+/**
+ * Resolve a raw model id (bare key, model ref with provider prefix, or the
+ * exact key) to its ECON_MODELS key, or undefined when it isn't an econ
+ * pinned model. `modelIDLower` must already be lower-cased.
+ */
+function resolveEconModelKey(modelIDLower: string): string | undefined {
+  if (modelProfile(modelIDLower)) return modelIDLower
+  return Object.keys(ECON_MODELS).find(
+    (key) => modelIDLower.endsWith(key) || modelIDLower.includes(key),
+  )
+}
+
 /**
  * Best-effort tier label from a model id when the router has not tagged the turn
  * directly. A name heuristic only — the authoritative tier is the router's S3.2
@@ -119,8 +141,47 @@ const REASONER_HINTS = ["32b", "reason", "r1", "sonnet", "medium", "70b", "deeps
  *
  * @sem domain=observability role=ingestion
  */
+/**
+ * Authoritative tier from the router's agent name — the correct source when it is known
+ * (the live tier-router tags each turn's message with its agent). Prefer this over inferTier:
+ * econ's reasoner and oracle share one model (glm-5.2), so `inferTier(model)` cannot tell them
+ * apart, but the agent name can. conductor/executor are the cheap tiers; reasoner/oracle are large.
+ * Returns "unknown" for any non-econ agent so the caller can fall back to inferTier(model).
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function tierFromAgent(agent: string): UsageTier {
+  switch (agent) {
+    case "conductor":
+    case "executor":
+      return "cheap"
+    case "reasoner":
+      return "reasoner"
+    case "oracle":
+      return "oracle"
+    default:
+      return "unknown"
+  }
+}
+
 export function inferTier(model: string): UsageTier {
   const m = model.toLowerCase()
+  // econ's tiers pin specific models (opencode.json), so recognise them authoritatively before
+  // the generic name heuristic — whose substrings collide on econ's actual ids: deepseek-v4-flash
+  // matches both "flash" (cheap) and "deepseek" (reasoner) and would misclassify the cheap
+  // conductor as a large tier; glm-5.2 (the oracle/reasoner model) matches no generic hint at all.
+  // Resolved through the model registry (not hard-coded ids) so a model swap in ECON_TIER_BINDING
+  // is a one-line change there, not a second edit here.
+  const econKey = resolveEconModelKey(m)
+  if (econKey) {
+    const tiers = tiersForModel(econKey)
+    if (tiers.length > 0) {
+      // A model may back multiple tiers (glm-5.2 → reasoner AND oracle) — pick the highest so the
+      // receipt's large-tier share stays conservative.
+      const best = tiers.reduce((a, b) => (ECON_TIER_RANK[b] > ECON_TIER_RANK[a] ? b : a))
+      return usageTierForEconTier(best)
+    }
+  }
   if (ORACLE_HINTS.some((h) => m.includes(h))) return "oracle"
   if (REASONER_HINTS.some((h) => m.includes(h))) return "reasoner"
   if (CHEAP_HINTS.some((h) => m.includes(h))) return "cheap"

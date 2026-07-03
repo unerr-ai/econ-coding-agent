@@ -17,6 +17,24 @@ the template in §10 and, if it wins a role, update §1.
 
 ---
 
+## Current configuration
+
+| Tier | Model | Provider | Context window | Max output | Reasoning | Cost (in / cached-in / out, $/1M) |
+|---|---|---|---|---|---|---|
+| conductor | DeepSeek V4 Flash | openrouter | 1,000,000 | 8,192 | OFF | 0.14 / 0.03 / 0.28 |
+| executor | gpt-oss-20b | openrouter | 131,072 | 8,192 | ON (effort low, trace hidden) | 0 / 0 / 0 (self-hosted) |
+| reasoner | GLM 5.2 | openrouter | 200,000 | 8,192 | ON (effort high, trace hidden) | 1.4 / 0.14 / 4.4 |
+| oracle | GLM 5.2 | openrouter | 200,000 | 8,192 | ON (effort high, trace hidden) | 1.4 / 0.14 / 4.4 |
+
+- **Reasoner and oracle share the glm-5.2 model** — they differ by how the router invokes them, not by model.
+- **All tiers served via OpenRouter** → Fireworks BYOK.
+- **Tier↔model binding is abstract and swappable** by config in `packages/code-intelligence/src/model-registry.ts` (ECON_TIER_BINDING) — e.g. the executor is planned to swap to NVIDIA Nemotron 3 (OL-M.1) by changing one binding line.
+- **Capability values held consistent** with `opencode.json` by `model-registry.test.ts`.
+
+**Last updated: 2026-07-03**
+
+---
+
 ## 1. The decision (what we are building with)
 
 | Role (plain name) | Model | What it does | Why it won |

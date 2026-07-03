@@ -42,7 +42,6 @@ import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Select } from "@opencode-ai/ui/select"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { ModelSelectorPopover } from "@/components/dialog-select-model"
 import { useCommand } from "@/context/command"
 import { Persist, persisted } from "@/utils/persist"
 import { usePermission } from "@/context/permission"
@@ -1373,8 +1372,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     }
   }
 
-  const agentsLoading = () => props.controls.agents.loading
-  const agentsShouldFadeIn = createMemo((prev) => prev ?? agentsLoading())
   const providersLoading = () => props.controls.model.loading
   const providersShouldFadeIn = createMemo((prev) => prev ?? providersLoading())
 
@@ -1387,23 +1384,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     if (store.mode === "shell") return placeholder()
     return "Ask anything, / for commands, @ for context..."
   }
-
-  const modelControlState = createMemo<ComposerModelControlState>(() => ({
-    loading: providersLoading(),
-    paid: props.controls.model.paid,
-    title: language.t("command.model.choose"),
-    keybind: command.keybind("model.choose"),
-    model: props.controls.model.selection,
-    providerID: props.controls.model.selection.current()?.provider?.id,
-    modelName: props.controls.model.selection.current()?.name ?? language.t("dialog.model.select.title"),
-    style: control(),
-    onClose: restoreFocus,
-    onUnpaidClick: () => {
-      void import("@/components/dialog-select-model-unpaid").then((x) => {
-        dialog.show(() => <x.DialogSelectModelUnpaid model={props.controls.model.selection} />)
-      })
-    },
-  }))
 
   const newSession = () => props.variant === "new-session"
   const projects = createMemo(() => props.controls.projects.available)
@@ -1420,7 +1400,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     if (!search) return projects()
     return projects().filter((project) => displayName(project).toLowerCase().includes(search))
   })
-  const showAgentControl = createMemo(() => props.controls.agents.visible && props.controls.agents.options.length > 0)
   const selectProject = (worktree: string) => {
     setPicker({
       projectOpen: false,
@@ -1471,17 +1450,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     onSearchInput: (value) => setPicker("projectSearch", value),
     onSearchClear: () => setPicker("projectSearch", ""),
     searchRef: (el) => (projectSearchRef = el),
-  }))
-  const agentControlState = createMemo<ComposerAgentControlState>(() => ({
-    title: language.t("command.agent.cycle"),
-    keybind: command.keybind("agent.cycle"),
-    options: props.controls.agents.options,
-    current: props.controls.agents.current,
-    style: control(),
-    onSelect: (value) => {
-      props.controls.agents.select(value)
-      restoreFocus()
-    },
   }))
   const newProjectTriggerState = createMemo<ComposerPickerTriggerState>(() => ({
     action: "prompt-project",
@@ -1619,13 +1587,9 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                       aria-label={language.t("prompt.action.attachFile")}
                     />
                   </TooltipKeybind>
-                  <Show when={showAgentControl()}>
-                    <ComposerAgentControl state={agentControlState()} />
-                  </Show>
                   <Show when={newSession() && !selectedProject()}>
                     <ComposerPickerTrigger state={newProjectTriggerState()} />
                   </Show>
-                  <ComposerModelControl state={modelControlState()} />
                   <Show when={store.mode !== "shell" && showVariantControl()}>
                     <div
                       data-component="prompt-variant-control"
@@ -1874,114 +1838,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                     </Button>
                   </div>
                   <div class="flex items-center gap-1.5 min-w-0 flex-1 h-7">
-                    <Show when={!agentsLoading()}>
-                      <div
-                        data-component="prompt-agent-control"
-                        style={agentsShouldFadeIn() ? { animation: "fade-in 0.3s" } : undefined}
-                      >
-                        <TooltipKeybind
-                          placement="top"
-                          gutter={4}
-                          title={language.t("command.agent.cycle")}
-                          keybind={command.keybind("agent.cycle")}
-                        >
-                          <Select
-                            size="normal"
-                            options={props.controls.agents.options}
-                            current={props.controls.agents.current}
-                            onSelect={(value) => {
-                              props.controls.agents.select(value)
-                              restoreFocus()
-                            }}
-                            class="capitalize max-w-[160px] text-text-base"
-                            valueClass="truncate text-13-regular text-text-base"
-                            triggerStyle={control()}
-                            triggerProps={{ "data-action": "prompt-agent" }}
-                            variant="ghost"
-                          />
-                        </TooltipKeybind>
-                      </div>
-                    </Show>
                     <Show when={!providersLoading()}>
                       <Show when={store.mode !== "shell"}>
-                        <div
-                          data-component="prompt-model-control"
-                          style={providersShouldFadeIn() ? { animation: "fade-in 0.3s" } : undefined}
-                        >
-                          <Show
-                            when={props.controls.model.paid}
-                            fallback={
-                              <TooltipKeybind
-                                placement="top"
-                                gutter={4}
-                                title={language.t("command.model.choose")}
-                                keybind={command.keybind("model.choose")}
-                              >
-                                <Button
-                                  data-action="prompt-model"
-                                  as="div"
-                                  variant="ghost"
-                                  size="normal"
-                                  class="min-w-0 max-w-[320px] text-13-regular text-text-base group"
-                                  style={control()}
-                                  onClick={() => {
-                                    void import("@/components/dialog-select-model-unpaid").then((x) => {
-                                      dialog.show(() => (
-                                        <x.DialogSelectModelUnpaid model={props.controls.model.selection} />
-                                      ))
-                                    })
-                                  }}
-                                >
-                                  <Show when={props.controls.model.selection.current()?.provider?.id}>
-                                    <ProviderIcon
-                                      id={props.controls.model.selection.current()?.provider?.id ?? ""}
-                                      class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                                      style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                                    />
-                                  </Show>
-                                  <span class="truncate">
-                                    {props.controls.model.selection.current()?.name ??
-                                      language.t("dialog.model.select.title")}
-                                  </span>
-                                  <Icon name="chevron-down" size="small" class="shrink-0" />
-                                </Button>
-                              </TooltipKeybind>
-                            }
-                          >
-                            <TooltipKeybind
-                              placement="top"
-                              gutter={4}
-                              title={language.t("command.model.choose")}
-                              keybind={command.keybind("model.choose")}
-                            >
-                              <ModelSelectorPopover
-                                model={props.controls.model.selection}
-                                triggerAs={Button}
-                                triggerProps={{
-                                  variant: "ghost",
-                                  size: "normal",
-                                  style: control(),
-                                  class: "min-w-0 max-w-[320px] text-13-regular text-text-base group",
-                                  "data-action": "prompt-model",
-                                }}
-                                onClose={restoreFocus}
-                              >
-                                <Show when={props.controls.model.selection.current()?.provider?.id}>
-                                  <ProviderIcon
-                                    id={props.controls.model.selection.current()?.provider?.id ?? ""}
-                                    class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                                    style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                                  />
-                                </Show>
-                                <span class="truncate">
-                                  {props.controls.model.selection.current()?.name ??
-                                    language.t("dialog.model.select.title")}
-                                </span>
-                                <Icon name="chevron-down" size="small" class="shrink-0" />
-                              </ModelSelectorPopover>
-                            </TooltipKeybind>
-                          </Show>
-                        </div>
                         <Show when={showVariantControl()}>
                           <div
                             data-component="prompt-variant-control"
@@ -2053,28 +1911,6 @@ type ComposerPickerState = {
   onOpenChange: (open: boolean) => void
   onSearchInput: (value: string) => void
   onSearchClear: () => void
-}
-
-type ComposerAgentControlState = {
-  title: string
-  keybind: string
-  options: string[]
-  current: string
-  style: JSX.CSSProperties | undefined
-  onSelect: (value: string | undefined) => void
-}
-
-type ComposerModelControlState = {
-  loading: boolean
-  paid: boolean
-  title: string
-  keybind: string
-  model: ReturnType<typeof useLocal>["model"]
-  providerID?: string
-  modelName: string
-  style: JSX.CSSProperties | undefined
-  onClose: () => void
-  onUnpaidClick: () => void
 }
 
 function ComposerPickerTrigger(props: ComponentProps<"button"> & { state: ComposerPickerTriggerState }) {
@@ -2161,88 +1997,3 @@ function ComposerPicker(props: { state: ComposerPickerState }) {
   )
 }
 
-function ComposerAgentControl(props: { state: ComposerAgentControlState }) {
-  return (
-    <div class="relative">
-      <div class="pointer-events-none absolute left-2 top-1/2 z-10 flex size-4 -translate-y-1/2 items-center justify-center text-v2-icon-icon-muted">
-        <Icon name="sliders" size="small" />
-      </div>
-      <TooltipKeybind placement="top" gutter={4} title={props.state.title} keybind={props.state.keybind}>
-        <Select
-          size="normal"
-          options={props.state.options}
-          current={props.state.current}
-          onSelect={props.state.onSelect}
-          class="max-w-[175px] justify-start text-v2-text-text-faint [&_[data-component=icon]]:text-v2-icon-icon-muted"
-          valueClass="truncate pl-5 text-[13px] font-[440] leading-5 text-v2-text-text-faint"
-          triggerStyle={props.state.style}
-          triggerProps={{ "data-action": "prompt-agent" }}
-          variant="ghost"
-        />
-      </TooltipKeybind>
-    </div>
-  )
-}
-
-function ComposerModelControl(props: { state: ComposerModelControlState }) {
-  return (
-    <Show when={!props.state.loading}>
-      <Show
-        when={props.state.paid}
-        fallback={
-          <TooltipKeybind placement="top" gutter={4} title={props.state.title} keybind={props.state.keybind}>
-            <Button
-              data-action="prompt-model"
-              as="div"
-              variant="ghost"
-              size="normal"
-              class="min-w-0 max-w-[220px] justify-start text-[13px] font-[440] leading-5 text-v2-text-text-faint group"
-              style={props.state.style}
-              onClick={props.state.onUnpaidClick}
-            >
-              <Show when={props.state.providerID}>
-                {(providerID) => (
-                  <ProviderIcon
-                    id={providerID()}
-                    class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                    style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                  />
-                )}
-              </Show>
-              <span class="truncate">{props.state.modelName}</span>
-              <Icon name="chevron-down" size="small" class="shrink-0 text-v2-icon-icon-muted" />
-            </Button>
-          </TooltipKeybind>
-        }
-      >
-        <TooltipKeybind placement="top" gutter={4} title={props.state.title} keybind={props.state.keybind}>
-          <ModelSelectorPopover
-            model={props.state.model}
-            triggerAs={Button}
-            triggerProps={{
-              variant: "ghost",
-              size: "normal",
-              style: props.state.style,
-              class:
-                "min-w-0 max-w-[220px] justify-start text-[13px] font-[440] leading-5 text-v2-text-text-faint group",
-              "data-action": "prompt-model",
-            }}
-            onClose={props.state.onClose}
-          >
-            <Show when={props.state.providerID}>
-              {(providerID) => (
-                <ProviderIcon
-                  id={providerID()}
-                  class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                  style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                />
-              )}
-            </Show>
-            <span class="truncate">{props.state.modelName}</span>
-            <Icon name="chevron-down" size="small" class="shrink-0 text-v2-icon-icon-muted" />
-          </ModelSelectorPopover>
-        </TooltipKeybind>
-      </Show>
-    </Show>
-  )
-}

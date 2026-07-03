@@ -13,7 +13,7 @@
 
 // Z1 — resolved via tsconfig paths alias (no bun install needed during dev;
 // add "workspace:*" dep to package.json before shipping)
-import { BunSqliteGraph, makeReconTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool } from "@opencode-ai/code-intelligence"
+import { BunSqliteGraph, makeReconTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, computeTurnRisk, type Entity } from "@opencode-ai/code-intelligence"
 
 import * as Tool from "./tool"
 import { Effect, Schema } from "effect"
@@ -57,6 +57,99 @@ export async function ensureGraphReady(): Promise<BunSqliteGraph> {
   const graph = getGraph()
   if (_indexReady) await _indexReady
   return graph
+}
+
+/** Top entities the turn-open risk probe scores for the prompt (the focus set). */
+const RISK_PROBE_ENTITY_LIMIT = 8
+/**
+ * The risk probe waits at most this long for the initial index before falling
+ * back to 0. Turn-open latency must not hostage a whole-repo index — a cold
+ * graph simply yields no risk signal that turn and warms for the next.
+ */
+const RISK_PROBE_INDEX_BUDGET_MS = 3000
+/** Prompt tokens below this length aren't worth a graph lookup. */
+const RISK_TOKEN_MIN_LEN = 4
+/** Bound the number of tokens the probe searches, capping turn-open latency. */
+const RISK_MAX_TOKENS = 12
+/**
+ * Generic english/coding words that would match unrelated hubs and inflate risk
+ * for prompts that don't actually target dangerous code. Symbol-shaped tokens
+ * (routeTurn, computeRisk, Tool) survive; connectives and verbs don't.
+ */
+const RISK_TOKEN_STOPLIST = new Set([
+  "this", "that", "then", "with", "from", "into", "your", "there", "here", "when", "what", "which",
+  "please", "make", "change", "update", "refactor", "implement", "function", "class", "method",
+  "file", "files", "code", "test", "tests", "type", "types", "value", "return", "async", "await",
+])
+
+/**
+ * Identifier-shaped tokens worth resolving against the graph. Splits on
+ * non-identifier characters and dotted refs (Tool.define → Tool, define), drops
+ * short tokens and the stoplist, dedupes case-insensitively, and caps the count.
+ *
+ * @sem domain=routing role=analysis
+ */
+function candidateRiskTokens(prompt: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of prompt.split(/[^A-Za-z0-9_.]+/)) {
+    for (const tok of raw.split(".")) {
+      const t = tok.trim()
+      if (t.length < RISK_TOKEN_MIN_LEN) continue
+      const lower = t.toLowerCase()
+      if (RISK_TOKEN_STOPLIST.has(lower) || seen.has(lower)) continue
+      seen.add(lower)
+      out.push(t)
+      if (out.length >= RISK_MAX_TOKENS) return out
+    }
+  }
+  return out
+}
+
+/**
+ * OL-3.3: code-structural risk for one live turn, 0–100. Resolves the prompt's
+ * identifier-shaped tokens to graph entities and scores their blast-radius /
+ * fan-in / centrality with computeTurnRisk — pure structural signal, no
+ * prompt-text classification. Fully defensive: a cold graph, an index that
+ * exceeds the latency budget, no matching entities, or any error all yield 0,
+ * and the router falls back to its prompt-heaviness signal. Never throws — a
+ * risk probe must not break a turn.
+ *
+ * @sem domain=routing role=analysis
+ */
+export async function probeTurnRisk(prompt: string): Promise<number> {
+  try {
+    const graph = getGraph()
+    // Bound the wait on the initial index: skip risk this turn rather than block
+    // turn-open on a full-repo index.
+    if (_indexReady) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const budget = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), RISK_PROBE_INDEX_BUDGET_MS)
+      })
+      try {
+        const raced = await Promise.race([_indexReady.then(() => "ready" as const), budget])
+        if (raced === "timeout") return 0
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+    // graph.search matches symbol names, not sentences — resolve each candidate
+    // token and union the matches, capped at the focus limit.
+    const byName = new Map<string, Entity>()
+    for (const tok of candidateRiskTokens(prompt)) {
+      for (const e of await graph.search(tok, 3)) {
+        if (!byName.has(e.name)) byName.set(e.name, e)
+        if (byName.size >= RISK_PROBE_ENTITY_LIMIT) break
+      }
+      if (byName.size >= RISK_PROBE_ENTITY_LIMIT) break
+    }
+    if (byName.size === 0) return 0
+    const turn = await computeTurnRisk(graph, [...byName.values()])
+    return turn?.score ?? 0
+  } catch {
+    return 0
+  }
 }
 
 // ---------------------------------------------------------------------------

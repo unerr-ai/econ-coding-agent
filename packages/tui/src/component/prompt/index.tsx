@@ -160,7 +160,6 @@ export function Prompt(props: PromptProps) {
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
-  const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
   const renderer = useRenderer()
   const exit = useExit()
@@ -1669,11 +1668,6 @@ export function Prompt(props: PromptProps) {
                           {[item().context, item().cost].filter(Boolean).join(" · ")}
                         </text>
                       )}
-                    </Match>
-                    <Match when={true}>
-                      <text fg={theme.text}>
-                        {agentShortcut()} <span style={{ fg: theme.textMuted }}>agents</span>
-                      </text>
                     </Match>
                   </Switch>
                   <text fg={theme.text}>

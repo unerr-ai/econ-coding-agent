@@ -60,6 +60,8 @@ export const AgentSwitched = EventV2.define({
     ...Base,
     messageID: SessionMessageID.ID,
     agent: Schema.String,
+    // Absent means "system" (router/system-initiated switch).
+    source: Schema.Literals(["system", "user"]).pipe(Schema.optional),
   },
 })
 export type AgentSwitched = typeof AgentSwitched.Type
@@ -71,6 +73,8 @@ export const ModelSwitched = EventV2.define({
     ...Base,
     messageID: SessionMessageID.ID,
     model: ModelV2.Ref,
+    // Absent means "system" (router/system-initiated switch).
+    source: Schema.Literals(["system", "user"]).pipe(Schema.optional),
   },
 })
 export type ModelSwitched = typeof ModelSwitched.Type

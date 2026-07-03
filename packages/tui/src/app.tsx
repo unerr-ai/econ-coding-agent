@@ -37,13 +37,11 @@ import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
 import { LocationProvider } from "./context/location"
 import { LocalProvider, useLocal } from "./context/local"
-import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
-import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
 import { DialogConsoleOrg } from "./component/dialog-console-org"
@@ -100,15 +98,7 @@ const appGlobalBindingCommands = [
 
 const appBindingCommands = [
   "command.palette.show",
-  "model.list",
-  "model.cycle_recent",
-  "model.cycle_recent_reverse",
-  "model.cycle_favorite",
-  "model.cycle_favorite_reverse",
-  "agent.list",
   "mcp.list",
-  "agent.cycle",
-  "agent.cycle.reverse",
   "variant.cycle",
   "variant.list",
   "provider.connect",
@@ -616,78 +606,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       })),
       {
-        name: "model.list",
-        title: "Switch model",
-        suggested: true,
-        category: "Agent",
-        slashName: "models",
-        // Bias /mo toward /models over /move without changing global fuzzy scoring.
-        slashAliases: ["mo"],
-        run: () => {
-          dialog.replace(() => <DialogModel />)
-        },
-      },
-      {
-        name: "model.cycle_recent",
-        title: "Model cycle",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.model.cycle(1)
-        },
-      },
-      {
-        name: "model.cycle_recent_reverse",
-        title: "Model cycle reverse",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.model.cycle(-1)
-        },
-      },
-      {
-        name: "model.cycle_favorite",
-        title: "Favorite cycle",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.model.cycleFavorite(1)
-        },
-      },
-      {
-        name: "model.cycle_favorite_reverse",
-        title: "Favorite cycle reverse",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.model.cycleFavorite(-1)
-        },
-      },
-      {
-        name: "agent.list",
-        title: "Switch agent",
-        category: "Agent",
-        slashName: "agents",
-        run: () => {
-          dialog.replace(() => <DialogAgent />)
-        },
-      },
-      {
         name: "mcp.list",
         title: "Toggle MCPs",
         category: "Agent",
         slashName: "mcps",
         run: () => {
           dialog.replace(() => <DialogMcp />)
-        },
-      },
-      {
-        name: "agent.cycle",
-        title: "Agent cycle",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.agent.move(1)
         },
       },
       {
@@ -713,15 +637,6 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             })
           }
           dialog.replace(() => <DialogVariant />)
-        },
-      },
-      {
-        name: "agent.cycle.reverse",
-        title: "Agent cycle reverse",
-        category: "Agent",
-        hidden: true,
-        run: () => {
-          local.agent.move(-1)
         },
       },
       {

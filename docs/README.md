@@ -6,7 +6,8 @@ Docs are organized by **feature**, not by sprint. Four layers, outermost first:
 docs/
 ├── architecture/   the system-design narrative (what we're building, and why it fits together)
 │   ├── ECON_ARCHITECTURE.md   + diagrams/ (TikZ figures)
-│   └── SELF_ORCHESTRATION_PLAN.md   sprint/task plan for the self-orchestrating agent loop
+│   ├── SELF_ORCHESTRATION_PLAN.md   sprint/task plan for the self-orchestrating agent loop
+│   └── DECOMPOSITION_ORCHESTRATION_PLAN.md   detailed plan: decomposition-first (risk → one feature)
 ├── features/       how each feature is built on the forked OpenCode base — seams + status
 ├── design/         deeper per-topic design notes the features draw on
 └── strategy/       the business case — positioning, economics, market
@@ -29,7 +30,12 @@ framing plus an "Under the hood" track. TikZ figures live in
 [architecture/diagrams/](./architecture/diagrams/). Alongside it,
 [SELF_ORCHESTRATION_PLAN.md](./architecture/SELF_ORCHESTRATION_PLAN.md) is the sprint/task plan for
 moving econ to a self-orchestrating agent loop (models switch themselves; context managed per switch)
-— grounded in the current codebase and the checked-out Claude Code source.
+— grounded in the current codebase and the checked-out Claude Code source. Its next direction,
+[DECOMPOSITION_ORCHESTRATION_PLAN.md](./architecture/DECOMPOSITION_ORCHESTRATION_PLAN.md), is the
+detailed engineering plan for the **decomposition-first** reframe: the conductor splits a task into
+typed slices and allocates each to the cheapest capable tier (execute-cheap-then-verify, escalate only
+failures), with whole-turn *risk* demoted from the routing decision to one per-slice feature —
+grounded in the 2026-07 model/reasoning/cost research (F1–F8).
 
 ### `features/` — the build docs
 One doc per feature area (foundations → conductor core → context engine → router → model team

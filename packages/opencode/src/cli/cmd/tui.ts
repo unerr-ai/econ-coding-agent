@@ -77,11 +77,6 @@ export const TuiThreadCommand = cmd({
         type: "string",
         describe: "path to start opencode in",
       })
-      .option("model", {
-        type: "string",
-        alias: ["m"],
-        describe: "model to use in the format of provider/model",
-      })
       .option("continue", {
         alias: ["c"],
         describe: "continue the last session",
@@ -99,10 +94,6 @@ export const TuiThreadCommand = cmd({
       .option("prompt", {
         type: "string",
         describe: "prompt to use",
-      })
-      .option("agent", {
-        type: "string",
-        describe: "agent to use",
       })
       .option("mini", {
         type: "boolean",
@@ -149,8 +140,9 @@ export const TuiThreadCommand = cmd({
         continue: args.continue,
         session: args.session,
         fork: args.fork,
-        model: args.model,
-        agent: args.agent,
+        // OL-4.1: no user-facing --model/--agent flags; router auto-selects.
+        model: undefined,
+        agent: undefined,
         prompt: args.prompt,
         replay: noReplay ? false : undefined,
         replayLimit: args.replayLimit,
@@ -268,8 +260,9 @@ export const TuiThreadCommand = cmd({
             args: {
               continue: args.continue,
               sessionID: args.session,
-              agent: args.agent,
-              model: args.model,
+              // OL-4.1: no user-facing --agent/--model flags; router auto-selects.
+              agent: undefined,
+              model: undefined,
               prompt,
               fork: args.fork,
             },

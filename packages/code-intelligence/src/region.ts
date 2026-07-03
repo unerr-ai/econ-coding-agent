@@ -126,8 +126,10 @@ export const DEFAULT_RESIDENCY_POLICY: ResidencyPolicy = {
  */
 export const DEFAULT_REGION_CONFIG: RegionConfig = {
   residency: DEFAULT_RESIDENCY_POLICY,
+  // Tier→model bindings must match ECON_TIER_BINDING in model-registry.ts (the authoritative
+  // source of truth) and opencode.json; model-registry.test.ts guards the two against drift.
   tiers: {
-    conductor: [{ providerId: "openrouter", model: "qwen/qwen3.7-plus", region: "global" }],
+    conductor: [{ providerId: "openrouter", model: "deepseek/deepseek-v4-flash", region: "global" }],
     oracle: [{ providerId: "openrouter", model: "z-ai/glm-5.2", region: "global" }],
     reasoner: [
       // Shares the oracle model (GLM 5.2) for now — see opencode.json reasoner agent.

@@ -46,14 +46,19 @@ export function provider(model: Provider.Model) {
 const ECON_TIERS = new Set(["conductor", "executor", "oracle", "reasoner"])
 
 // Per-tier behavioral deltas (Sprint 5b §10.3). Short by design: the shared core carries the bulk;
-// each delta states only what is distinct about that tier so the cached prefix stays lean. The
-// oracle "compiled-brief" assembly path is intentionally NOT built here — it depends on a runtime
-// risk-escalation router that is not yet wired (tiers are static agent defs).
+// each delta states only what is distinct about that tier so the cached prefix stays lean. Tier
+// selection is now live: the tier-router (tier-router.ts, OL-3.1/3.2) reassigns the turn's agent at
+// the createUserMessage seam, so a hard turn is served by the reasoner/oracle rather than the pinned
+// conductor. The oracle "compiled-brief" assembly (brief.ts) is built + unit-tested but not on the
+// live path yet — it awaits a live unerrd recon client for its slices (same blocker as OL-3.3).
 const TIER_DELTA: Record<string, string> = {
   conductor: [
-    "# econ conductor (default engineer)",
-    "You are the default tier. Plan the task, decide each step, and hold the working context across turns.",
-    "Route brainless, read-only, or scoped-mechanical slices to the executor via the `task` tool; keep architecture, public interfaces, cross-cutting wiring, and bug root-causing on your own thread, then review and integrate each result.",
+    "# econ conductor (default engineer — you orchestrate the whole turn)",
+    "You are the default tier and the orchestrator. You do not just answer — you run a loop every non-trivial turn: understand, plan, delegate, verify, then respond. Hold the working context across turns.",
+    "1. Recon first, then meta-plan. On an unfamiliar or high-blast-radius turn, spawn read-only recon (find / trace / map the affected code and its callers) via the `task` tool BEFORE you plan — fan out several in parallel when the areas are independent, and plan from the consolidated digests, not from assumptions. Then, before editing anything on a non-trivial turn, state in one or two lines what the user is really asking and how you will approach it — grounded in the session so far and the recon. Skip recon and this step only for a trivial one-step answer.",
+    "2. Externalise the plan. For any task of three or more steps, call `todowrite` to write the task list BEFORE you start executing. Mark a task `in_progress` before you begin it and `completed` the moment it is done; add follow-ups the instant you discover them. The list is your plan of record, not a log written after the fact.",
+    "3. Delegate by default. Route read-only recon (find / trace / map, audits, codebase Q&A) and scoped, mechanical slices to the executor via the `task` tool — spawn them in parallel when the slices are independent. Keep only what needs your judgement on your own thread: architecture, public interfaces, cross-cutting wiring, and bug root-causing. Give each sub-agent the task plus a one-line pointer, never a pasted transcript; review and integrate each returned digest before building on it.",
+    "4. Verify before you claim done. Non-trivial implementation is not finished until it is independently verified — delegate a scoped verify (typecheck + the targeted tests + lint) and read the result before you report completion. Never report success on unverified or failing work.",
     "Prefer the cheapest path that does the job well, and keep context lean.",
   ].join("\n"),
   executor: [

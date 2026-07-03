@@ -1552,6 +1552,87 @@ describe("session.compaction.process", () => {
   )
 })
 
+// OL-5.4 / AC-6.1 — long-horizon compaction must preserve the plan +
+// execution frontier: the active plan (the latest todowrite call) is
+// protected content (see isProtectedToolPart/earliestProtectedIndex in
+// compaction.ts's select()), so `select()` pulls the tail boundary back to
+// keep it out of `head` even when it would otherwise fall inside the
+// summarized region. Locks that guarantee down end-to-end: a todowrite plan
+// set early in a session must never reach the summarizer's input and must
+// remain the recorded tail boundary after compaction.
+describe("session.compaction — AC-6.1 protected plan survives compaction", () => {
+  itCompaction.instance(
+    "keeps the active todowrite plan out of the LLM summary input and as the retained tail boundary",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(
+        reply("summary", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const test = yield* TestInstance
+        const session = yield* ssn.create({})
+
+        const u1 = yield* createUserMessage(session.id, "older context")
+        const a1 = yield* createAssistantMessage(session.id, u1.id, test.directory)
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: a1.id,
+          sessionID: session.id,
+          type: "tool",
+          callID: crypto.randomUUID(),
+          tool: "todowrite",
+          state: {
+            status: "completed",
+            input: { todos: [{ content: "PIN-TODO-MARKER: finish the migration", status: "in_progress" }] },
+            output: "[]",
+            title: "todos",
+            metadata: {},
+            time: { start: Date.now(), end: Date.now() },
+          },
+        })
+
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createUserMessage(session.id, "and this one too")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        // The plan must never be flattened into what the summarizer sees.
+        expect(captured).not.toContain("PIN-TODO-MARKER")
+
+        // select() pulled the tail boundary back to the plan's own message so
+        // it is retained verbatim rather than summarized away.
+        const part = yield* readCompactionPart(session.id)
+        expect(part?.tail_start_id).toBe(a1.id)
+
+        // The raw todowrite part itself survives, unpruned, in the session's
+        // retained messages.
+        const after = yield* ssn.messages({ sessionID: session.id })
+        const planPart = after
+          .flatMap((m) => m.parts)
+          .find((p): p is SessionV1.ToolPart => p.type === "tool" && p.tool === "todowrite")
+        expect(planPart).toBeTruthy()
+        if (planPart?.state.status === "completed") {
+          expect(planPart.state.time.compacted).toBeUndefined()
+          expect(planPart.state.output).toBe("[]")
+        }
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+  )
+})
+
 // AC-1.8 — min_turns_before_compact: compact() must not spend an LLM
 // summarize call on a brand-new auto-triggered session, but must still allow
 // it once the session has accumulated enough turns. Uses a tiny-context

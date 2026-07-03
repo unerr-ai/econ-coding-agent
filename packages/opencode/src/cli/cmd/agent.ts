@@ -52,16 +52,10 @@ const AgentCreateCommand = effectCmd({
         type: "string",
         alias: ["tools"],
         describe: `comma-separated list of permissions to allow (default: all). Available: "${AVAILABLE_PERMISSIONS.join(", ")}"`,
-      })
-      .option("model", {
-        type: "string",
-        alias: ["m"],
-        describe: "model to use in the format of provider/model",
       }),
   handler: Effect.fn("Cli.agent.create")(function* (args) {
     const { InstanceRef } = yield* Effect.promise(() => import("@/effect/instance-ref"))
     const { Agent } = yield* Effect.promise(() => import("../../agent/agent"))
-    const { Provider } = yield* Effect.promise(() => import("@/provider/provider"))
     const maybeCtx = yield* InstanceRef
     if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
     const ctx = maybeCtx
@@ -128,8 +122,9 @@ const AgentCreateCommand = effectCmd({
       // Generate agent
       const spinner = prompts.spinner()
       spinner.start("Generating agent configuration...")
-      const model = args.model ? Provider.parseModel(args.model) : undefined
-      const generated = await runLocalEffect(agentSvc.generate({ description, model })).catch((error) => {
+      // OL-4.1: no user-facing --model flag; Agent.generate falls back to the
+      // provider's default model when none is supplied.
+      const generated = await runLocalEffect(agentSvc.generate({ description })).catch((error) => {
         spinner.stop(`LLM failed to generate agent: ${error.message}`, 1)
         if (isFullyNonInteractive) process.exit(1)
         throw new UI.CancelledError()

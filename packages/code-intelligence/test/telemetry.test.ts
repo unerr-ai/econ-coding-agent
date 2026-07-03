@@ -16,6 +16,7 @@ import {
   TelemetryStore,
   emitUsageEvent,
   inferTier,
+  tierFromAgent,
   installUsageSink,
   EfficiencyMetrics,
 } from "../src/telemetry.ts"
@@ -91,6 +92,18 @@ describe("inferTier", () => {
   it("cheap: small", () => expect(inferTier("phi-small-128k")).toBe("cheap"))
   it("cheap: lite", () => expect(inferTier("mixtral-lite")).toBe("cheap"))
 
+  // econ's pinned tier models (opencode.json) — recognised authoritatively before the generic
+  // heuristic, whose substrings collide on these ids. Regression guard for the savings-receipt bug
+  // where a cheap conductor turn was mislabelled a large tier (deepseek-v4-flash matched "deepseek").
+  it("econ conductor: deepseek-v4-flash is cheap (not reasoner via 'deepseek')", () =>
+    expect(inferTier("deepseek/deepseek-v4-flash")).toBe("cheap"))
+  it("econ executor: gpt-oss-20b is cheap (not unknown)", () =>
+    expect(inferTier("openai/gpt-oss-20b")).toBe("cheap"))
+  it("econ oracle/reasoner: glm-5.2 is a large tier (not unknown)", () =>
+    expect(inferTier("z-ai/glm-5.2")).toBe("oracle"))
+  it("generic deepseek (non-flash) stays reasoner", () =>
+    expect(inferTier("deepseek-chat")).toBe("reasoner"))
+
   // fallback
   it("unknown: unrecognised model", () =>
     expect(inferTier("my-custom-model-v1")).toBe("unknown"))
@@ -100,6 +113,17 @@ describe("inferTier", () => {
 // ---------------------------------------------------------------------------
 // emitUsageEvent
 // ---------------------------------------------------------------------------
+
+describe("tierFromAgent", () => {
+  // #110: authoritative tier from the router's agent name — reasoner and oracle share glm-5.2,
+  // so this is the only signal that tells them apart (inferTier(model) cannot).
+  it("conductor is cheap", () => expect(tierFromAgent("conductor")).toBe("cheap"))
+  it("executor is cheap", () => expect(tierFromAgent("executor")).toBe("cheap"))
+  it("reasoner is reasoner (not oracle)", () => expect(tierFromAgent("reasoner")).toBe("reasoner"))
+  it("oracle is oracle", () => expect(tierFromAgent("oracle")).toBe("oracle"))
+  it("non-econ agent is unknown (caller falls back to inferTier)", () =>
+    expect(tierFromAgent("build")).toBe("unknown"))
+})
 
 describe("emitUsageEvent", () => {
   it("returns a normalised UsageEvent with correct fields", () => {

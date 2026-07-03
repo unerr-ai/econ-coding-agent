@@ -117,7 +117,7 @@
       "env": ["OPENROUTER_API_KEY"],
       "models": {
         "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true } } },
-        "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle/reasoner)", "limit": { "context": 200000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true } } },
+        "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle/reasoner)", "reasoning": true, "limit": { "context": 200000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "high", "exclude": true } } },
         "openai/gpt-oss-20b": { "name": "gpt-oss-20b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "low", "exclude": true } } }
       }
     }

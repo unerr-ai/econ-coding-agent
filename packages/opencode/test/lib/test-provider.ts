@@ -1,15 +1,18 @@
 // Shared provider config for tests that need opencode to talk to a fake LLM
 // over a real HTTP endpoint. Registers a single provider `test` with a single
-// model `test-model` (i.e. `--model test/test-model`), pointed at the URL the
-// caller supplies (typically a TestLLMServer instance).
+// model `test-model`, pointed at the URL the caller supplies (typically a
+// TestLLMServer instance). Also sets the top-level `model` field (the same
+// "provider/modelID" string `--model` used to take) so the binary resolves a
+// model with no CLI flag — see `Provider.defaultModel` (`cfg.model`).
 //
 // Used by:
-//   - test/lib/run-process.ts          (subprocess CLI tests)
+//   - test/lib/cli-process.ts          (subprocess CLI tests)
 //   - test/server/httpapi-sdk.test.ts  (in-process SDK tests)
-export function testProviderConfig(llmUrl: string) {
+export function testProviderConfig(llmUrl: string, modelID: string = "test/test-model") {
   return {
     formatter: false,
     lsp: false,
+    model: modelID,
     provider: {
       test: {
         name: "Test",

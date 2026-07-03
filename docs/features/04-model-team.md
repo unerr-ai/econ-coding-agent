@@ -547,6 +547,108 @@ and full prompt (role + task + digest contract).
 
 ---
 
+## Provider / serving arbitrage (OL-M.2)
+
+**Research date:** 2026-07-03 | **Status:** researched — decision pending
+
+econ's current tiers run on Fireworks BYOK (Bring Your Own Key) via OpenRouter. This section
+compares per-token pricing across providers for each tier and evaluates the trade-off between
+cost savings (via managed services) and operational control (BYOK). Data sourced from live
+provider APIs and aggregators (treat as directional — pricing fluctuates).
+
+### Conductor tier: DeepSeek-V4-Flash
+
+| Provider | Input $/M | Output $/M | Notes |
+|----------|-----------|-----------|-------|
+| **DeepInfra** | $0.10 | $0.20 | Lowest cost; Asia-friendly latency |
+| **OpenRouter** | $0.10 | $0.20 | Routing flexibility; cache support |
+| **Novita** | $0.14 | $0.28 | Markup-free pass-through of base rates |
+| **Fireworks (BYOK, current)** | $0.14 | $0.28 | Data residency + managed reliability |
+| **DeepSeek Direct** | $0.14 | $0.28 | Highest latency; needs direct setup |
+
+**Arbitrage:** DeepInfra and OpenRouter are **−29% cheaper** than current Fireworks BYOK
+($0.10/$0.20 vs $0.14/$0.28 per M tokens). Over a large session volume (e.g. 1B input tokens/month),
+that gap compounds to ~$40k/month savings. Fireworks adds ~15–20ms latency offset via prompt caching
+(up to 90% cache hit reduction) on repeated prefixes; DeepInfra lacks this in published docs.
+
+**Trade-offs:**
+- **Managed (DeepInfra, OpenRouter):** lower cost, simpler ops, no data-residency guarantees; India
+  region not guaranteed.
+- **BYOK (Fireworks):** data stays in your region/account, SLA / reliability controls, prompt caching
+  leverage (critical for the oracle hop — see oracle tier below).
+
+**Recommendation for conductor:** Trial **DeepInfra** for cost. If <100M input tokens/month, the
+−29% wins decisively. Above that volume, measure Fireworks' prompt-cache hit-rate on real oracle
+prefixes (OL-3.7); if cache sustains >60% hit, the caching edge may offset the token-cost gap. Keep
+BYOK as fallback for data-residency gate (post-POC decision).
+
+### Executor tier: gpt-oss-20b
+
+| Provider | Input $/M | Output $/M | Notes |
+|----------|-----------|-----------|-------|
+| **DeepInfra** | $0.03 | $0.14 | Lowest managed cost |
+| **OpenAI Direct** | $0.03 | $0.14 | Direct access; no aggregator markup |
+| **Novita** | $0.04 | $0.15 | Small markup; reliable uptime |
+| **Together.ai** | $0.05 | $0.20 | Managed floor; documented SLA |
+| **Self-host (assumed)** | $0 | $0 | Only profitable >50–100M tok/mo on amortized GPU (~$0.001–0.003/M real cost) |
+
+**Arbitrage:** Managed providers cluster at $0.03–0.05 input / $0.14–0.20 output. Self-hosting at
+assumed $0 cost is aspirational unless monthly volume sustains $5k+/month GPU amortization. For
+POC scale (≤50M tok/mo), **Together.ai at $0.05/$0.20** is a reliable managed floor.
+
+**Trade-offs:**
+- **Cheapest managed (DeepInfra $0.03/$0.14):** no SLA published; batch-mode inference dominates.
+- **Managed with SLA (Together.ai $0.05/$0.20):** slightly higher cost, documented uptime; lower
+  latency variance.
+- **Self-host:** requires GPU provisioning, model serving ops, and cold-start mitigation. Break-even
+  calculation (OL-M.3) must account for real GPU cost, not assumed zero.
+
+**Recommendation for executor:** Use **Together.ai** ($0.05/$0.20) as the managed floor for the POC
+(OL-1.4 verification gate absorbs any lower first-pass accuracy). Defer self-hosting until
+monthly volume justifies the ops lift. A future executor model swap (OL-M.1 to NVIDIA Nemotron 3)
+will narrow cost diff but increase self-host appeal.
+
+### Oracle tier: GLM-5.2
+
+| Aspect | Rate | Notes |
+|--------|------|-------|
+| **Standard read (OpenRouter)** | $1.40 input / $4.40 output | Unbuffered, per-request |
+| **Cached-read (OpenRouter)** | $0.26 / M tokens | −81% discount vs standard input; reusable prefix |
+| **Break-even:** | | Cache hit-rate must stay >60% for oracle to remain cheaper than reasoner (see [03-risk-router](03-risk-router.md)) |
+
+**The oracle's leverage is cache, not per-token cost.** GLM-5.2 is expensive at every provider
+($1.40/$4.40) and no cheaper model in its capability tier exists. The **compiled brief** (OL-2.2)
+is the critical optimization: a stable, prefix-shared input that hits the cached-read tier on every
+oracle hop. Without cache discipline, a single oracle request costs $1400 / 1M + $4400 / 1M output
+tokens; with a 1M-token stable prefix and cache-hit, the input drops to $260 / M (80% savings on the
+prefix alone).
+
+**Trade-offs:**
+- **Prompt caching enabled:** requires orchestrator to pin the brief format and tool definitions at
+  the prefix boundary (OL-3.7 / OL-5.3); one cache miss resets the 1M-token window.
+- **Stateless oracle over cached prefix (topology):** the oracle never sees the raw transcript,
+  only the compiled brief — cache-hit rate hinges on brief stability + deterministic serialization.
+
+**Recommendation for oracle:** Keep GLM-5.2 on OpenRouter with **mandatory cache-hit tracking**
+(OL-3.7 + OL-6.2). Measure cache-hit-rate on real runs; if <40%, escalate cost-reduction to Lever B
+(OL-2.2 brief serialization) before considering a model swap. The −81% cached-read is the single
+largest lever on oracle cost and is fully in econ's control via orchestration.
+
+### Decision: move forward with provider arbitrage (Wave 2)
+
+**Immediate (POC):** Pilot DeepInfra for conductor and Together.ai for executor, keep OpenRouter
+for oracle (due to prompt-caching support and GLM-5.2 availability). Measure actual cost vs
+projected; if gap >10%, assess BYOK return.
+
+**Post-POC decision gates:**
+- Conductor: cache-hit-rate on Fireworks BYOK oracle hops vs DeepInfra latency trade-off.
+- Executor: monthly token volume and self-host break-even (OL-M.3).
+- Oracle: cache-hit tracking (OL-M.4) to validate the −81% leverage.
+
+See [SELF_ORCHESTRATION_PLAN.md](../architecture/SELF_ORCHESTRATION_PLAN.md) § OL-M for integration sequencing and cost-model updates.
+
+---
+
 ## Tests
 
 Verification for this feature spans all four sub-areas; see each `Done-when` above for the

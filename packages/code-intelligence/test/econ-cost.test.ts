@@ -8,7 +8,15 @@
  */
 
 import { describe, it, expect } from "bun:test"
-import { econStepCost, econModelLabel, ECON_COST_MATRIX } from "../src/econ-cost.ts"
+import {
+  econStepCost,
+  econModelLabel,
+  ECON_COST_MATRIX,
+  executorMarginalCostPerMTokens,
+  executorBreakEvenMonthlyTokens,
+  executorEffectiveCost,
+  EXECUTOR_BREAK_EVEN_DEFAULTS,
+} from "../src/econ-cost.ts"
 import type { EconTokens } from "../src/econ-cost.ts"
 
 describe("econStepCost", () => {
@@ -119,5 +127,106 @@ describe("econModelLabel", () => {
 
   it("passes an unknown modelID through unchanged", () => {
     expect(econModelLabel("some/unknown-model")).toBe("some/unknown-model")
+  })
+})
+
+describe("executor self-host break-even model (OL-M.3)", () => {
+  it("ships sensible default parameters", () => {
+    expect(EXECUTOR_BREAK_EVEN_DEFAULTS).toEqual({
+      fixedMonthlyCostUsd: 500,
+      managedFloorLowUsdPerM: 0.05,
+      managedFloorHighUsdPerM: 0.2,
+    })
+  })
+
+  it("below break-even: self-host costs far more than the managed floor at low volume", () => {
+    const rate = executorMarginalCostPerMTokens(200_000) // 200K tok/mo
+    expect(rate).toBeCloseTo(2500.0, 10)
+    expect(rate).toBeGreaterThan(EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorHighUsdPerM)
+    expect(rate).toBeGreaterThan(EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorLowUsdPerM)
+  })
+
+  it("at realistic volumes (50-100M tok/mo) self-host is still well above the managed floor", () => {
+    const at50M = executorMarginalCostPerMTokens(50_000_000)
+    const at100M = executorMarginalCostPerMTokens(100_000_000)
+    expect(at50M).toBeCloseTo(10.0, 10)
+    expect(at100M).toBeCloseTo(5.0, 10)
+    // a managed endpoint wins at these volumes — self-host is nowhere near the floor yet
+    expect(at50M).toBeGreaterThan(EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorHighUsdPerM)
+    expect(at100M).toBeGreaterThan(EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorHighUsdPerM)
+    // self-host only nears the low managed floor at multi-billion tok/mo (near full card utilization)
+    const atMultiBillion = executorMarginalCostPerMTokens(10_000_000_000)
+    expect(atMultiBillion).toBeCloseTo(EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorLowUsdPerM, 10)
+  })
+
+  it("rises sharply as volume approaches zero and is Infinity at zero/negative volume", () => {
+    expect(executorMarginalCostPerMTokens(0)).toBe(Infinity)
+    expect(executorMarginalCostPerMTokens(-1)).toBe(Infinity)
+    const veryLow = executorMarginalCostPerMTokens(10_000) // 10K tok/mo
+    const low = executorMarginalCostPerMTokens(1_000_000) // 1M tok/mo
+    expect(veryLow).toBeGreaterThan(low)
+  })
+
+  it("computes the crossover point against the low managed floor by default", () => {
+    const crossover = executorBreakEvenMonthlyTokens()
+    expect(crossover).toBeCloseTo(10_000_000_000, 6) // 10B tok/mo
+    // at the crossover, self-host cost exactly matches the comparison floor
+    const rateAtCrossover = executorMarginalCostPerMTokens(crossover)
+    expect(rateAtCrossover).toBeCloseTo(
+      EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorLowUsdPerM,
+      10,
+    )
+  })
+
+  it("computes the crossover point against the high managed floor at the default fixed cost", () => {
+    const crossover = executorBreakEvenMonthlyTokens({
+      managedRateUsdPerM: EXECUTOR_BREAK_EVEN_DEFAULTS.managedFloorHighUsdPerM,
+    })
+    expect(crossover).toBeCloseTo(2_500_000_000, 6) // 2.5B tok/mo
+  })
+
+  it("computes the crossover point against a custom managed rate and fixed cost", () => {
+    const crossover = executorBreakEvenMonthlyTokens({
+      fixedMonthlyCostUsd: 1,
+      managedRateUsdPerM: 0.2,
+    })
+    expect(crossover).toBeCloseTo(5_000_000, 6)
+  })
+
+  it("executorEffectiveCost returns a non-zero honest figure the matrix's $0 hides", () => {
+    const tokens: EconTokens = {
+      input: 500_000,
+      output: 200_000,
+      reasoning: 0,
+      cache: { read: 100_000, write: 50_000 },
+    }
+    // the matrix keeps pricing the executor at exactly $0 regardless of volume
+    expect(econStepCost({ modelID: "openai/gpt-oss-20b", tokens })).toBe(0)
+
+    const atHighVolume = executorEffectiveCost({ monthlyTokens: 100_000_000, tokens })
+    const atLowVolume = executorEffectiveCost({ monthlyTokens: 200_000, tokens })
+    expect(atHighVolume).toBeGreaterThan(0)
+    expect(atLowVolume).toBeGreaterThan(atHighVolume)
+
+    const total = 500_000 + 200_000 + 0 + 100_000 + 50_000
+    // rate at 100M tok/mo = 500 / (100M / 1e6) = 5.0 $/M
+    const expectedAtHighVolume = (total * 5.0) / 1_000_000
+    expect(atHighVolume).toBeCloseTo(expectedAtHighVolume, 10)
+  })
+
+  it("executorEffectiveCost honors custom break-even options", () => {
+    const tokens: EconTokens = {
+      input: 1_000_000,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    }
+    const cost = executorEffectiveCost({
+      monthlyTokens: 10_000_000,
+      tokens,
+      opts: { fixedMonthlyCostUsd: 2 },
+    })
+    // rate = 2 / (10_000_000 / 1e6) = 0.2 $/M
+    expect(cost).toBeCloseTo((1_000_000 * 0.2) / 1_000_000, 10)
   })
 })
