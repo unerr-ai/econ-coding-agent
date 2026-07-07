@@ -1886,9 +1886,21 @@ export const layer = Layer.effect(
                           ModelV2.ID.make(m.modelID),
                         )
                         const language = yield* provider.getLanguage(resolved)
+                        const startedAt = Date.now()
                         const out = yield* Effect.promise(() =>
                           generateText({ model: language, prompt: judgePrompt, maxOutputTokens: 400, temperature: 0 }),
                         )
+                        // OL-7.8 observability: a fired judge sample was otherwise
+                        // indistinguishable from a skipped one in the decode — one
+                        // line per sample closes that gap.
+                        yield* Effect.logInfo("judge_sampled", {
+                          "session.id": sessionID,
+                          tier: judgeTier.tier,
+                          modelID: m.modelID,
+                          elapsedMs: Date.now() - startedAt,
+                          inputTokens: out.usage?.inputTokens ?? 0,
+                          outputTokens: out.usage?.outputTokens ?? 0,
+                        })
                         return out.text
                       }),
                     )
@@ -2099,6 +2111,20 @@ export const layer = Layer.effect(
               // digests, never the raw transcript. The conductor then RELAYS it: the
               // cheap tier keeps the session, the capable tier writes the artifact.
               const outcomes = orch.engaged ? (orch.result?.outcomes ?? []) : []
+              // OL-7.8 observability: one line per settled slice — the verifier
+              // rung that decided it is otherwise only visible by replaying the
+              // ladder, not from the run log.
+              for (const outcome of outcomes) {
+                yield* Effect.logInfo("slice_settled", {
+                  "session.id": sessionID,
+                  sliceId: outcome.id,
+                  state: outcome.state,
+                  tier: outcome.tier,
+                  verification: outcome.verification,
+                  rung: outcome.verdict.rung,
+                  attempts: outcome.attempts,
+                })
+              }
               // F1/§8 — a pre-pass-only engagement (the seeded frame slice —
               // localization or planner — and nothing else) produced a FRAME
               // for the turn, not a final answer: relay it as the working
