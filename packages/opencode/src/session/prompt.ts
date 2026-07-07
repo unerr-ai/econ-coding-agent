@@ -394,7 +394,14 @@ export const layer = Layer.effect(
               Effect.orDie,
             ),
         )
-      return yield* Effect.promise(() => runTurnTriage({ userPrompt, complete }))
+      let parseRetried = false
+      const verdict = yield* Effect.promise(() =>
+        runTurnTriage({ userPrompt, complete, onParseRetry: () => (parseRetried = true) }),
+      )
+      // The retry itself lives in runTurnTriage; this line only makes a
+      // formerly-silent extraction flake decodable from the run log.
+      if (parseRetried) yield* Effect.logInfo("turn_triage_retry", { reason: "parse" })
+      return verdict
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {

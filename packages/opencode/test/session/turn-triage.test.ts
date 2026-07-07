@@ -227,6 +227,79 @@ describe("runTurnTriage", () => {
     const verdict = await runTurnTriage({ userPrompt: "Fix the profile-name bug.", complete })
     expect(verdict).toBeNull()
   })
+
+  test("a parse failure then a valid second response returns the verdict, retries once, and fires onParseRetry once", async () => {
+    const userPrompt = "Fix the profile-name bug."
+    const validRaw = JSON.stringify({
+      goals: [
+        {
+          quote: "Fix the profile-name bug.",
+          shape: "diagnosis-grounded",
+          deliverable: "profile name displays correctly",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    let callCount = 0
+    const complete: TriageComplete = async () => {
+      callCount++
+      return callCount === 1 ? "{not valid json" : validRaw
+    }
+    let retryCount = 0
+    const verdict = await runTurnTriage({
+      userPrompt,
+      complete,
+      onParseRetry: () => {
+        retryCount++
+      },
+    })
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals).toHaveLength(1)
+    expect(callCount).toBe(2)
+    expect(retryCount).toBe(1)
+  })
+
+  test("two parse failures return null, calling complete twice and firing onParseRetry exactly once", async () => {
+    let callCount = 0
+    const complete: TriageComplete = async () => {
+      callCount++
+      return "{not valid json"
+    }
+    let retryCount = 0
+    const verdict = await runTurnTriage({
+      userPrompt: "Fix the profile-name bug.",
+      complete,
+      onParseRetry: () => {
+        retryCount++
+      },
+    })
+
+    expect(verdict).toBeNull()
+    expect(callCount).toBe(2)
+    expect(retryCount).toBe(1)
+  })
+
+  test("a rejected complete callback resolves to null without retrying", async () => {
+    let callCount = 0
+    const complete: TriageComplete = async () => {
+      callCount++
+      throw new Error("provider unavailable")
+    }
+    let retryCount = 0
+    const verdict = await runTurnTriage({
+      userPrompt: "Fix the profile-name bug.",
+      complete,
+      onParseRetry: () => {
+        retryCount++
+      },
+    })
+
+    expect(verdict).toBeNull()
+    expect(callCount).toBe(1)
+    expect(retryCount).toBe(0)
+  })
 })
 
 describe("triageTelemetry", () => {

@@ -199,6 +199,8 @@ export type TriageComplete = (request: TriageCompleteRequest) => Promise<string>
 export interface RunTurnTriageInput {
   readonly userPrompt: string
   readonly complete: TriageComplete
+  /** Fired when a completed attempt fails parse validation and the one retry launches — the caller's telemetry hook (case-3 tierfire3 decode: a silent null closed the whole decomposition path with no trace of why). */
+  readonly onParseRetry?: () => void
 }
 
 async function raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -215,25 +217,34 @@ async function raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 /**
  * Run the turn-triage call: one forced-schema request on the conductor tier,
- * `TRIAGE_TIMEOUT_MS` blocking cap, extraction-only system prompt. Returns
- * `null` on timeout, a rejected `complete`, or a verdict that fails
- * `parseTriageResponse`'s validation — the caller falls back to
+ * `TRIAGE_TIMEOUT_MS` blocking cap, extraction-only system prompt. A completed
+ * attempt that fails `parseTriageResponse`'s validation retries ONCE (case-3
+ * tierfire3: one extraction flake nulled the verdict and silently closed the
+ * whole decomposition path — a ~4s re-ask is cheap insurance); timeout or a
+ * rejected `complete` never retries — that budget is already spent, and
+ * stacking a second blocking wait on a slow gateway doubles the turn-open
+ * stall. Returns `null` when both attempts fail — the caller falls back to
  * `classifyTurnShape` in every `null` case (§1.1 rule 3), never here.
  *
  * @sem domain=routing role=extractor
  */
 export async function runTurnTriage(input: RunTurnTriageInput): Promise<TriageVerdict | null> {
   const { userPrompt, complete } = input
-  let raw: string
-  try {
-    raw = await raceTimeout(
-      complete({ system: TRIAGE_SYSTEM_PROMPT, user: userPrompt, timeoutMs: TRIAGE_TIMEOUT_MS }),
-      TRIAGE_TIMEOUT_MS,
-    )
-  } catch {
-    return null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let raw: string
+    try {
+      raw = await raceTimeout(
+        complete({ system: TRIAGE_SYSTEM_PROMPT, user: userPrompt, timeoutMs: TRIAGE_TIMEOUT_MS }),
+        TRIAGE_TIMEOUT_MS,
+      )
+    } catch {
+      return null
+    }
+    const verdict = parseTriageResponse(raw, userPrompt)
+    if (verdict) return verdict
+    if (attempt === 0) input.onParseRetry?.()
   }
-  return parseTriageResponse(raw, userPrompt)
+  return null
 }
 
 // ---------------------------------------------------------------------------
