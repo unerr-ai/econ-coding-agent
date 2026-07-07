@@ -44,5 +44,7 @@ export const migrations = (
     import("./migration/20260627000001_s1_3_canonical_state"),
     // OL-7.1b: todo slice_meta column (typed decomposition tags)
     import("./migration/20260703140820_add_todo_slice_meta"),
+    // U2: todo parent_id column (turn-open goal-tree skeleton)
+    import("./migration/20260706172829_add_todo_parent_id"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

@@ -1960,6 +1960,12 @@ export const layer = Layer.effect(
                         : readOnly
                           ? "LANE: this slice is READ-ONLY (reconnaissance/verification). Do NOT create, edit, or write any file — file-mutation tools are disabled for this session. Run commands and read code as needed, and deliver your findings as text."
                           : "",
+                      // Case-2 tierfire3 attempt B: a budget-capped judgment slice
+                      // died with its analysis unwritten and the dimension came back
+                      // empty. The watchdog reads back whatever text exists — so the
+                      // brief demands incremental delivery, mirroring the frame
+                      // slices' budget-discipline line.
+                      "Budget discipline: your tool-call budget is HARD — a watchdog ends the session at the cap and keeps only the text you have already written. Write your deliverable INCREMENTALLY as evidence lands (partial findings first, refine as you go); reserve your final steps to complete it. A partial deliverable written beats a perfect one unwritten.",
                       repoPrimer,
                       renderSliceDigestLedger(completedSliceDigests),
                       parentTask ? `## Parent task (context only — do ONLY your slice)\n${parentTask}` : "",

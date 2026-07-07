@@ -58,17 +58,27 @@ const SLICE_WIRING_GRAPH_BUDGET_MS = 500
  * metadata, so the child doesn't have to re-guess the coupling. Graph access
  * is capped at SLICE_WIRING_GRAPH_BUDGET_MS so a cold/slow graph never delays the spawn
  * past that bound, and degrades silently to the prompt unchanged on any
- * timeout, error, missing metadata, or empty wiring.
+ * timeout, error, missing metadata, or empty wiring. The graph singleton is
+ * resolved lazily AFTER the no-metadata early return — a JS default parameter
+ * evaluates before the body, so `= getGraph()` was kicking off a full-repo
+ * background index on every sliceless spawn (and starving the event loop in
+ * the wiring tests).
  *
  * @sem domain=infrastructure role=digest
  */
 export async function buildChildPrompt(
   prompt: string,
   slice: TaskSliceMetadata | undefined,
-  graph: SliceWiringGraph = getGraph(),
+  graph?: SliceWiringGraph,
 ): Promise<string> {
   if (!slice) return prompt
+  // ECON_SLICE_WIRING kill switch — checked BEFORE the graph singleton is
+  // resolved so switching wiring off also switches off the background index
+  // it would spin up.
+  const wiringSwitch = process.env["ECON_SLICE_WIRING"]
+  if (wiringSwitch === "false" || wiringSwitch === "0") return prompt
   try {
+    const wiringGraph = graph ?? getGraph()
     const input: SliceWiringInput = {
       text: prompt,
       files: slice.files,
@@ -81,7 +91,7 @@ export async function buildChildPrompt(
       timer = setTimeout(() => resolve("timeout"), SLICE_WIRING_GRAPH_BUDGET_MS)
     })
     try {
-      const raced = await Promise.race([assembleSliceWiring(input, graph), budget])
+      const raced = await Promise.race([assembleSliceWiring(input, wiringGraph), budget])
       if (raced === "timeout" || !raced.text) return prompt
       return [prompt, raced.text].join("\n\n")
     } finally {

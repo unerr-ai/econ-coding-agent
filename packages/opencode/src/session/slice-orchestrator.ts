@@ -542,6 +542,11 @@ const MECHANICAL_START = /^\s*(implement|fix|apply|add|wire|rename|refactor|writ
 // into its own checklists. Stripped before body-level keyword classification
 // in autoTypeTodos; identity on untagged content.
 const TODO_TAG_RE = /^\s*\[[^\]\n]{1,24}\]\s*/
+// The closing decision item of an audit list — the one that consumes the other
+// dimensions ("FINAL VERDICT — SHIP or DO NOT SHIP", "APPROVE or REJECT").
+// Deliberately narrow: per-dimension "sign off on X" items must NOT match,
+// only the final decision does.
+const VERDICT_SHAPED_RE = /\bverdict\b|\bship or do not ship\b|\bapprove or reject\b|\bfinal\s+sign.?off\b/i
 // Defect-shaped item openers — the repair subset of the imperative verbs.
 // Deliberately excludes implement/add/build/etc so an ordinary build list
 // (the run-20 T2 shape) never reads as a bug turn.
@@ -845,6 +850,60 @@ export function diagnosisPrepassSeed(userPrompt: string): InjectedSliceTodo {
   return isHardDiagnosisPrompt(userPrompt) ? PLANNER_PREPASS_TODO : LOCALIZATION_PREPASS_TODO
 }
 
+/** Engine-authored frame-seed contents (the localization/planner pre-pass) — typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
+const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLANNER_SLICE_CONTENT])
+
+/**
+ * Todowrite-boundary reconcile net (case-2 tierfire3 double-wave decode): slice
+ * settlement is monotonic — a conductor rewrite of the todo list cannot
+ * resurrect a settled slice or drop an engine-planted frame seed. Two nets in
+ * one seam: (a) an incoming item whose content matches a stored typed slice
+ * keeps the stored slice fields, and a settled (terminal) stored status
+ * overrides the incoming one, so a stale re-emission of the plan list can no
+ * longer un-complete paid-for slices and re-trigger a full dispatch wave;
+ * (b) a stored typed slice the incoming list omits is re-appended when it is
+ * settled (settlement memory survives omission) or when it is a frame seed
+ * (the case-1 skeleton-clobber race). An unstarted conductor-authored slice
+ * omitted by the rewrite stays dropped — that is a legitimate re-plan.
+ *
+ * @sem domain=routing role=router
+ */
+export function reconcileSettledSlices<T extends OrchestrationTodo, S extends OrchestrationTodo>(
+  incoming: readonly T[],
+  existing: readonly S[],
+): (T | S)[] {
+  const storedTyped = new Map<string, S>()
+  for (const t of existing) {
+    if (!isTypedSlice(t)) continue
+    const key = t.content.trim()
+    if (!storedTyped.has(key)) storedTyped.set(key, t)
+  }
+  if (storedTyped.size === 0) return [...incoming]
+
+  const incomingKeys = new Set(incoming.map((t) => t.content.trim()))
+  const merged: (T | S)[] = incoming.map((t) => {
+    const stored = storedTyped.get(t.content.trim())
+    if (!stored) return t
+    const patch: { sliceType?: string; need?: string; deps?: readonly string[]; persona?: string; status?: string } =
+      {}
+    if (stored.sliceType !== undefined) patch.sliceType = stored.sliceType
+    if (stored.need !== undefined) patch.need = stored.need
+    if (stored.deps !== undefined) patch.deps = stored.deps
+    if (stored.persona !== undefined) patch.persona = stored.persona
+    if (TERMINAL_TODO_STATUSES.has(stored.status)) patch.status = stored.status
+    return { ...t, ...patch } as T
+  })
+  for (const [key, stored] of storedTyped) {
+    if (incomingKeys.has(key)) continue
+    if (!TERMINAL_TODO_STATUSES.has(stored.status) && !FRAME_SEED_CONTENTS.has(stored.content)) continue
+    // Re-appended at the tail as a root item — a stored parentID indexed the
+    // OLD list's positions and must not point into the rewritten one.
+    const { parentID: _stale, ...rest } = stored as S & { parentID?: number }
+    merged.push(rest as S)
+  }
+  return merged
+}
+
 // ---------------------------------------------------------------------------
 // U1/U2 — turn triage: preamble + goal-tree skeleton
 // (docs/architecture/ORCHESTRATION_MECHANISM.md §1.1, §1.2, §4.1, §4.5)
@@ -1028,7 +1087,10 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * Three guards keep run 8 buried: a list the conductor typed itself is never
  * touched; a list with any build/mechanical-shaped active item (a build turn)
  * is never judgment-typed — it takes the build branch below instead; and
- * non-pending items are never retyped.
+ * terminal-status items are never retyped. One deliberate exception (case-2
+ * tierfire3 attempt B): an in_progress JUDGMENT item is a conductor inline
+ * claim — the run-20 self-grade hole — so it types and dispatches anyway;
+ * in_progress check-runs stay with the conductor.
  *
  * One structural exception on the build-turn branch — the diagnosis pre-pass
  * (SWE-bench django-11964/11885 decode): when a build turn is bug-shaped (a
@@ -1041,7 +1103,8 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * conductor's own checklist, never a second workhorse. Existing items are
  * never edited or reordered (append-only: `todo_N` positional deps must not
  * shift), and the injected slice is typed, so a second pass exits on the
- * typed-list guard — one injection per list, ever. Engagement, allocation,
+ * active-DAG guard while the seed is live and a content check keeps the
+ * injection one-shot after it settles. Engagement, allocation,
  * lanes, and attempt caps all stay with the existing OL-9.5 machinery
  * downstream.
  *
@@ -1050,8 +1113,9 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * shape requires NO build-shaped active item, so an audit list never reaches
  * the build branch; the diagnosis pre-pass requires NO active file target
  * while the net requires two decided-change targets, so the two build-side
- * nets are disjoint; and a list the conductor typed itself exits at the top
- * guard before any net runs — self-typing, when it happens, wins.
+ * nets are disjoint; and a list carrying a live (non-settled) conductor-typed
+ * slice exits at the top guard before any net runs — self-typing, when it
+ * happens, wins, but settled slices are history and never mute the nets.
  *
  * §4.2 rule 4 (venue affinity, U2, conservative v1): after a net above would
  * type the batch, a result of <= VENUE_INLINE_MAX_ITEMS items with no `need`
@@ -1062,18 +1126,24 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * @sem domain=routing role=router
  */
 export function autoTypeTodos<T extends OrchestrationTodo>(todos: readonly T[]): (T | InjectedSliceTodo)[] {
-  if (todos.some(isTypedSlice)) return [...todos]
+  // Active-DAG guard: only a non-settled typed slice marks a conductor DAG in
+  // flight. Settled typed slices are history reconcileSettledSlices re-stuck —
+  // they must not disable typing for the turn's next phase.
+  if (todos.some(isDispatchableSlice)) return [...todos]
   const active = todos.filter((t) => !TERMINAL_TODO_STATUSES.has(t.status))
   const typed = ((): (T | InjectedSliceTodo)[] => {
     if (active.some((t) => MECHANICAL_START.test(t.content) || isDecidedChange(t))) {
       const bugShaped = todos.some((t) => t.status === "pending" && DIAGNOSIS_START.test(t.content))
       const localized = active.some((t) => FILE_TARGET_RE.test(t.content))
-      if (bugShaped && !localized) {
+      // The content check keeps injection one-shot now that a SETTLED seed no
+      // longer trips the top guard: a list already carrying the seed (any
+      // status) falls through to plan-first typing instead of paying twice.
+      if (bugShaped && !localized && !todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
         return [...todos, LOCALIZATION_PREPASS_TODO]
       }
       return typeBuildPlan(todos)
     }
-    return todos.map((t) => {
+    const mapped = todos.map((t) => {
       // A leading bracket tag ("[audit] …", "[verdict] …") is presentation the
       // triage preamble taught the conductor, not content (case-2 tierfire3
       // decode: the suite run priced at reasoner because the tag's literal
@@ -1083,19 +1153,40 @@ export function autoTypeTodos<T extends OrchestrationTodo>(todos: readonly T[]):
       // audit-tagged list. The tag still counts as a judgment signal for items
       // whose body carries no keyword at all ("[verdict] SHIP or DO NOT SHIP").
       const body = t.content.replace(TODO_TAG_RE, "")
-      if (t.status !== "pending" || MECHANICAL_START.test(body)) return t
+      // An in_progress judgment item is a conductor CLAIM, and inline judgment
+      // claims are the run-20 self-grade hole — observed flaking in case-2
+      // tierfire3 attempt B (claimed, never executed, cancelled at turn close).
+      // Decision-shaped ambiguity rounds UP: the claim dispatches anyway.
+      // Check-runs stay pending-only — a run the conductor is actually
+      // executing inline must not double-run.
+      const claimable = t.status === "pending" || t.status === "in_progress"
+      if (!claimable || MECHANICAL_START.test(body)) return t
       if (!JUDGMENT_KEYWORDS.test(body) && !TEST_AUTHORING_RE.test(body) && VERIFY_RUN_KEYWORDS.test(body))
-        return { ...t, sliceType: "verify" }
+        return t.status === "pending" ? { ...t, sliceType: "verify" } : t
       if (JUDGMENT_KEYWORDS.test(t.content)) return { ...t, sliceType: "verify", need: "reasoner" }
-      if (VERIFY_RUN_KEYWORDS.test(t.content)) return { ...t, sliceType: "verify" }
+      if (VERIFY_RUN_KEYWORDS.test(t.content)) return t.status === "pending" ? { ...t, sliceType: "verify" } : t
       return t
     })
+    // The closing verdict is decision-shaped — it consumes the other
+    // dimensions' results, yet judgment typing used to emit a dep-less DAG and
+    // the verdict slice launched blind in wave 1 (case-2 tierfire3 attempt B,
+    // identical creation timestamps). A deps-less verdict-shaped typed item
+    // gains deps on every other newly-typed sibling; conductor-authored deps
+    // always win.
+    const dimensionIds = mapped
+      .filter((t) => isDispatchableSlice(t) && !VERDICT_SHAPED_RE.test(t.content))
+      .map((t) => t.content)
+    return mapped.map((t) =>
+      isTypedSlice(t) && t.deps === undefined && VERDICT_SHAPED_RE.test(t.content) && dimensionIds.length > 0
+        ? { ...t, deps: dimensionIds }
+        : t,
+    )
   })()
   // §4.2 rule 4 (venue affinity, conservative v1): a typed candidate set this
   // small, with nothing pinned above the conductor, earns nothing from a
   // spawn (§1.3) — leave it untyped so the conductor executes it inline
   // instead of paying a child's brief-compile + cold-cache-write cost.
-  const newlyTyped = typed.filter(isTypedSlice)
+  const newlyTyped = typed.filter(isDispatchableSlice)
   if (newlyTyped.length > 0 && newlyTyped.length <= VENUE_INLINE_MAX_ITEMS && newlyTyped.every((t) => !t.need)) {
     return [...todos]
   }

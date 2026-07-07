@@ -161,6 +161,14 @@ cost paths verified ratio 1.00 in every run):
   verification missed the system python3.12 that attempt B had found (behavioral
   asserts only; suite confirmed post-hoc by the harness), and the root goal todo was
   left pending at run end despite the delivered fix.
+- **Regression re-run (2026-07-07, binary 202607070458): outcome PASS, door closed
+  by a race.** Gold-equivalent patch in enums.py, 411 tests zero regressions, $0.0414 /
+  33 turns / 985k tok / cache 91.7% — cheapest correct run of the series. Mechanism
+  note: triage + round-up + seed all fired, but the conductor's first todowrite
+  REPLACED the turn-open skeleton (clobbering the typed localization seed) before the
+  slice loop engaged, then solved it inline anyway. Open engine item: frame seeds
+  should survive list-replacement writes (preserve-frame-slices at the todowrite
+  boundary); accepted as non-blocking per user direction (outcome bar).
 
 ### Case 2 — multi-dimension audit of a subtly-unsound fix → door 2 (judgment typing → reasoner)
 
@@ -181,6 +189,40 @@ cost paths verified ratio 1.00 in every run):
 - **Verdict:** the judgment door works and pays for itself — this planted flaw shipped
   clean past the suite and was caught only here. No judge rung (slices named no files →
   untestable·low-coupling → qe): correct per matrix.
+- **Observed (2026-07-07 tierfire3, 3 attempts): door OPEN and hardened — PASS on
+  attempt C (binary 202607070458).** Attempt A ($1.56): audit substance the strongest
+  yet (caught the planted asymmetric drop PLUS the stale-refinement-on-overridden-key
+  unsoundness `.extend()` guards against), but the suite item priced at reasoner — the
+  conductor mirrored the triage preamble's `[audit]` tag style into todo names and the
+  tag's literal "audit" judgment-typed a pure check-run. Fixed: tag-aware
+  classification in `autoTypeTodos` (TODO_TAG_RE). Attempt B ($1.00): suite item on
+  the executor runner ✓, but 2 of 4 dimensions came back cancelled — soundness was
+  claimed inline (`in_progress`) and never executed; posture starved at the reasoner
+  step cap with nothing written; and the verdict slice launched blind in the same
+  wave as the dimensions (dep-less judgment DAG). Fixed: (D1) verdict-shaped items
+  dep-gate on typed siblings (VERDICT_SHAPED_RE), (D2) in_progress judgment claims
+  type and dispatch anyway, (D3) slice briefs demand incremental delivery. Side
+  catches while fixing: the todo `parent_id` migration was unregistered (fresh-DB
+  installs broken — schema.gen.ts + migration.gen.ts fixed) and `buildChildPrompt`'s
+  default param spun the repo graph index on every sliceless spawn and ignored the
+  ECON_SLICE_WIRING kill switch (both fixed; the flaky cold-graph wiring test now
+  passes 5/5 in 2s). Attempt C ($1.21, 81 turns, 0 escalations): ALL 5 items
+  completed, none cancelled — soundness/edge-cases/posture/verdict on reasoner, suite
+  on the executor runner (full 3689-test run, $0.0033), synthesis on oracle; the
+  verdict slice launched 200s after the dimension wave (dep gate live); verdict DO
+  NOT SHIP on 3 independent grounds incl. new chained-merge and shared-reference
+  aliasing findings; zero arena edits (gate honored). Minor note: triage read the
+  turn as run-only (goalCount=1) — the structural todowrite-boundary typing carried
+  the door regardless, which is the designed layering.
+- **Regression re-run (2026-07-07, binary 202607070458): outcome PASS, one efficiency
+  anomaly.** Verdict DO NOT SHIP catching the dropped-`b` flaw with 7 live repro
+  tests (new key-overlap+refinement finding) and the exact correct fix
+  (concatenate both operands' checks); all 5 items completed; verdict dep-gated
+  (+240s after dimensions); suite on executor. BUT the whole 6-slice wave dispatched
+  TWICE (second round ~17min in, same titles, both rounds completed) → $2.5796 /
+  172 turns / 6.19M tok — 2.1× attempt C. A milder relative of the run-8
+  never-settled re-dispatch: root-cause the re-engagement that re-dispatched settled
+  slices. 0 escalations, cache 80.2%.
 
 ### Case 3 — audit naming untested + tangled files → door 3 (oracle residual + judge sampler)
 

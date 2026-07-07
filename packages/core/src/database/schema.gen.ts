@@ -220,6 +220,7 @@ export default {
           \`priority\` text NOT NULL,
           \`position\` integer NOT NULL,
           \`slice_meta\` text,
+          \`parent_id\` integer,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           CONSTRAINT \`todo_pk\` PRIMARY KEY(\`session_id\`, \`position\`),

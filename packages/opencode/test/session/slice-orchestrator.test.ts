@@ -24,6 +24,7 @@ import {
   hasPendingTypedSlices,
   shouldOrchestrate,
   autoTypeTodos,
+  reconcileSettledSlices,
   LOCALIZATION_SLICE_CONTENT,
   LOCALIZATION_PREPASS_TODO,
   PLANNER_SLICE_CONTENT,
@@ -699,6 +700,36 @@ describe("autoTypeTodos — bracket-tagged audit lists (case-2 tierfire3 decode)
     expect((typed[1] as { sliceType?: string }).sliceType).toBeUndefined()
     expect(typed[0]).toMatchObject({ sliceType: "verify", need: "reasoner" })
     expect(typed[2]).toMatchObject({ sliceType: "verify", need: "reasoner" })
+  })
+
+  it("the verdict item is dep-gated on every other typed sibling — never a blind wave-1 launch", () => {
+    const todos = [
+      pending("(1) soundness — is the change semantically correct for a merge of two schemas?"),
+      pending("(2) edge cases — enumerate the edge cases this change must survive and assess each"),
+      pending("(3) test suite — run the relevant test suite and report what it does and does not prove"),
+      pending("FINAL VERDICT — SHIP or DO NOT SHIP, with reasons"),
+    ]
+    const typed = autoTypeTodos(todos)
+    const verdict = typed[3] as { sliceType?: string; need?: string; deps?: string[] }
+    expect(verdict).toMatchObject({ sliceType: "verify", need: "reasoner" })
+    expect(verdict.deps).toEqual([todos[0]!.content, todos[1]!.content, todos[2]!.content])
+    // dimensions themselves stay dep-less (parallel wave 1)
+    expect((typed[0] as { deps?: string[] }).deps).toBeUndefined()
+    expect((typed[2] as { deps?: string[] }).deps).toBeUndefined()
+  })
+
+  it("an in_progress judgment claim is typed and dispatched anyway; an in_progress check-run is not", () => {
+    const todos: OrchestrationTodo[] = [
+      { content: "(1) soundness — is the change semantically correct in general?", status: "in_progress" },
+      pending("(2) edge cases — enumerate and assess the edge cases"),
+      { content: "(3) test suite — run the relevant tests and report", status: "in_progress" },
+      pending("FINAL VERDICT — SHIP or DO NOT SHIP, with reasons"),
+    ]
+    const typed = autoTypeTodos(todos)
+    expect(typed[0]).toMatchObject({ sliceType: "verify", need: "reasoner" })
+    expect((typed[2] as { sliceType?: string }).sliceType).toBeUndefined()
+    // the verdict's deps include the claimed-but-typed soundness item, not the inline check-run
+    expect((typed[3] as { deps?: string[] }).deps).toEqual([todos[0]!.content, todos[1]!.content])
   })
 
   it("untagged judgment items are classified exactly as before the tag rule", () => {
@@ -1952,5 +1983,148 @@ describe("slice child prompt assembly includes primer + ledger (OL-9.4b)", () =>
     expect(framed).toContain("Established by earlier slices")
     expect(framed).toContain("trust these findings; do not re-derive them")
     expect(framed).toContain("wave1-slice")
+  })
+})
+
+describe("reconcileSettledSlices — settled-slice memory + frame-seed preservation (case-2 tierfire3 double-wave)", () => {
+  it("case-2 tierfire3 replay: a completed 4-dim+verdict wave re-emitted bare comes back completed with fields carried", () => {
+    const existing: OrchestrationTodo[] = [
+      { content: "Audit edge cases: both-refinements, superRefine, chained merge", status: "completed", sliceType: "verify", need: "reasoner" },
+      { content: "Verify deprecation posture coherence", status: "completed", sliceType: "verify", need: "reasoner" },
+      { content: "Assess residual risk in the merge path", status: "completed", sliceType: "verify", need: "reasoner" },
+      { content: "Check error messaging format consistency", status: "completed", sliceType: "verify", need: "reasoner" },
+      {
+        content: "State verdict: soundness, completeness, residual risk",
+        status: "completed",
+        sliceType: "verify",
+        need: "reasoner",
+        deps: [
+          "Audit edge cases: both-refinements, superRefine, chained merge",
+          "Verify deprecation posture coherence",
+          "Assess residual risk in the merge path",
+          "Check error messaging format consistency",
+        ],
+      },
+    ]
+    // Re-emitted with NO slice fields at all — a stale rewrite of the plan list.
+    const incoming: OrchestrationTodo[] = existing.map((t, i) => ({
+      content: t.content,
+      status: i % 2 === 0 ? "pending" : "in_progress",
+    }))
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toHaveLength(5)
+    for (let i = 0; i < 4; i++) {
+      expect(result[i]).toMatchObject({ content: existing[i]!.content, status: "completed", sliceType: "verify", need: "reasoner" })
+    }
+    expect(result[4]).toMatchObject({
+      content: existing[4]!.content,
+      status: "completed",
+      sliceType: "verify",
+      need: "reasoner",
+      deps: existing[4]!.deps,
+    })
+    expect(hasPendingTypedSlices(result)).toBe(false)
+  })
+
+  it("an omitted SETTLED typed slice is re-appended at the tail with its terminal status intact", () => {
+    const existing: OrchestrationTodo[] = [
+      { content: "Audit dimension 5: config drift", status: "completed", sliceType: "verify", need: "reasoner" },
+    ]
+    const incoming: OrchestrationTodo[] = [{ content: "A fresh unrelated todo", status: "pending" }]
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toHaveLength(2)
+    expect(result[0]).toEqual(incoming[0])
+    expect(result[1]).toMatchObject({
+      content: "Audit dimension 5: config drift",
+      status: "completed",
+      sliceType: "verify",
+      need: "reasoner",
+    })
+  })
+
+  it("case-1 skeleton clobber: an omitted frame seed is re-appended, still pending+typed, parentID stripped", () => {
+    const existing: Array<OrchestrationTodo & { parentID?: number }> = [
+      { content: "Fix the crash on startup", status: "pending" },
+      { ...LOCALIZATION_PREPASS_TODO, parentID: 0 },
+    ]
+    const incoming: OrchestrationTodo[] = [
+      { content: "fresh untyped item 1", status: "pending" },
+      { content: "fresh untyped item 2", status: "pending" },
+      { content: "fresh untyped item 3", status: "pending" },
+    ]
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toHaveLength(4)
+    const seed = result[3]!
+    expect(seed.content).toBe(LOCALIZATION_SLICE_CONTENT)
+    expect(seed.status).toBe("pending")
+    expect(seed.sliceType).toBe("design")
+    expect("parentID" in seed).toBe(false)
+    expect(hasPendingTypedSlices(result)).toBe(true)
+  })
+
+  it("an omitted NON-terminal, non-seed typed slice is dropped — a legitimate re-plan", () => {
+    const existing: OrchestrationTodo[] = [
+      { content: "Implement the old approach in old.ts", status: "pending", sliceType: "mechanical" },
+    ]
+    const incoming: OrchestrationTodo[] = [{ content: "Implement the new approach in new.ts", status: "pending" }]
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toEqual(incoming)
+  })
+
+  it("forward transition allowed: a stored pending typed slice re-emitted completed stays completed", () => {
+    const existing: OrchestrationTodo[] = [
+      { content: "Implement the tier gate in src/session/gate.ts", status: "pending", sliceType: "mechanical" },
+    ]
+    const incoming: OrchestrationTodo[] = [
+      { content: "Implement the tier gate in src/session/gate.ts", status: "completed" },
+    ]
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toEqual([{ content: "Implement the tier gate in src/session/gate.ts", status: "completed", sliceType: "mechanical" }])
+  })
+
+  it("no typed stored todos: incoming returned unchanged, and an UNTYPED completed todo rewritten to pending is not re-stuck", () => {
+    const existing: OrchestrationTodo[] = [{ content: "Update the changelog entry", status: "completed" }]
+    const incoming: OrchestrationTodo[] = [{ content: "Update the changelog entry", status: "pending" }]
+    const result = reconcileSettledSlices(incoming, existing)
+    expect(result).toEqual(incoming)
+    expect(result[0]!.status).toBe("pending")
+  })
+
+  it("autoTypeTodos active-DAG guard: a settled typed item alone no longer blocks typing of fresh judgment items", () => {
+    const list: OrchestrationTodo[] = [
+      { content: "Audit edge cases: both-refinements, superRefine, chained merge", status: "pending" },
+      { content: "Verify deprecation posture coherence", status: "pending" },
+      { content: "Assess residual risk in the merge path", status: "pending" },
+      { content: "State verdict: soundness, completeness, residual risk", status: "pending" },
+      { content: "Old settled item", status: "completed", sliceType: "mechanical" },
+    ]
+    const typed = autoTypeTodos(list)
+    for (const i of [0, 1, 2]) expect(typed[i]).toMatchObject({ sliceType: "verify", need: "reasoner" })
+    expect(typed[3]).toMatchObject({
+      sliceType: "verify",
+      need: "reasoner",
+      deps: [list[0]!.content, list[1]!.content, list[2]!.content],
+    })
+    expect(typed[4]).toMatchObject({ content: "Old settled item", status: "completed", sliceType: "mechanical" })
+    expect(hasPendingTypedSlices(typed)).toBe(true)
+  })
+
+  it("autoTypeTodos active-DAG guard: a list with a PENDING typed slice still early-returns unchanged", () => {
+    const list: OrchestrationTodo[] = [
+      { content: "Wire the gate in src/session/gate.ts", status: "pending", sliceType: "mechanical" },
+      { content: "State verdict: soundness", status: "pending" },
+    ]
+    expect(autoTypeTodos(list)).toEqual(list)
+  })
+
+  it("autoTypeTodos injection one-shot: a bug-shaped list already containing a completed seed emits no duplicate seed", () => {
+    const list: OrchestrationTodo[] = [
+      { content: "Fix the enum display bug so str() returns the raw value", status: "pending" },
+      { ...LOCALIZATION_PREPASS_TODO, status: "completed" },
+      { content: "Verify the model field returns 'M'", status: "pending" },
+    ]
+    const typed = autoTypeTodos(list)
+    const seedCount = typed.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT).length
+    expect(seedCount).toBe(1)
   })
 })
