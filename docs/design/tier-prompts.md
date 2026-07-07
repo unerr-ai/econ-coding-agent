@@ -2,8 +2,10 @@
 
 Every system prompt econ sends per model tier, plus **every runtime mutation** the engine
 applies to prompts and requests after assembly. All quotes below are verbatim from the code
-with `file:line` anchors (current as of the 2026-07-08 failure-mode overhaul — see §7). **The code is authoritative** —
-when a prompt constant changes, update this doc in the same change.
+with `file:line` anchors (current as of the 2026-07-08 failure-mode overhaul, Waves 1–2 — see §7). **The code is authoritative** —
+when a prompt constant changes, update this doc in the same change. econ's prompt-text config
+— base, tier deltas, persona deltas, the tool-usage block, and the `select()` assembly — now
+lives in one registry: `packages/opencode/src/session/prompts/` (§7.5).
 
 Related docs (facts live there, not here): tier↔model bindings, pricing and model facts in
 [models.md](./models.md) · per-tier context/cache strategy in
@@ -40,17 +42,21 @@ evaluator, containment) in
                  └──────────────────────────────────────────────────────────┘
 ```
 
-The **base prompt** is OpenCode's `packages/opencode/src/session/prompt/default.txt` (107
-lines): tool usage, conventions-following, code style ("DO NOT ADD ***ANY*** COMMENTS unless
-asked"), concise-output tone, plus the cross-cutting discipline every tier now inherits —
-root-cause finding, edit correctness (no elision/placeholders), and honest reporting (added
-2026-07-08, §7). Every tier below layers a **delta** on top of it.
+The **base prompt** is `packages/opencode/src/session/prompt/default.txt` (107 lines): tool
+usage, conventions-following, code style ("DO NOT ADD ***ANY*** COMMENTS unless asked"),
+concise-output tone, plus the cross-cutting discipline every tier inherits — root-cause
+finding, edit correctness (no elision/placeholders), and honest reporting (§7). Every tier
+layers a **delta** on top of it. The base, the tier/persona deltas, the tool-usage block, and
+the `select()` that composes them live together in the **prompt-config registry**
+`packages/opencode/src/session/prompts/` (`base.ts` · `roles.ts` · `personas.ts` ·
+`fragments.ts` · `assemble.ts`); `request.ts` assembles from `select()` + `toolUsage()` there
+(§7.5). The Wave-2 move changed no emitted bytes — the golden cache-prefix hash is the guard.
 
 ---
 
-## 2. Tier deltas (`packages/opencode/src/session/system.ts:56-96`)
+## 2. Tier deltas (`TIER_DELTA`, `packages/opencode/src/session/prompts/roles.ts:7-48`)
 
-### 2.1 Conductor (`system.ts:57-79`) — the default tier, orchestrator
+### 2.1 Conductor (`prompts/roles.ts:8-31`) — the default tier, orchestrator
 
 ```
 # econ conductor (default engineer — you orchestrate the whole turn)
@@ -179,7 +185,7 @@ need:"reasoner".
 Prefer the cheapest path that does the job well, and keep context lean.
 ```
 
-### 2.2 Executor (`system.ts:80-84`) — scoped assistant
+### 2.2 Executor (`prompts/roles.ts:32-36`) — scoped assistant
 
 ```
 # econ executor (scoped assistant)
@@ -189,7 +195,7 @@ You execute one clearly-scoped task handed to you. Do exactly that task, verify 
 Do not expand scope, redesign, or make unrelated changes.
 ```
 
-### 2.3 Oracle (`system.ts:85-90`) — the expert
+### 2.3 Oracle (`prompts/roles.ts:37-42`) — the expert
 
 ```
 # econ oracle (expert)
@@ -205,7 +211,7 @@ context at the expensive tier.
 under judgment; do not re-read the repo broadly.
 ```
 
-### 2.4 Reasoner (`system.ts:92-96`)
+### 2.4 Reasoner (`prompts/roles.ts:44-48`)
 
 The reasoner now carries **its own delta** — it no longer aliases the oracle. It runs as a
 dispatched leaf slice, not a delegating principal, so the oracle's "delegate mechanical work
@@ -223,7 +229,7 @@ was dispatched. Work from the brief and the code named in it; do not re-read the
 
 ---
 
-## 3. Executor personas (`PERSONA_DELTA`, `system.ts:104-195`)
+## 3. Executor personas (`PERSONA_DELTA`, `prompts/personas.ts`)
 
 Six persona deltas layered on the executor tier. Each embeds the same batching directive
 ("Issue every independent tool call in the SAME response … Act from your first response") and
@@ -240,7 +246,7 @@ a strict NEVER block; the distinctive parts:
 
 All personas have `task`, `question`, and `todowrite` **removed from the tool set entirely**
 (no orchestration recursion) — `econ-defaults.ts:27-56`. Full verbatim persona texts:
-`system.ts:105-195`. Persona list constant: `ECON_PERSONAS`
+`prompts/personas.ts`. Persona list constant: `ECON_PERSONAS`
 (`packages/code-intelligence/src/model-registry.ts:154`). Notable prompt-embedded shell lore
 (runner): "jest swallows console.log by default — add --silent=false"; "in zsh an unmatched
 glob aborts the whole && chain".
@@ -265,11 +271,11 @@ All four set `parallel_tool_calls: true`. Pricing and provider facts: [models.md
 
 ## 5. Mutation surfaces — everything that rewrites a prompt or request at runtime
 
-Ordered by lifecycle stage. ~25 distinct surfaces.
+Ordered by lifecycle stage. ~26 distinct surfaces.
 
 ### 5.1 Per-request: the adaptive reasoning gate
 
-`packages/opencode/src/session/llm/reasoning-gate.ts:66-108`, applied in
+`packages/opencode/src/session/llm/reasoning-gate.ts:174-216`, applied in
 `request.ts:126-134` (skipped for `small` housekeeping calls). Guard: only acts when
 `options.reasoningEffort === "none"` — i.e. **only the conductor**. The mutation is always the
 same — `delete options.reasoningEffort`, restoring the provider's default thinking for exactly
@@ -279,10 +285,13 @@ one request. Three triggers:
 |---|---|---|
 | Plan step | last message is a user message (turn open) | `plan` |
 | Recovery | trailing bash tool-result matches a failure signature (`reasoning-gate.ts:4-10`: `FAIL`, `suite failed to run`, `N failed`, `error TS\d+`, `npm ERR!/Command failed/non-zero exit`) | `recovery` |
-| Contradiction (F4) | trailing non-bash tool result is an error, or a search-class tool (`search/grep/glob`) returned empty / `no files\|matches\|results\|entities` | `contradiction` |
+| Contradiction (F4) | trailing non-bash tool result is an error; OR a search-class tool (`search/grep/glob`) returned empty (`no files\|matches\|results\|entities`); OR **(F4b, 2026-07-08) scope-miss** — a scoped search that SUCCEEDED but referenced nothing under the scope its query named (`isScopeMissResult`, `:142-160`: recovers the query by `toolCallId`, requires an explicit path/glob/symbol scope token, parses the result defensively, biases to not-firing on any ambiguity) | `contradiction` |
 
-Recovery wins when both recovery and contradiction match. Live effect (trace runs 12–18 →
-19–21): un-muting at these forks cut step counts from 33–48 to 26–35.
+Recovery wins when both recovery and contradiction match. F4b (2026-07-08) extends contradiction
+beyond the purely-syntactic empty/error shapes to a *successful-but-off-scope* lookup — the gate
+reads only the result shape and the query it recovers by `toolCallId`, never the model's intent,
+so it fires only on an explicit scope token and fails closed on any ambiguity. Live effect (trace
+runs 12–18 → 19–21): un-muting at these forks cut step counts from 33–48 to 26–35.
 
 ### 5.2 Turn-open: turn-shape preambles (system tail)
 
@@ -365,6 +374,17 @@ plan. If budget runs short, deliver the ranked candidates with their discriminat
 still OPEN — never assert a single site as the cause without a probe result that rules the
 others out.
 ```
+
+**Fold-back guard — narrative-only flag** (`prompt.ts` `prepassOnly` branch, `:~2197`;
+`isProbeGrounded`, `prompt.ts:~155`, 2026-07-08). When a localization/plan pre-pass is the only
+outcome of a turn, its result folds back to the conductor. Before it does, `isProbeGrounded`
+checks the output for a sign a discriminating probe was actually run — a backticked runner
+command, a "ruled out" / "eliminated" / "probe result" phrase, or an honest `OPEN:` / `MISSING:`
+marker. If the output asserts a cause with none of these, a warning is **prepended** to the
+folded-back body: *"⚠ Localization is narrative-only — no discriminating probe result rules out
+the alternatives. Before you edit, run the probe yourself…"* This is **flag-and-continue** by
+design (§7.5, #7): no verify-ladder rung and no oracle escalation — the reasoning gate un-mutes
+the conductor on the next step, which runs the cheap probe itself.
 
 ### 5.4 Typing-time: autoTypeTodos mutations (`slice-orchestrator.ts:1134-1200`)
 
@@ -494,9 +514,9 @@ is rebuilt as:
 
 | # | Surface | Trigger | Mutates | Anchor |
 |---|---|---|---|---|
-| 1 | Reasoning gate: plan | turn-open user msg | deletes `reasoningEffort:"none"` | reasoning-gate.ts:76 |
-| 2 | Reasoning gate: recovery | bash failure signature | same | reasoning-gate.ts:92 |
-| 3 | Reasoning gate: contradiction | empty/error tool result | same | reasoning-gate.ts:97 |
+| 1 | Reasoning gate: plan | turn-open user msg | deletes `reasoningEffort:"none"` | reasoning-gate.ts:174-216 |
+| 2 | Reasoning gate: recovery | bash failure signature | same | reasoning-gate.ts:174-216 |
+| 3 | Reasoning gate: contradiction (+F4b scope-miss) | empty/error, or off-scope successful search | same | reasoning-gate.ts:142-216 |
 | 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:772-810 |
 | 5 | Triage preamble | multi-goal verdict | replaces #4 | slice-orchestrator.ts:922-935 |
 | 6 | Localization seed | bug-shaped, not localized | injects todo | slice-orchestrator.ts:607,1147 |
@@ -519,17 +539,18 @@ is rebuilt as:
 | 23 | Judge prompt | judge-cell verification | session-less call | judge.ts:60-74 |
 | 24 | System assembly order | every request | system[] composition | request.ts:64-72 |
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
+| 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2197 (`isProbeGrounded` :~155) |
 
 ---
 
 ## 7. Change record — the failure-mode prompt overhaul (2026-07-08)
 
-This section records *what* changed and *why*. The code stays authoritative for the current
-text; the verbatim quotes + `file:line` anchors in §2–§5 are re-synced to the new strings in
-the same commit that lands the change (task #5/#6). Deep evidence: the five research digests
-of 2026-07-08 (leaked Claude Code / Codex / Cursor / Gemini / OSS prompts) and
-[ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §2.2 (its new **G5**)
-and §3.1–3.2.
+This section records *what* changed and *why*; §1–§6 above already reflect the resulting
+current state (code authoritative). The overhaul shipped in two waves on 2026-07-08 — **Wave 1**
+(the prompt-content changes, §7.4) and **Wave 2** (the mechanism + refactor changes, §7.5) — all
+wired unconditionally, with **no feature flags**. Deep evidence: the five research digests of
+2026-07-08 (leaked Claude Code / Codex / Cursor / Gemini / OSS prompts) and
+[ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §2.2 (its **G5**).
 
 ### 7.1 Why this wave
 
@@ -562,7 +583,9 @@ From the research pass over leading coding-agent prompts:
 - **Effort is a numeric dial, not prose.** OpenAI's `o3-high` vs `o3-low` differ by one line
   (`# Juice: 512` → `32`), everything else byte-identical; output verbosity is a *separate*
   knob. → don't fork prompt *prose* per tier by capability; vary `reasoningEffort` + a
-  verbosity cap. (Motivates the Wave-2 `knobs.ts`.)
+  verbosity cap. econ already keeps that dial single-sourced in `model-registry.ts` /
+  `econ-defaults.ts` (drift-guarded), so the Wave-2 registry deliberately added **no** competing
+  `knobs.ts` (§7.5).
 - **Tool specifics live in the tool block, not the base.** Confirms `toolUsage()` (§5, surface
   drift-proofing) as the right home for the edit/write format contract.
 
@@ -580,15 +603,36 @@ From the research pass over leading coding-agent prompts:
 | `diagnosis-grounded` "No broad exploration" fixed; build-turn localization cue added | `slice-orchestrator.ts` | root-cause discipline lived in only 1 of 5 turn shapes | F2 | #2 |
 | Edit-tool errors made self-correcting; `edit.txt` doc drift fixed | `edit.ts`, `edit.txt` | for a low-reasoning OSS tier the thrown error is the only in-loop teacher | F1 | #3 |
 
-### 7.5 Deferred to Wave 2 (design-sensitive / refactor)
+> Note: Wave-2 #9 (below) later relocated the `system.ts` and `default.txt` prompt config into
+> `session/prompts/`; the live anchors in §2–§5 point at that registry, while the table above
+> records the file each change was first made in.
 
-- **Localization verification rung** — an executable "probe result attached, not narrative"
-  check before a localization folds back. Adds a rung to a slice type §4.3 currently defines
-  as unverified → a real mechanism change, live-fire gated (task #7).
-- **Contradiction gate → semantic.** `reasoning-gate.ts` `isContradictionResult` is purely
-  syntactic; it misses a lookup that *succeeds but disproves* the hypothesis, muting the
-  conductor exactly when rule 4b needs thinking budget (task #8).
-- **Single prompt-config registry** — `packages/code-intelligence/src/prompts/`
-  (`base.ts` / `roles.ts` / `personas.ts` / `fragments.ts` / `knobs.ts` / `assemble.ts`)
-  consolidating the base + role deltas + `toolUsage()` + the numeric knobs into one editable,
-  test-guarded location (task #9). This is the "single location to modify prompts" goal.
+### 7.5 Wave 2 — the mechanism + refactor changes (landed 2026-07-08)
+
+The design-sensitive tail of the overhaul. All three shipped, unconditional, no flags.
+
+- **Localization narrative-only flag (#7)** — the localization/plan fold-back now runs
+  `isProbeGrounded` (`prompt.ts`) and, when a result asserts a cause with no discriminating probe
+  actually run, **prepends a warning** telling the conductor to run the probe itself before
+  editing (§5.3, fold-back guard). Mechanism decision: **flag-and-continue** — no verify rung, no
+  oracle escalation — chosen over enforce-at-tier and escalate-to-oracle because a spurious
+  narrative costs far less than paying the top tier on every lazy localization, and the un-muted
+  conductor absorbs the cheap probe. Observable-first; a hard verify rung stays a future,
+  live-fire-gated option. Sharp edge: only the helper is unit-tested, the fold-back wiring is a
+  trivial ternary.
+- **Scope-miss contradiction trigger (#8)** — `reasoning-gate.ts` F4 gained a third shape
+  (§5.1, F4b): a scoped search that succeeds but returns nothing under its named scope now
+  un-mutes the conductor. Honest limit: the gate sees only the result shape and the query it
+  recovers by `toolCallId`, never the model's hypothesis — a narrow, fail-closed subset (an
+  explicit scope token is required), not general semantic-contradiction detection. Sharp edge: a
+  prose slash in a freeform query (`retry/timeout`) can be misread as a path — a bounded over-fire
+  that only adds thinking budget.
+- **Prompt-config registry (#9)** — the base, tier/persona deltas, tool-usage block, and
+  `select()` moved into `packages/opencode/src/session/prompts/` (`base.ts` · `roles.ts` ·
+  `personas.ts` · `fragments.ts` · `assemble.ts` · `index.ts`); callers were updated with no
+  re-export shim; emitted bytes unchanged (golden hash held). Two deliberate deviations from the
+  original sketch: the registry lives **opencode-local**, not in `code-intelligence` (a Bun native
+  text import can't cross the package boundary without a bundler rule), and there is **no
+  `knobs.ts`** (the numeric effort dial is already single-sourced in `model-registry.ts` /
+  `econ-defaults.ts` under a drift test — a second home would compete with it). This delivers the
+  "single location to modify prompts" goal (§1).
