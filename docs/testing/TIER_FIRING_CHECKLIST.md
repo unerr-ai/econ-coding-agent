@@ -247,6 +247,14 @@ cost paths verified ratio 1.00 in every run):
   against the old-code baseline instead of the contributor's "refinements are
   preserved" claim. Routing chain identical to the two DO-NOT-SHIP runs;
   divergence is reasoner-tier audit judgment (2 of 3 runs correct on this arena).
+- **Variance-confirmation re-run (2026-07-07, binary 202607070720): PASS —
+  DO NOT SHIP, variance confirmed.** Correct verdict catching the dropped-`b`
+  asymmetry PLUS a new `.merge().partial()` runtime-regression finding, and
+  naming the exact correct fix (concatenate both operands' checks). $1.2437 /
+  94 turns / 3.14M tok / 0 escalations / 0 cache writes; mechanism identical
+  (1 engagement, 6 children, verdict dep-gated +246s). Arena tally: 3 of 4
+  correct-mechanism runs verdict-correct ($0.99/$1.21/$1.21-SHIP/$1.24); the
+  SHIP run is the outlier — reasoner-tier sampling variance, no engine action.
 
 ### Case 3 — audit naming untested + tangled files → door 3 (oracle residual + judge sampler)
 
