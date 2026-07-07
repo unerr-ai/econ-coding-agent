@@ -28,7 +28,7 @@ import {
   MECHANICAL_DESIGN_TIMEOUT_MS,
   ESCALATION_TIMEOUT_FACTOR,
   LOOP_BUDGET_FACTOR,
-  MAX_SLICE_ATTEMPTS,
+  SAME_TIER_RETRY_BUDGET,
   type LoopSlice,
   type SliceLoopDeps,
   type SliceDispatchRequest,
@@ -121,18 +121,18 @@ describe("runSliceLoop — reject climbs the ladder (OL-2.2 + double-pay)", () =
     id: "prop",
     prompt: "propagate the refresh signature to all callers",
     sliceType: "mechanical",
-    coupling: "high",
+    coupling: "low",
     testStrength: "testable",
     verifyCommands: [{ kind: "typecheck", command: "tsc --noEmit" }],
     wiring: "refreshToken() has 40 callers across auth/",
   }
 
-  it("rescues a failed executor slice on the CONDUCTOR first (re-verified) and records double-pay", async () => {
+  it("rescues a failed executor slice with a same-tier squeeze retry (M2, re-verified) and records double-pay", async () => {
     const { dispatch, calls } = recordingDispatch({
       onCheap: () => ({ text: "bad patch", trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING.executor, cost: 0.001, tokens: { input: 100, output: 200 } } }),
       onEscalated: () => ({ text: "fixed patch", trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING.conductor, cost: 0.02, tokens: { input: 300, output: 400 } } }),
     })
-    // The cheap attempt fails its sound check; the conductor rescue passes.
+    // The cheap attempt fails its sound check; the same-tier squeeze retry passes.
     let runs = 0
     const flakyRunner = async (c: VerifyCommand): Promise<CommandResult> =>
       runs++ === 0
@@ -143,15 +143,15 @@ describe("runSliceLoop — reject climbs the ladder (OL-2.2 + double-pay)", () =
     const outcome = result.outcomes[0]
     expect(outcome.state).toBe("escalated")
     expect(outcome.output).toBe("fixed patch")
-    expect(outcome.escalation?.tier).toBe("conductor")
+    expect(outcome.escalation?.tier).toBe("executor") // squeeze — same tier, not a climb (M2)
     expect(outcome.verdict.accepted).toBe(true) // the rescue's verdict, not the cheap one
 
-    // Two dispatches: cheap (executor, not escalated) then the conductor rescue.
+    // Two dispatches: cheap (executor, not escalated) then the same-tier squeeze retry.
     expect(calls.length).toBe(2)
     expect(calls[0].escalated).toBe(false)
     expect(calls[0].tier).toBe("executor")
     expect(calls[1].escalated).toBe(true)
-    expect(calls[1].tier).toBe("conductor")
+    expect(calls[1].tier).toBe("executor")
 
     // The escalation prompt is a COMPILED BRIEF (bounded failure evidence) plus the
     // prior attempt's digested context (OL rescue continuity) — never the raw transcript
@@ -172,32 +172,43 @@ describe("runSliceLoop — reject climbs the ladder (OL-2.2 + double-pay)", () =
     expect(outcome.escalation?.record.totalCost).toBeCloseTo(0.021, 6)
   })
 
-  it("climbs one rescue hop (executor→conductor) then stops at the MAX_SLICE_ATTEMPTS cap, ending unverified (OL-9.5d)", async () => {
+  it("squeezes the executor to its budget while converging, climbs to the conductor, squeezes there too, then settles unverified (frozen sequences 1+2)", async () => {
     const { dispatch, calls } = recordingDispatch({
       onCheap: () => ({ text: "bad patch", trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING.executor, cost: 0.001, tokens: { input: 100, output: 200 } } }),
       onEscalated: (req) => ({ text: `rescue:${req.tier}`, trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING[req.tier], cost: 0.02, tokens: { input: 300, output: 400 } } }),
     })
-    const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner })
+    // A new exit code (→ a new MISSING line, a new signature) every call, and
+    // it never passes — isolates the squeeze budget (SAME_TIER_RETRY_BUDGET)
+    // as the thing that ends each tier's squeezing, not a signature repeat.
+    let call = 0
+    const everConverging = async (): Promise<CommandResult> => {
+      call += 1
+      return { exitCode: call, stdout: "", stderr: `attempt ${call}` }
+    }
+    const result = await runSliceLoop([slice], { dispatch, runCommand: everConverging })
 
     const outcome = result.outcomes[0]
-    // MAX_SLICE_ATTEMPTS (2) caps a mechanical slice at one cheap attempt plus
-    // ONE rescue hop — the ladder no longer climbs to the oracle by default
-    // (run-8: an un-capped ladder re-ran identical work up to 4x/slice).
+    // Sequence 1: executor(rejA) → squeeze exec(rejB) → squeeze exec(rejC,
+    // budget=2 spent) → CLIMB conductor. Sequence 2: the conductor ALSO
+    // rejects, so it squeezes there too, spends its own budget, and — because
+    // a non-critical slice's climb depth is 1 — settles unverified AT the
+    // conductor, never reaching the reasoner. The INVARIANT: it reached (and
+    // squeezed) the conductor before settling; a stalled/exhausted squeeze
+    // never denies the one climb a non-critical slice is owed.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "executor", "conductor", "conductor", "conductor"])
+    expect(calls.map((c) => c.escalated)).toEqual([false, true, true, true, true, true])
     expect(outcome.state).toBe("unverified")
-    expect(outcome.output).toBe("rescue:conductor")
-    expect(outcome.verdict.accepted).toBe(false)
-    expect(outcome.escalation?.tier).toBe("conductor") // the LAST (only) hop
-    expect(outcome.attempts).toBe(MAX_SLICE_ATTEMPTS)
+    expect(outcome.escalation?.tier).toBe("conductor")
+    expect(outcome.attempts).toBe(6)
 
-    expect(calls.map((c) => c.tier)).toEqual(["executor", "conductor"])
-    expect(calls.map((c) => c.escalated)).toEqual([false, true])
-
-    // One hop, discarding the cheap attempt's spend.
-    expect(result.ledger.escalations).toBe(1)
-    expect(result.ledger.totalWastedCost).toBeCloseTo(0.001, 6)
+    // 5 discarded hops (2 squeezes + 1 climb + 2 squeezes), all recorded net —
+    // plus the discarded cheap attempt (0.001 + 4*0.02 rescue hops; the final,
+    // still-rejected 6th call is the settle point, not itself "wasted" spend).
+    expect(result.ledger.escalations).toBe(5)
+    expect(result.ledger.totalWastedCost).toBeCloseTo(0.081, 6)
   })
 
-  it("honors an injected maxAttempts override, climbing further than the default cap", async () => {
+  it("stalls on a repeated signature at the executor and climbs immediately — still reaches the conductor (frozen sequence 3)", async () => {
     const { dispatch, calls } = recordingDispatch({
       onCheap: () => ({ text: "bad patch", trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING.executor, cost: 0.001, tokens: { input: 100, output: 200 } } }),
       onEscalated: (req) => ({ text: `rescue:${req.tier}`, trajectory: { events: [] }, usage: { model: ECON_TIER_BINDING[req.tier], cost: 0.02, tokens: { input: 300, output: 400 } } }),
@@ -205,10 +216,203 @@ describe("runSliceLoop — reject climbs the ladder (OL-2.2 + double-pay)", () =
     const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner, maxAttempts: () => 4 })
 
     const outcome = result.outcomes[0]
+    // failRunner's repeated signature means the executor gets exactly one
+    // squeeze retry (converging on the first look, stalling on the repeat)
+    // before climbing; the conductor then gets its own one squeeze before its
+    // signature repeats too, and — non-critical climb depth = 1 — settles
+    // unverified AT the conductor without ever reaching the reasoner.
     expect(outcome.state).toBe("unverified")
-    expect(outcome.escalation?.tier).toBe("oracle") // the LAST hop, now reachable with a raised cap
-    expect(calls.map((c) => c.tier)).toEqual(["executor", "conductor", "reasoner", "oracle"])
+    expect(outcome.escalation?.tier).toBe("conductor")
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
     expect(result.ledger.escalations).toBe(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M2 — squeeze the tier before escalating: a rejected attempt retries the
+// SAME tier while its failure signature is still converging, and climbs only
+// on stall (signature repeats, or SAME_TIER_RETRY_BUDGET is spent).
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — M2 same-tier squeeze retry", () => {
+  const squeezeSlice: LoopSlice = {
+    id: "s",
+    prompt: "p",
+    sliceType: "mechanical",
+    coupling: "low",
+    testStrength: "testable",
+    verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+  }
+
+  it("retries the same tier while the failure signature keeps changing, up to SAME_TIER_RETRY_BUDGET, then climbs", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    let call = 0
+    // A new exit code (→ a new MISSING line, a new signature) every call — never repeats.
+    const everNewSignature = async (): Promise<CommandResult> => {
+      call += 1
+      return { exitCode: call, stdout: "", stderr: `attempt ${call}` }
+    }
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([squeezeSlice], {
+      dispatch,
+      runCommand: everNewSignature,
+      maxAttempts: () => 4,
+      onProvenance: (e) => provenance.push(e),
+    })
+
+    // 1 cheap attempt + SAME_TIER_RETRY_BUDGET (2) same-tier squeeze retries —
+    // the squeeze budget (not the attempt backstop) is what climbs it, even
+    // though the signature was still changing on every call. everNewSignature
+    // never passes, so the conductor hop also rejects; a non-critical slice's
+    // climb depth (1) then settles it unverified AT the conductor.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "executor", "conductor"])
+    expect(calls.filter((c) => c.tier === "executor").length).toBe(1 + SAME_TIER_RETRY_BUDGET)
+    expect(provenance.map((p) => p.rungReason.includes("squeeze-retry"))).toEqual([true, true, false])
+    expect(provenance[2]).toMatchObject({ fromTier: "executor", toTier: "conductor" })
+    expect(result.outcomes[0].state).toBe("unverified")
+    expect(result.outcomes[0].escalation?.tier).toBe("conductor")
+  })
+
+  it("stalls and climbs immediately when the retry's signature repeats (no new failure surfaced)", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([squeezeSlice], {
+      dispatch,
+      runCommand: failRunner, // deterministic — same stderr/exit every call, so the same MISSING line every time
+      maxAttempts: () => 3,
+      onProvenance: (e) => provenance.push(e),
+    })
+
+    // The one squeeze retry's signature is identical to the cheap attempt's —
+    // no new information surfaced — so it climbs on the very next hop instead
+    // of spending its remaining squeeze budget.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor"])
+    expect(provenance[0].rungReason).toContain("squeeze-retry")
+    expect(provenance[1].rungReason).not.toContain("squeeze-retry")
+    expect(provenance[1]).toMatchObject({ fromTier: "executor", toTier: "conductor" })
+    expect(result.outcomes[0].state).toBe("unverified")
+  })
+
+  it("INVARIANT: a non-critical slice that rejects at every dispatch always reaches the conductor before settling unverified — squeeze never denies the climb", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([squeezeSlice], { dispatch, runCommand: failRunner })
+
+    // failRunner repeats the same signature every call: the squeeze stalls
+    // immediately at the executor (climbs early), squeezes once more at the
+    // conductor (fresh signature there), stalls again, and — non-critical
+    // climb depth = 1 — settles unverified AT the conductor. MAX_SLICE_ATTEMPTS
+    // (8, a backstop) is nowhere near binding here — the squeeze-budget /
+    // stall-guard / climb-depth mechanics are what stop it, and a climb to
+    // "conductor" happens before the settle either way.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
+    expect(calls.some((c) => c.tier === "conductor")).toBe(true) // reached the conductor
+    expect(result.outcomes[0].attempts).toBe(4)
+    expect(result.outcomes[0].state).toBe("unverified")
+    expect(result.outcomes[0].escalation?.tier).toBe("conductor")
+  })
+
+  it("never squeeze-retries a read-only (recon/verify) slice — unchanged, caps at 1 dispatch", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const slice: LoopSlice = {
+      id: "explore",
+      prompt: "map callers",
+      sliceType: "recon",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "test", command: "bun test" }],
+    }
+    const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner })
+
+    expect(calls.map((c) => c.tier)).toEqual(["executor"])
+    expect(result.outcomes[0].attempts).toBe(1)
+    expect(result.outcomes[0].state).toBe("unverified")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M3 — escalation floor: a critical slice (high coupling, or risk over the
+// allocator's tiebreak) may never soft-settle unverified below the oracle. It
+// forces one more climb per exhaustion point instead of settling, and settles
+// loudly (a distinct provenance marker) only once truly stuck at the oracle.
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — M3 escalation floor (critical slices never soft-settle below the oracle)", () => {
+  it("forces a climb past the exhausted attempt budget instead of settling unverified below the oracle", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    let call = 0
+    const passFromReasonerOn = async (): Promise<CommandResult> => {
+      call += 1
+      return call <= 4 ? { exitCode: 1, stdout: "", stderr: "boom" } : { exitCode: 0, stdout: "ok", stderr: "" }
+    }
+    const slice: LoopSlice = {
+      id: "s",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "high",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    }
+    const result = await runSliceLoop([slice], { dispatch, runCommand: passFromReasonerOn })
+
+    const outcome = result.outcomes[0]
+    // executor(fail) → squeeze exec stalls immediately (identical "boom"
+    // signature) → climb conductor(fail) → squeeze conductor (fresh
+    // signature there) stalls too → the slice is critical (coupling:
+    // "high"), so M3's floor forces one more climb instead of settling at
+    // the conductor — reaching (and passing at) the reasoner.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor", "reasoner"])
+    expect(outcome.state).toBe("escalated")
+    expect(outcome.escalation?.tier).toBe("reasoner")
+    expect(outcome.attempts).toBe(5) // the floor overrides the non-critical climb depth
+  })
+
+  it("settles unverified at the oracle ceiling with a loud critical-unverified-at-ceiling marker — never a silent accept", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const slice: LoopSlice = {
+      id: "s",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "high",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    }
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner, onProvenance: (e) => provenance.push(e) })
+
+    const outcome = result.outcomes[0]
+    // failRunner never passes and always repeats the same signature: one
+    // squeeze stalls immediately at every tier, so the floor keeps forcing
+    // climbs — executor, conductor, reasoner, oracle, squeezing once more at
+    // each — until there's nowhere left to climb, where it finally settles
+    // unverified — LOUDLY.
+    expect(calls.map((c) => c.tier)).toEqual([
+      "executor", "executor", "conductor", "conductor", "reasoner", "reasoner", "oracle", "oracle",
+    ])
+    expect(outcome.state).toBe("unverified")
+    expect(outcome.escalation?.tier).toBe("oracle")
+    const loud = provenance.find((p) => p.rungReason === "critical-unverified-at-ceiling")
+    expect(loud).toBeDefined()
+    expect(loud).toMatchObject({ fromTier: "oracle", toTier: "oracle" })
+  })
+
+  it("leaves a non-critical slice unaffected — settles unverified at the default budget's ceiling, same as before", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const slice: LoopSlice = {
+      id: "s",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "low",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    }
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner, onProvenance: (e) => provenance.push(e) })
+
+    // Squeeze stalls at the executor (climb early), squeezes once more at the
+    // conductor, stalls again — non-critical climb depth = 1, so it settles
+    // AT the conductor with no floor override.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
+    expect(result.outcomes[0].state).toBe("unverified")
+    expect(provenance.some((p) => p.rungReason === "critical-unverified-at-ceiling")).toBe(false)
   })
 })
 
@@ -518,6 +722,18 @@ describe("buildLadderInput — allocation→ladder rung mapping", () => {
   it("attaches the QE fallback whenever a QE sampler exists", () => {
     const input = buildLadderInput(slice, { tier: "executor", verification: "qe", reason: "" }, result, { dispatch: async () => result, qeGenerate: async () => "out" })
     expect(input.qe).toBeDefined()
+  })
+
+  it("carries slice.probeCommand into spec.probeCommand", () => {
+    const probeCommand: VerifyCommand = { kind: "test", command: "bun test path/to/repro.test.ts" }
+    const probed: LoopSlice = { ...slice, probeCommand }
+    const input = buildLadderInput(probed, { tier: "executor", verification: "sound", reason: "" }, result, { dispatch: async () => result, runCommand: passRunner })
+    expect(input.spec.probeCommand).toEqual(probeCommand)
+  })
+
+  it("omits spec.probeCommand when the slice has none", () => {
+    const input = buildLadderInput(slice, { tier: "executor", verification: "sound", reason: "" }, result, { dispatch: async () => result, runCommand: passRunner })
+    expect(input.spec.probeCommand).toBeUndefined()
   })
 })
 
@@ -870,7 +1086,7 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
     id: "prop",
     prompt: "propagate the refresh signature to all callers",
     sliceType: "mechanical",
-    coupling: "high",
+    coupling: "low",
     testStrength: "testable",
     verifyCommands: [{ kind: "typecheck", command: "tsc --noEmit" }],
   }
@@ -933,9 +1149,11 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
     const result = await runSliceLoop([editableSlice], { dispatch, runCommand: failRunner, snapshot })
 
     const outcome = result.outcomes[0]
-    expect(outcome.state).toBe("unverified") // MAX_SLICE_ATTEMPTS exhausted, one rescue hop tried
+    expect(outcome.state).toBe("unverified") // non-critical climb depth (1) exhausted at the conductor
     expect(outcome.revertedDiff).toBe("diff --git a/y.ts b/y.ts\n+still-broken")
-    expect(calls.filter((c) => c.fn === "restore").length).toBe(2) // cheap hop + the exhausted rescue hop
+    // 3 rescue hops (squeeze executor, climb conductor, squeeze conductor) —
+    // each restores — plus the final settle-unverified restore = 4.
+    expect(calls.filter((c) => c.fn === "restore").length).toBe(4)
   })
 
   it("caps the reverted diff at ~4000 chars with a truncation marker before it reaches the brief", async () => {
@@ -951,7 +1169,7 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
     expect(briefText).not.toContain(longDiff)
   })
 
-  it("emits onProvenance once per escalation hop naming fromTier/toTier/rungReason", async () => {
+  it("emits onProvenance once per rescue hop naming fromTier/toTier/rungReason — a squeeze retry reports fromTier===toTier", async () => {
     const { dispatch } = recordingDispatch({
       onCheap: () => ({ text: "bad patch", trajectory: { events: [] } }),
       onEscalated: (req) => ({ text: `rescue:${req.tier}`, trajectory: { events: [] } }),
@@ -959,9 +1177,17 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
     const provenance: Array<{ sliceId: string; fromTier: string; toTier: string; rungReason: string }> = []
     await runSliceLoop([editableSlice], { dispatch, runCommand: failRunner, onProvenance: (e) => provenance.push(e) })
 
-    expect(provenance.length).toBe(1)
-    expect(provenance[0]).toMatchObject({ sliceId: "prop", fromTier: "executor", toTier: "conductor" })
-    expect(provenance[0].rungReason.length).toBeGreaterThan(0)
+    // failRunner repeats the same signature: squeeze executor (stalls on
+    // repeat), climb to conductor, squeeze conductor (stalls again) — 3
+    // rescue hops, one onProvenance emission each. Non-critical climb depth
+    // (1) then settles it unverified at the conductor.
+    expect(provenance.length).toBe(3)
+    expect(provenance[0]).toMatchObject({ sliceId: "prop", fromTier: "executor", toTier: "executor" })
+    expect(provenance[0].rungReason).toContain("squeeze-retry")
+    expect(provenance[1]).toMatchObject({ sliceId: "prop", fromTier: "executor", toTier: "conductor" })
+    expect(provenance[1].rungReason).not.toContain("squeeze-retry")
+    expect(provenance[2]).toMatchObject({ sliceId: "prop", fromTier: "conductor", toTier: "conductor" })
+    expect(provenance[2].rungReason).toContain("squeeze-retry")
   })
 
   it("makes zero snapshot/provenance calls and leaves the ladder byte-identical when both deps are absent", async () => {

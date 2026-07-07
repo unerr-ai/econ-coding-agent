@@ -9,12 +9,18 @@
  * (verifier.ts + the cross-model judge of judge.ts) — an untestable slice with
  * no applicable check is accepted flagged unverified rather than rejected
  * (OL-9.5d: absence of a check is not evidence of failure) — and only a real
- * reject climbs the tier ladder, capped at a per-slice `maxAttempts` total
- * dispatches (one escalation hop for a normal slice, none at all for a
- * read-only recon/verify slice; run-8 post-mortem: an un-capped ladder re-ran
- * identical work up to 4x per slice with no new signal) with a compiled
- * failure brief per hop (brief.ts), re-verifying each rescue and
- * recording every discarded attempt as double-pay (double-pay.ts). Slices run
+ * reject works the tier ladder, capped at a per-slice `maxAttempts` total
+ * dispatches (one rescue hop for a normal slice, none at all for a read-only
+ * recon/verify slice; run-8 post-mortem: an un-capped ladder re-ran identical
+ * work up to 4x per slice with no new signal) with a compiled failure brief
+ * per hop (brief.ts), re-verifying each rescue and recording every discarded
+ * attempt as double-pay (double-pay.ts). A rejected attempt first squeezes
+ * the SAME tier while its failure signature keeps changing (M2,
+ * SAME_TIER_RETRY_BUDGET) and climbs only once it stalls; a critical slice
+ * (high coupling or risk over the allocator's tiebreak) may never soft-settle
+ * unverified below the oracle (M3, the escalation floor) — it forces one more
+ * climb per exhaustion point instead, settling loudly only at the oracle
+ * ceiling. Slices run
  * in dependency (topological) order; independent slices in a wave run in
  * parallel. Every dispatch is wall-clock capped per its slice type, and the
  * whole run is capped by a budget derived from the plan (OL-9.3e) — exhaustion
@@ -44,6 +50,7 @@
 
 import {
   allocateSlice,
+  ALLOCATION_RISK_TIEBREAK,
   type SliceAllocation,
   type SliceAllocationInput,
   type SliceType,
@@ -79,9 +86,11 @@ import type { EconTier } from "./region.js"
  * One node in the decomposition DAG the loop executes. `coupling`/`testStrength`
  * come pre-tagged from the OL-7.9 probes at decompose time (the loop does not
  * re-probe — that is the caller's job); `verifyCommands` is the sound-rung spec
- * for a testable slice; `wiring` is the deterministic graph facts already woven
- * for this slice (OL-7.7). All allocation-facing fields are optional so a
- * partially-tagged slice still allocates defensively (allocation.ts).
+ * for a testable slice, and `probeCommand` is its optional pinned red→green
+ * reproduction (verifier.ts's separate probe rung); `wiring` is the
+ * deterministic graph facts already woven for this slice (OL-7.7). All
+ * allocation-facing fields are optional so a partially-tagged slice still
+ * allocates defensively (allocation.ts).
  *
  * @sem domain=routing role=type
  */
@@ -97,12 +106,14 @@ export interface LoopSlice {
   testStrength?: TestStrength
   /** Conductor minimum-tier hint (an EconTier name); allocation may raise, never lower. */
   need?: string
-  /** OL-3 code-structural risk (0–100); an in-cell tiebreaker only. */
+  /** OL-3 code-structural risk (0–100); an in-cell tiebreaker only, and the M3 escalation-floor criticality signal (isCritical). */
   risk?: number
   /** True when this slice depends on a design slice whose output carries the concrete patch (design-emits-the-patch). */
   specBacked?: boolean
   /** Sound-rung commands (typecheck / test / lint) for a testable slice. */
   verifyCommands?: readonly VerifyCommand[]
+  /** A pinned reproduction that must transition red→green (verifier.ts's separate probe rung) — threaded into the ladder's spec alongside `verifyCommands`. */
+  probeCommand?: VerifyCommand
   /** True when this slice's own task is to author/modify tests (behavior monitor exemption). */
   isTestSlice?: boolean
   /** Deterministic wiring facts already assembled for this slice (OL-7.7) — fed to the judge and the escalation brief. */
@@ -333,6 +344,19 @@ export function escalateTier(tier: EconTier): EconTier {
   }
 }
 
+/**
+ * A slice whose blast radius or structural risk means it may never soft-settle
+ * unverified below the oracle (M3, the escalation floor): high coupling, or
+ * risk above the same tiebreak the allocator uses to break toward the oracle
+ * (`ALLOCATION_RISK_TIEBREAK`). Callers must also exclude a read-only
+ * (recon/verify) slice — the floor never overrides its no-retry/no-escalate rule.
+ *
+ * @sem domain=routing role=allocator
+ */
+function isCritical(slice: LoopSlice): boolean {
+  return slice.coupling === "high" || (slice.risk ?? 0) > ALLOCATION_RISK_TIEBREAK
+}
+
 // ---------------------------------------------------------------------------
 // Allocation → verifier-ladder rung mapping (the contract gap OL-7.3 closes)
 // ---------------------------------------------------------------------------
@@ -350,6 +374,8 @@ export function escalateTier(tier: EconTier): EconTier {
  * the single extraRung slot (§4.6 ladder order) — RM first, judge on RM abstain.
  * verifyCommands are always offered when a runner exists — the ladder decides
  * applicability — so a real check is never skipped just because the cell is qe/judge.
+ * `slice.probeCommand` (if set) rides along on `spec.probeCommand` untouched —
+ * the ladder's separate probe rung, orthogonal to this rung mapping.
  *
  * @sem domain=routing role=verify-ladder
  */
@@ -370,7 +396,7 @@ export function buildLadderInput(
     })
 
   const input: VerifierLadderInput = {
-    spec: { commands },
+    spec: { commands, ...(slice.probeCommand ? { probeCommand: slice.probeCommand } : {}) },
     runner,
     trajectory: result.trajectory,
     ...(previousCaseCount !== undefined ? { previousCaseCount } : {}),
@@ -505,6 +531,120 @@ function buildEscalationBrief(
 }
 
 // ---------------------------------------------------------------------------
+// Same-tier squeeze retry (M2) — a rejected attempt retries the SAME tier
+// while its failure signature is still converging, and climbs only on stall.
+// ---------------------------------------------------------------------------
+
+/** A reject verdict's identity for squeeze/stall comparison: same rung + same MISSING line means no new information surfaced. */
+function verdictSignature(verdict: VerifierVerdict): string {
+  return `${verdict.rung}|${verdict.missing ?? ""}`
+}
+
+/**
+ * One rescue hop: build the escalation brief from the rejected attempt (the
+ * EXISTING `buildEscalationBrief` path — a same-tier squeeze retry (M2)
+ * carries the same rejected-diff-as-advice brief a tier climb does), dispatch
+ * `targetTier` (equal to `atTier` for a squeeze retry, higher for a climb),
+ * re-verify, and record the discarded attempt as double-pay. Shared by the
+ * squeeze-retry and climb paths in `runSlice` so both go through one
+ * dispatch/verify/ledger path — the only difference is the target tier and
+ * the provenance reason.
+ */
+async function dispatchRescueHop(args: {
+  slice: LoopSlice
+  deps: SliceLoopDeps
+  ledger: DoublePayLedger
+  allocation: SliceAllocation
+  atTier: EconTier
+  targetTier: EconTier
+  attempt: SliceDispatchResult
+  attemptVerdict: VerifierVerdict
+  currentHash: string | undefined
+  baseTimeoutMs: number
+  dispatchTimeout: NonNullable<SliceLoopDeps["dispatchTimeout"]>
+  tierModel: (tier: EconTier) => string
+  attempts: number
+}): Promise<{
+  result: SliceDispatchResult
+  verdict: VerifierVerdict
+  escalation: NonNullable<SliceOutcome["escalation"]>
+  currentHash: string | undefined
+}> {
+  const { slice, deps, ledger, allocation, atTier, targetTier, attempt, attemptVerdict, baseTimeoutMs, dispatchTimeout, tierModel, attempts } = args
+  const squeeze = targetTier === atTier
+
+  // Escalation provenance (U3): one line per hop naming why it moved — closes
+  // the live-fire decode gap where INFO logs never showed this. A squeeze
+  // retry is marked distinctly (fromTier === toTier + a "squeeze-retry"
+  // reason prefix) so the trace shows max-out-the-tier vs a real climb.
+  deps.onProvenance?.({
+    sliceId: slice.id,
+    fromTier: atTier,
+    toTier: targetTier,
+    rungReason: squeeze ? `squeeze-retry: ${attemptVerdict.reason}` : attemptVerdict.reason,
+  })
+
+  // Pre-dispatch re-evaluation on escalation re-entry (U4, §4.2): a rung
+  // reject IS a signal delta. Observational at this hop — `targetTier` still
+  // governs the actual dispatch tier; this call reports what the evaluator
+  // would decide, for the receipt's evaluator drilldown (U6).
+  const reEvalVerdict = evaluate(
+    buildEvalContext(slice, deps, { attempts, lastRejectReason: attemptVerdict.reason }, { lastTier: atTier, signalDelta: true }),
+  )
+  deps.onEvaluation?.({ sliceId: slice.id, tier: reEvalVerdict.tier, venue: reEvalVerdict.venue, reasons: reEvalVerdict.reasons })
+
+  // Capture the rejected attempt's diff BEFORE restoring, so the brief can
+  // carry it as advice; restore returns the tree to clean before the next
+  // hop is dispatched (U3, OL-ORCH-1.6/4.3).
+  const revertedDiff = await captureAndRestore(deps, args.currentHash)
+  const brief = buildEscalationBrief(slice, allocation, attemptVerdict, attempt, revertedDiff)
+  const hopTimeoutMs = Math.ceil(baseTimeoutMs * ESCALATION_TIMEOUT_FACTOR)
+  const currentHash = await trackBeforeAttempt(slice, deps)
+  const dispatched = await dispatchWithBudget(
+    deps.dispatch,
+    dispatchTimeout,
+    { sliceId: slice.id, tier: targetTier, prompt: brief.text, escalated: true, sliceType: slice.sliceType },
+    hopTimeoutMs,
+  )
+  const hopResult = dispatched.result
+
+  const record = recordEscalation({
+    turnId: slice.id,
+    cheap: {
+      model: attempt.usage?.model ?? tierModel(atTier),
+      cost: attempt.usage?.cost ?? 0,
+      tokens: attempt.usage?.tokens ?? zeroTokens(),
+    },
+    oracle: {
+      model: hopResult.usage?.model ?? tierModel(targetTier),
+      cost: hopResult.usage?.cost ?? 0,
+      tokens: hopResult.usage?.tokens ?? zeroTokens(),
+    },
+    emit: deps.onEscalation,
+  })
+  ledger.add(record)
+
+  const hopTrajectory: SliceTrajectory = {
+    ...hopResult.trajectory,
+    ...(slice.isTestSlice ? { isTestSlice: true } : {}),
+    isReadOnlySlice: isReadOnlySlice(slice.sliceType),
+  }
+  // The prior attempt's case count travels into the re-verify so a rescue
+  // that "fixes" the suite by shrinking it rejects the sound rung (B6).
+  const priorCaseCount = attemptVerdict.sound.caseCount
+  const hopVerdict =
+    dispatched.verdict ??
+    (await runVerifierLadder(buildLadderInput(slice, allocation, { ...hopResult, trajectory: hopTrajectory }, deps, priorCaseCount)))
+
+  return {
+    result: hopResult,
+    verdict: hopVerdict,
+    escalation: { tier: targetTier, brief, result: hopResult, record },
+    currentHash,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Failure containment (U3, OL-ORCH-4.3) — bracket every editable attempt with
 // a snapshot: track() before dispatch, restore() after a reject (before the
 // next hop is built, or before the ladder gives up), the reverted diff riding
@@ -602,17 +742,31 @@ export const ESCALATION_TIMEOUT_FACTOR = 1.5
 export const LOOP_BUDGET_FACTOR = 1.2
 
 /**
- * Max total dispatch calls (the cheap attempt plus rescue hops) for a normal
- * (mechanical/design) slice — one cheap attempt plus at most ONE escalation
- * hop (OL-9.5d). Read-only (recon/verify) slices override this to 1 instead
- * (see `defaultMaxAttempts`): a failed verify there is information for the
- * parent, not grounds to re-run. Run-8 post-mortem: the un-capped ladder
- * re-ran identical work up to 4x per slice (8 briefs -> 62 runner sessions,
- * one "Apply the fix" dispatched 5x) because a reject alone carries no
- * diagnosis of what to change — laddering it further added no new signal.
- * Overridable per-run via `SliceLoopDeps.maxAttempts`. Tunable.
+ * Runaway backstop on total dispatch calls (the cheap attempt plus every
+ * squeeze retry and climb) for a normal (mechanical/design) slice — a fail-
+ * safe ceiling, not the real control. The real controls are the
+ * convergence-gated same-tier squeeze budget (`SAME_TIER_RETRY_BUDGET`, reset
+ * on every climb), the non-critical climb depth (`maxClimbs` in `runSlice`),
+ * the signature-stall guard (a repeated verdict signature climbs immediately
+ * instead of spending more squeeze budget), and the tier ceiling — together
+ * these already prevent the run-8 regression (an un-capped ladder re-running
+ * identical work up to 4x per slice, 8 briefs -> 62 runner sessions) without
+ * needing a tight flat cap, so this backstop can sit high. Read-only
+ * (recon/verify) slices override this to 1 instead (see `defaultMaxAttempts`)
+ * and never squeeze or climb regardless of this value: a failed verify there
+ * is information for the parent, not grounds to re-run. Overridable per-run
+ * via `SliceLoopDeps.maxAttempts`. Tunable.
  */
-export const MAX_SLICE_ATTEMPTS = 2
+export const MAX_SLICE_ATTEMPTS = 8
+
+/**
+ * Max same-tier squeeze retries (M2) — per tier, reset on every climb —
+ * before a still-converging-but-rejecting attempt is forced to climb
+ * instead. This is the real squeeze control, independent of
+ * `MAX_SLICE_ATTEMPTS` (a backstop) and of `maxClimbs` (the separate climb
+ * depth in `runSlice`): a stalled squeeze must never deny a climb. Tunable.
+ */
+export const SAME_TIER_RETRY_BUDGET = 2
 
 /** Default per-slice attempt cap (OL-9.5d): 1 for a read-only (recon/verify) slice — no ladder at all — `MAX_SLICE_ATTEMPTS` otherwise. */
 function defaultMaxAttempts(slice: LoopSlice): number {
@@ -773,150 +927,177 @@ async function runSlice(
   const verdict =
     cheapAttempt.verdict ?? (await runVerifierLadder(buildLadderInput(slice, allocation, { ...cheap, trajectory }, deps)))
 
-  if (verdict.accepted) {
-    return {
-      id: slice.id,
-      // An untestable-slice accept (verdict.unverified, OL-9.5d) still needs
-      // to surface as unverified downstream — it wasn't actually checked.
-      state: verdict.unverified ? "unverified" : "accepted",
-      tier: allocation.tier,
-      verification: allocation.verification,
-      allocation,
-      verdict,
-      output: cheap.text,
-      attempts: 1,
-    }
+  // M3 escalation floor: a critical slice (isCritical) may never soft-settle
+  // unverified below the oracle. An untestable-slice vacuous accept
+  // (verdict.unverified) is NOT settled here when the slice isCritical and
+  // still has tier headroom — it falls through into the ladder below, which
+  // forces a climb instead of a silent accept. Read-only (recon/verify)
+  // slices are excluded — the floor never overrides their no-escalate rule.
+  const criticalFloorBlocksAccept = (v: VerifierVerdict, tier: EconTier): boolean =>
+    Boolean(v.unverified) && !isReadOnlySlice(slice.sliceType) && isCritical(slice) && LADDER_RANK[tier] < LADDER_RANK.oracle
+
+  const settleAccepted = (v: VerifierVerdict, out: SliceDispatchResult, atAttempts: number, esc?: SliceOutcome["escalation"]): SliceOutcome => ({
+    id: slice.id,
+    // An untestable-slice accept (verdict.unverified, OL-9.5d) still needs to
+    // surface as unverified downstream — it wasn't actually checked.
+    state: v.unverified ? "unverified" : esc ? "escalated" : "accepted",
+    tier: allocation.tier,
+    verification: allocation.verification,
+    allocation,
+    verdict: v,
+    output: out.text,
+    attempts: atAttempts,
+    ...(esc ? { escalation: esc } : {}),
+  })
+
+  if (verdict.accepted && !criticalFloorBlocksAccept(verdict, allocation.tier)) {
+    return settleAccepted(verdict, cheap, 1)
   }
 
-  // --- Rejected → climb the ladder up to `maxAttempts` total dispatches
-  // (OL-9.5d), each rescue RE-VERIFIED before it is trusted — a conductor
-  // rescue cannot be blind-accepted the way the old straight-to-oracle hop
-  // was. The ladder no longer climbs unconditionally to the oracle: run-8
-  // showed an un-capped ladder re-running identical work up to 4x per slice
-  // (8 briefs -> 62 runner sessions, one "Apply the fix" dispatched 5x) with
-  // no new signal, because a reject alone carries no diagnosis of what to
-  // change. `maxAttempts` (`defaultMaxAttempts` unless overridden) caps this
-  // at MAX_SLICE_ATTEMPTS (2) for a normal slice — one cheap attempt plus at
-  // most ONE escalation hop — and at 1 (no ladder at all) for a read-only
-  // (recon/verify) slice, where a failed verify is information for the
-  // parent, not grounds to re-run. Exhausting either the tier ceiling or the
-  // attempt cap accepts the last attempt flagged unverified (the frontier
-  // hatch OL-7.10 is out of scope).
+  // --- Rejected (or a critical slice's vacuous accept, M3) → work the ladder,
+  // each rescue RE-VERIFIED before it is trusted — a conductor rescue cannot
+  // be blind-accepted the way the old straight-to-oracle hop was. A genuine
+  // reject first RETRIES THE SAME TIER while its failure signature is still
+  // converging (M2, SAME_TIER_RETRY_BUDGET, reset on every climb) — squeezing
+  // the cheap tier before paying for a climb — and only climbs on stall (the
+  // signature repeats, or the squeeze budget is spent). The climb itself is
+  // gated by `maxClimbs`, NOT by the total attempt count: a non-critical
+  // slice always reaches at least the conductor before it may settle
+  // unverified (a stalled squeeze must never deny the climb) and climbs at
+  // most once more beyond that (the cost cap — the conductor rescue is the
+  // affordable ceiling for a non-critical slice); a critical slice (M3)
+  // bypasses `maxClimbs` via `forceFloorClimb` and climbs every tier up to
+  // the oracle. `MAX_SLICE_ATTEMPTS` (`defaultMaxAttempts` unless overridden)
+  // is a runaway backstop on total dispatches, not the real control — the
+  // signature-stall guard already prevents the run-8 regression (an
+  // un-capped ladder re-running identical work up to 4x per slice, 8 briefs
+  // -> 62 runner sessions) since a squeeze only fires while NEW evidence
+  // keeps surfacing. Read-only (recon/verify) slices never squeeze or climb
+  // (maxClimbs=0), matching their 1-dispatch `defaultMaxAttempts` cap.
+  // Exhausting the climb depth or the tier ceiling settles the last attempt
+  // flagged unverified — UNLESS the slice isCritical (M3), which instead
+  // forces one more climb per exhaustion point, settling loudly only once
+  // it's genuinely stuck at the oracle ceiling.
   let atTier = allocation.tier
   let attempt = cheap
   let attemptVerdict = verdict
   let escalation: SliceOutcome["escalation"]
   let attempts = 1
+  let sameTierRetries = 0
+  let lastSignatureAtTier: string | undefined
+  let climbs = 0
+
+  // Non-critical climb depth (the cost cap): a non-critical slice climbs at
+  // most once beyond the cheap tier (to the conductor for an executor-first
+  // slice) before it may settle unverified — `forceFloorClimb` below bypasses
+  // this for a critical slice, up to the oracle ceiling. Zero for a read-only
+  // (recon/verify) slice: it never climbs at all, matching `defaultMaxAttempts`
+  // — the `ceiling` backstop alone (below) does not block a first climb (a
+  // recon's ceiling IS the conductor, and verify's ceiling is the oracle), so
+  // this must be the real gate now that the attempt count no longer is.
+  const maxClimbs = isReadOnlySlice(slice.sliceType) ? 0 : 1
 
   // Ladder ceiling: recon is read-only investigation — it never deserves an
-  // oracle-priced rescue. In practice this is now subsumed by the read-only
-  // maxAttempts=1 cap below (recon/verify never reach a second dispatch), but
-  // it stays as the tier-side backstop for a caller-overridden maxAttempts.
+  // oracle-priced rescue; verify has no special ceiling of its own (maxClimbs
+  // above is what actually stops it at 0 climbs). This stays as the tier-side
+  // backstop for a caller-overridden maxClimbs/maxAttempts.
   const ceiling: EconTier = slice.sliceType === "recon" ? "conductor" : "oracle"
 
-  for (;;) {
-    const higher = escalateTier(atTier)
-    if (higher === atTier || LADDER_RANK[higher] > LADDER_RANK[ceiling] || attempts >= maxAttempts) {
-      // Ladder exhaustion: no further hop is coming, so the reverted diff (if
-      // this attempt was bracketed) travels in the failure result itself
-      // instead of a next brief — the turn owner decides from here (U3).
-      const revertedDiff = await captureAndRestore(deps, currentHash)
-      return {
-        id: slice.id,
-        state: "unverified",
-        tier: allocation.tier,
-        verification: allocation.verification,
-        allocation,
-        verdict: attemptVerdict,
-        output: attempt.text,
-        attempts,
-        ...(escalation ? { escalation } : {}),
-        ...(revertedDiff !== undefined ? { revertedDiff } : {}),
-      }
-    }
-
-    // Escalation provenance (U3): one line per hop naming why it escalated —
-    // closes the live-fire decode gap where INFO logs never showed this.
-    deps.onProvenance?.({ sliceId: slice.id, fromTier: atTier, toTier: higher, rungReason: attemptVerdict.reason })
-
-    // Pre-dispatch re-evaluation on escalation re-entry (U4, §4.2): a rung
-    // reject IS a signal delta. Observational at this hop — the ladder's own
-    // tier bump (`higher`, above) still governs the actual escalated dispatch
-    // tier; this call reports what the evaluator would decide, for the
-    // receipt's evaluator drilldown (U6).
-    const reEvalVerdict = evaluate(
-      buildEvalContext(
-        slice,
-        deps,
-        { attempts, lastRejectReason: attemptVerdict.reason },
-        { lastTier: atTier, signalDelta: true },
-      ),
-    )
-    deps.onEvaluation?.({ sliceId: slice.id, tier: reEvalVerdict.tier, venue: reEvalVerdict.venue, reasons: reEvalVerdict.reasons })
-
-    // Capture the rejected attempt's diff BEFORE restoring, so the brief can
-    // carry it as advice; restore returns the tree to clean before the next
-    // (higher-tier) hop is dispatched (U3, OL-ORCH-1.6/4.3).
+  const settleUnverified = async (): Promise<SliceOutcome> => {
+    // Ladder exhaustion: no further hop is coming, so the reverted diff (if
+    // this attempt was bracketed) travels in the failure result itself
+    // instead of a next brief — the turn owner decides from here (U3).
     const revertedDiff = await captureAndRestore(deps, currentHash)
-    const brief = buildEscalationBrief(slice, allocation, attemptVerdict, attempt, revertedDiff)
-    const escalatedTimeoutMs = Math.ceil(baseTimeoutMs * ESCALATION_TIMEOUT_FACTOR)
-    currentHash = await trackBeforeAttempt(slice, deps)
-    const escalatedAttempt = await dispatchWithBudget(
-      deps.dispatch,
-      dispatchTimeout,
-      { sliceId: slice.id, tier: higher, prompt: brief.text, escalated: true, sliceType: slice.sliceType },
-      escalatedTimeoutMs,
-    )
-    const escalated = escalatedAttempt.result
-    attempts += 1
-
-    const record = recordEscalation({
-      turnId: slice.id,
-      cheap: {
-        model: attempt.usage?.model ?? tierModel(atTier),
-        cost: attempt.usage?.cost ?? 0,
-        tokens: attempt.usage?.tokens ?? zeroTokens(),
-      },
-      oracle: {
-        model: escalated.usage?.model ?? tierModel(higher),
-        cost: escalated.usage?.cost ?? 0,
-        tokens: escalated.usage?.tokens ?? zeroTokens(),
-      },
-      emit: deps.onEscalation,
-    })
-    ledger.add(record)
-
-    const escalatedTrajectory: SliceTrajectory = {
-      ...escalated.trajectory,
-      ...(slice.isTestSlice ? { isTestSlice: true } : {}),
-      isReadOnlySlice: isReadOnlySlice(slice.sliceType),
+    return {
+      id: slice.id,
+      state: "unverified",
+      tier: allocation.tier,
+      verification: allocation.verification,
+      allocation,
+      verdict: attemptVerdict,
+      output: attempt.text,
+      attempts,
+      ...(escalation ? { escalation } : {}),
+      ...(revertedDiff !== undefined ? { revertedDiff } : {}),
     }
-    // The prior attempt's case count travels into the re-verify so a rescue
-    // that "fixes" the suite by shrinking it rejects the sound rung (B6).
-    const priorCaseCount = attemptVerdict.sound.caseCount
-    attemptVerdict =
-      escalatedAttempt.verdict ??
-      (await runVerifierLadder(
-        buildLadderInput(slice, allocation, { ...escalated, trajectory: escalatedTrajectory }, deps, priorCaseCount),
-      ))
-    escalation = { tier: higher, brief, result: escalated, record }
-    atTier = higher
-    attempt = escalated
+  }
 
-    if (attemptVerdict.accepted) {
-      return {
-        id: slice.id,
-        // Mirrors the cheap-attempt branch: an untestable-slice accept on the
-        // rescue hop is still unverified, not a genuine escalated pass.
-        state: attemptVerdict.unverified ? "unverified" : "escalated",
-        tier: allocation.tier,
-        verification: allocation.verification,
-        allocation,
-        verdict: attemptVerdict,
-        output: attempt.text,
-        escalation,
-        attempts,
+  for (;;) {
+    // Only reachable via the M3 floor above (or a later pass on the same
+    // forced chain, since an untestable-critical verdict stays unverified at
+    // every tier) — a genuine reject never sets `accepted`. There is nothing
+    // to squeeze-retry for an accept, only a tier to raise.
+    const forcedFloorAccept = attemptVerdict.accepted
+
+    if (!forcedFloorAccept) {
+      // Genuine reject: squeeze the tier before climbing (M2) — a same-tier
+      // retry re-dispatches through the EXISTING buildEscalationBrief path
+      // (the rejected diff as advice), exactly like a climb does.
+      const signature = verdictSignature(attemptVerdict)
+      const canSqueeze =
+        !isReadOnlySlice(slice.sliceType) &&
+        attempts < maxAttempts &&
+        sameTierRetries < SAME_TIER_RETRY_BUDGET &&
+        signature !== lastSignatureAtTier
+
+      if (canSqueeze) {
+        const hop = await dispatchRescueHop({
+          slice, deps, ledger, allocation, atTier, targetTier: atTier,
+          attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts,
+        })
+        attempts += 1
+        sameTierRetries += 1
+        lastSignatureAtTier = signature
+        currentHash = hop.currentHash
+        escalation = hop.escalation
+        attempt = hop.result
+        attemptVerdict = hop.verdict
+
+        if (attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, atTier)) {
+          return settleAccepted(attemptVerdict, attempt, attempts, escalation)
+        }
+        continue
       }
+    }
+
+    // Stall (signature repeated, squeeze budget spent, or an M3 forced-floor
+    // carry-over that always climbs directly) → climb, or give up if there's
+    // nowhere left to climb / the attempt cap is spent (the cap is bypassed
+    // for a forced-floor carry-over, which never settles below the oracle).
+    const higher = escalateTier(atTier)
+    const exhausted =
+      higher === atTier || LADDER_RANK[higher] > LADDER_RANK[ceiling] || (!forcedFloorAccept && climbs >= maxClimbs)
+
+    if (exhausted) {
+      const forceFloorClimb =
+        !forcedFloorAccept && !isReadOnlySlice(slice.sliceType) && isCritical(slice) && LADDER_RANK[atTier] < LADDER_RANK.oracle
+      if (!forceFloorClimb) {
+        // A critical slice genuinely stuck at its ceiling (the oracle, or
+        // recon's conductor cap) settles loudly (M3) instead of a silent accept.
+        if (isCritical(slice) && !isReadOnlySlice(slice.sliceType)) {
+          deps.onProvenance?.({ sliceId: slice.id, fromTier: atTier, toTier: atTier, rungReason: "critical-unverified-at-ceiling" })
+        }
+        return await settleUnverified()
+      }
+      // else: the floor (M3) forces this climb past the exhausted ceiling/budget.
+    }
+
+    const hop = await dispatchRescueHop({
+      slice, deps, ledger, allocation, atTier, targetTier: higher,
+      attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts,
+    })
+    attempts += 1
+    climbs += 1
+    currentHash = hop.currentHash
+    escalation = hop.escalation
+    atTier = higher
+    attempt = hop.result
+    attemptVerdict = hop.verdict
+    sameTierRetries = 0
+    lastSignatureAtTier = undefined
+
+    if (attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, atTier)) {
+      return settleAccepted(attemptVerdict, attempt, attempts, escalation)
     }
   }
 }

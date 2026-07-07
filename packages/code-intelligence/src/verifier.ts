@@ -12,10 +12,15 @@
  * (recon/verify) slice — a bash command shaped like a write (OL-9.3b),
  * closing the gap where the host's edit-tool deny lane doesn't see a
  * write hidden inside a shell command. `runVerifierLadder` composes both —
- * sound first, then the behavior gate — and only then falls through to the
- * optional OL-7.8a extension rung (execution-free RM, a later task; this
- * only reserves the typed extension point) and the existing QE veto
- * (qe.ts) for untestable slices. Every reject verdict carries a `missing`
+ * sound first, then the behavior gate, then (once sound has passed or is
+ * inapplicable) an optional pinned-reproduction probe (`VerifySpec.probeCommand`,
+ * rung "probe" — task #7 localization/repro verification: the slice's
+ * specific failing case must go red→green, checked independently of the
+ * generic `commands` list, so a red probe rejects even when the sound check
+ * itself passed) — and only when no sound check applies (untestable slice)
+ * does the ladder fall further through to the optional OL-7.8a extension
+ * rung (execution-free RM, a later task; this only reserves the typed
+ * extension point) and the existing QE veto (qe.ts). Every reject verdict carries a `missing`
  * field naming the evidence that would have passed it (OL-9.4c); the
  * trajectory also tracks `file-read` events so a rescue's escalation brief
  * can point at what was already read instead of re-deriving it.
@@ -40,9 +45,11 @@ export interface VerifyCommand {
   command: string
 }
 
-/** Which typecheck/test/lint commands apply to a slice — assembled by the caller (OL-7.3 slice loop). */
+/** Which typecheck/test/lint commands apply to a slice — assembled by the caller (OL-7.3 slice loop). `probeCommand` is a distinct, optional pinned reproduction that gates separately as rung "probe" (task #7 localization/repro verification). */
 export interface VerifySpec {
   commands: VerifyCommand[]
+  /** A pinned reproduction that MUST transition red→green — e.g. the exact repro of the bug being fixed. Distinct from `commands`: when unset, no probe rung fires and the ladder behaves exactly as before. */
+  probeCommand?: VerifyCommand
 }
 
 /** Outcome of running one VerifyCommand — supplied by the injected runner. */
@@ -490,6 +497,41 @@ function missingEvidenceForBehavior(behavior: BehaviorResult): string {
   return `MISSING: a trajectory clear of ${kinds || "the flagged pattern"} — redo the change without it, then a fresh sound-check run.`
 }
 
+/** Deterministic "MISSING: ..." line for a red pinned reproduction — names the exact repro command and its current exit code, not a description of the fix. */
+function missingEvidenceForProbe(cmd: VerifyCommand, exitCode: number): string {
+  return `MISSING: a green run of the pinned reproduction \`${cmd.command}\` (currently exit ${exitCode}) — fix the CAUSE so the failing case passes; do not weaken or swap the check.`
+}
+
+/**
+ * Runs the pinned reproduction (`VerifySpec.probeCommand`, task #7
+ * localization/repro verification) and returns a reject verdict when it's
+ * still red — `null` when there's no probeCommand, or it exits 0 (green is
+ * necessary but not sufficient, so the caller still falls through to
+ * whatever rung follows). Shared by both call sites in `runVerifierLadder` —
+ * the sound-accept path (`commands` non-empty and passing) and the
+ * untestable-slice path (`commands` empty) — so a red probe rejects the
+ * same way regardless of which rung reached it.
+ */
+async function checkProbeRung(
+  spec: VerifySpec,
+  runner: CommandRunner,
+  sound: SoundVerdict,
+  behavior: BehaviorResult,
+): Promise<VerifierVerdict | null> {
+  if (!spec.probeCommand) return null
+  const cmd = spec.probeCommand
+  const result = await runner(cmd)
+  if (result.exitCode === 0) return null
+  return {
+    accepted: false,
+    rung: "probe",
+    reason: `pinned reproduction \`${cmd.command}\` is still red (exit ${result.exitCode})`,
+    sound,
+    behavior,
+    missing: missingEvidenceForProbe(cmd, result.exitCode),
+  }
+}
+
 /**
  * The OL-7.8 ladder entry point: runs the sound check, then gates on
  * trajectory behavior flags — a sound PASS with a suspicious trajectory is
@@ -497,21 +539,29 @@ function missingEvidenceForBehavior(behavior: BehaviorResult): string {
  * whose case count shrank versus `previousCaseCount` is also rejected (a
  * dropped probe case reads as a fabricated green), while a pass that skipped
  * cases is accepted but carries its pass-with-skips flag into the verdict
- * reason so the caller sees the suspicion. Only when
- * no sound check applies (untestable slice) and the trajectory is clean does
- * the ladder degrade to the optional extension rung and then the existing QE
- * veto, wired through qe.ts rather than reimplemented here. When NONE of
- * sound/extension/QE apply, the slice is accepted with `unverified: true`
+ * reason so the caller sees the suspicion. Once sound has passed (whether
+ * an applicable command list passed, or the slice is untestable and sound
+ * is vacuously true) does the ladder gate on an optional pinned-reproduction
+ * probe (`VerifySpec.probeCommand`, rung "probe" — task #7 localization/repro
+ * verification: the slice's specific failing case must go red→green, run
+ * independently of the generic `commands` list via the shared
+ * `checkProbeRung` helper — a red probe rejects even when the sound check
+ * itself passed; green is necessary but not sufficient, so the ladder still
+ * falls through). Only when no sound check applies (untestable slice) and
+ * the probe (if any) is clean does the ladder degrade further to the
+ * optional extension rung and then the existing QE veto, wired through
+ * qe.ts rather than reimplemented here. When NONE of probe/extension/QE
+ * apply, the slice is accepted with `unverified: true`
  * (OL-9.5d) rather than rejected: absence of any applicable check is not
  * evidence of failure, and laddering an unverifiable slice only re-runs
  * identical work with no new signal (run-8 post-mortem: 8 briefs escalated
  * into 62 runner sessions, one "Apply the fix" dispatched 5x, against work
  * that was already correct). Every OTHER reject path still carries a
  * `missing` field (OL-9.4c) — synthesized from the failing check itself for
- * sound/behavior/QE, or propagated from the extension rung (e.g. the judge's
- * parsed "MISSING: ..." line) — so the escalation brief always states what
- * evidence would have passed; the no-rung fallback carries none, since it is
- * no longer a reject.
+ * sound/behavior/probe/QE, or propagated from the extension rung (e.g. the
+ * judge's parsed "MISSING: ..." line) — so the escalation brief always
+ * states what evidence would have passed; the no-rung fallback carries none,
+ * since it is no longer a reject.
  *
  * @sem domain=routing role=verify-ladder
  */
@@ -543,6 +593,12 @@ export async function runVerifierLadder(input: VerifierLadderInput): Promise<Ver
         missing: `MISSING: a green run covering all ${shrink.previous} case(s) the previous attempt ran — restore the dropped case(s); a smaller suite is not a pass.`,
       }
     }
+    // A broken build rejects before the probe runs (order preserved) — the
+    // probe only gates the accept path, once sound itself passed.
+    if (sound.pass) {
+      const probe = await checkProbeRung(input.spec, input.runner, sound, behavior)
+      if (probe) return probe
+    }
     const skips = sound.flags ?? []
     const suspect = sound.pass && skips.length > 0 ? ` — suspect: ${skips.map((f) => f.detail).join("; ")}` : ""
     return {
@@ -555,7 +611,12 @@ export async function runVerifierLadder(input: VerifierLadderInput): Promise<Ver
     }
   }
 
-  // Untestable slice — no sound check applies. Degrade one rung at a time.
+  // Untestable slice — no sound check applies (a vacuous pass). Gate on the
+  // pinned reproduction here too, via the same helper used above, then
+  // degrade one rung at a time.
+  const untestableProbe = await checkProbeRung(input.spec, input.runner, sound, behavior)
+  if (untestableProbe) return untestableProbe
+
   if (input.extraRung) {
     const extra = await input.extraRung({ sound, behavior, trajectory: input.trajectory })
     if (extra) {

@@ -613,3 +613,115 @@ describe("runVerifierLadder — OL-9.4c synthesized MISSING evidence on reject",
     expect(verdict.missing).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// runVerifierLadder — pinned reproduction probe rung (task #7
+// localization/repro verification)
+// ---------------------------------------------------------------------------
+
+describe("runVerifierLadder — pinned reproduction probe rung", () => {
+  const cleanTrajectory: SliceTrajectory = { events: [] }
+  const probeCommand: VerifyCommand = { kind: "test", command: "bun test repro.test.ts" }
+
+  it("rejects on rung 'probe' when the pinned reproduction is still red", async () => {
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({ exitCode: 1, stdout: "", stderr: "still failing" })
+    const verdict = await runVerifierLadder({
+      spec: { commands: [], probeCommand },
+      runner,
+      trajectory: cleanTrajectory,
+    })
+    expect(verdict.accepted).toBe(false)
+    expect(verdict.rung).toBe("probe")
+    expect(verdict.reason).toContain("still red")
+    expect(verdict.missing).toContain("MISSING:")
+    expect(verdict.missing).toContain("bun test repro.test.ts")
+  })
+
+  it("proceeds past a green probe to the next applicable rung, same as without a probe", async () => {
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({ exitCode: 0, stdout: "", stderr: "" })
+    const verdict = await runVerifierLadder({
+      spec: { commands: [], probeCommand },
+      runner,
+      trajectory: cleanTrajectory,
+      extraRung: () => ({ rung: "rm", pass: true, detail: "scored 0.9" }),
+    })
+    expect(verdict.accepted).toBe(true)
+    expect(verdict.rung).toBe("rm")
+  })
+
+  it("accepts unverified when the probe is green and no extension/QE apply, same as without a probe", async () => {
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({ exitCode: 0, stdout: "", stderr: "" })
+    const verdict = await runVerifierLadder({
+      spec: { commands: [], probeCommand },
+      runner,
+      trajectory: cleanTrajectory,
+    })
+    expect(verdict.accepted).toBe(true)
+    expect(verdict.unverified).toBe(true)
+  })
+
+  it("fires no probe rung when probeCommand is unset — identical to current behavior", async () => {
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({ exitCode: 0, stdout: "", stderr: "" })
+    const verdict = await runVerifierLadder({
+      spec: { commands: [] },
+      runner,
+      trajectory: cleanTrajectory,
+    })
+    expect(verdict.accepted).toBe(true)
+    expect(verdict.unverified).toBe(true)
+    expect(verdict.rung).toBe("sound")
+  })
+
+  it("does not let a red probe override a prior behavior-gate reject (order preserved)", async () => {
+    const suspiciousTrajectory: SliceTrajectory = {
+      isTestSlice: false,
+      events: [{ kind: "file-edit", filePath: "src/foo.test.ts", diff: "+it.skip('x', () => {})" }],
+    }
+    let probeCalled = false
+    const runner: CommandRunner = async (): Promise<CommandResult> => {
+      probeCalled = true
+      return { exitCode: 1, stdout: "", stderr: "" }
+    }
+    const verdict = await runVerifierLadder({
+      spec: { commands: [], probeCommand },
+      runner,
+      trajectory: suspiciousTrajectory,
+    })
+    expect(verdict.accepted).toBe(false)
+    expect(verdict.rung).toBe("behavior")
+    expect(probeCalled).toBe(false)
+  })
+
+  it("does not let a red probe override a prior sound-rung reject (order preserved)", async () => {
+    let probeCalled = false
+    const runner: CommandRunner = async (cmd): Promise<CommandResult> => {
+      if (cmd.command === probeCommand.command) probeCalled = true
+      return { exitCode: 1, stdout: "", stderr: "boom" }
+    }
+    const verdict = await runVerifierLadder({
+      spec: { commands: [{ kind: "test", command: "bun test" }], probeCommand },
+      runner,
+      trajectory: cleanTrajectory,
+    })
+    expect(verdict.accepted).toBe(false)
+    expect(verdict.rung).toBe("sound")
+    expect(probeCalled).toBe(false)
+  })
+
+  it("rejects at rung 'probe' when commands is non-empty and its sound check PASSES but the probe is still red", async () => {
+    const runner: CommandRunner = async (cmd): Promise<CommandResult> =>
+      cmd.command === probeCommand.command
+        ? { exitCode: 1, stdout: "", stderr: "still failing" }
+        : { exitCode: 0, stdout: "", stderr: "" }
+    const verdict = await runVerifierLadder({
+      spec: { commands: [{ kind: "test", command: "bun test" }], probeCommand },
+      runner,
+      trajectory: cleanTrajectory,
+    })
+    expect(verdict.accepted).toBe(false)
+    expect(verdict.rung).toBe("probe")
+    expect(verdict.sound.pass).toBe(true)
+    expect(verdict.missing).toContain("MISSING:")
+    expect(verdict.missing).toContain("bun test repro.test.ts")
+  })
+})
