@@ -169,6 +169,16 @@ cost paths verified ratio 1.00 in every run):
   slice loop engaged, then solved it inline anyway. Open engine item: frame seeds
   should survive list-replacement writes (preserve-frame-slices at the todowrite
   boundary); accepted as non-blocking per user direction (outcome bar).
+- **Post-reconcile-net re-run (2026-07-07, binary 202607070720): PASS with flying
+  colors — door 1 restored.** The conductor's first todowrite again omitted the
+  frame seed (planner, this time), and `reconcileSettledSlices` re-appended it:
+  engagement 1s later, one oracle planner slice, and the exact upstream fix
+  (`Choices.__str__` → `str(self.value)`, django `dbcd7b064e` equivalent) verified
+  with tests. $0.0561 / 19 turns / 301k tok / cache 87% / 0 escalations, single
+  wave. The skeleton-clobber backlog item is CLOSED by the same seam as the
+  double-wave fix. (First launch of this round hit `database is locked` — two
+  fresh binaries booting the shared DB sub-second apart contend on the migration
+  check; stagger parallel arena launches by a few seconds.)
 
 ### Case 2 — multi-dimension audit of a subtly-unsound fix → door 2 (judgment typing → reasoner)
 
@@ -223,6 +233,20 @@ cost paths verified ratio 1.00 in every run):
   172 turns / 6.19M tok — 2.1× attempt C. A milder relative of the run-8
   never-settled re-dispatch: root-cause the re-engagement that re-dispatched settled
   slices. 0 escalations, cache 80.2%.
+- **Post-reconcile-net re-run (2026-07-07, binary 202607070720): mechanism FIXED,
+  verdict flipped — judgment variance, not routing.** Double-wave decode root
+  cause: the conductor's mid-turn todowrite re-emitted the settled 5-item list as
+  pending/in_progress, un-completing paid-for slices (the loop's `setTodoStatus`
+  settlement was intact; the todowrite boundary wholesale-replaced it). Fixed by
+  `reconcileSettledSlices` (terminal stickiness + frame-seed preservation) before
+  `autoTypeTodos` in tool/todo.ts. This run: 1 engagement, exactly 6 children in
+  one wave (4 dims → dep-gated verdict +248s → oracle synthesis), all completed,
+  $1.2081 / 82 turns / 2.10M tok — back at the attempt-C baseline (53% below the
+  double-wave run). BUT the verdict came back SHIP: the soundness/edge dims noted
+  "b's checks are ignored — unchanged [vs old merge]" and graded the asymmetry
+  against the old-code baseline instead of the contributor's "refinements are
+  preserved" claim. Routing chain identical to the two DO-NOT-SHIP runs;
+  divergence is reasoner-tier audit judgment (2 of 3 runs correct on this arena).
 
 ### Case 3 — audit naming untested + tangled files → door 3 (oracle residual + judge sampler)
 
