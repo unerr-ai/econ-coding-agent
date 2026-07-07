@@ -491,6 +491,38 @@ export function extractVerifyCommands(text: string): VerifyCommand[] {
   return commands
 }
 
+// Task #7 (probe rung) — a pinned reproduction must target a SPECIFIC case: a
+// named test file, or a -t/--grep/-k filter. A bare `bun test`/`pnpm test`
+// (no file, no filter) is a whole-suite run, not a repro — it still qualifies
+// as a generic verifyCommands entry, just never as probeCommand.
+const REPRO_FILE_RE = /\.(?:test|spec)\.[a-zA-Z]+\b|(?:^|[\s/])(?:tests?|specs?)\/[^\s`]+/i
+const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
+
+/** Specificity score for a repro candidate (0 disqualifies it — not a repro). */
+function reproSpecificity(cmd: VerifyCommand): number {
+  if (cmd.kind !== "test") return 0
+  return (REPRO_FILE_RE.test(cmd.command) ? 2 : 0) + (REPRO_FILTER_RE.test(cmd.command) ? 1 : 0)
+}
+
+/**
+ * The most-specific pinned reproduction among a slice's extracted verify
+ * commands (task #7 probe rung) — reuses `extractVerifyCommands`'s output,
+ * only ranks it; `undefined` when nothing extracted qualifies as a targeted
+ * repro (a bare typecheck/lint/whole-suite command never does).
+ */
+function mostSpecificRepro(commands: readonly VerifyCommand[]): VerifyCommand | undefined {
+  let best: VerifyCommand | undefined
+  let bestScore = 0
+  for (const cmd of commands) {
+    const score = reproSpecificity(cmd)
+    if (score > bestScore) {
+      bestScore = score
+      best = cmd
+    }
+  }
+  return best
+}
+
 // Items whose job is to author/extend tests — the batch then legitimately
 // edits test files: the guard below is skipped and the slice is marked
 // isTestSlice so the behavior monitor's test-file-edit flag stays quiet.
@@ -605,7 +637,7 @@ function isFreshPlan(todos: readonly OrchestrationTodo[]): boolean {
  * item verbatim.
  */
 export const LOCALIZATION_SLICE_CONTENT =
-  "Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s) that must change, the defect mechanism (why the current behavior is wrong), and the minimal fix strategy — every claim backed by evidence — and for the named cause, the call edge that connects the symptom to it, not just a file/line at the symptom. Trace the failure path from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — never assert a single site as the cause without a probe result that rules the others out."
+  "Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s) that must change, the defect mechanism (why the current behavior is wrong), and the minimal fix strategy — every claim backed by evidence — and for the named cause, the call edge that connects the symptom to it, not just a file/line at the symptom. Trace the failure path from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — name each probe as a single runnable shell command on its own backticked line so it can be pinned and re-run — never assert a single site as the cause without a probe result that rules the others out."
 
 /**
  * Shape of the todo the diagnosis pre-pass injects: OrchestrationTodo plus the
@@ -635,7 +667,7 @@ export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
  * relay recognizes the frame slice by id, same as LOCALIZATION_SLICE_CONTENT.
  */
 export const PLANNER_SLICE_CONTENT =
-  "Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly: (1) ranked candidate defect sites (file + function), each with the evidence that earns its rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome separates it from the rest; (3) the fix layer(s) the evidence points to, with the risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps. Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — never assert a single site as the cause without a probe result that rules the others out."
+  "Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly: (1) ranked candidate defect sites (file + function), each with the evidence that earns its rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome separates it from the rest; (3) the fix layer(s) the evidence points to, with the risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps. Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — name each probe as a single runnable shell command on its own backticked line so it can be pinned and re-run — never assert a single site as the cause without a probe result that rules the others out."
 
 /** The planner seat's seed (§8): the localization pre-pass's frame-slice shape pinned `need:"reasoner"` — a hard diagnosis turn buys one bounded plan up front, and the pin is what carries a lone frame slice through the shouldOrchestrate benefit gate. */
 export const PLANNER_PREPASS_TODO: InjectedSliceTodo = {
@@ -1325,6 +1357,12 @@ export async function todosToLoopSlices(
   // test-tree guard is skipped for the whole batch.
   const batchAuthorsTests = typed.some((t) => TEST_AUTHORING_RE.test(t.content))
 
+  // Task #7 — pinned-reproduction lookup: an edit-emitting slice's upstream
+  // deps are themselves typed todos in this same batch (deps only resolve
+  // against `used`, i.e. `typed`); index their content by id so a mechanical
+  // fix can fall back to a dependency's (e.g. a diagnosis slice's) text.
+  const contentById = new Map(ids.map((id, idx) => [id, typed[idx]!.content]))
+
   return Promise.all(
     typed.map(async (t, i): Promise<LoopSlice> => {
       const files = extractSliceFiles(t.content)
@@ -1339,6 +1377,20 @@ export async function todosToLoopSlices(
         (t.sliceType === "design" && hasMechanicalDependent(ids[i]!)) ||
         t.sliceType === "mechanical" ||
         t.sliceType === "author"
+
+      // Task #7 (probe rung) — a bug-fix/diagnosis edit-emitting slice that
+      // names an identifiable reproduction (own content first, falling back to
+      // an upstream dep's) gets it pinned as probeCommand, so the verifier's
+      // probe rung enforces red→green on that exact case. Unset when nothing
+      // identifiable exists — never fabricated (the M3 floor covers that case).
+      let probeCommand: VerifyCommand | undefined
+      if (isPatchEmittingSlice) {
+        probeCommand = mostSpecificRepro(extractVerifyCommands(t.content))
+        if (!probeCommand) {
+          const upstreamCandidates = deps.flatMap((d) => extractVerifyCommands(contentById.get(d) ?? ""))
+          probeCommand = mostSpecificRepro(upstreamCandidates)
+        }
+      }
 
       // F2 — sound-rung spec: a verify slice always wants commands; a testable
       // mechanical slice wants its edit checked the same way. Text-named
@@ -1367,6 +1419,7 @@ export async function todosToLoopSlices(
         testStrength: testStrength.testStrength,
         specBacked: t.sliceType === "mechanical" && dependsOnDesign(i) ? true : undefined,
         ...(verifyCommands.length > 0 ? { verifyCommands } : {}),
+        ...(probeCommand ? { probeCommand } : {}),
         ...(TEST_AUTHORING_RE.test(t.content) ? { isTestSlice: true } : {}),
       }
     }),

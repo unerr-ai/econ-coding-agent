@@ -1210,6 +1210,85 @@ describe("todosToLoopSlices — verify-command derivation (F2)", () => {
   })
 })
 
+describe("todosToLoopSlices — pinned reproduction / probeCommand (task #7 probe rung)", () => {
+  it("a mechanical fix slice's own targeted repro (a specific test file) is pinned as probeCommand", async () => {
+    const probes = fakeProbes("low", "testable")
+    const slices = await todosToLoopSlices(
+      [
+        {
+          content: "Fix the null check in checkout.ts; repro: `bun test e2e/checkout.test.ts`",
+          status: "pending",
+          sliceType: "mechanical",
+        },
+      ],
+      probes,
+    )
+    expect(slices[0]!.probeCommand).toEqual({ kind: "test", command: "bun test e2e/checkout.test.ts" })
+    // Still populates the generic sound-rung spec too — probeCommand is additive, not a substitute.
+    expect(slices[0]!.verifyCommands).toEqual([
+      TEST_TREE_GUARD_COMMAND,
+      { kind: "test", command: "bun test e2e/checkout.test.ts" },
+    ])
+  })
+
+  it("a targeted repro via a -t filter (no file path) is also pinned", async () => {
+    const probes = fakeProbes("low", "untestable")
+    const slices = await todosToLoopSlices(
+      [{ content: 'Fix it; repro: `bun test -t "handles empty cart"`', status: "pending", sliceType: "mechanical" }],
+      probes,
+    )
+    expect(slices[0]!.probeCommand).toEqual({ kind: "test", command: 'bun test -t "handles empty cart"' })
+  })
+
+  it("falls back to an upstream dependency's content when the fix slice's own text names no repro", async () => {
+    const probes = fakeProbes("low", "testable")
+    const todos: OrchestrationTodo[] = [
+      {
+        content: "Localize the defect; confirmed repro: `bun test packages/core/foo.test.ts -t \"case\"`",
+        status: "pending",
+        sliceType: "design",
+      },
+      {
+        content: "Fix the bug identified above",
+        status: "pending",
+        sliceType: "mechanical",
+        deps: ["todo_1"],
+      },
+    ]
+    const slices = await todosToLoopSlices(todos, probes)
+    expect(slices[1]!.probeCommand).toEqual({ kind: "test", command: 'bun test packages/core/foo.test.ts -t "case"' })
+  })
+
+  it("a bare typecheck/lint/whole-suite command is NOT pinned as probeCommand, but still populates verifyCommands", async () => {
+    const probes = fakeProbes("low", "testable")
+    const slices = await todosToLoopSlices(
+      [
+        {
+          content: "Fix the bug; verify with `bun run typecheck` and `bun test`",
+          status: "pending",
+          sliceType: "mechanical",
+        },
+      ],
+      probes,
+    )
+    expect(slices[0]!.probeCommand).toBeUndefined()
+    expect(slices[0]!.verifyCommands).toEqual([
+      TEST_TREE_GUARD_COMMAND,
+      { kind: "typecheck", command: "bun run typecheck" },
+      { kind: "test", command: "bun test" },
+    ])
+  })
+
+  it("no identifiable reproduction anywhere leaves probeCommand unset — never fabricated", async () => {
+    const probes = fakeProbes("low", "untestable")
+    const slices = await todosToLoopSlices(
+      [{ content: "Fix the off-by-one in the pagination helper", status: "pending", sliceType: "mechanical" }],
+      probes,
+    )
+    expect(slices[0]!.probeCommand).toBeUndefined()
+  })
+})
+
 describe("todosToLoopSlices — dep-ref resolution (todo_N / bare N / stage-DAG backstop)", () => {
   it("resolves a 1-indexed todo_N chain into a linear DAG, not a flat wave (live-run repro)", async () => {
     const probes = fakeProbes()
@@ -1722,17 +1801,28 @@ describe("runConductorSliceLoop", () => {
       dispatch,
       { runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "typecheck failed" }) },
     )
-    // One cheap dispatch + exactly one escalation hop (MAX_SLICE_ATTEMPTS = 2).
-    expect(prompts.length).toBe(2)
-    expect(escalatedFlags).toEqual([false, true])
+    // Deterministic same-failure signature every hop: the cheap dispatch rejects,
+    // then squeezes the SAME tier once (M2 — the signature hasn't changed, so the
+    // 2nd squeeze attempt stalls), climbs ONE hop to the conductor (the non-critical
+    // climb depth, maxClimbs=1), squeezes there once more, and — with the climb
+    // budget spent and the slice non-critical — settles unverified instead of
+    // climbing again. 4 dispatches total: cheap, squeeze@executor, climb->conductor,
+    // squeeze@conductor. Every hop past the cheap one is an escalation hop (a
+    // same-tier squeeze retry re-dispatches through the same compiled-brief path a
+    // climb does, per dispatchRescueHop).
+    expect(prompts.length).toBe(4)
+    expect(escalatedFlags).toEqual([false, true, true, true])
     // The cheap hop carries the raw slice prompt verbatim...
     expect(prompts[0]).toBe("fix the bug")
-    // ...the escalation hop carries a compiled OracleBrief (compileBrief's fixed sections),
-    // never the raw slice prompt or a running transcript (OL-3.2 stateless-oracle contract).
-    expect(prompts[1]).not.toBe("fix the bug")
-    expect(prompts[1]).toContain("## Problem")
-    expect(prompts[1]).toContain("## Question")
-    expect(prompts[1]).toContain("## Expected Output Shape")
+    // ...every hop after it carries a compiled OracleBrief (compileBrief's fixed
+    // sections), never the raw slice prompt or a running transcript (OL-3.2
+    // stateless-oracle contract) — squeeze hops included.
+    for (const p of prompts.slice(1)) {
+      expect(p).not.toBe("fix the bug")
+      expect(p).toContain("## Problem")
+      expect(p).toContain("## Question")
+      expect(p).toContain("## Expected Output Shape")
+    }
     expect(result.outcomes[0].state).toBe("unverified")
   })
 
