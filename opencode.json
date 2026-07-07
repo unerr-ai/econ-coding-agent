@@ -4,23 +4,22 @@
   // econ conductor tier (S1.1) — the 'Engineer' role (docs/design/models.md, Part II).
   // The conductor is DeepSeek V4 Flash: a cheap, fast, agentic OSS engineer that plans the job,
   // decides each step, and carries the working context for every turn by default. 1M-token context
-  // keeps the prompt cache warm across turns and the bill tiny ($0.14/$0.28 per M). Chosen because
-  // OpenRouter's routing API confirms Fireworks fronts deepseek-v4-flash (BYOK-served → billed to our
-  // own account), whereas it does NOT front qwen3.7-plus or minimax-m3 — both were live-tested and
-  // fell back to OR-credit billing, hitting the 402 wall. A live run requires OPENROUTER_API_KEY.
+  // keeps the prompt cache warm across turns and the bill tiny ($0.14/$0.28 per M). Served through
+  // econ's self-hosted LiteLLM gateway, which fronts deepseek-v4-flash, glm-5.2, deepseek-v4-pro,
+  // and gpt-oss-120b with usage passthrough. A live run requires LITELLM_API_KEY.
   "default_agent": "conductor",
 
   // econ small_model (S8.3) — the 'Assistant' role. Cheap stateless model for incidental tasks
-  // (title generation, summaries). Pinned to the executor/Assistant tier (gpt-oss-20b) so
+  // (title generation, summaries). Pinned to the executor/Assistant tier (gpt-oss-120b) so
   // housekeeping never pays conductor/oracle rates.
-  "small_model": "openrouter/openai/gpt-oss-20b",
+  "small_model": "litellm/openai/gpt-oss-120b",
 
   // econ top-level default model — the fallback for any agent with no model pinned.
   // MUST be an econ tier: without it, OpenCode's defaultModel() (provider.ts:1897) falls back to
-  // the last recently-used model or the top of the OpenRouter models.dev catalog — which surfaced
+  // the last recently-used model or the top of the models.dev catalog — which surfaced
   // an unsupported model (e.g. Nano Banana Pro, an image model) on the native build/plan agents.
   // Pinned to the conductor tier so every fallback lands on a supported econ model.
-  "model": "openrouter/deepseek/deepseek-v4-flash",
+  "model": "litellm/deepseek/deepseek-v4-flash",
 
   "agent": {
     // Disable OpenCode's native primary agents so the Tab switcher only cycles econ's tiers.
@@ -29,25 +28,80 @@
     "build": { "disable": true },
     "plan": { "disable": true },
     "conductor": {
-      "model": "openrouter/deepseek/deepseek-v4-flash",
-      "description": "econ default conductor — the 'Engineer' (MODEL_SELECTION §1): DeepSeek V4 Flash, cheap+fast agentic OSS workhorse for everyday coding turns; plans, decides, holds context (S1.1). Fireworks-served on OpenRouter so BYOK bills our own account; 1M ctx, $0.14/$0.28 per M.",
+      "model": "litellm/deepseek/deepseek-v4-flash",
+      "description": "econ default conductor — the 'Engineer' (MODEL_SELECTION §1): DeepSeek V4 Flash, cheap+fast agentic OSS workhorse for everyday coding turns; plans, decides, holds context (S1.1). Served through econ's self-hosted LiteLLM gateway; 1M ctx, $0.14/$0.28 per M.",
       "mode": "primary"
     },
     "oracle": {
-      "model": "openrouter/z-ai/glm-5.2",
+      "model": "litellm/z-ai/glm-5.2",
       "description": "econ oracle tier — the 'Expert' (MODEL_SELECTION §1): GLM 5.2, top open-weight coding score (SWE-bench Pro 62.1); called rarely for high-risk turns (S3.2, escalateAbove=70)",
       "mode": "primary"
     },
     "reasoner": {
-      "model": "openrouter/z-ai/glm-5.2",
-      "description": "econ reasoner tier: shares the oracle model (GLM 5.2) for now, so hard steps (S3.7 hardStep) route straight to the Expert — 3 distinct models total (MODEL_SELECTION §1 pins no reasoner role). Kept as a separate tier slot so a cheaper CoT model can be swapped in later to re-separate it from oracle.",
+      "model": "litellm/deepseek/deepseek-v4-pro",
+      "description": "econ reasoner tier (OL-8.B4+): DeepSeek V4 Pro, a distinct model family from both the conductor and the oracle — deliberate verifier de-correlation — for hard steps (S3.7 hardStep) that don't warrant the full Expert escalation. 4 distinct models total (MODEL_SELECTION §1 pins no reasoner role).",
       "mode": "primary",
       "hidden": true
     },
     "executor": {
-      "model": "openrouter/openai/gpt-oss-20b",
-      "description": "econ executor tier — the 'Assistant' (MODEL_SELECTION §1): gpt-oss-20b (US-made, ~3.6B active MoE, fast on CPU) for delegable chores — recon/lint/docstrings (S4.1); spawned per-task via the task tool, returns a digest",
-      "mode": "subagent"
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ executor tier — the 'Assistant' (MODEL_SELECTION §1): gpt-oss-120b (OL-8.B4+, was gpt-oss-20b — 20b carries no function-calling tag on Fireworks serverless) for delegable chores — recon/lint/docstrings (S4.1); spawned per-task via the task tool, returns a digest",
+      "mode": "subagent",
+      "permission": { "task": "deny", "question": "deny" },
+      "tools": { "todowrite": false }
+    },
+
+    // OL-9.1c — six stateless executor-persona intern agents (persona-deltas-design.md), all
+    // backed by the executor tier's model with their own prompt delta (session/system.ts
+    // PERSONA_DELTA) and a reduced toolset — mirrors econ-defaults.ts econDefaultConfig()
+    // (drift test: packages/opencode/test/config/econ-defaults.test.ts).
+    "explorer": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — read-only recon intern: investigates one question, returns a digest, never edits.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "deny" },
+      "tools": { "task": false, "question": false, "todowrite": false, "bash": false, "edit": false, "write": false, "apply_patch": false }
+    },
+    "runner": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — command intern: runs the brief's exact commands in order and reports what happened.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "allow" },
+      "tools": { "task": false, "question": false, "todowrite": false, "edit": false, "write": false, "apply_patch": false }
+    },
+    "applier": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — edit intern: applies exactly the specified change, verifies it, and reports.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "tools": { "task": false, "question": false, "todowrite": false }
+    },
+    "author": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — scoped creation intern: writes new tests/docstrings/scaffolds, never touches existing behavior.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "tools": { "task": false, "question": false, "todowrite": false }
+    },
+    "researcher": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — docs/web lookup intern: answers a lookup question from sources it actually fetched.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "deny", "webfetch": "allow", "websearch": "allow" },
+      "tools": { "task": false, "question": false, "todowrite": false, "bash": false, "edit": false, "write": false, "apply_patch": false }
+    },
+    "procedure": {
+      "model": "litellm/openai/gpt-oss-120b",
+      "description": "econ persona — step-by-step intern: executes the brief's numbered procedure and reports per step.",
+      "mode": "subagent",
+      "hidden": true,
+      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "tools": { "task": false, "question": false, "todowrite": false }
     }
   },
 
@@ -96,29 +150,37 @@
     "redirect_bash_reads": true
   },
 
-  // econ OpenRouter provider — the always-available global baseline. openrouter is a first-class
-  // built-in provider; we override only its display name + key env var and pin the three tier
-  // model IDs so they resolve regardless of the upstream models.dev catalog.
+  // econ LiteLLM gateway provider — the always-available global baseline. econ's self-hosted
+  // LiteLLM gateway (infra/litellm/config.yaml) is an OpenAI-compatible custom provider that fronts
+  // all four econ models with usage passthrough, so we declare it via @ai-sdk/openai-compatible
+  // and pin the four tier model IDs so they resolve regardless of the upstream models.dev catalog.
   //
-  // Fireworks BYOK routing: each model carries options.provider so OpenRouter prefers our
-  // Fireworks endpoint (BYOK bills our own Fireworks account, sidestepping the OR credit/prompt
-  // wall). This lands verbatim at providerOptions.openrouter.provider in the request body
-  // (config model.options → mergeOptions in session/llm/request.ts → ProviderTransform.providerOptions
-  // → { openrouter: options }, read by @openrouter/ai-sdk-provider). allow_fallbacks:true is a hard
-  // requirement: OpenRouter's routing API confirms Fireworks fronts deepseek-v4-flash, gpt-oss-20b,
-  // and glm-5.2 (all three tiers) — so every tier is BYOK-served and billed to our own account.
-  // Fallback stays on so a tier degrades to another provider instead of erroring. Live-tested:
-  // gpt-oss-20b routes through Fireworks BYOK on zero OR credits; qwen3.7-plus and minimax-m3 did NOT
-  // (no Fireworks endpoint on OpenRouter) and hit the 402 wall — the conductor was moved to
-  // deepseek-v4-flash (Fireworks-served, 1M ctx, $0.14/$0.28 per M).
+  // econ OL-7.5 adaptive plan-time reasoning — the conductor block below pins
+  // options.reasoningEffort="none": deepseek-v4-flash is a hybrid model (reasoning is a toggle,
+  // not a model swap) whose SERVER-SIDE default is thinking ON, so the off-switch must be explicit
+  // (run-9 post-mortem, 2026-07-05 — an unbounded think hit the 8192 output cap and truncated the
+  // turn). The explicit "none" is the near-zero-reasoning baseline a trivial turn takes.
+  // The tier router (packages/opencode/src/session/tier-router.ts resolveTier) reuses the same
+  // turn-open heaviness/risk signals to decide, per turn, whether to raise this to
+  // options.reasoningEffort="high" for the decomposition step (packages/opencode/src/session/
+  // prompt.ts, the createUserMessage seam) — never touching the oracle/reasoner (glm-5.2 /
+  // deepseek-v4-pro, pinned high below) or the executor (gpt-oss-120b, which must never see
+  // reasoning turned off). reasoning_effort is the standard OpenAI param — the OpenRouter-era
+  // `reasoning: {effort, exclude}` object 400s at Fireworks ("Extra inputs are not permitted").
+  // The config key above is the AI-SDK camelCase option (reasoningEffort); the SDK maps it to the
+  // wire param reasoning_effort — a snake_case config key is silently clobbered by
+  // @ai-sdk/openai-compatible (OL-9.6e, run-10 wire capture 2026-07-05).
   "provider": {
-    "openrouter": {
-      "name": "OpenRouter",
-      "env": ["OPENROUTER_API_KEY"],
+    "litellm": {
+      "name": "econ LiteLLM gateway",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["LITELLM_API_KEY"],
+      "options": { "baseURL": "https://econ-litellm.fly.dev/v1" },
       "models": {
-        "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true } } },
-        "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle/reasoner)", "reasoning": true, "limit": { "context": 200000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "high", "exclude": true } } },
-        "openai/gpt-oss-20b": { "name": "gpt-oss-20b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "low", "exclude": true } } }
+        "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "reasoningEffort": "none", "parallel_tool_calls": true } },
+        "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle)", "reasoning": true, "limit": { "context": 1048576, "output": 32768 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },
+        "deepseek/deepseek-v4-pro": { "name": "DeepSeek V4 Pro (econ reasoner)", "reasoning": true, "limit": { "context": 1048576, "output": 32768 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },
+        "openai/gpt-oss-120b": { "name": "gpt-oss-120b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "reasoningEffort": "low", "parallel_tool_calls": true } }
       }
     }
   }
@@ -131,8 +193,8 @@
   // resolveTierChain, selectEndpoint). See docs/features/07-hardening-hosting-ship.md.
   //
   // econ model fallback (S8.3) — expressed config-first: each tier's ordered endpoint chain is
-  // held in region.ts (in-region preferred, global OpenRouter as fallback). OpenCode has no
+  // held in region.ts (in-region preferred, global LiteLLM gateway as fallback). OpenCode has no
   // native per-model failover field, so runtime auto-failover on a 5xx is a GATED minimal
-  // wrapper (docs/features/07-hardening-hosting-ship.md). The safe always-available baseline today is the openrouter
+  // wrapper (docs/features/07-hardening-hosting-ship.md). The safe always-available baseline today is the litellm
   // provider above; small_model is pinned so housekeeping degrades cheaply.
 }

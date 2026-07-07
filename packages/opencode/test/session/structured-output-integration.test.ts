@@ -10,7 +10,14 @@ import { testEffect } from "../lib/effect"
 // Skip tests if no API key is available
 const hasApiKey = !!process.env.ANTHROPIC_API_KEY
 const it = testEffect(
-  Layer.mergeAll(SessionPrompt.defaultLayer, Session.defaultLayer).pipe(Layer.provide(Ripgrep.defaultLayer)),
+  Layer.mergeAll(
+    SessionPrompt.defaultLayer.pipe(
+      // Mock-provider harness: turn-open LLM calls (triage/title) would consume
+      // the scripted responses — switch them off (product default is on).
+      Layer.provide(Layer.succeed(SessionPrompt.TurnOpenCalls, { triage: false, titles: false })),
+    ),
+    Session.defaultLayer,
+  ).pipe(Layer.provide(Ripgrep.defaultLayer)),
 )
 const live = hasApiKey ? it.instance : it.instance.skip
 

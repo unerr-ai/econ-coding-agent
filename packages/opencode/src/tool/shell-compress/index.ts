@@ -25,6 +25,7 @@ import { classifyShellOutput } from "./classifier"
 import { compressGitStatus } from "./strategies/git-status"
 import { compressKeyValue } from "./strategies/key-value"
 import { compressLogText } from "./strategies/log-text"
+import { compressMultiRegion } from "./strategies/multi-region"
 import { compressOmni } from "./strategies/omni"
 import { compressProgress } from "./strategies/progress"
 import { compressStructured } from "./strategies/structured"
@@ -35,8 +36,32 @@ import { compressYaml } from "./strategies/yaml"
 import { compressDiff } from "./strategies/diff"
 import { compressErrorDiagnostic } from "./strategies/error-diagnostic"
 import { isDaemonAvailable, buildDiffRiskMap } from "./strategies/graph-boost"
+import { createCompressionQualityMonitor } from "./quality-monitor"
+import type { CompressionQualityMonitor } from "./quality-monitor"
 
 const CONFIDENCE_GATE = 0.7
+
+/**
+ * Signals below this ratio are worth feedback-tracking: a passthrough or
+ * near-passthrough compression can't have hidden anything, so a re-run after
+ * one must not count as an over-compression signal.
+ */
+const QUALITY_TRACK_RATIO = 0.9
+
+let qualityMonitorInstance: CompressionQualityMonitor | undefined
+
+/**
+ * Shared quality monitor for the shell compression path — one instance per
+ * process so over-compression signals accumulate across commands. shell.ts
+ * reports every command execution here; this module records compressions and
+ * consults conservative mode before picking a lossy strategy.
+ *
+ * @sem domain=tool role=quality-monitor
+ */
+export function shellQualityMonitor(): CompressionQualityMonitor {
+  if (!qualityMonitorInstance) qualityMonitorInstance = createCompressionQualityMonitor()
+  return qualityMonitorInstance
+}
 
 /**
  * Result of compressing one command's captured output.
@@ -99,7 +124,7 @@ function stripAnsiCodes(text: string): string {
 // Strategy dispatch
 // ---------------------------------------------------------------------------
 
-function applyStrategy(
+export function applyStrategy(
   category: OutputCategory,
   stripped: string,
   command: string,
@@ -202,6 +227,18 @@ export function compressShellOutput(
     if (gitOut) {
       const meta = withMeta(raw, gitOut)
       recordToolCall({ tool: "shell", ...meta })
+      if (meta.ratio < QUALITY_TRACK_RATIO) {
+        // Fast path bypasses the classifier; git status compresses via the key_value parser.
+        shellQualityMonitor().recordCompression({
+          command,
+          category: "key_value",
+          confidence: 1,
+          rawTokens: meta.raw_tokens,
+          returnedTokens: meta.returned_tokens,
+          ratio: meta.ratio,
+          timestamp: Date.now(),
+        })
+      }
       return { text: gitOut, meta }
     }
   }
@@ -209,7 +246,20 @@ export function compressShellOutput(
   const classification = classifyShellOutput(command, stripped)
 
   let text: string
-  if (classification.confidence < CONFIDENCE_GATE) {
+  if (classification.non_silent_segments > 1) {
+    // Composite command (e.g. `a && b && c`) — matchCommandHint can only pick
+    // ONE category for the whole interleaved output, so any single-category
+    // strategy would keep the recognized segment and drop the rest. Try the
+    // region-aware split first (each contiguous same-category region gets its
+    // own strategy); fall back to the dedup-only omni path, which preserves
+    // every line, when the split isn't confident enough to be worth it.
+    text = compressMultiRegion(stripped, command, exitCode) ?? compressOmni(stripped)
+  } else if (shellQualityMonitor().isConservative(classification.category)) {
+    // The quality monitor saw repeated re-runs right after this category's
+    // compressions — back off to the dedup-only omni path until the good
+    // streak decays conservative mode.
+    text = compressOmni(stripped)
+  } else if (classification.confidence < CONFIDENCE_GATE) {
     // Low confidence: try best-guess strategy AND omni, pick whichever compresses more
     const omniResult = compressOmni(stripped)
     let strategyResult: string | null = null
@@ -230,12 +280,29 @@ export function compressShellOutput(
   }
 
   // Safety net: test_results must never inflate (misclassified minified JSON etc.)
-  if (classification.category === "test_results" && text.length > stripped.length) {
+  // Composite commands already route through the dedup-only omni path above,
+  // which never inflates, so this only needs to guard single-segment results.
+  if (
+    classification.non_silent_segments <= 1 &&
+    classification.category === "test_results" &&
+    text.length > stripped.length
+  ) {
     text = stripped
   }
 
   const meta = withMeta(raw, text)
   recordToolCall({ tool: "shell", ...meta })
+  if (meta.ratio < QUALITY_TRACK_RATIO) {
+    shellQualityMonitor().recordCompression({
+      command,
+      category: classification.category,
+      confidence: classification.confidence,
+      rawTokens: meta.raw_tokens,
+      returnedTokens: meta.returned_tokens,
+      ratio: meta.ratio,
+      timestamp: Date.now(),
+    })
+  }
   return { text, meta }
 }
 

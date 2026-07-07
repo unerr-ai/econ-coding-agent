@@ -4,6 +4,8 @@
  * Ported from unerr-cli src/proxy/shell-strategies/tabular.ts — no external deps.
  */
 
+import { isSalientLine } from "./salience"
+
 const SPLIT = /\s{2,}|\t+/
 
 const POSITIONAL_COMMANDS = [
@@ -168,9 +170,17 @@ function compressTabularInner(text: string, command?: string): string {
   }
 
   const rows: string[][] = []
+  // A row that doesn't split into >=2 cells (e.g. a free-text diagnostic line
+  // with only single spaces) would otherwise be silently dropped from the
+  // grid below — keep it verbatim when it's salient.
+  const droppedSalient: string[] = []
   for (const line of lines) {
     const cells = line.trim().split(SPLIT).filter(Boolean)
-    if (cells.length >= 2) rows.push(cells)
+    if (cells.length >= 2) {
+      rows.push(cells)
+    } else if (isSalientLine(line)) {
+      droppedSalient.push(line.trim())
+    }
   }
   if (rows.length === 0) return text
   const width = Math.max(...rows.map((r) => r.length))
@@ -181,7 +191,7 @@ function compressTabularInner(text: string, command?: string): string {
   })
   const header = Array.from({ length: width }, (_, i) => `c${i}`).join("|")
   const body = padded.map((r) => r.map(esc).join("|")).join("\n")
-  return `${header}\n${body}`
+  return droppedSalient.length > 0 ? `${header}\n${body}\n${droppedSalient.join("\n")}` : `${header}\n${body}`
 }
 
 export function compressTabular(text: string, command?: string): string {

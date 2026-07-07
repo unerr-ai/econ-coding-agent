@@ -17,7 +17,13 @@ export const workspaceLayerWithRuntimeFlags = (overrides: Partial<RuntimeFlags.I
   Workspace.layer.pipe(
     Layer.provide(Auth.defaultLayer),
     Layer.provide(Session.defaultLayer),
-    Layer.provide(SessionPrompt.defaultLayer),
+    // Test fixture: keep the turn-open LLM calls (triage/title) off so scripted
+    // mock providers keep their response choreography (product default is on).
+    Layer.provide(
+      SessionPrompt.defaultLayer.pipe(
+        Layer.provide(Layer.succeed(SessionPrompt.TurnOpenCalls, { triage: false, titles: false })),
+      ),
+    ),
     Layer.provide(Project.defaultLayer),
     Layer.provide(Vcs.defaultLayer),
     Layer.provide(Database.defaultLayer),

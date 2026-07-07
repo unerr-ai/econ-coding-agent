@@ -16,7 +16,8 @@ import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
-import { compressShellOutput } from "./shell-compress/index"
+import { compressShellOutput, shellQualityMonitor } from "./shell-compress/index"
+import { noteVerifyCommand } from "./verify-tail-nudge"
 import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -323,6 +324,19 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
   })
 })
 
+// econ: zsh's default NOMATCH option aborts the whole command with "zsh:1: no matches
+// found" when a glob (e.g. `jest.config*`) fails to match — bash/sh instead leave the glob
+// text literal and keep going. `unsetopt nomatch` neutralizes that abort for the string
+// actually handed to the shell binary; every other consumer of the raw command (permission
+// matching, display titles, shell-compress classification, the verify-tail nudge) must keep
+// seeing the user's original text, so this only touches the string spawned here, never
+// `input.command` itself.
+// @sem domain=configuration role=guard
+export function shellCommandFor(shellPath: string, command: string): string {
+  if (Shell.name(shellPath) !== "zsh") return command
+  return `unsetopt nomatch 2>/dev/null; ${command}`
+}
+
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
     return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
@@ -333,7 +347,7 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     })
   }
 
-  return ChildProcess.make(command, [], {
+  return ChildProcess.make(shellCommandFor(shell, command), [], {
     shell,
     cwd,
     env,
@@ -512,6 +526,18 @@ export const ShellTool = Tool.define(
         },
       })
 
+      // econ: feed the compression quality monitor's re-run detector — a repeat of a
+      // recently-compressed command within its feedback window is an over-compression
+      // signal that flips that output category into conservative (dedup-only) mode.
+      // Await hydration first: in a one-shot `opencode run` process this is the
+      // monitor's first use, and the pending events the PREVIOUS process persisted
+      // only exist in memory after the (ms-scale) disk read completes — a synchronous
+      // match here would race that read and always lose, so cross-process re-run
+      // detection would never fire.
+      const qualityMonitor = shellQualityMonitor()
+      yield* Effect.promise(() => qualityMonitor.ready)
+      qualityMonitor.noteCommandExecution(input.command, Date.now())
+
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
@@ -628,23 +654,40 @@ export const ShellTool = Tool.define(
         file = yield* trunc.write(combined)
       }
 
+      // econ: compression can drop content truncation never would have — raw output stays
+      // under the line/byte caps but the compressed view still loses ≥30% of its tokens.
+      // Save the full combined output the same way the truncation safety net does (reuse
+      // `file`/trunc.write so it's never written twice) so the agent can re-read the file
+      // instead of re-running the command.
+      let lossy = false
+      if (!file && !cut && compressed.meta.ratio <= 0.7 && combined.length > 1024) {
+        file = yield* trunc.write(combined)
+        lossy = true
+      }
+
       let output = end.text
       if (!output) output = "(no output)"
 
       if (cut && file) {
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
+      } else if (lossy && file) {
+        output += `\n\n[output compressed — full output: ${file}]`
       }
 
       if (meta.length > 0) {
         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
       }
+
+      const nudge = noteVerifyCommand(ctx.sessionID, ctx.agent, input.command)
+      if (nudge) output += "\n\n" + nudge
+
       return {
         title: input.command,
         metadata: {
           output: last || preview(output),
           exit: code,
           truncated: cut,
-          ...(cut && file ? { outputPath: file } : {}),
+          ...((cut || lossy) && file ? { outputPath: file } : {}),
         },
         output,
       }

@@ -17,6 +17,17 @@ import { AgentV2 } from "../agent"
 type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
 type V1PartData = Omit<SessionV1.Part, "id" | "sessionID" | "messageID">
+// OL-7.1b — persisted shape of SessionTodo.Info's optional typed-decomposition fields.
+export interface TodoSliceMeta {
+  sliceType?: string
+  need?: string
+  deps?: readonly string[]
+  coupling?: string
+  testStrength?: string
+  // OL-9.1b — without this key the todo round-trip silently dropped every persona
+  // hint, so personaForSlice always fell back to the sliceType default at dispatch.
+  persona?: string
+}
 
 export const SessionTable = sqliteTable(
   "session",
@@ -107,6 +118,14 @@ export const TodoTable = sqliteTable(
     status: text().notNull(),
     priority: text().notNull(),
     position: integer().notNull(),
+    // U2a — self-reference to the parent todo's `position` within the same
+    // session; null for a root (goal-level) item. Integrity (depth <=3,
+    // <=5 children, no orphan reference) is enforced in the write path
+    // (session/todo.ts), not by a DB constraint.
+    parent_id: integer(),
+    // OL-7.1b — typed decomposition tags (sliceType/need/deps/coupling/testStrength),
+    // JSON-encoded; null for untyped/legacy todo items.
+    slice_meta: text({ mode: "json" }).$type<TodoSliceMeta>(),
     ...Timestamps,
   },
   (table) => [

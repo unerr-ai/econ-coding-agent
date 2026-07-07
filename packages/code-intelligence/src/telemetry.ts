@@ -12,10 +12,14 @@
  * `emit` sink so this module stays free of any provider or unerr SDK coupling
  * (mirrors double-pay.ts's emit pattern).
  *
+ * U6 adds one-shot orchestration decode events (turn triage, evaluator
+ * verdict, slice containment, escalation provenance) — minimal structural
+ * types decoupled from the triage/evaluator modules that will produce them.
+ *
  * @sem domain=observability role=ingestion
  */
 
-import { ECON_MODELS, modelProfile, tiersForModel } from "./model-registry"
+import { ECON_MODELS, ECON_PERSONAS, modelProfile, tiersForModel } from "./model-registry"
 import type { EconTier } from "./region"
 
 // ---------------------------------------------------------------------------
@@ -25,7 +29,9 @@ import type { EconTier } from "./region"
 /**
  * Pricing/capability tier a turn ran on. Kept a free string (not the router's
  * `Tier`) so telemetry stays decoupled from the router module; the conventional
- * values are "cheap" | "oracle" | "reasoner", plus "frontier" for a baseline.
+ * values are "conductor" | "executor" | "reasoner" | "oracle" (econ's four
+ * agents — no longer collapsed to "cheap"), plus "frontier" for a hatch-turn
+ * baseline, "cheap" (the foreign-small-model heuristic bucket), and "unknown".
  */
 export type UsageTier = string
 
@@ -48,12 +54,27 @@ export interface UsageEvent {
   timestamp: number
   /** Model id that served the turn. */
   model: string
-  /** Tier the turn ran on ("cheap" | "oracle" | "reasoner" | "frontier"). */
+  /** Tier the turn ran on ("conductor" | "executor" | "reasoner" | "oracle" | "frontier" | "cheap"). */
   tier: UsageTier
   /** Computed dollar cost for this turn (`Usage.cost`). */
   cost: number
   /** Token counts for this turn. */
   tokens: UsageEventTokens
+  /** Number of tool calls made during this turn. */
+  toolCalls: number
+}
+
+/** Per-tier usage rollup — the receipt's per-tier drilldown row. */
+export interface TierUsage {
+  turns: number
+  cost: number
+  tokens: UsageEventTokens
+  totalTokens: number
+  toolCalls: number
+  /** Peak prompt-side context across this tier's turns: max(input + cacheRead + cacheWrite). */
+  peakContextTokens: number
+  /** cacheRead / (cacheRead + input + cacheWrite) for this tier; 0 when the denominator is 0. */
+  cacheHitRatio: number
 }
 
 /** Aggregate totals over a set of usage events, with a per-tier breakdown. */
@@ -63,8 +84,11 @@ export interface UsageTotals {
   tokens: UsageEventTokens
   /** Sum of every token field — the denominator for share calculations. */
   totalTokens: number
+  toolCalls: number
+  /** Peak prompt-side context across all turns: max(input + cacheRead + cacheWrite). */
+  peakContextTokens: number
   /** Per-tier rollup, keyed by tier label. */
-  byTier: Record<UsageTier, { turns: number; cost: number; totalTokens: number }>
+  byTier: Record<UsageTier, TierUsage>
 }
 
 /** Live status data for the status line — derived from the latest + running totals. */
@@ -73,7 +97,7 @@ export interface StatusSnapshot {
   tier?: UsageTier
   /** Model id of the most recent turn. */
   model?: string
-  /** Cumulative cache-hit ratio: cacheRead / (cacheRead + input), 0 when no input. */
+  /** Cumulative cache-hit ratio: cacheRead / (cacheRead + input + cacheWrite), 0 when the denominator is 0. */
   cacheHitRatio: number
   /** Fraction of the context window filled by the latest turn, when a limit is given. */
   contextFill?: number
@@ -93,6 +117,16 @@ const nonNeg = (value: number | undefined): number =>
 
 const sumTokens = (t: UsageEventTokens): number =>
   t.input + t.output + t.reasoning + t.cacheRead + t.cacheWrite
+
+/** Prompt-side context size for one turn — the peakContextTokens input. */
+const contextTokens = (t: UsageEventTokens): number => t.input + t.cacheRead + t.cacheWrite
+
+/** cacheRead / (cacheRead + input + cacheWrite); 0 when the denominator is 0. cacheWrite
+ * is a prompt token that MISSED the cache, so it counts toward the denominator as a miss. */
+const cacheHitRatioOf = (cacheRead: number, input: number, cacheWrite: number): number => {
+  const denom = cacheRead + input + cacheWrite
+  return denom > 0 ? cacheRead / denom : 0
+}
 
 const emptyTokens = (): UsageEventTokens => ({
   input: 0,
@@ -116,10 +150,6 @@ const REASONER_HINTS = ["32b", "reason", "r1", "sonnet", "medium", "70b", "deeps
 /** Higher-tier-wins rank for collapsing a model's econ tiers to one UsageTier. */
 const ECON_TIER_RANK: Record<EconTier, number> = { conductor: 0, executor: 0, reasoner: 1, oracle: 2 }
 
-/** Map one econ abstract tier to the UsageTier label the receipt uses. */
-const usageTierForEconTier = (tier: EconTier): UsageTier =>
-  tier === "oracle" ? "oracle" : tier === "reasoner" ? "reasoner" : "cheap"
-
 /**
  * Resolve a raw model id (bare key, model ref with provider prefix, or the
  * exact key) to its ECON_MODELS key, or undefined when it isn't an econ
@@ -133,59 +163,83 @@ function resolveEconModelKey(modelIDLower: string): string | undefined {
 }
 
 /**
- * Best-effort tier label from a model id when the router has not tagged the turn
- * directly. A name heuristic only — the authoritative tier is the router's S3.2
- * decision; wire that through `RawUsage.tier` once the router is on the turn
- * path. Returns "unknown" when no hint matches so the receipt never lies about
- * which tier ran.
- *
- * @sem domain=observability role=ingestion
- */
-/**
- * Authoritative tier from the router's agent name — the correct source when it is known
- * (the live tier-router tags each turn's message with its agent). Prefer this over inferTier:
- * econ's reasoner and oracle share one model (glm-5.2), so `inferTier(model)` cannot tell them
- * apart, but the agent name can. conductor/executor are the cheap tiers; reasoner/oracle are large.
- * Returns "unknown" for any non-econ agent so the caller can fall back to inferTier(model).
+ * Tier label from an agent name alone. The agent name is a routing claim, not a
+ * billing fact — a mislabeled agent can run another tier's model — so this is a
+ * disambiguator/fallback for `attributeTier`, never the primary source. Returns
+ * the agent name itself for econ's four tiers (conductor and executor are no
+ * longer merged into "cheap"); every ECON_PERSONAS agent runs on the executor
+ * model, so it attributes to "executor". Returns "unknown" for anything else.
  *
  * @sem domain=observability role=ingestion
  */
 export function tierFromAgent(agent: string): UsageTier {
   switch (agent) {
     case "conductor":
+      return "conductor"
     case "executor":
-      return "cheap"
+      return "executor"
     case "reasoner":
       return "reasoner"
     case "oracle":
       return "oracle"
     default:
-      return "unknown"
+      return (ECON_PERSONAS as readonly string[]).includes(agent) ? "executor" : "unknown"
   }
 }
 
+/**
+ * Best-effort tier label from a model id alone. Econ-pinned models resolve
+ * authoritatively through the registry (a tier swap in ECON_TIER_BINDING needs
+ * no edit here); foreign models fall to the generic name heuristic — applied
+ * only after the registry, because econ's own ids can contain colliding
+ * substrings (a cheap-tier id matching a large-family hint, or a large-tier id
+ * matching no hint at all). Returns "unknown" when nothing matches so the
+ * receipt never guesses.
+ *
+ * @sem domain=observability role=ingestion
+ */
 export function inferTier(model: string): UsageTier {
   const m = model.toLowerCase()
-  // econ's tiers pin specific models (opencode.json), so recognise them authoritatively before
-  // the generic name heuristic — whose substrings collide on econ's actual ids: deepseek-v4-flash
-  // matches both "flash" (cheap) and "deepseek" (reasoner) and would misclassify the cheap
-  // conductor as a large tier; glm-5.2 (the oracle/reasoner model) matches no generic hint at all.
-  // Resolved through the model registry (not hard-coded ids) so a model swap in ECON_TIER_BINDING
-  // is a one-line change there, not a second edit here.
   const econKey = resolveEconModelKey(m)
   if (econKey) {
     const tiers = tiersForModel(econKey)
     if (tiers.length > 0) {
-      // A model may back multiple tiers (glm-5.2 → reasoner AND oracle) — pick the highest so the
-      // receipt's large-tier share stays conservative.
+      // A model may back more than one tier — pick the highest so the receipt's
+      // large-tier share stays conservative. (attributeTier disambiguates with
+      // the agent name before falling back to this rank.)
       const best = tiers.reduce((a, b) => (ECON_TIER_RANK[b] > ECON_TIER_RANK[a] ? b : a))
-      return usageTierForEconTier(best)
+      return best
     }
   }
+  // Foreign (non-econ) model: "cheap" here is the generic small-model heuristic bucket, distinct
+  // from econ's "conductor"/"executor" tiers above.
   if (ORACLE_HINTS.some((h) => m.includes(h))) return "oracle"
   if (REASONER_HINTS.some((h) => m.includes(h))) return "reasoner"
   if (CHEAP_HINTS.some((h) => m.includes(h))) return "cheap"
   return "unknown"
+}
+
+/**
+ * The one attribution entry point for usage events: which tier does a turn's
+ * spend belong to. Model-id-first — billing follows the model, so a registry
+ * match on the model id is ground truth even when the dispatching agent's name
+ * claims another tier (an "oracle"-named agent running the reasoner's model is
+ * reasoner spend). The agent name is consulted only to disambiguate a model
+ * that backs multiple tiers, or when the model id resolves to nothing.
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function attributeTier(model: string, agent?: string): UsageTier {
+  const econKey = resolveEconModelKey(model.toLowerCase())
+  const tiers = econKey ? tiersForModel(econKey) : []
+  if (tiers.length === 1) return tiers[0]!
+  const fromAgent = agent ? tierFromAgent(agent) : "unknown"
+  if (tiers.length > 1) {
+    if ((tiers as UsageTier[]).includes(fromAgent)) return fromAgent
+    return tiers.reduce((a, b) => (ECON_TIER_RANK[b] > ECON_TIER_RANK[a] ? b : a))
+  }
+  if (fromAgent !== "unknown") return fromAgent
+  return inferTier(model)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +261,8 @@ export interface RawUsage {
     reasoning?: number
     cache?: { read?: number; write?: number }
   }
+  /** Tool calls made during this turn; clamped nonNeg, defaults to 0. */
+  toolCalls?: number
   /** Override the recorded timestamp (defaults to Date.now()); injectable for tests. */
   timestamp?: number
 }
@@ -241,6 +297,7 @@ export function emitUsageEvent(
       cacheRead: nonNeg(raw.tokens?.cache?.read),
       cacheWrite: nonNeg(raw.tokens?.cache?.write),
     },
+    toolCalls: nonNeg(raw.toolCalls),
   }
   store.append(event)
   sink?.(event)
@@ -314,11 +371,16 @@ export class TelemetryStore {
     return this._events.length
   }
 
-  /** Aggregate totals with a per-tier breakdown. */
+  /** Aggregate totals with a per-tier breakdown (tokens, tool calls, peak context, cache-hit ratio). */
   totals(): UsageTotals {
     const tokens = emptyTokens()
-    const byTier: UsageTotals["byTier"] = {}
     let cost = 0
+    let toolCalls = 0
+    let peakContextTokens = 0
+    const rawByTier = new Map<
+      UsageTier,
+      { turns: number; cost: number; tokens: UsageEventTokens; toolCalls: number; peakContextTokens: number }
+    >()
     for (const e of this._events) {
       tokens.input += e.tokens.input
       tokens.output += e.tokens.output
@@ -326,28 +388,67 @@ export class TelemetryStore {
       tokens.cacheRead += e.tokens.cacheRead
       tokens.cacheWrite += e.tokens.cacheWrite
       cost += e.cost
-      const bucket = (byTier[e.tier] ??= { turns: 0, cost: 0, totalTokens: 0 })
+      toolCalls += e.toolCalls
+      const ctx = contextTokens(e.tokens)
+      if (ctx > peakContextTokens) peakContextTokens = ctx
+
+      const bucket = rawByTier.get(e.tier) ?? {
+        turns: 0,
+        cost: 0,
+        tokens: emptyTokens(),
+        toolCalls: 0,
+        peakContextTokens: 0,
+      }
       bucket.turns += 1
       bucket.cost += e.cost
-      bucket.totalTokens += sumTokens(e.tokens)
+      bucket.tokens.input += e.tokens.input
+      bucket.tokens.output += e.tokens.output
+      bucket.tokens.reasoning += e.tokens.reasoning
+      bucket.tokens.cacheRead += e.tokens.cacheRead
+      bucket.tokens.cacheWrite += e.tokens.cacheWrite
+      bucket.toolCalls += e.toolCalls
+      if (ctx > bucket.peakContextTokens) bucket.peakContextTokens = ctx
+      rawByTier.set(e.tier, bucket)
     }
-    return { turns: this._events.length, cost, tokens, totalTokens: sumTokens(tokens), byTier }
+    const byTier: UsageTotals["byTier"] = {}
+    for (const [tier, bucket] of rawByTier) {
+      byTier[tier] = {
+        turns: bucket.turns,
+        cost: bucket.cost,
+        tokens: bucket.tokens,
+        totalTokens: sumTokens(bucket.tokens),
+        toolCalls: bucket.toolCalls,
+        peakContextTokens: bucket.peakContextTokens,
+        cacheHitRatio: cacheHitRatioOf(bucket.tokens.cacheRead, bucket.tokens.input, bucket.tokens.cacheWrite),
+      }
+    }
+    return {
+      turns: this._events.length,
+      cost,
+      tokens,
+      totalTokens: sumTokens(tokens),
+      toolCalls,
+      peakContextTokens,
+      byTier,
+    }
   }
 
   /**
-   * Cumulative cache-hit ratio: cacheRead / (cacheRead + non-cached input).
-   * Returns 0 when no billable input has been seen. Cache-write is excluded —
-   * it is a cost, not a hit.
+   * Cumulative cache-hit ratio: cacheRead / (cacheRead + input + cacheWrite).
+   * Returns 0 when the denominator is 0. Cache-write tokens are prompt tokens
+   * that MISSED the cache, so they count toward the denominator as a miss —
+   * the write's dollar cost is priced separately in econ-cost.ts.
    */
   cacheHitRatio(): number {
     let read = 0
     let input = 0
+    let write = 0
     for (const e of this._events) {
       read += e.tokens.cacheRead
       input += e.tokens.input
+      write += e.tokens.cacheWrite
     }
-    const denom = read + input
-    return denom > 0 ? read / denom : 0
+    return cacheHitRatioOf(read, input, write)
   }
 
   /**
@@ -479,4 +580,157 @@ export class EfficiencyMetrics {
         this._compactions > 0 ? this._productiveCompactions / this._compactions : undefined,
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// U6 — orchestration decode events (ORCHESTRATION_MECHANISM.md §1.8, §6 U6)
+// ---------------------------------------------------------------------------
+//
+// One-shot facts from the new mechanism's stages (triage, evaluator, containment,
+// escalation), each a minimal structural type — no import from the evaluator/
+// triage modules that produce them (those land in a later wiring pass). Mirrors
+// `emitUsageEvent`'s shape: build from a raw input, stamp a default timestamp,
+// forward to an optional sink, return the built event.
+
+/** Turn-triage verdict: the goals a prompt was split into (U1). */
+export interface TurnTriageEvent {
+  type: "turn_triage"
+  sessionID: string
+  timestamp: number
+  goals: Array<{ summary: string; shape: string }>
+}
+
+/** Pre-dispatch evaluator verdict for one slice (U4). */
+export interface EvaluatorVerdictEvent {
+  type: "evaluator_verdict"
+  sessionID: string
+  timestamp: number
+  sliceId: string
+  tier: UsageTier
+  venue: "inline" | "child"
+  reasons: string[]
+}
+
+/** A failed slice attempt contained by the snapshot bracket (U3). */
+export interface SliceContainedEvent {
+  type: "slice_contained"
+  sessionID: string
+  timestamp: number
+  sliceId: string
+  fromTier: UsageTier
+  toTier?: UsageTier
+  rungReason: string
+  reverted: boolean
+}
+
+/** Why an escalation fired — the live-fire decode gap U3 logs at INFO. */
+export interface EscalationProvenanceEvent {
+  type: "escalation_provenance"
+  sessionID: string
+  timestamp: number
+  sliceId: string
+  fromTier: UsageTier
+  toTier: UsageTier
+  reason: string
+}
+
+/**
+ * Build a `TurnTriageEvent` and optionally forward it to a sink.
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function emitTurnTriageEvent(
+  raw: { sessionID: string; goals: Array<{ summary: string; shape: string }>; timestamp?: number },
+  sink?: (event: TurnTriageEvent) => void,
+): TurnTriageEvent {
+  const event: TurnTriageEvent = {
+    type: "turn_triage",
+    sessionID: raw.sessionID,
+    timestamp: raw.timestamp ?? Date.now(),
+    goals: raw.goals,
+  }
+  sink?.(event)
+  return event
+}
+
+/**
+ * Build an `EvaluatorVerdictEvent` and optionally forward it to a sink.
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function emitEvaluatorVerdictEvent(
+  raw: {
+    sessionID: string
+    sliceId: string
+    tier: UsageTier
+    venue: "inline" | "child"
+    reasons: string[]
+    timestamp?: number
+  },
+  sink?: (event: EvaluatorVerdictEvent) => void,
+): EvaluatorVerdictEvent {
+  const event: EvaluatorVerdictEvent = {
+    type: "evaluator_verdict",
+    sessionID: raw.sessionID,
+    timestamp: raw.timestamp ?? Date.now(),
+    sliceId: raw.sliceId,
+    tier: raw.tier,
+    venue: raw.venue,
+    reasons: raw.reasons,
+  }
+  sink?.(event)
+  return event
+}
+
+/**
+ * Build a `SliceContainedEvent` and optionally forward it to a sink.
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function emitSliceContainedEvent(
+  raw: {
+    sessionID: string
+    sliceId: string
+    fromTier: UsageTier
+    toTier?: UsageTier
+    rungReason: string
+    reverted: boolean
+    timestamp?: number
+  },
+  sink?: (event: SliceContainedEvent) => void,
+): SliceContainedEvent {
+  const event: SliceContainedEvent = {
+    type: "slice_contained",
+    sessionID: raw.sessionID,
+    timestamp: raw.timestamp ?? Date.now(),
+    sliceId: raw.sliceId,
+    fromTier: raw.fromTier,
+    toTier: raw.toTier,
+    rungReason: raw.rungReason,
+    reverted: raw.reverted,
+  }
+  sink?.(event)
+  return event
+}
+
+/**
+ * Build an `EscalationProvenanceEvent` and optionally forward it to a sink.
+ *
+ * @sem domain=observability role=ingestion
+ */
+export function emitEscalationProvenanceEvent(
+  raw: { sessionID: string; sliceId: string; fromTier: UsageTier; toTier: UsageTier; reason: string; timestamp?: number },
+  sink?: (event: EscalationProvenanceEvent) => void,
+): EscalationProvenanceEvent {
+  const event: EscalationProvenanceEvent = {
+    type: "escalation_provenance",
+    sessionID: raw.sessionID,
+    timestamp: raw.timestamp ?? Date.now(),
+    sliceId: raw.sliceId,
+    fromTier: raw.fromTier,
+    toTier: raw.toTier,
+    reason: raw.reason,
+  }
+  sink?.(event)
+  return event
 }

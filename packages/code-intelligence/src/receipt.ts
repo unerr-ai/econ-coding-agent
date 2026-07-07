@@ -1,43 +1,36 @@
 /**
- * End-of-turn savings receipt — the headline of econ's proof surface.
+ * End-of-turn econ receipt — the honest usage/cost surface.
  *
  * Reads the recorded `UsageEvent`s (telemetry.ts) plus the double-pay ledger
- * (double-pay.ts) and produces an HONEST savings figure: it counts what was
- * actually spent, prices the same token volume at a frontier baseline, then
- * subtracts the wasted cheap-attempt cost of escalated turns via the ledger's
- * `effectiveSavings`. We report a number we can stand behind, not a promise.
+ * (double-pay.ts) and reports what was actually spent and how: overall and
+ * per-tier cost, tokens, cache reads/writes, tool calls, and context size. It
+ * counts real spend — it does not price a frontier baseline or promise a
+ * savings figure. Task-level comparisons against other agents live in the
+ * ../unerr-benchmarks repo, not in the product.
  *
- * The headline reduction metric follows econ's principle: reduction ≈
- * 1 − the large-tier TOKEN share. The dollar figure is baseline − actual with
- * double-pay removed; both are shown so the receipt is auditable.
+ * The headline `estimatedReduction` metric follows econ's principle:
+ * reduction ≈ 1 − the large-tier TOKEN share — self-referential, no external
+ * price reference.
  *
  * double-pay.ts is imported READ-ONLY (type position) — this module never
- * constructs or mutates the ledger; it only reads a snapshot and calls
- * `effectiveSavings`.
+ * constructs or mutates the ledger; it only reads a snapshot.
+ *
+ * U6: optional goals/evaluations/contained trace sections (§1.8, §6 of
+ * ORCHESTRATION_MECHANISM.md) pass through unchanged when the caller supplies
+ * them, already folded across root + child slices upstream — additive, no
+ * shape change to the existing per-tier drilldown.
  *
  * @sem domain=observability role=accounting
  */
 
 import type { DoublePayLedger } from "./double-pay.js"
 import type { TelemetryStore, UsageTier, UsageEventTokens } from "./telemetry.js"
+import { contextWindow, tierProfile } from "./model-registry.js"
+import type { EconTier } from "./region.js"
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/**
- * Per-million-token prices for the frontier model we baseline against — the
- * "what Claude/GPT would have cost" reference. Cache-read pricing is optional;
- * when omitted, cache-read tokens are priced at the input rate.
- */
-export interface FrontierBaseline {
-  /** Frontier model id, for display. */
-  model: string
-  inputPerMTok: number
-  outputPerMTok: number
-  /** Defaults to `inputPerMTok` when omitted. */
-  cacheReadPerMTok?: number
-}
 
 /** A named risk catch the router escalated — rendered in the receipt's catch list. */
 export interface ReceiptCatch {
@@ -49,53 +42,99 @@ export interface ReceiptCatch {
   reason: string
 }
 
+/** One triaged goal from turn-open — the split-and-track outcome (U6, §1.1/§1.2). */
+export interface ReceiptGoal {
+  /** Short, possibly-truncated quote of the goal as triaged. */
+  summary: string
+  /** The turn-shape label assigned to this goal. */
+  shape: string
+}
+
+/** One pre-dispatch evaluator verdict for a slice (U6, §6 U4). */
+export interface ReceiptEvaluation {
+  sliceId: string
+  /** Tier the evaluator picked for this slice. */
+  tier: UsageTier
+  /** Whether the slice ran inline on the caller's session or as a dispatched child. */
+  venue: "inline" | "child"
+  /** Why this tier was picked — difficulty / blast-radius / verifiability / history / cache signals. */
+  reasons: string[]
+}
+
+/** One contained (reverted) slice attempt (U6, §6 U3). */
+export interface ReceiptContainment {
+  sliceId: string
+  /** Tier the failed attempt ran on. */
+  fromTier: UsageTier
+  /** Tier the slice escalated to on re-dispatch, when it did. */
+  toTier?: UsageTier
+  /** Which verify rung rejected the attempt and why. */
+  rungReason: string
+  /** Whether the failed attempt's edits were actually reverted (the snapshot restore fired). */
+  reverted: boolean
+}
+
 /** Inputs to {@link buildReceipt}. */
 export interface ReceiptInput {
   /** The session's recorded usage events. */
   store: TelemetryStore
-  /** The double-pay ledger (read-only) for the wasted-cost subtraction. */
+  /** The double-pay ledger (read-only) for the double-pay line. */
   ledger: DoublePayLedger
-  /** Frontier reference pricing; omit to skip the dollar figure (token-share only). */
-  baseline?: FrontierBaseline
   /** Named risk catches to surface; optional. */
   catches?: ReceiptCatch[]
+  /** Triaged goals for the internal trace; optional, already folded across root + child slices. */
+  goals?: ReceiptGoal[]
+  /** Pre-dispatch evaluator verdicts for the internal trace; optional, already folded across root + child slices. */
+  evaluations?: ReceiptEvaluation[]
+  /** Contained (reverted) attempts for the internal trace; optional, already folded across root + child slices. */
+  contained?: ReceiptContainment[]
   /** Tiers counted as "large" for the reduction metric. Default: oracle, reasoner, frontier. */
   largeTiers?: UsageTier[]
   /** Currency label for display. Default "USD". */
   currency?: string
 }
 
-/** One row of the tier split — token + cost share for a tier. */
+/** One row of the per-tier drilldown. */
 export interface TierSplitRow {
   tier: UsageTier
   turns: number
+  tokens: UsageEventTokens
   totalTokens: number
-  cost: number
-  /** This tier's share of all tokens (0..1). */
+  /** Share of all tokens (0..1). */
   tokenShare: number
+  cost: number
+  /** Share of total spend (0..1); 0 when total cost is 0. */
+  costShare: number
+  cacheHitRatio: number
+  toolCalls: number
+  peakContextTokens: number
+  /** Context window of the tier's bound model (from the model registry) — only for the four econ tiers. */
+  contextLimit?: number
 }
 
 /** The computed receipt. */
-export interface SavingsReceipt {
+export interface EconReceipt {
   turns: number
+  toolCalls: number
+  tokens: UsageEventTokens
+  totalTokens: number
+  actualCost: number
+  cacheHitRatio: number
+  peakContextTokens: number
   tierSplit: TierSplitRow[]
   /** Combined token share of the large tiers (0..1). */
   largeTierTokenShare: number
-  /** econ's headline metric: 1 − largeTierTokenShare. */
+  /** econ's headline metric: 1 − largeTierTokenShare (token-share based, self-referential — no external price reference). */
   estimatedReduction: number
-  cacheHitRatio: number
-  /** Real dollars spent across all recorded turns. */
-  actualCost: number
-  /** What the same token volume would have cost at the frontier baseline. */
-  frontierBaselineCost?: number
-  /** baseline − actual, before the double-pay subtraction (the optimistic figure). */
-  grossSavings?: number
-  /** Double-pay penalty pulled from the ledger. */
   doublePay: { escalations: number; wastedCost: number }
-  /** HONEST savings: grossSavings − wastedCost, via ledger.effectiveSavings. */
-  netSavings?: number
   catches: ReceiptCatch[]
   currency: string
+  /** Triaged goals — internal trace only, present only when the caller supplied them (U6). */
+  goals?: ReceiptGoal[]
+  /** Pre-dispatch evaluator verdicts — internal trace only, present only when the caller supplied them (U6). */
+  evaluations?: ReceiptEvaluation[]
+  /** Contained (reverted) attempts — internal trace only, present only when the caller supplied them (U6). */
+  contained?: ReceiptContainment[]
 }
 
 // ---------------------------------------------------------------------------
@@ -104,15 +143,27 @@ export interface SavingsReceipt {
 
 const DEFAULT_LARGE_TIERS: UsageTier[] = ["oracle", "reasoner", "frontier"]
 
-/** Price one turn's tokens at the frontier baseline (per-million-token rates). */
-function frontierCostOf(tokens: UsageEventTokens, b: FrontierBaseline): number {
-  const cacheReadRate = b.cacheReadPerMTok ?? b.inputPerMTok
-  return (
-    (tokens.input * b.inputPerMTok +
-      tokens.cacheRead * cacheReadRate +
-      (tokens.output + tokens.reasoning) * b.outputPerMTok) /
-    1_000_000
-  )
+/** The four econ tiers whose bound model has a registry-tracked context window. */
+const ECON_RECEIPT_TIERS = new Set<UsageTier>(["conductor", "executor", "reasoner", "oracle"])
+
+/**
+ * Tiers on the default routing path — excluded from the receipt's "ran above
+ * conductor" routing line. Executor covers its persona sub-agents too (they
+ * all roll up into the "executor" tier key), so they're noise for this line,
+ * not an escalation signal.
+ */
+const NOISE_ROUTING_TIERS = new Set<UsageTier>(["conductor", "executor"])
+
+/** Context window of a tier's bound model, or undefined for a non-econ tier label. */
+function contextLimitForTier(tier: UsageTier): number | undefined {
+  if (!ECON_RECEIPT_TIERS.has(tier)) return undefined
+  return contextWindow(tier as EconTier)
+}
+
+/** Registry cache-accounting mode of a tier's bound model, or undefined for a non-econ tier label. */
+function cacheAccountingFor(tier: UsageTier): "stream" | "nonstream-only" | "none" | undefined {
+  if (!ECON_RECEIPT_TIERS.has(tier)) return undefined
+  return tierProfile(tier as EconTier).cacheAccounting
 }
 
 // ---------------------------------------------------------------------------
@@ -120,34 +171,38 @@ function frontierCostOf(tokens: UsageEventTokens, b: FrontierBaseline): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute the end-of-turn savings receipt from real recorded usage.
- *
- * Dollar math (only when a `baseline` is supplied):
- *   grossSavings = Σ (frontierCostOf(turn.tokens) − turn.cost)
- *   netSavings   = ledger.effectiveSavings(grossSavings)   // − wastedCost
- *
- * The gross figure naively treats a discarded cheap attempt as savings (its
- * frontier-priced tokens exceed its cheap cost); routing through
- * `effectiveSavings` subtracts the ledger's `totalWastedCost`, removing that
- * phantom saving and the real waste — this is what makes the receipt honest.
+ * Compute the end-of-turn econ receipt from real recorded usage: overall
+ * totals plus a per-tier drilldown, straight off `store.totals()` and
+ * `store.cacheHitRatio()`, carrying through the optional goals/evaluations/
+ * contained trace sections unchanged when the caller supplies them (already
+ * folded across root + child slices upstream, same idiom as `catches`). No
+ * baseline pricing, no savings math — the double-pay line is the ledger's
+ * own accounting, not a subtraction from a frontier-derived figure.
  *
  * @sem domain=observability role=accounting
  */
-export function buildReceipt(input: ReceiptInput): SavingsReceipt {
-  const { store, ledger, baseline, catches = [] } = input
+export function buildReceipt(input: ReceiptInput): EconReceipt {
+  const { store, ledger, catches = [] } = input
   const largeTiers = new Set(input.largeTiers ?? DEFAULT_LARGE_TIERS)
   const currency = input.currency ?? "USD"
 
   const totals = store.totals()
-  const denom = totals.totalTokens
+  const tokenDenom = totals.totalTokens
+  const costDenom = totals.cost
 
   const tierSplit: TierSplitRow[] = Object.entries(totals.byTier)
     .map(([tier, t]) => ({
-      tier,
+      tier: tier as UsageTier,
       turns: t.turns,
+      tokens: t.tokens,
       totalTokens: t.totalTokens,
+      tokenShare: tokenDenom > 0 ? t.totalTokens / tokenDenom : 0,
       cost: t.cost,
-      tokenShare: denom > 0 ? t.totalTokens / denom : 0,
+      costShare: costDenom > 0 ? t.cost / costDenom : 0,
+      cacheHitRatio: t.cacheHitRatio,
+      toolCalls: t.toolCalls,
+      peakContextTokens: t.peakContextTokens,
+      contextLimit: contextLimitForTier(tier as UsageTier),
     }))
     .sort((a, b) => b.totalTokens - a.totalTokens)
 
@@ -158,27 +213,27 @@ export function buildReceipt(input: ReceiptInput): SavingsReceipt {
   const snapshot = ledger.snapshot()
   const doublePay = { escalations: snapshot.escalations, wastedCost: snapshot.totalWastedCost }
 
-  const receipt: SavingsReceipt = {
+  const receipt: EconReceipt = {
     turns: totals.turns,
+    toolCalls: totals.toolCalls,
+    tokens: totals.tokens,
+    totalTokens: totals.totalTokens,
+    actualCost: totals.cost,
+    cacheHitRatio: store.cacheHitRatio(),
+    peakContextTokens: totals.peakContextTokens,
     tierSplit,
     largeTierTokenShare,
     estimatedReduction: 1 - largeTierTokenShare,
-    cacheHitRatio: store.cacheHitRatio(),
-    actualCost: totals.cost,
     doublePay,
     catches,
     currency,
   }
-
-  if (baseline) {
-    let frontierBaselineCost = 0
-    for (const e of store.all()) frontierBaselineCost += frontierCostOf(e.tokens, baseline)
-    const grossSavings = frontierBaselineCost - totals.cost
-    receipt.frontierBaselineCost = frontierBaselineCost
-    receipt.grossSavings = grossSavings
-    receipt.netSavings = ledger.effectiveSavings(grossSavings)
-  }
-
+  // U6 trace sections: additive-only — present only when the caller supplies
+  // them (already folded across root + child slices upstream), so an omitted
+  // section keeps today's shape exactly (no key at all, not an empty array).
+  if (input.goals !== undefined) receipt.goals = input.goals
+  if (input.evaluations !== undefined) receipt.evaluations = input.evaluations
+  if (input.contained !== undefined) receipt.contained = input.contained
   return receipt
 }
 
@@ -191,33 +246,67 @@ const money = (n: number, currency: string): string =>
 
 const pct = (n: number): string => `${(n * 100).toFixed(1)}%`
 
+/** Compact token count: 1234 → "1.2k", 1234567 → "1.23M". */
+const fmtTokens = (n: number): string => {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return `${n}`
+}
+
 /**
- * Render a {@link SavingsReceipt} as a compact multi-line block for the
- * end-of-turn surface. Pure string formatting — no I/O.
+ * Render an {@link EconReceipt} as a compact multi-line block for the
+ * end-of-turn surface: overall totals, a routing line naming which tiers ran
+ * above conductor (when any did — double-pay alone only counts mid-turn
+ * escalation, not a turn that opened directly on a large tier), then a
+ * per-tier drilldown. Pure string formatting — no I/O.
  *
  * @sem domain=observability role=formatting
  */
-export function formatReceipt(r: SavingsReceipt): string {
+export function formatReceipt(r: EconReceipt): string {
   const lines: string[] = []
-  lines.push("econ savings receipt")
-  lines.push(`  turns:        ${r.turns}`)
+  lines.push("econ receipt")
+  lines.push(`  turns:      ${r.turns} · tool calls: ${r.toolCalls}`)
   lines.push(
-    `  tier split:   ${r.tierSplit.map((t) => `${t.tier} ${pct(t.tokenShare)}`).join("  ") || "(none)"}`,
+    `  tokens:     ${fmtTokens(r.totalTokens)} — in ${fmtTokens(r.tokens.input)} · out ${fmtTokens(r.tokens.output)} · think ${fmtTokens(r.tokens.reasoning)} · cache r ${fmtTokens(r.tokens.cacheRead)} / w ${fmtTokens(r.tokens.cacheWrite)}`,
+  )
+  // Honesty over precision: some deployments cache but omit cache fields from
+  // streamed usage (registry cacheAccounting "nonstream-only"), so the overall
+  // ratio only counts tiers that actually report.
+  const anyUnreported = r.tierSplit.some((t) => cacheAccountingFor(t.tier) === "nonstream-only")
+  lines.push(`  cache hit:  ${pct(r.cacheHitRatio)}${anyUnreported ? " (reported tiers only)" : ""}`)
+  lines.push(`  context:    peak ${fmtTokens(r.peakContextTokens)}`)
+  lines.push(`  spent:      ${money(r.actualCost, r.currency)}`)
+  lines.push(
+    `  reduction:  ${pct(r.estimatedReduction)}  (1 − large-tier token share ${pct(r.largeTierTokenShare)})`,
   )
   lines.push(
-    `  reduction:    ${pct(r.estimatedReduction)}  (1 − large-tier token share ${pct(r.largeTierTokenShare)})`,
+    `  double-pay: −${money(r.doublePay.wastedCost, r.currency)} (${r.doublePay.escalations} escalation${r.doublePay.escalations === 1 ? "" : "s"})`,
   )
-  lines.push(`  cache hit:    ${pct(r.cacheHitRatio)}`)
-  lines.push(`  spent:        ${money(r.actualCost, r.currency)}`)
-  if (r.frontierBaselineCost !== undefined) {
-    lines.push(`  vs frontier:  ${money(r.frontierBaselineCost, r.currency)}`)
-    lines.push(`  gross saved:  ${money(r.grossSavings ?? 0, r.currency)}`)
+  // Turn-open routing: which tiers ran above the default conductor/executor
+  // path, and how much. double-pay only counts mid-turn escalation (a cheap
+  // turn redone on oracle) — a turn that opened directly on reasoner/oracle
+  // shows 0 escalations there even at 100% large-tier usage; this line closes
+  // that blind spot. Omitted entirely when every turn ran on conductor/executor.
+  const routingRows = r.tierSplit.filter((t) => !NOISE_ROUTING_TIERS.has(t.tier) && t.turns > 0)
+  const turnsAboveConductor = routingRows.reduce((acc, t) => acc + t.turns, 0)
+  if (turnsAboveConductor > 0) {
+    const parts = routingRows.map((t) => `${t.tier}: ${t.turns}·${money(t.cost, r.currency)}`).join(", ")
+    lines.push(`  routing:    ${turnsAboveConductor} of ${r.turns} turns ran above conductor (${parts})`)
   }
-  lines.push(
-    `  double-pay:   −${money(r.doublePay.wastedCost, r.currency)} (${r.doublePay.escalations} escalation${r.doublePay.escalations === 1 ? "" : "s"})`,
-  )
-  if (r.netSavings !== undefined) {
-    lines.push(`  NET SAVED:    ${money(r.netSavings, r.currency)}  (double-pay subtracted)`)
+  if (r.tierSplit.length > 0) {
+    lines.push(`  tiers:`)
+    const nameWidth = Math.max(...r.tierSplit.map((t) => t.tier.length))
+    for (const t of r.tierSplit) {
+      const ctx = t.contextLimit !== undefined ? `${fmtTokens(t.peakContextTokens)}/${fmtTokens(t.contextLimit)}` : fmtTokens(t.peakContextTokens)
+      // A hollow 0% from a tier whose stream omits cache fields is "not
+      // reported" (n/r); a tier whose provider never caches is "n/a".
+      const acct = cacheAccountingFor(t.tier)
+      const cacheCell =
+        acct === "none" ? "n/a" : acct === "nonstream-only" && t.cacheHitRatio === 0 ? "n/r" : pct(t.cacheHitRatio)
+      lines.push(
+        `    ${t.tier.padEnd(nameWidth)}  ${t.turns} turn${t.turns === 1 ? "" : "s"} · ${fmtTokens(t.totalTokens)} tok (${pct(t.tokenShare)}) · ${money(t.cost, r.currency)} (${pct(t.costShare)}) · cache ${cacheCell} · ${t.toolCalls} tool${t.toolCalls === 1 ? "" : "s"} · ctx ${ctx}`,
+      )
+    }
   }
   if (r.catches.length > 0) {
     lines.push(`  catches:`)

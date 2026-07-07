@@ -18,20 +18,25 @@ import type { CacheHitEvent, TierCacheRollupSignal } from "../src/cache-meter.ts
 // ---------------------------------------------------------------------------
 
 describe("computeCacheHitRate", () => {
-  it("returns 0 when both cacheRead and input are 0 (divide-by-zero guard)", () => {
-    expect(computeCacheHitRate({ cacheRead: 0, input: 0 })).toBe(0)
+  it("returns 0 when cacheRead, input, and cacheWrite are all 0 (divide-by-zero guard)", () => {
+    expect(computeCacheHitRate({ cacheRead: 0, input: 0, cacheWrite: 0 })).toBe(0)
   })
 
-  it("returns 1 on a full hit (input is 0, all reads cached)", () => {
-    expect(computeCacheHitRate({ cacheRead: 500, input: 0 })).toBe(1)
+  it("returns 1 on a full hit (input and cacheWrite are 0, all reads cached)", () => {
+    expect(computeCacheHitRate({ cacheRead: 500, input: 0, cacheWrite: 0 })).toBe(1)
   })
 
   it("returns the partial ratio for a mixed turn", () => {
-    expect(computeCacheHitRate({ cacheRead: 400, input: 100 })).toBeCloseTo(0.8)
+    expect(computeCacheHitRate({ cacheRead: 400, input: 100, cacheWrite: 0 })).toBeCloseTo(0.8)
   })
 
   it("returns 0 for a cold turn with no cache reads at all", () => {
-    expect(computeCacheHitRate({ cacheRead: 0, input: 1000 })).toBe(0)
+    expect(computeCacheHitRate({ cacheRead: 0, input: 1000, cacheWrite: 0 })).toBe(0)
+  })
+
+  it("counts cacheWrite in the denominator as a miss", () => {
+    // cacheRead=200, input=0, cacheWrite=800 -> 200/(200+0+800) = 0.2
+    expect(computeCacheHitRate({ cacheRead: 200, input: 0, cacheWrite: 800 })).toBeCloseTo(0.2)
   })
 })
 

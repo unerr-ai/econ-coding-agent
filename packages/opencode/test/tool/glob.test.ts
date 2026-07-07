@@ -133,4 +133,63 @@ describe("tool.glob", () => {
       }
     }),
   )
+
+  it.instance("auto-broadens a metacharacter-free miss and reports the broadened pattern", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const nested = path.join(test.directory, "test", "plugin", "timezone.ts")
+      yield* Effect.promise(() => Bun.write(nested, "export const tz = 1\n"))
+      const info = yield* GlobTool
+      const glob = yield* info.init()
+      const result = yield* glob.execute(
+        {
+          pattern: "test/plugin/timezone",
+          path: test.directory,
+        },
+        ctx,
+      )
+      expect(result.metadata.count).toBe(1)
+      expect(result.metadata.broadened).toBe("**/timezone*")
+      expect(result.output).toContain(
+        `[econ-ctx] no matches for "test/plugin/timezone" — auto-broadened to "**/timezone*":`,
+      )
+      expect(result.output).toContain(nested)
+    }),
+  )
+
+  it.instance("reports both patterns tried when the broadened retry still finds nothing", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const info = yield* GlobTool
+      const glob = yield* info.init()
+      const result = yield* glob.execute(
+        {
+          pattern: "nonexistent/nomatch",
+          path: test.directory,
+        },
+        ctx,
+      )
+      expect(result.metadata.count).toBe(0)
+      expect(result.metadata.broadened).toBe("**/nomatch*")
+      expect(result.output).toBe(`No files found for "nonexistent/nomatch" (also tried "**/nomatch*")`)
+    }),
+  )
+
+  it.instance("leaves the zero-match behavior for patterns with metacharacters unchanged", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const info = yield* GlobTool
+      const glob = yield* info.init()
+      const result = yield* glob.execute(
+        {
+          pattern: "*.nomatch",
+          path: test.directory,
+        },
+        ctx,
+      )
+      expect(result.metadata.count).toBe(0)
+      expect(result.metadata.broadened).toBeUndefined()
+      expect(result.output).toBe("No files found")
+    }),
+  )
 })

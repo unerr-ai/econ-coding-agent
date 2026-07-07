@@ -6,6 +6,8 @@
  * ~70%+ compression on typical `find` output.
  */
 
+import { isSalientLine } from "./salience"
+
 const COLLAPSE_DIRS = new Set([
   "node_modules",
   ".git",
@@ -77,9 +79,14 @@ export function compressTreePaths(raw: string, command?: string): string {
 
   const paths: string[] = []
   const nonPathLines: string[] = []
+  // Error/denied lines (e.g. `find: '/root': Permission denied`) must survive
+  // the fold verbatim — tracked separately so neither the nonPathLines cap nor
+  // the director/files-only filter below can drop them.
+  const salientLines: string[] = []
   for (const line of lines) {
     const cleaned = cleanPath(line)
     if (!cleaned) continue
+    if (isSalientLine(cleaned)) salientLines.push(cleaned)
     if (cleaned.includes("/") && cleaned.length > 1 && !cleaned.includes(" ")) {
       paths.push(cleaned)
     } else if (cleaned.length > 0 && nonPathLines.length < 6) {
@@ -153,6 +160,10 @@ export function compressTreePaths(raw: string, command?: string): string {
 
   for (const t of nonPathLines.slice(-2)) {
     if (/\bdirector(?:y|ies)\b/i.test(t) || /\bfiles?\b/i.test(t)) out.push(t)
+  }
+
+  for (const s of salientLines) {
+    if (!out.includes(s)) out.push(s)
   }
 
   return out.join("\n")

@@ -42,3 +42,10 @@ Skip it:
 - "Run npm install and tell me what happened" -> one command
 
 When in doubt, use it.
+
+## Protocol cost
+Each call returns only a one-line ack, not the full list — plan status transitions accordingly:
+- Flip statuses in the SAME assistant step as the work that changed them. A call must ride along with real tool calls (edits, reads, commands) — never be the step's only action.
+- Never make this call a step's only tool call — batch it with the tool calls of the work it records.
+- Batch the pair transition (previous item -> completed, next item -> in_progress) into ONE call, not two.
+- Close the final todo in the step that finishes its work, before writing the final summary. Never end the turn with an item still in_progress.

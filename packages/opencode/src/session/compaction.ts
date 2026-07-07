@@ -190,7 +190,9 @@ function observationSynthesis(part: SessionV1.ToolPart, sessionID: SessionID, me
 // stale-drop, or summarize, and must always land in the re-injected
 // (post-compaction) payload verbatim. "Protected" (part-level) = an
 // explicitly PINNED tool part, the active plan (the latest `todowrite` call),
-// or a path matching `cfg.protected.paths`. `cfg.protected.keep_all_user_messages`
+// a `task` sub-agent digest (already the compressed form of a child
+// session's work — masking it again defeats its purpose), or a path
+// matching `cfg.protected.paths`. `cfg.protected.keep_all_user_messages`
 // (default true) is satisfied structurally, not via this helper: none of
 // prune/maskObservations/pruneStaleReads ever touch a `text` part, only
 // completed `tool` parts, so raw user message text is already never pruned,
@@ -209,6 +211,9 @@ function protectedPathMatch(filePath: unknown, patterns: readonly string[] | und
 function isProtectedToolPart(part: SessionV1.ToolPart, cfg: ConfigV1.Info, planPartId: PartID | undefined): boolean {
   if (isPinnedPart(part)) return true
   if (cfg.protected?.plan !== false && part.tool === "todowrite" && part.id === planPartId) return true
+  // A `task` digest is already the compressed form of a child session's work —
+  // masking it again defeats its purpose, so it is never pruned/masked/stale-dropped.
+  if (part.tool === "task") return true
   if (part.state.status === "pending") return false
   return protectedPathMatch(part.state.input?.filePath ?? part.state.input?.path, cfg.protected?.paths)
 }

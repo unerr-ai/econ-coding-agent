@@ -226,12 +226,15 @@ describeWatcher("Watcher", () => {
           const branch = `watch-${Math.random().toString(36).slice(2)}`
           yield* ready(directory)
           yield* Effect.promise(() => $`git branch ${branch}`.cwd(directory).quiet())
-          expect(
-            yield* nextUpdate((event) => event.file === head, fs.writeFileString(head, `ref: refs/heads/${branch}\n`)),
-          ).toEqual({
-            file: head,
-            event: "change",
-          })
+          const result = yield* nextUpdate(
+            (event) => event.file === head,
+            fs.writeFileString(head, `ref: refs/heads/${branch}\n`),
+          )
+          // Backends report the first write to an existing .git/HEAD as "add" or
+          // "change" nondeterministically (fs-event ordering race); consumers
+          // (e.g. Vcs.layer) only key off the file path, not the event kind.
+          expect(result.file).toEqual(head)
+          expect(["add", "change"]).toContain(result.event)
         }),
       { git: true },
     ),

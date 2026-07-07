@@ -117,11 +117,7 @@ export interface LedgerSnapshot {
 
 /**
  * In-memory aggregator that accumulates `EscalationCost` records and exposes
- * session-level totals for the savings receipt.
- *
- * `effectiveSavings(grossSavings)` subtracts accumulated `wastedCost` from
- * the caller-supplied gross savings figure (oracle price minus cheap price,
- * summed over non-escalated turns), yielding the honest net savings.
+ * session-level totals for the econ receipt's double-pay line.
  *
  * @sem domain=router role=accounting
  */
@@ -146,18 +142,6 @@ export class DoublePayLedger {
    */
   get totalWastedCost(): number {
     return this._totalWastedCost
-  }
-
-  /**
-   * Adjust a gross savings figure by subtracting the wasted escalation cost.
-   *
-   * `grossSavings` = Σ (oracle_ref_price − cheap_price) for turns that
-   * succeeded on the cheap model.  Subtracting `totalWastedCost` accounts for
-   * the turns where the cheap attempt was discarded — those contributed cost,
-   * not savings.
-   */
-  effectiveSavings(grossSavings: number): number {
-    return grossSavings - this._totalWastedCost
   }
 
   /** Point-in-time snapshot of running totals — safe to log or serialise. */

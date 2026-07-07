@@ -52,14 +52,18 @@ export interface CacheHitInput {
 }
 
 /**
- * Cache-hit rate for one turn: `cacheRead / (cacheRead + input)`, clamped to
- * 0 when the denominator is zero. Pure — no I/O — so it is safe to call from
- * both the recorder below and any future per-tier rollup.
+ * Cache-hit rate for one turn: `cacheRead / (cacheRead + input + cacheWrite)`,
+ * clamped to 0 when the denominator is zero. cacheWrite tokens are prompt
+ * tokens that MISSED the cache, so they count toward the denominator as a
+ * miss. Pure — no I/O — so it is safe to call from both the recorder below
+ * and any future per-tier rollup.
  *
  * @sem domain=observability role=ingestion
  */
-export function computeCacheHitRate(tokens: Pick<UsageEventTokens, "cacheRead" | "input">): number {
-  const denom = tokens.cacheRead + tokens.input
+export function computeCacheHitRate(
+  tokens: Pick<UsageEventTokens, "cacheRead" | "input" | "cacheWrite">,
+): number {
+  const denom = tokens.cacheRead + tokens.input + tokens.cacheWrite
   return denom > 0 ? tokens.cacheRead / denom : 0
 }
 
@@ -187,7 +191,11 @@ export class TierCacheRollup {
     bucket.cost += event.cost
     this._byTier.set(tier, bucket)
 
-    const hitRate = computeCacheHitRate({ cacheRead: bucket.cacheRead, input: bucket.input })
+    const hitRate = computeCacheHitRate({
+      cacheRead: bucket.cacheRead,
+      input: bucket.input,
+      cacheWrite: bucket.cacheWrite,
+    })
     const flagged = hitRate < TIER_CACHE_HIT_FLAG_THRESHOLD
     if (flagged) {
       const stats: TierCacheStats = {
@@ -216,7 +224,11 @@ export class TierCacheRollup {
   snapshot(): TierCacheSnapshot {
     const byTier: Record<string, TierCacheStats> = {}
     for (const [tier, bucket] of this._byTier) {
-      const hitRate = computeCacheHitRate({ cacheRead: bucket.cacheRead, input: bucket.input })
+      const hitRate = computeCacheHitRate({
+        cacheRead: bucket.cacheRead,
+        input: bucket.input,
+        cacheWrite: bucket.cacheWrite,
+      })
       byTier[tier] = {
         tier,
         turns: bucket.turns,

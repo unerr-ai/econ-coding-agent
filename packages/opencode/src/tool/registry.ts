@@ -17,7 +17,7 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 // Z1 — econ graph tools (S1.2); remove this comment block when graduated
-import { GraphReconTool, GraphGetReferencesTool, GraphSearchCodeTool, GraphFileOutlineTool } from "./graph-tools"
+import { GraphReconTool, GraphGetReferencesTool, GraphSearchCodeTool, GraphFileOutlineTool, GraphNoteSaveTool } from "./graph-tools"
 import { CompactionRefetchTool } from "./compaction-refetch"
 import { ToolJsonSchema } from "./json-schema"
 // Z2.3 — webfetch-compress folded into the webfetch tool (Sprint 6.2)
@@ -45,7 +45,7 @@ import { Format } from "../format"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
 import { Question } from "../question"
-import { Todo } from "../session/todo"
+import { SessionTodo } from "@opencode-ai/core/session/todo"
 import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -108,6 +108,7 @@ export const CATALOG_TOOL_IDS = new Set<string>([
   SkillTool.id,
   QuestionTool.id,
   GraphFileOutlineTool.id,
+  GraphNoteSaveTool.id,
   CompactionRefetchTool.id,
   InvalidTool.id,
 ])
@@ -143,6 +144,8 @@ export const layer = Layer.effect(
     const graphGetRefs = yield* GraphGetReferencesTool
     const graphSearchCode = yield* GraphSearchCodeTool
     const graphFileOutline = yield* GraphFileOutlineTool
+    // Task #14 — note_save: model-invokable path for BunSqliteGraph.upsertNote
+    const graphNoteSave = yield* GraphNoteSaveTool
     // AC-6.2 — recoverable transcript: read-only, cheap, always available.
     const compactionRefetch = yield* CompactionRefetchTool
 
@@ -256,6 +259,8 @@ export const layer = Layer.effect(
           getReferences: Tool.init(graphGetRefs),
           searchCode: Tool.init(graphSearchCode),
           fileOutline: Tool.init(graphFileOutline),
+          // Task #14 — note_save
+          noteSave: Tool.init(graphNoteSave),
           compactionRefetch: Tool.init(compactionRefetch),
         })
 
@@ -317,6 +322,8 @@ export const layer = Layer.effect(
             tool.getReferences,
             tool.searchCode,
             tool.fileOutline,
+            // Task #14 — note_save: catalog-compacted (on-demand), same treatment as fileOutline.
+            tool.noteSave,
             // AC-6.2 — recoverable transcript: read-only, cheap, always available.
             tool.compactionRefetch,
             // AC-7.1 — only advertised once the compact catalog is actually in play.
@@ -431,7 +438,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Config.defaultLayer),
       Layer.provide(Plugin.defaultLayer),
       Layer.provide(Question.defaultLayer),
-      Layer.provide(Todo.defaultLayer),
+      Layer.provide(SessionTodo.defaultLayer),
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
@@ -554,7 +561,7 @@ export const node = LayerNode.make(layer.pipe(Layer.provide(Ripgrep.defaultLayer
   Config.node,
   Plugin.node,
   Question.node,
-  Todo.node,
+  SessionTodo.node,
   Agent.node,
   Skill.node,
   Session.node,

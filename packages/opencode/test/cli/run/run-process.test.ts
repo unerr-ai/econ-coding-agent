@@ -147,6 +147,7 @@ describe("opencode run (non-interactive subprocess)", () => {
             type: "cost_breakdown",
             cumulative: expect.any(Object),
             models: expect.any(Object),
+            tiers: expect.any(Object),
             discarded: expect.any(Number),
             net: expect.any(Number),
           }),
@@ -279,8 +280,14 @@ describe("opencode run (non-interactive subprocess)", () => {
         yield* llm.text("continued after rejection")
         const denied = yield* opencode.run("request permission", { permission: { bash: "ask" } })
         opencode.expectExit(denied, 0)
-        expect(denied.stderr).toContain("permission requested: bash")
-        expect(denied.stdout).toBe("")
+        // OL-9.0b: the headless backstop in permission/index.ts's ask() now auto-
+        // rejects with feedback before the "asking" event is ever published, so
+        // the old "permission requested: bash" print from run.ts's event-loop
+        // handler no longer fires. The feedback is a CorrectedError, which (per
+        // processor.ts's failToolCall) doesn't block the loop, so the model
+        // bounces and the queued follow-up turn runs.
+        expect(denied.stderr).toContain("Interactive approval is unavailable in this headless run")
+        expect(denied.stdout).toContain("continued after rejection")
 
         yield* llm.reset
         yield* llm.tool("bash", { command: "rm -f allowed-file", description: "Remove a test file" })

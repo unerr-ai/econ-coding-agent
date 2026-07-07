@@ -386,6 +386,79 @@ describe("session.llm.ai-sdk adapter", () => {
     expect(stepFinish.usage).toBeUndefined()
   })
 
+  // W8 (2026-07-06): the reasoner/oracle tiers were marked cacheAccounting
+  // "nonstream-only" because the AI SDK's normalized usage fields were assumed
+  // to omit prompt-cache hits on some transports. This raw-payload fallback
+  // reads the provider's own usage JSON directly so a cache hit is reported
+  // even when the normalized fields never populate.
+  test("falls back to the raw provider usage payload for cache reads (W8 client-side mapping fix)", async () => {
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "econ-reasoner" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 6511,
+          outputTokens: 40,
+          totalTokens: 6551,
+          raw: { prompt_tokens: 6511, completion_tokens: 40, prompt_tokens_details: { cached_tokens: 6510 } },
+        },
+      }),
+    ])
+
+    expect(events).toHaveLength(1)
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.cacheReadInputTokens).toBe(6510)
+  })
+
+  test("falls back to the flat OpenAI-compat cache_read_input_tokens field", async () => {
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "econ-reasoner" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 6511,
+          outputTokens: 40,
+          totalTokens: 6551,
+          raw: { cache_read_input_tokens: 6510 },
+        },
+      }),
+    ])
+
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.cacheReadInputTokens).toBe(6510)
+  })
+
+  test("prefers the normalized AI SDK cache field over the raw fallback (does not regress the flash 'stream' tier)", async () => {
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "econ-conductor" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 6511,
+          outputTokens: 40,
+          totalTokens: 6551,
+          inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 6510, cacheWriteTokens: 0 },
+          raw: { prompt_tokens_details: { cached_tokens: 1 } },
+        },
+      }),
+    ])
+
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.cacheReadInputTokens).toBe(6510)
+  })
+
   test("reuses adapter state cleanly across streams once finish has fired", async () => {
     // adapterState() is meant to be per-stream, but the only thing finish currently clears
     // is toolNames — step, text counters, and the current text/reasoning IDs all leak

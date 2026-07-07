@@ -127,19 +127,19 @@ export interface RouterLayerConfig {
  * rule). Absent from context → the caller falls back to `{}` (degrade-open,
  * identical to pre-AC-3.3 dormant behaviour).
  *
- * The value is a DEFERRED resolver (an Effect), not a resolved object: the
- * opencode producer reads instance-scoped Config (Config.get() dies unless
- * InstanceRef is live in the running fiber), which is unavailable at
- * app-layer construction time. The consumer (see location-layer.ts) runs the
- * resolver per-location, where InstanceRef IS live, so the config read
- * happens at the right scope. Resolving eagerly at construction crashes the
- * whole server with "InstanceRef not provided".
+ * The value is a resolver FUNCTION of the location's directory, not a
+ * resolved object and not a bare Effect: location layers are built in
+ * whatever fiber first touches the location, and v2 /api request fibers
+ * carry no instance context (OL-9.6g — a bare Effect that read
+ * instance-scoped Config died with "InstanceRef not provided" on every
+ * TUI/v2 request). The producer must bind its own instance scope from the
+ * directory argument; the consumer (location-layer.ts) passes ref.directory.
  *
  * @sem domain=routing role=interface
  */
-export const RouterLayerConfigTag = Context.Reference<Effect.Effect<RouterLayerConfig>>(
+export const RouterLayerConfigTag = Context.Reference<(directory: string) => Effect.Effect<RouterLayerConfig>>(
   "@opencode/v2/SessionRunnerModel.RouterLayerConfig",
-  { defaultValue: () => Effect.succeed({}) },
+  { defaultValue: () => () => Effect.succeed({}) },
 )
 
 export interface Interface {

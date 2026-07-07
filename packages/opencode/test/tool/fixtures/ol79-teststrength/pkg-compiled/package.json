@@ -1,0 +1,6 @@
+{
+  "name": "pkg-compiled",
+  "scripts": {
+    "build": "tsc"
+  }
+}

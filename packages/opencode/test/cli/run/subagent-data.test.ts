@@ -559,7 +559,7 @@ describe("run subagent data", () => {
   })
 
   test("resolveSubagentTokenBudget caps the executor payload to a fraction of the child model's context window", () => {
-    // gpt-oss-20b's 131k window: fraction × 131k (65.5k) exceeds the 60k
+    // gpt-oss-120b's 131k window (OL-8.B4+, was gpt-oss-20b): fraction × 131k (65.5k) exceeds the 60k
     // default, so the default binds — target payload stays ≤ ~60k.
     expect(resolveSubagentTokenBudget({ childModelContextLimit: 131_000 })).toBe(SUBAGENT_TOKEN_BUDGET_DEFAULT)
     // No child model limit available — falls back to the sane default.

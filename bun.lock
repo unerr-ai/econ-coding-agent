@@ -457,6 +457,10 @@
     "packages/eval": {
       "name": "@econ/eval",
       "version": "0.1.0",
+      "dependencies": {
+        "@opencode-ai/code-intelligence": "workspace:*",
+        "opencode": "workspace:*",
+      },
       "devDependencies": {
         "@tsconfig/bun": "catalog:",
         "@types/bun": "catalog:",

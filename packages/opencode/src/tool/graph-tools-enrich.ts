@@ -66,11 +66,15 @@ export async function enrichEntities(
   root: string,
   queryCacheKey: string,
 ): Promise<EnrichResult> {
-  const fullBodies: Array<{ key: string; body: string }> = []
   const signals: string[] = []
 
+  // Collected per entity and assembled AFTER the Promise.all — pushing from
+  // inside the async callbacks would order pages by file-read completion,
+  // making cache_ref pagination nondeterministic under load.
+  const bodyByIndex: Array<{ key: string; body: string }> = new Array(entities.length)
+
   const lean = await Promise.all(
-    entities.map(async (e) => {
+    entities.map(async (e, index) => {
       const abs = (e.filePath ?? "").startsWith("/")
         ? e.filePath
         : join(root, e.filePath ?? "")
@@ -88,7 +92,7 @@ export async function enrichEntities(
       const entityKey = typeof e.key === "string" && e.key.length > 0
         ? e.key
         : `${e.filePath}:${e.name}:${e.kind}`
-      fullBodies.push({ key: entityKey, body })
+      bodyByIndex[index] = { key: entityKey, body }
 
       const callerCount = typeof e.caller_count === "number" ? e.caller_count : 0
       if (callerCount >= RSK_CALLER_THRESHOLD) {
@@ -104,6 +108,7 @@ export async function enrichEntities(
     }),
   )
 
+  const fullBodies = bodyByIndex.filter(Boolean)
   const cacheKey = hashInputs(queryCacheKey, "full_bodies")
   put(cacheKey, fullBodies)
 

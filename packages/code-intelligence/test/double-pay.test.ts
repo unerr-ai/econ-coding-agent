@@ -4,10 +4,10 @@
  * Covers:
  *  1. recordEscalation — shape, totalCost, wastedCost, emit callback.
  *  2. DoublePayLedger — non-escalated turn accrues nothing; escalated turn
- *     accumulates correctly; multiple turns sum; effectiveSavings subtracts
- *     wastedCost; snapshot is a stable point-in-time copy.
- *  3. Mixed-session scenario — cheap-only turn + escalated turn → honest net
- *     savings figure.
+ *     accumulates correctly; multiple turns sum; snapshot is a stable
+ *     point-in-time copy.
+ *  3. Mixed-session scenario — cheap-only turn + escalated turn → ledger
+ *     tracks the wasted double-pay cost.
  */
 
 import { describe, it, expect } from "bun:test"
@@ -97,7 +97,6 @@ describe("DoublePayLedger", () => {
     // so no add() call is made. Ledger must remain pristine.
     expect(ledger.escalations).toBe(0)
     expect(ledger.totalWastedCost).toBe(0)
-    expect(ledger.effectiveSavings(0.05)).toBeCloseTo(0.05)
   })
 
   it("accumulates one escalated turn", () => {
@@ -115,21 +114,6 @@ describe("DoublePayLedger", () => {
 
     expect(ledger.escalations).toBe(2)
     expect(ledger.totalWastedCost).toBeCloseTo(0.003)
-  })
-
-  it("effectiveSavings subtracts totalWastedCost from grossSavings", () => {
-    const ledger = new DoublePayLedger()
-    ledger.add(recordEscalation({ turnId: "e-001", cheap: cheapCall(0.002), oracle: oracleCall(0.02) }))
-
-    const grossSavings = 0.1 // from non-escalated cheap turns
-    expect(ledger.effectiveSavings(grossSavings)).toBeCloseTo(0.1 - 0.002)
-  })
-
-  it("effectiveSavings can go negative if wasted cost exceeds gross savings", () => {
-    const ledger = new DoublePayLedger()
-    ledger.add(recordEscalation({ turnId: "e-001", cheap: cheapCall(0.05), oracle: oracleCall(0.1) }))
-
-    expect(ledger.effectiveSavings(0.03)).toBeCloseTo(0.03 - 0.05) // -0.02
   })
 
   it("snapshot returns a stable point-in-time copy", () => {
@@ -153,14 +137,10 @@ describe("DoublePayLedger", () => {
 // ---------------------------------------------------------------------------
 
 describe("mixed session: cheap-only turns + escalated turn", () => {
-  it("savings receipt: gross savings minus wasted escalation cost", () => {
+  it("ledger tracks the wasted double-pay cost of an escalated turn", () => {
     const ledger = new DoublePayLedger()
 
-    // Turn A: cheap model succeeds — no escalation, caller accumulates gross savings.
-    const oracleRefCostA = 0.018
-    const cheapCostA = 0.0012
-    const grossSavingsA = oracleRefCostA - cheapCostA // 0.0168
-
+    // Turn A: cheap model succeeds — no escalation, no ledger entry.
     // Turn B: cheap model fails → oracle invoked; both costs are paid.
     const escB = recordEscalation({
       turnId: "turn-B",
@@ -178,10 +158,5 @@ describe("mixed session: cheap-only turns + escalated turn", () => {
     // Ledger reflects only the one escalation
     expect(ledger.escalations).toBe(1)
     expect(ledger.totalWastedCost).toBeCloseTo(0.0015)
-
-    // Effective savings subtracts the wasted cheap attempt
-    const effective = ledger.effectiveSavings(grossSavingsA)
-    expect(effective).toBeCloseTo(grossSavingsA - 0.0015) // 0.0168 - 0.0015 = 0.0153
-    expect(effective).toBeGreaterThan(0)
   })
 })

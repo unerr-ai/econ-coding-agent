@@ -7,7 +7,7 @@ import { describe, test, expect } from "bun:test"
 import {
   isReadOnly,
   callsConflict,
-  planWaves,
+  planFanoutWaves,
   isSingleWave,
   BATCH_THEN_FANOUT_RULE,
 } from "../src/fanout.ts"
@@ -90,12 +90,12 @@ describe("callsConflict", () => {
 })
 
 // ---------------------------------------------------------------------------
-// planWaves
+// planFanoutWaves
 // ---------------------------------------------------------------------------
 
-describe("planWaves", () => {
+describe("planFanoutWaves", () => {
   test("empty input returns empty waves", () => {
-    expect(planWaves([])).toEqual([])
+    expect(planFanoutWaves([])).toEqual([])
   })
 
   test("fully-independent read-only calls return a single wave containing all", () => {
@@ -104,7 +104,7 @@ describe("planWaves", () => {
       readCall("b", ["src/b.ts"]),
       readCall("c", ["src/c.ts"]),
     ]
-    const waves = planWaves(calls)
+    const waves = planFanoutWaves(calls)
     expect(waves.length).toBe(1)
     expect(waves[0].length).toBe(3)
   })
@@ -114,7 +114,7 @@ describe("planWaves", () => {
       writeCall("a", ["src/a.ts"]),
       writeCall("b", ["src/b.ts"]),
     ]
-    const waves = planWaves(calls)
+    const waves = planFanoutWaves(calls)
     expect(waves.length).toBe(1)
     expect(waves[0].length).toBe(2)
   })
@@ -124,7 +124,7 @@ describe("planWaves", () => {
       writeCall("a", ["src/shared.ts"]),
       writeCall("b", ["src/shared.ts"]),
     ]
-    const waves = planWaves(calls)
+    const waves = planFanoutWaves(calls)
     expect(waves.length).toBe(2)
     expect(waves[0].length).toBe(1)
     expect(waves[1].length).toBe(1)
@@ -137,13 +137,13 @@ describe("planWaves", () => {
       readCall("c", ["src/other.ts"]),
       writeCall("d", ["src/another.ts"]),
     ]
-    const waves = planWaves(calls)
+    const waves = planFanoutWaves(calls)
     const total = waves.reduce((sum, w) => sum + w.length, 0)
     expect(total).toBe(calls.length)
   })
 
   test("a single call produces a single wave with one element", () => {
-    const waves = planWaves([writeCall("a", ["src/foo.ts"])])
+    const waves = planFanoutWaves([writeCall("a", ["src/foo.ts"])])
     expect(waves.length).toBe(1)
     expect(waves[0].length).toBe(1)
   })
@@ -153,7 +153,7 @@ describe("planWaves", () => {
       writeCall("a", ["src/a.ts"]),
       readCall("b", ["src/b.ts"]),
     ]
-    const waves = planWaves(calls)
+    const waves = planFanoutWaves(calls)
     expect(waves.length).toBe(1)
   })
 })

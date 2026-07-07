@@ -25,6 +25,29 @@ export interface AttemptSummary {
   readonly error?: string
 }
 
+/**
+ * Deterministic failure evidence for an escalation brief (OL-2.2 / OL-7.3):
+ * what the cheap attempt failed on and the verifier verdict that rejected it —
+ * NOT the raw transcript. This is what turns a plain oracle brief into an
+ * *escalation* brief: the oracle sees the failing rung, its reason, and a few
+ * concrete deterministic evidence lines (a failing command's stderr, a
+ * behavior-monitor flag), so it fixes the actual defect instead of re-deriving
+ * it. Kept small and prefix-stable so the oracle cache still hits (OL-3.7).
+ */
+export interface FailureEvidence {
+  /** The verifier rung that rejected the cheap attempt (sound / behavior / qe / judge). */
+  readonly rung: string
+  /** Human-readable verdict reason from the rejecting rung. */
+  readonly verdict: string
+  /**
+   * Concrete, deterministic evidence lines — failing-command stderr snippets,
+   * behavior-monitor flags, type errors. Explicitly NOT the transcript.
+   */
+  readonly evidence?: readonly string[]
+  /** A "MISSING: ..." statement (OL-9.4c) naming the evidence that would have passed the rejecting rung — rendered fixed, never trimmed. */
+  readonly missing?: string
+}
+
 /** Structured inputs for compileBrief. */
 export interface BriefInput {
   /** Problem statement driving this oracle escalation. */
@@ -37,6 +60,12 @@ export interface BriefInput {
   readonly slices: readonly string[]
   /** Prior attempts from canonical state. */
   readonly attempts: readonly AttemptSummary[]
+  /**
+   * Deterministic failure evidence when this brief escalates a rejected cheap
+   * attempt (OL-2.2 / OL-7.3). Omitted for a first-hop oracle brief; present on
+   * an escalation so the oracle sees what failed before the wiring.
+   */
+  readonly failure?: FailureEvidence
   /** Target token budget for the compiled brief (default 8 000). */
   readonly tokenBudget?: number
 }
@@ -99,6 +128,8 @@ const HEADER_OVERHEAD_TOKENS = 60
  *
  * The oracle therefore always sees the core directive before any supporting
  * context. Slices and attempts are only elided when they exceed the budget.
+ * When `failure.missing` is set, its "MISSING: ..." line (OL-9.4c) is rendered
+ * fixed inside the Failure Evidence section — never trimmed.
  *
  * @sem domain=intelligence role=utilities
  */
@@ -106,11 +137,26 @@ export function compileBrief(input: BriefInput): OracleBrief {
   const budget = Math.max(input.tokenBudget ?? DEFAULT_BUDGET, 200)
 
   // ── Fixed sections (always included) ────────────────────────────────────
-  const fixedText = [
+  // Failure evidence, when present, is fixed (never trimmed) and comes right
+  // after the core directive: an escalated oracle must see what the cheap
+  // attempt failed on and the rejecting verdict before any supporting wiring.
+  const fixedParts = [
     `## Problem\n${input.problem}`,
     `## Question\n${input.question}`,
     `## Expected Output Shape\n${input.outputShape}`,
-  ].join("\n\n")
+  ]
+  if (input.failure) {
+    const lines = [
+      `Rejected at the ${input.failure.rung} verifier rung.`,
+      `Verdict: ${input.failure.verdict}`,
+    ]
+    if (input.failure.missing) lines.push(input.failure.missing)
+    if (input.failure.evidence && input.failure.evidence.length > 0) {
+      lines.push("Evidence:", ...input.failure.evidence.map((e) => `- ${e}`))
+    }
+    fixedParts.push(`## Failure Evidence\n${lines.join("\n")}`)
+  }
+  const fixedText = fixedParts.join("\n\n")
 
   const fixedTokens = estimateTokens(fixedText) + HEADER_OVERHEAD_TOKENS
   const remainingBudget = Math.max(budget - fixedTokens, 0)

@@ -97,6 +97,25 @@ describe("BunSqliteGraph — toy repo smoke test", () => {
   })
 
   // -------------------------------------------------------------------------
+  // Property calls through a namespace import — e.ts calls util.merge(x, y)
+  // where `import * as util from "./d"`; d.ts exports merge.
+  // -------------------------------------------------------------------------
+
+  it("e.ts calls util.merge(x, y) via a namespace import — getCallers('merge') includes the e.ts call edge", async () => {
+    const callers = await graph.getCallers("merge")
+    const eEdge = callers.find((r) => r.fromFile.includes("e.ts"))
+    expect(eEdge).toBeDefined()
+    expect(eEdge!.kind).toBe("call")
+    expect(eEdge!.fromEntity).toBe("Merger.combine")
+  })
+
+  it("obj.merge(x, y) on a local (non-import) variable creates no call edge", async () => {
+    const callers = await graph.getCallers("merge")
+    const localEdge = callers.find((r) => r.fromEntity === "callLocal")
+    expect(localEdge).toBeUndefined()
+  })
+
+  // -------------------------------------------------------------------------
   // Risk signal
   // -------------------------------------------------------------------------
 

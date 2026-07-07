@@ -11,8 +11,9 @@ import { Truncate } from "@/tool/truncate"
 
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
+import { claimNudge, standaloneTodowriteSuffix } from "@/tool/todowrite-nudge"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import { SessionProcessor } from "./processor"
@@ -49,6 +50,32 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const registry = yield* ToolRegistry.Service
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
+
+  // Best-effort: decorates the next tool call of any kind (not specifically
+  // the next todowrite — flips alternate with work steps, so a
+  // todowrite-only trigger never fires) when the session's previous
+  // assistant step was a standalone todowrite. Never decorates todowrite
+  // itself (flipping again isn't the fix) or task (child digests stay
+  // pristine); the once-guard claim keeps parallel tool calls in one step to
+  // exactly one decorated output. Session.Service is resolved inside this
+  // nested generator (run only via the `run.promise` bridge below), not at
+  // `resolve`'s own top level — hoisting it there would add Session.Service
+  // to `resolve`'s inferred requirements, which breaks callers pinned to
+  // `Effect.Effect<..., never>` (e.g. SessionPrompt.run's runLoop).
+  const nudgeStandaloneTodowrite = <T extends Tool.ExecuteResult>(toolID: string, ctx: Tool.Context, output: T) =>
+    Effect.gen(function* () {
+      if (toolID === "todowrite" || toolID === "task") return output
+      const sessions = yield* Session.Service
+      const prior = yield* sessions.findMessage(
+        ctx.sessionID,
+        (msg) => msg.info.role === "assistant" && msg.info.id < ctx.messageID,
+      )
+      if (Option.isNone(prior)) return output
+      const suffix = standaloneTodowriteSuffix(prior.value.parts)
+      if (!suffix) return output
+      if (!claimNudge(ctx.sessionID, prior.value.info.id)) return output
+      return { ...output, output: `${output.output}${suffix}` }
+    }).pipe(Effect.catch(() => Effect.succeed(output)))
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -111,15 +138,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 messageID: input.processor.message.id,
               })),
             }
+            const decorated = yield* nudgeStandaloneTodowrite(item.id, ctx, output)
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
-              output,
+              decorated,
             )
             if (options.abortSignal?.aborted) {
-              yield* input.processor.completeToolCall(options.toolCallId, output)
+              yield* input.processor.completeToolCall(options.toolCallId, decorated)
             }
-            return output
+            return decorated
           }),
         )
       },

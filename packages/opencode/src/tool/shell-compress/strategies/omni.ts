@@ -3,6 +3,8 @@
  * Simple dedup + error-line extraction; no domain-specific knowledge.
  */
 
+import { isSalientLine } from "./salience"
+
 const ERROR_RE = /\b(ERROR|FATAL|CRIT|PANIC|Exception|Traceback|FAIL(?:ED)?|WARN(?:ING)?)\b/i
 const MAX_ERROR_LINES = 30
 const MAX_PATTERNS = 30
@@ -25,7 +27,10 @@ export function compressOmni(text: string): string {
 
   for (const line of lines) {
     if (!line.trim()) continue
-    if (ERROR_RE.test(line)) {
+    // ERROR_RE catches WARN(ING), which isSalientLine's failure-focused set
+    // does not — OR the two so every salient line lands in the exact-dedup
+    // path below (never the normalized/folded generic path).
+    if (ERROR_RE.test(line) || isSalientLine(line)) {
       errorLines.push(line)
       continue
     }

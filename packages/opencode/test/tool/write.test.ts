@@ -14,6 +14,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { checkReadDedup, clearReadDedup, computeContentHash } from "@/tool/_shared/read-dedup"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -270,6 +271,23 @@ describe("tool.write", () => {
 
         const result = yield* run({ filePath: filepath, content: "export const Button = () => {}" })
         expect(result.title).toEndWith(path.join("src", "components", "Button.tsx"))
+      }),
+    )
+  })
+
+  describe("read-dedup seeding", () => {
+    it.instance("seeds the read-dedup memo so an immediate subset read of the written content hits", () =>
+      Effect.gen(function* () {
+        clearReadDedup()
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "seeded.txt")
+        const content = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")
+
+        yield* run({ filePath: filepath, content })
+
+        const { fileHash } = computeContentHash(content)
+        const check = checkReadDedup({ sessionID: ctx.sessionID, filePath: filepath, start: 5, end: 10, fileHash })
+        expect(check.hit).toBe(true)
       }),
     )
   })

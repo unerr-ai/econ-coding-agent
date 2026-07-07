@@ -35,7 +35,10 @@ const graph: EditImpactGraph = {
   async getEntitiesInFile(filePath) {
     return filePath === "src/api.ts" ? [TARGET] : []
   },
-  async getCallers(name) {
+  async getCallers(entityKey) {
+    // computeEditImpact now passes the full entity key — resolve the bare
+    // name the same way BunSqliteGraph does.
+    const name = entityKey.includes(":") ? (entityKey.split(":")[1] ?? entityKey) : entityKey
     return name === "doThing" ? CALLERS : []
   },
 }

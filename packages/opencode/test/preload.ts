@@ -38,6 +38,10 @@ process.env["XDG_STATE_HOME"] = path.join(dir, "state")
 process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtures", "models-api.json")
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
+// Opt the inherited engine test harness out of econ's built-in tier defaults so these tests keep
+// exercising OpenCode-native agent mechanics (default_agent=build, native build/plan agents). The
+// econ base-defaults layer is covered by its own tests, which re-enable it explicitly.
+process.env["ECON_DISABLE_DEFAULT_CONFIG"] = "1"
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills

@@ -218,10 +218,9 @@ describe("LocationServiceMap", () => {
           )
 
           const triageModel = { id: ModelV2.ID.make("triage-chat"), providerID: ProviderV2.ID.make("unavailable") }
-          // RouterLayerConfigTag holds a deferred resolver (an Effect), so the
-          // injected value is wrapped in Effect.succeed.
-          const routerLayerConfig = Layer.succeed(
-            SessionRunnerModel.RouterLayerConfigTag,
+          // RouterLayerConfigTag holds a resolver function of the location's
+          // directory (OL-9.6g), so the injected value is a constant function.
+          const routerLayerConfig = Layer.succeed(SessionRunnerModel.RouterLayerConfigTag, () =>
             Effect.succeed({
               triageConfig: { model: triageModel, enabled: true },
             }),

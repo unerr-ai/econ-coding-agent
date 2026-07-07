@@ -91,6 +91,7 @@ export const bodyFields = {
   messages: Schema.Array(OpenAIChatMessage),
   tools: optionalArray(OpenAIChatTool),
   tool_choice: Schema.optional(OpenAIChatToolChoice),
+  parallel_tool_calls: Schema.optional(Schema.Boolean),
   stream: Schema.Literal(true),
   stream_options: Schema.optional(Schema.Struct({ include_usage: Schema.Boolean })),
   store: Schema.optional(Schema.Boolean),
@@ -350,6 +351,11 @@ const fromRequest = Effect.fn("OpenAIChat.fromRequest")(function* (request: LLMR
     messages: yield* lowerMessages(request),
     tools: request.tools.length === 0 ? undefined : request.tools.map(lowerTool),
     tool_choice: request.toolChoice ? yield* lowerToolChoice(request.toolChoice) : undefined,
+    // LiteLLM/OpenAI both tolerate this field; set it whenever this request
+    // carries tools so multi-tool-call turns are batched instead of serialized
+    // one call per model turn (OL-9.4a: parsing already handles multiple
+    // tool_calls[] deltas — only the outgoing request was missing this flag).
+    parallel_tool_calls: request.tools.length > 0 ? true : undefined,
     stream: true as const,
     stream_options: { include_usage: true },
     max_tokens: generation?.maxTokens,

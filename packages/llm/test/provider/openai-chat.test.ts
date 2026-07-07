@@ -51,6 +51,28 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
+  it.effect("sets parallel_tool_calls when the request carries tools", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(
+        LLM.request({
+          model,
+          prompt: "Say hello.",
+          tools: [{ name: "lookup", description: "Lookup data", inputSchema: { type: "object", properties: {} } }],
+        }),
+      )
+
+      expect(prepared.body.parallel_tool_calls).toBe(true)
+    }),
+  )
+
+  it.effect("omits parallel_tool_calls when the request has no tools", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(request)
+
+      expect(prepared.body.parallel_tool_calls).toBeUndefined()
+    }),
+  )
+
   it.effect("lowers chronological system updates to escaped user wrappers in order", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(

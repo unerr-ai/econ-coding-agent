@@ -69,9 +69,12 @@ function makeMockGraph(overrides: Partial<EditImpactGraph> = {}): EditImpactGrap
       if (filePath === "src/rare.ts") return [rareFunc]
       return []
     },
-    async getCallers(entityName) {
-      if (entityName === "myFunc") return callerRefs
-      if (entityName === "rareFunc") return rareCallerRefs
+    async getCallers(entityKey) {
+      // computeEditImpact now passes the full entity key — resolve the bare
+      // name the same way BunSqliteGraph does.
+      const name = entityKey.includes(":") ? (entityKey.split(":")[1] ?? entityKey) : entityKey
+      if (name === "myFunc") return callerRefs
+      if (name === "rareFunc") return rareCallerRefs
       return []
     },
     ...overrides,
@@ -138,6 +141,40 @@ describe("computeEditImpact", () => {
     // fromEntity = "src/caller1.ts:useMyFunc:function" → split(":")[1] = "useMyFunc"
     expect(direct.some((c) => c.entity === "useMyFunc")).toBe(true)
     expect(direct.some((c) => c.entity === "callMyFunc")).toBe(true)
+  })
+
+  it("(5) an import edge + a call edge from the same file count as ONE distinct caller", async () => {
+    // dupFunc has exactly 2 callers by raw edge count, but both edges come
+    // from the SAME file: a file-level import edge (fromEntity="") and a
+    // named call edge (fromEntity="useDupFunc") — one relationship, not two.
+    const dupFunc = makeEntity("dupFunc", "src/dup.ts", "function dupFunc(a: string)")
+    const dupRefs: Reference[] = [
+      makeRef("", "src/dupCaller.ts", "dupFunc"),
+      makeRef("src/dupCaller.ts:useDupFunc:function", "src/dupCaller.ts", "dupFunc"),
+    ]
+    const dupGraph = makeMockGraph({
+      async getEntitiesInFile(filePath) {
+        if (filePath === "src/dup.ts") return [dupFunc]
+        return []
+      },
+      async getCallers(entityKey) {
+        const name = entityKey.includes(":") ? (entityKey.split(":")[1] ?? entityKey) : entityKey
+        if (name === "dupFunc") return dupRefs
+        return []
+      },
+    })
+
+    const warnings = await computeEditImpact(
+      dupGraph,
+      "src/dup.ts",
+      "function dupFunc(a: string) { return a; }",
+      "function dupFunc(a: string, b: number) { return a + b; }",
+      { minCallersToWarn: 1, includeTests: true },
+    )
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]!.blast_radius.total_at_risk).toBe(1)
+    expect(warnings[0]!.blast_radius.direct_callers).toHaveLength(1)
   })
 })
 

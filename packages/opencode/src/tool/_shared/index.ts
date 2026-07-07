@@ -14,3 +14,15 @@ export { hashInputs, put, getSlice, clearCache } from "./cache"
 
 export type { ToolCallRecord } from "./meter"
 export { recordToolCall, getRecords, clearRecords } from "./meter"
+
+export type { ReadDedupResult, ContentHashResult } from "./read-dedup"
+export {
+  hashContent,
+  checkReadDedup,
+  clearReadDedup,
+  seedReadDedup,
+  computeContentHash,
+  IncrementalLineHasher,
+  READ_MAX_LINE_LENGTH,
+  READ_MAX_BYTES,
+} from "./read-dedup"

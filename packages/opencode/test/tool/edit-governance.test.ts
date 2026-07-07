@@ -1,0 +1,173 @@
+/**
+ * S6.3 in-loop governance gate — callersAtRiskWarning unit tests.
+ *
+ * Reuses the ol79-coupling fixture (centralHub: a 12-caller hub, well above
+ * RSK_CALLER_THRESHOLD = 10) already indexed for probeTurnRisk/probeSliceCoupling,
+ * so a signature change to centralHub is guaranteed to clear the chokepoint
+ * threshold and surface a callers-at-risk warning.
+ */
+
+import { describe, it, expect, beforeAll, afterAll } from "bun:test"
+import { join } from "node:path"
+import { readFileSync } from "node:fs"
+import { BunSqliteGraph } from "@opencode-ai/code-intelligence"
+import type { EditImpactGraph } from "@opencode-ai/code-intelligence"
+import { callersAtRiskWarning } from "../../src/tool/edit-governance"
+import { RSK_CALLER_THRESHOLD } from "../../src/tool/graph-tools-enrich"
+
+const COUPLING_FIXTURE = join(import.meta.dir, "fixtures/ol79-coupling")
+const HUB_FILE = join(COUPLING_FIXTURE, "hub.ts")
+
+describe("S6.3 — callersAtRiskWarning", () => {
+  let graph: BunSqliteGraph
+  let hubSource: string
+
+  beforeAll(async () => {
+    graph = new BunSqliteGraph(":memory:", COUPLING_FIXTURE)
+    await graph.index(COUPLING_FIXTURE)
+    hubSource = readFileSync(HUB_FILE, "utf8")
+  })
+
+  afterAll(() => {
+    graph.close()
+  })
+
+  it("a signature change to the 12-caller hub yields a warning listing callers", async () => {
+    const changedSource = hubSource.replace(
+      "export function centralHub(): number {",
+      "export function centralHub(x: number): number {",
+    )
+    const warning = await callersAtRiskWarning("hub.ts", hubSource, changedSource, graph)
+    expect(warning).not.toBeNull()
+    expect(warning).toContain("centralHub")
+    // At least the 12 direct callers clear RSK_CALLER_THRESHOLD (import + call
+    // edges may inflate the raw graph count further, so assert the floor).
+    const match = warning!.match(/(\d+) caller\(s\) to update/)
+    expect(match).not.toBeNull()
+    expect(Number(match![1])).toBeGreaterThanOrEqual(RSK_CALLER_THRESHOLD)
+    // At least one caller site is listed as file:entity.
+    expect(warning).toMatch(/caller\d+\.ts/)
+  })
+
+  it("a body-only edit (signature unchanged) yields no warning", async () => {
+    const changedSource = hubSource.replace("return 1", "return 42")
+    const warning = await callersAtRiskWarning("hub.ts", hubSource, changedSource, graph)
+    expect(warning).toBeNull()
+  })
+
+  it("the isolated leaf's signature change stays silent (fan-in below threshold)", async () => {
+    const leafSource = readFileSync(join(COUPLING_FIXTURE, "leaf.ts"), "utf8")
+    const changedSource = leafSource.replace(
+      "export function isolatedLeaf(): number {",
+      "export function isolatedLeaf(x: number): number {",
+    )
+    const warning = await callersAtRiskWarning("leaf.ts", leafSource, changedSource, graph)
+    expect(warning).toBeNull()
+  })
+
+  it("defensive: a throwing graph applies the edit cleanly (returns null, never throws)", async () => {
+    const throwingGraph: EditImpactGraph = {
+      getEntitiesInFile: async () => {
+        throw new Error("graph unavailable")
+      },
+      getCallers: async () => {
+        throw new Error("graph unavailable")
+      },
+    }
+    const changedSource = hubSource.replace(
+      "export function centralHub(): number {",
+      "export function centralHub(x: number): number {",
+    )
+    await expect(
+      callersAtRiskWarning("hub.ts", hubSource, changedSource, throwingGraph),
+    ).resolves.toBeNull()
+  })
+
+  it("defensive: a cold/hanging graph is bounded by the graph budget and resolves null", async () => {
+    const hangingGraph: EditImpactGraph = {
+      getEntitiesInFile: () => new Promise(() => {}), // never resolves
+      getCallers: async () => [],
+    }
+    const changedSource = hubSource.replace(
+      "export function centralHub(): number {",
+      "export function centralHub(x: number): number {",
+    )
+    const warning = await callersAtRiskWarning("hub.ts", hubSource, changedSource, hangingGraph)
+    expect(warning).toBeNull()
+  })
+
+  it("RSK_CALLER_THRESHOLD stays the single source of truth for the chokepoint cutoff", () => {
+    expect(RSK_CALLER_THRESHOLD).toBe(10)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// B3 — no-test-edit gate: path classifier, per-session arm/disarm, denial text
+// ---------------------------------------------------------------------------
+
+import { isTestFilePath, setTestEditGate, testEditGateArmed, testEditDenialMessage } from "../../src/tool/edit-governance"
+
+describe("B3 — isTestFilePath", () => {
+  it("matches test trees, suffixes, and python conventions", () => {
+    for (const p of [
+      "tests/test_utils.py",
+      "django/contrib/tests/models.py",
+      "src/__tests__/router.tsx",
+      "spec/parser_spec_helper/deep.rb",
+      "src/session/prompt.test.ts",
+      "lib/response.spec.js",
+      "pkg/server_test.go",
+      "test_settings.py",
+      "app/tests.py",
+    ]) {
+      expect(isTestFilePath(p)).toBe(true)
+    }
+  })
+
+  it("does not match source files that merely mention test-ish words", () => {
+    for (const p of [
+      "src/session/prompt.ts",
+      "src/testing-utils.ts", // no tests/ dir, no .test. suffix
+      "django/test/client.py", // framework's own test MODULE is source, but tests?/ dir matches — see below
+      "docs/latest/spec.md",
+      "src/contest.py",
+      "attestation/verify.ts",
+    ]) {
+      if (p === "django/test/client.py") continue // covered in the tradeoff test below
+      expect(isTestFilePath(p)).toBe(false)
+    }
+  })
+
+  it("accepts the known tradeoff: a framework's own test/ source dir classifies as test tree", () => {
+    // django/test/client.py is framework SOURCE. The gate denies its edit only
+    // on fix-shaped turns, and the denial message tells the model to surface
+    // the disagreement — an acceptable false-positive rate for the protection.
+    expect(isTestFilePath("django/test/client.py")).toBe(true)
+  })
+
+  it("normalizes windows separators", () => {
+    expect(isTestFilePath("src\\__tests__\\router.tsx")).toBe(true)
+  })
+})
+
+describe("B3 — test-edit gate store", () => {
+  it("arms, consults, and disarms per session", () => {
+    setTestEditGate("ses_b3_a", true)
+    setTestEditGate("ses_b3_b", false)
+    expect(testEditGateArmed("ses_b3_a")).toBe(true)
+    expect(testEditGateArmed("ses_b3_b")).toBe(false)
+    expect(testEditGateArmed("ses_b3_never_set")).toBe(false)
+    setTestEditGate("ses_b3_a", false) // re-arm cycle: next non-fix turn disarms
+    expect(testEditGateArmed("ses_b3_a")).toBe(false)
+  })
+})
+
+describe("B3 — testEditDenialMessage", () => {
+  it("names the file, the rule, and both legitimate outs", () => {
+    const msg = testEditDenialMessage("tests/test_utils.py")
+    expect(msg).toContain("tests/test_utils.py")
+    expect(msg).toContain("no-test-edit gate")
+    expect(msg).toContain("NEW test file")
+    expect(msg).toContain("do not edit it")
+  })
+})

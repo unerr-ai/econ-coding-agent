@@ -52,6 +52,11 @@ const helperEntities = callerFiles.map((f, i) => makeEntity(`helper${i}`, f, 1, 
 const bridge = makeEntity("bridge", "bridge.ts", 10, 30)
 const bridgeCallerFiles = Array.from({ length: 5 }, (_, i) => `bridgeCaller${i}.ts`)
 
+// "dupCalled" — one caller FILE that contributes both an import edge
+// (fromEntity="") and a named call edge for the same relationship; must
+// count as 1 distinct caller, not 2.
+const dupCalled = makeEntity("dupCalled", "dup.ts", 1, 5)
+
 // ---------------------------------------------------------------------------
 // Mock graph
 // ---------------------------------------------------------------------------
@@ -59,7 +64,7 @@ const bridgeCallerFiles = Array.from({ length: 5 }, (_, i) => `bridgeCaller${i}.
 const mockGraph: RiskGraph = {
   async getEntity(key) {
     const name = key.includes(":") ? key.split(":")[1] ?? key : key
-    const all = [central, leaf, bridge, ...helperEntities]
+    const all = [central, leaf, bridge, dupCalled, ...helperEntities]
     return all.find((e) => e.name === name) ?? null
   },
 
@@ -76,6 +81,14 @@ const mockGraph: RiskGraph = {
       return bridgeCallerFiles.map((f, i) =>
         makeRef(`bc${i}`, f, "bridge")
       )
+    }
+    if (name === "dupCalled") {
+      // Same caller file, two edges: a file-level import edge (fromEntity="")
+      // and a named call edge — one relationship, not two distinct callers.
+      return [
+        makeRef("", "dupCaller.ts", "dupCalled"),
+        makeRef("useDupCalled", "dupCaller.ts", "dupCalled"),
+      ]
     }
     return []
   },
@@ -169,6 +182,13 @@ describe("computeRisk — factor values", () => {
     const { factors } = await computeRisk(mockGraph, leaf)
     // leaf: lineStart=5, lineEnd=8 → cx = 8-5 = 3
     expect(factors.cx).toBe(3)
+  })
+
+  it("an import edge + a call edge from the same file count as ONE distinct fanIn caller", async () => {
+    const { factors } = await computeRisk(mockGraph, dupCalled)
+    // dupCalled has 2 raw edges from dupCaller.ts (one import, one call) —
+    // both describe the same dependency, so fanIn must be 1, not 2.
+    expect(factors.fanIn).toBe(1)
   })
 })
 

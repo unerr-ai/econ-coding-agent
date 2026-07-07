@@ -94,6 +94,27 @@ export const layer = Layer.effect(
 
       if (!needsAsk) return
 
+      // OL-9.0b headless backstop: in `opencode run` (no --mini) nobody answers an
+      // ask over the server API, so parking on the Deferred below deadlocks the
+      // whole session tree until an external kill. run.ts sets OPENCODE_HEADLESS
+      // once per process; every ask (any session depth, any spawn path) funnels
+      // through this one function, so checking here covers all of them. We fail
+      // with CorrectedError (has a feedback message) rather than a bare
+      // RejectedError — per processor.ts's failToolCall, CorrectedError never sets
+      // ctx.blocked, so the loop bounces on its own instead of dying, composing
+      // cleanly with continue_loop_on_deny. This ask never enters `pending`, so
+      // reply()'s same-session reject cascade can't touch it or orphan a later ask.
+      if (process.env["OPENCODE_HEADLESS"] === "1") {
+        yield* Effect.logInfo("auto-rejected (headless)", {
+          permission: request.permission,
+          patterns: request.patterns,
+        })
+        return yield* new PermissionV1.CorrectedError({
+          feedback:
+            "Interactive approval is unavailable in this headless run. This action has been denied — pick a decisive alternative and continue.",
+        })
+      }
+
       const id = request.id ?? PermissionV1.ID.ascending()
       const info: PermissionV1.Request = {
         id,

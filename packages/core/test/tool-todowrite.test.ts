@@ -80,11 +80,12 @@ describe("TodoWriteTool", () => {
       const todoList = [{ content: "Implement slice", status: "in_progress", priority: "high" }]
 
       expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toEqual([TodoWriteTool.name])
+      const ack = 'ok: 1 todos — 0 completed, 0 pending, in_progress: "Implement slice"'
       expect(yield* settleTool(registry, call(todoList))).toEqual({
-        result: { type: "text", value: JSON.stringify(todoList, null, 2) },
+        result: { type: "text", value: ack },
         output: {
           structured: { todos: todoList },
-          content: [{ type: "text", text: JSON.stringify(todoList, null, 2) }],
+          content: [{ type: "text", text: ack }],
         },
       })
       expect(assertions).toMatchObject([{ sessionID, action: "todowrite", resources: ["*"], save: ["*"] }])

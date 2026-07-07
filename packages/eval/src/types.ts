@@ -45,7 +45,7 @@ export interface Pricing {
 export interface ModelEndpoint {
   /** Display name, e.g. "qwen3-32b" */
   name: string
-  /** OpenAI-compatible base URL, e.g. "https://openrouter.ai/api/v1" */
+  /** OpenAI-compatible base URL, e.g. "https://econ-litellm.fly.dev/v1" */
   baseURL: string
   /** Model id string passed in the request body. */
   model: string

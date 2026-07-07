@@ -9,6 +9,7 @@
  */
 
 import type { CodeIntelligence } from "./index.js"
+import type { AnchoredNote } from "./memory.js"
 import { readFile, readdir } from "node:fs/promises"
 import { resolve, join, relative } from "node:path"
 import { detectLanguage, extractEntities } from "./ast-extractor.js"
@@ -18,6 +19,34 @@ import { detectLanguage, extractEntities } from "./ast-extractor.js"
 // ---------------------------------------------------------------------------
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".turbo", "out", "coverage"])
+
+/**
+ * Dedupe caller edges for counting: one caller file can contribute BOTH a
+ * file-level import edge (fromEntity="") and a named call edge for the same
+ * target, which describe the same dependency, not two callers. Drops the
+ * import-only edge when a named call edge from the same file is present;
+ * distinct named callers within one file are preserved.
+ */
+function dedupeCallerRefs<T extends { fromFile: string; fromEntity: string }>(refs: T[]): T[] {
+  const byFile = new Map<string, Map<string, T>>()
+  for (const ref of refs) {
+    let group = byFile.get(ref.fromFile)
+    if (!group) {
+      group = new Map()
+      byFile.set(ref.fromFile, group)
+    }
+    if (!group.has(ref.fromEntity)) group.set(ref.fromEntity, ref)
+  }
+  const out: T[] = []
+  for (const group of byFile.values()) {
+    const hasNamedCaller = [...group.keys()].some((k) => k !== "")
+    for (const [fromEntity, ref] of group) {
+      if (hasNamedCaller && fromEntity === "") continue
+      out.push(ref)
+    }
+  }
+  return out
+}
 
 /** Walk source files (same filter as BunSqliteGraph.index) for content search. */
 async function walkSourceFiles(dir: string, results: string[]): Promise<void> {
@@ -351,7 +380,10 @@ export function makeSearchCodeTool(graph: CodeIntelligence, repoRoot: string): G
             const entityLines = fileLines.slice(e.lineStart - 1, e.lineEnd)
 
             // Lean-index P0: always include caller count + first-15-line preview.
-            const callers = await graph.getCallers(e.name)
+            // Full entity key (not bare name) so same-named entities in other
+            // files never leak callers; deduped so an import+call edge pair
+            // from one file counts once.
+            const callers = dedupeCallerRefs(await graph.getCallers(e.key))
             extra.caller_count = callers.length
             extra.preview = entityLines.slice(0, 15).join("\n")
 
@@ -363,7 +395,7 @@ export function makeSearchCodeTool(graph: CodeIntelligence, repoRoot: string): G
               extra.callers = callers
             }
             if (want.includes("callees")) {
-              extra.callees = await graph.getReferences(e.name)
+              extra.callees = await graph.getReferences(e.key)
             }
             if (want.includes("imports")) {
               extra.imports = fileContent
@@ -439,7 +471,9 @@ export function makeSearchCodeTool(graph: CodeIntelligence, repoRoot: string): G
           const fileContent = await readFile(abs, "utf8").catch(() => "")
           const fileLines = fileContent.split("\n")
           const entityLines = fileLines.slice(e.lineStart - 1, e.lineEnd)
-          const callers = await graph.getCallers(e.name)
+          // Full entity key so same-named entities in other files never leak
+          // callers; deduped so an import+call edge pair from one file counts once.
+          const callers = dedupeCallerRefs(await graph.getCallers(e.key))
           return {
             ...e,
             caller_count: callers.length,
@@ -454,14 +488,14 @@ export function makeSearchCodeTool(graph: CodeIntelligence, repoRoot: string): G
         if (want.includes("callers")) {
           const callersMap: Record<string, unknown> = {}
           for (const e of enrichedEntities) {
-            callersMap[e.name] = await graph.getCallers(e.name)
+            callersMap[e.name] = dedupeCallerRefs(await graph.getCallers(e.key))
           }
           extras.callers = callersMap
         }
         if (want.includes("callees")) {
           const calleesMap: Record<string, unknown> = {}
           for (const e of enrichedEntities) {
-            calleesMap[e.name] = await graph.getReferences(e.name)
+            calleesMap[e.name] = await graph.getReferences(e.key)
           }
           extras.callees = calleesMap
         }
@@ -564,6 +598,150 @@ export function makeFileOutlineTool(graph: CodeIntelligence, repoRoot: string): 
         null,
         2,
       )
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// note_save
+// ---------------------------------------------------------------------------
+
+const NOTE_KINDS = new Set(["cnv", "rul", "wrn", "dec", "blk", "fct"])
+const NOTE_POLARITIES = new Set(["+", "-", "~"])
+const NOTE_ANCHOR_PREFIXES = new Set(["f:", "e:", "g:", "p:"])
+
+/**
+ * Validate a candidate {kind, anchor, polarity, content} tuple against the
+ * AnchoredNote wire contract. Returns the cleaned note on success or a
+ * descriptive error string — never throws, so callers can surface the error
+ * directly as tool output.
+ */
+function validateNoteFields(
+  kind: string,
+  anchor: string,
+  polarity: string,
+  content: string,
+): { note: AnchoredNote } | { error: string } {
+  if (!NOTE_KINDS.has(kind)) {
+    return { error: `Invalid note: kind must be one of cnv|rul|wrn|dec|blk|fct (got "${kind}")` }
+  }
+  const prefix = anchor.slice(0, 2)
+  if (!NOTE_ANCHOR_PREFIXES.has(prefix)) {
+    return { error: `Invalid note: anchor must start with f:, e:, g:, or p: (got "${anchor}")` }
+  }
+  if (prefix !== "p:" && anchor.length <= 2) {
+    return { error: `Invalid note: anchor "${anchor}" is missing a path/name after the "${prefix}" prefix` }
+  }
+  if (!NOTE_POLARITIES.has(polarity)) {
+    return { error: `Invalid note: polarity must be one of +, -, ~ (got "${polarity}")` }
+  }
+  // Strip newlines so content stays a single line; the wire format's `|` splitting
+  // already preserved any `|` the caller embedded in content.
+  const cleanContent = content.replace(/\r?\n+/g, " ").trim()
+  return {
+    note: {
+      kind: kind as AnchoredNote["kind"],
+      anchor,
+      polarity: polarity as AnchoredNote["polarity"],
+      content: cleanContent,
+    },
+  }
+}
+
+/**
+ * Parse the note_save tool's input — either a raw wire string
+ * (`kind|anchor|polarity|content`, content may itself contain `|`; only the
+ * first three pipes split fields) or structured {kind, anchor, polarity,
+ * content} — into a validated AnchoredNote, or a descriptive error string.
+ */
+function parseNoteInput(input: Record<string, unknown>): { note: AnchoredNote } | { error: string } {
+  const inp = input as {
+    note?: unknown
+    kind?: unknown
+    anchor?: unknown
+    polarity?: unknown
+    content?: unknown
+  }
+
+  if (typeof inp.note === "string" && inp.note.length > 0) {
+    const parts = inp.note.split("|")
+    if (parts.length < 4) {
+      return {
+        error: `Invalid note: malformed wire string (expected kind|anchor|polarity|content, got "${inp.note}")`,
+      }
+    }
+    const [kindRaw, anchorRaw, polarityRaw, ...rest] = parts
+    return validateNoteFields(kindRaw ?? "", anchorRaw ?? "", polarityRaw ?? "", rest.join("|"))
+  }
+
+  if (inp.kind !== undefined || inp.anchor !== undefined || inp.polarity !== undefined || inp.content !== undefined) {
+    return validateNoteFields(
+      String(inp.kind ?? ""),
+      String(inp.anchor ?? ""),
+      String(inp.polarity ?? ""),
+      String(inp.content ?? ""),
+    )
+  }
+
+  return {
+    error: "Invalid note: provide either `note` (wire string kind|anchor|polarity|content) or the structured kind/anchor/polarity/content fields",
+  }
+}
+
+/**
+ * Build the `note_save` tool definition. Persists a single anchored note
+ * (wire string or structured fields) to the graph's notes store via
+ * upsertNote after validating kind/anchor-prefix/polarity — the
+ * model-invokable path that gives upsertNote its production caller.
+ *
+ * @sem domain=intelligence role=indexing
+ */
+export function makeNoteSaveTool(graph: CodeIntelligence): GraphToolDef {
+  return {
+    id: "note_save",
+    description:
+      "Persist a single anchored note to the graph's notes store. Pass either `note` " +
+      "(wire string 'kind|anchor|polarity|content', e.g. \"rul|f:src/x.ts|-|no intelligence imports\") " +
+      "or the structured kind/anchor/polarity/content fields. Validates kind (cnv|rul|wrn|dec|blk|fct), " +
+      "anchor prefix (f:|e:|g:|p:), and polarity (+|-|~) before saving; returns a descriptive error " +
+      "on invalid input instead of throwing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note: {
+          type: "string",
+          description:
+            "Wire-format note: kind|anchor|polarity|content. Use this OR the structured fields below, not both.",
+        },
+        kind: {
+          type: "string",
+          enum: ["cnv", "rul", "wrn", "dec", "blk", "fct"],
+          description:
+            "Note kind (structured form): cnv (convention) | rul (rule) | wrn (warning) | dec (decision) | " +
+            "blk (blocker) | fct (fact).",
+        },
+        anchor: {
+          type: "string",
+          description: "Anchor (structured form): f:<path> | e:<entity> | g:<glob> | p: (project-wide).",
+        },
+        polarity: {
+          type: "string",
+          enum: ["+", "-", "~"],
+          description: "Polarity (structured form): + (do) | - (don't) | ~ (mixed/ambiguous).",
+        },
+        content: {
+          type: "string",
+          description: "Content (structured form): a single line of prose (newlines are stripped).",
+        },
+      },
+    },
+    execute: async (input) => {
+      const parsed = parseNoteInput(input)
+      if ("error" in parsed) return parsed.error
+      await graph.upsertNote(parsed.note)
+      const { kind, anchor, polarity, content } = parsed.note
+      const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content
+      return `Saved ${kind} note on ${anchor} (${polarity}): ${preview}`
     },
   }
 }

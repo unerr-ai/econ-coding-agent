@@ -33,6 +33,7 @@ import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
 import { ConfigVariable } from "./variable"
+import { econDefaultConfig } from "./econ-defaults"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 
@@ -350,6 +351,25 @@ export const layer = Layer.effect(
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
           result = mergeConfigConcatArrays(result, next)
           return mergePluginOrigins(source, next.plugin, kind)
+        }
+
+        // econ built-in tier defaults — the base config layer, merged first (below every user /
+        // global / project source) so the agent ships its cost-routing model surface (tier agent
+        // pins, model + small_model fallbacks, disabled build/plan, LiteLLM gateway model options)
+        // from any working directory, even one with no opencode.json. Without it, a foreign-cwd run has
+        // no tier agents and no model pins, and provider.defaultModel()'s terminal models.dev
+        // catalog fallback selects a non-tool model and the turn dies. Routed through loadConfig so
+        // the defaults are schema-normalized identically to a file-loaded config; every downstream
+        // opencode.json key deep-merges on top and wins, so inside the econ repo (whose opencode.json
+        // fully re-specifies these keys) the effective config is byte-identical. Opt out with
+        // ECON_DISABLE_DEFAULT_CONFIG (vanilla-OpenCode escape hatch; also how the inherited engine
+        // test harness keeps its native build/plan agents).
+        if (!Flag.ECON_DISABLE_DEFAULT_CONFIG) {
+          yield* merge(
+            "econ-defaults",
+            yield* loadConfig(JSON.stringify(econDefaultConfig()), { dir: ctx.directory, source: "econ-defaults" }),
+            "global",
+          )
         }
 
         for (const [key, value] of Object.entries(auth)) {

@@ -67,7 +67,8 @@ const W_CX = 0.10
 export interface RiskFactors {
   /** Unique caller-file count reachable transitively via BFS. */
   blastRadius: number
-  /** Direct caller count (edge count where to_entity = this entity's name). */
+  /** Distinct direct callers (deduped: an import edge + a call edge from
+   *  the same file describe one dependency, not two). */
   fanIn: number
   /** Connectivity proxy: fanIn + direct fanOut. */
   centrality: number
@@ -105,6 +106,38 @@ export interface TurnRiskResult {
 }
 
 // ---------------------------------------------------------------------------
+// Caller dedup
+// ---------------------------------------------------------------------------
+
+/**
+ * Dedupe caller edges before counting: one caller file can contribute BOTH a
+ * file-level import edge (fromEntity="") and a named call edge for the same
+ * target, which describe the same dependency, not two callers. Drops the
+ * import-only edge when a named call edge from the same file is present;
+ * distinct named callers within one file are preserved.
+ */
+function dedupeCallerRefs(refs: Reference[]): Reference[] {
+  const byFile = new Map<string, Map<string, Reference>>()
+  for (const ref of refs) {
+    let group = byFile.get(ref.fromFile)
+    if (!group) {
+      group = new Map()
+      byFile.set(ref.fromFile, group)
+    }
+    if (!group.has(ref.fromEntity)) group.set(ref.fromEntity, ref)
+  }
+  const out: Reference[] = []
+  for (const group of byFile.values()) {
+    const hasNamedCaller = [...group.keys()].some((k) => k !== "")
+    for (const [fromEntity, ref] of group) {
+      if (hasNamedCaller && fromEntity === "") continue
+      out.push(ref)
+    }
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Core scorer
 // ---------------------------------------------------------------------------
 
@@ -112,7 +145,7 @@ export interface TurnRiskResult {
  * Compute a 0–100 code-structural risk score for a single entity.
  *
  * Factors and weights:
- *   fanIn 35%  — direct callers (immediate break risk)
+ *   fanIn 35%  — distinct direct callers (immediate break risk)
  *   blastRadius 35%  — transitive caller-file count (cascade risk)
  *   centrality 20%  — connectivity proxy (fanIn + fanOut, hub detection)
  *   cx 10%  — body line count (surface area for mistakes)
@@ -125,12 +158,16 @@ export async function computeRisk(
   graph: RiskGraph,
   target: Entity
 ): Promise<RiskResult> {
-  // Direct callers (fan-in)
-  const callerRefs = await graph.getCallers(target.name)
+  // Direct callers (fan-in) — pass the full key so BunSqliteGraph scopes
+  // the query to this entity's own file (two same-named entities in
+  // different files must not share callers/callees). Deduped: one caller
+  // file can contribute both an import edge and a call edge for the same
+  // relationship, which must count once, not twice.
+  const callerRefs = dedupeCallerRefs(await graph.getCallers(target.key))
   const fanIn = callerRefs.length
 
   // Direct callees (fan-out) — contributes to centrality
-  const calleeRefs = await graph.getReferences(target.name)
+  const calleeRefs = await graph.getReferences(target.key)
   const fanOut = calleeRefs.length
 
   // Transitive blast radius: unique caller files reachable via BFS
@@ -172,13 +209,15 @@ async function computeTransitiveCallers(
   entity: Entity
 ): Promise<number> {
   const visitedFiles = new Set<string>([entity.filePath])
-  // frontier = entity names whose callers we'll probe this BFS level
-  let frontier: string[] = [entity.name]
+  // frontier = entity keys whose callers we'll probe this BFS level (full
+  // keys, not bare names, so getCallers resolves each one to its own file
+  // and never cross-contaminates with a same-named entity elsewhere)
+  let frontier: string[] = [entity.key]
 
   for (let depth = 0; depth < MAX_BFS_DEPTH && frontier.length > 0; depth++) {
-    const nextEntityNames: string[] = []
-    for (const name of frontier) {
-      const refs = await graph.getCallers(name)
+    const nextEntityKeys: string[] = []
+    for (const key of frontier) {
+      const refs = await graph.getCallers(key)
       for (const ref of refs) {
         const f = ref.fromFile
         if (f && !visitedFiles.has(f)) {
@@ -186,12 +225,12 @@ async function computeTransitiveCallers(
           // Continue BFS from entities in this newly discovered caller file
           const fileEntities = await graph.getEntitiesInFile(f)
           for (const e of fileEntities) {
-            nextEntityNames.push(e.name)
+            nextEntityKeys.push(e.key)
           }
         }
       }
     }
-    frontier = nextEntityNames
+    frontier = nextEntityKeys
   }
 
   // visitedFiles includes the entity's own file; exclude it from the count

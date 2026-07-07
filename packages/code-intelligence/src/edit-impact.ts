@@ -70,7 +70,7 @@ export type SignatureChangeType =
  */
 export interface EditImpactGraph {
   getEntitiesInFile(filePath: string): Promise<Entity[]>
-  getCallers(entityName: string): Promise<Reference[]>
+  getCallers(entityKey: string): Promise<Reference[]>
 }
 
 /**
@@ -306,6 +306,34 @@ export function buildSuggestion(
   return parts.join(" ")
 }
 
+/**
+ * Dedupe caller edges before counting: one caller file can contribute BOTH a
+ * file-level import edge (fromEntity="") and a named call edge for the same
+ * target, which describe the same dependency, not two callers. Drops the
+ * import-only edge when a named call edge from the same file is present;
+ * distinct named callers within one file are preserved.
+ */
+function dedupeCallerRefs(refs: Reference[]): Reference[] {
+  const byFile = new Map<string, Map<string, Reference>>()
+  for (const ref of refs) {
+    let group = byFile.get(ref.fromFile)
+    if (!group) {
+      group = new Map()
+      byFile.set(ref.fromFile, group)
+    }
+    if (!group.has(ref.fromEntity)) group.set(ref.fromEntity, ref)
+  }
+  const out: Reference[] = []
+  for (const group of byFile.values()) {
+    const hasNamedCaller = [...group.keys()].some((k) => k !== "")
+    for (const [fromEntity, ref] of group) {
+      if (hasNamedCaller && fromEntity === "") continue
+      out.push(ref)
+    }
+  }
+  return out
+}
+
 /** Max caller sites listed inline before deferring the rest to get_references. */
 const MAX_INLINE_CALLERS = 8
 
@@ -340,10 +368,11 @@ export function renderInlineBlastRadius(warnings: CascadeWarning[]): string | nu
 
 /**
  * Computes cascade warnings for an in-flight edit. Detects signature changes
- * for every entity in the edited file and resolves depth-1 callers at risk,
- * returning one CascadeWarning per entity that clears the minCallersToWarn
- * threshold — the single callable entry point for hook, UDS, and behavior
- * surfaces.
+ * for every entity in the edited file and resolves depth-1 callers at risk
+ * (via each entity's full key, and deduped so a caller file's import+call
+ * edge pair counts once), returning one CascadeWarning per entity that
+ * clears the minCallersToWarn threshold — the single callable entry point
+ * for hook, UDS, and behavior surfaces.
  *
  * @sem domain=intelligence role=analysis
  */
@@ -365,7 +394,10 @@ export async function computeEditImpact(
     const changeType = detectSignatureChange(entity, oldContent, newContent)
     if (!changeType) continue
 
-    const callerRefs = await graph.getCallers(entity.name)
+    // Full entity key (not bare name) so same-named entities in other files
+    // never leak callers; deduped so an import+call edge pair from one
+    // caller file counts once, not twice.
+    const callerRefs = dedupeCallerRefs(await graph.getCallers(entity.key))
     if (callerRefs.length < config.minCallersToWarn) continue
 
     const callersAtRisk = callerRefs.map((ref) => toCallerAtRisk(ref))

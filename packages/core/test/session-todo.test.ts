@@ -89,4 +89,42 @@ describe("SessionTodo", () => {
       ])
     }),
   )
+
+  it.effect("round-trips OL-7.1 typed decomposition fields through slice_meta and leaves legacy rows unaffected", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const { db } = yield* Database.Service
+      const todos = yield* SessionTodo.Service
+
+      const typed = {
+        content: "typed slice",
+        status: "pending",
+        priority: "high",
+        sliceType: "mechanical",
+        need: "executor",
+        deps: ["design-the-interface"],
+        coupling: "high",
+        testStrength: "testable",
+        // OL-9.1b regression: persona was the one typed field slice_meta did NOT
+        // persist, so every persona hint silently reverted to the sliceType
+        // default at dispatch (personaForSlice never saw it).
+        persona: "researcher",
+      }
+      const legacy = { content: "legacy slice", status: "pending", priority: "low" }
+
+      yield* todos.update({ sessionID, todos: [typed, legacy] })
+      expect(yield* todos.get(sessionID)).toEqual([typed, legacy])
+
+      const rows = yield* db.select().from(TodoTable).orderBy(asc(TodoTable.position)).all().pipe(Effect.orDie)
+      expect(rows[0]?.slice_meta).toEqual({
+        sliceType: "mechanical",
+        need: "executor",
+        deps: ["design-the-interface"],
+        coupling: "high",
+        testStrength: "testable",
+        persona: "researcher",
+      })
+      expect(rows[1]?.slice_meta).toBeNull()
+    }),
+  )
 })

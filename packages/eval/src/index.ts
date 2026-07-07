@@ -3,7 +3,7 @@
  *
  * Usage:
  *   bun run packages/eval/src/index.ts --dry-run          # mock provider, no key needed
- *   bun run packages/eval/src/index.ts                    # reads OPENROUTER_API_KEY env var
+ *   bun run packages/eval/src/index.ts                    # reads LITELLM_API_KEY env var
  *
  * Exit code 0 = at least one model passed every fixture in every tier.
  * Exit code 1 = one or more tiers have no passing model (or a flag error).
@@ -20,18 +20,18 @@ const dryRun = args.includes("--dry-run")
 
 /**
  * Builds a live TierConfig from environment variables.
- * Each tier reads ECON_<TIER>_BASE_URL, ECON_<TIER>_MODEL, and OPENROUTER_API_KEY.
+ * Each tier reads ECON_<TIER>_BASE_URL, ECON_<TIER>_MODEL, and LITELLM_API_KEY.
  * Falls back to mock if no key is set.
  */
 function buildLiveConfig(): TierConfig {
-  const apiKey = process.env["OPENROUTER_API_KEY"] ?? process.env["OPENAI_API_KEY"]
+  const apiKey = process.env["LITELLM_API_KEY"] ?? process.env["OPENAI_API_KEY"]
 
   function endpointForTier(tier: Tier, defaultModel: string, defaultPrice: { inputPer1M: number; outputPer1M: number }) {
     const tierUpper = tier.toUpperCase()
     const baseURL =
       process.env[`ECON_${tierUpper}_BASE_URL`] ??
       process.env["ECON_BASE_URL"] ??
-      "https://openrouter.ai/api/v1"
+      "https://econ-litellm.fly.dev/v1"
     const model =
       process.env[`ECON_${tierUpper}_MODEL`] ?? defaultModel
 
@@ -64,10 +64,10 @@ async function main() {
   if (dryRun) {
     console.log("Running in DRY-RUN mode — using mock provider (no API key required).\n")
   } else {
-    const hasKey = !!(process.env["OPENROUTER_API_KEY"] ?? process.env["OPENAI_API_KEY"])
+    const hasKey = !!(process.env["LITELLM_API_KEY"] ?? process.env["OPENAI_API_KEY"])
     if (!hasKey) {
       console.warn(
-        "WARNING: No API key found (OPENROUTER_API_KEY / OPENAI_API_KEY). " +
+        "WARNING: No API key found (LITELLM_API_KEY / OPENAI_API_KEY). " +
           "Falling back to mock provider. Use --dry-run to suppress this warning.\n",
       )
     }

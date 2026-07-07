@@ -18,6 +18,7 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "@/util/bom"
+import { callersAtRiskWarning, isTestFilePath, testEditGateArmed, testEditDenialMessage } from "./edit-governance"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -81,6 +82,17 @@ export const EditTool = Tool.define(
             ? params.filePath
             : path.join(instance.directory, params.filePath)
           yield* assertExternalDirectoryEffect(ctx, filePath)
+
+          // B3 no-test-edit gate: on a fix-shaped turn, modifying an existing
+          // test file is denied with the reason — creating a new repro file
+          // (empty oldString on a non-existent path) falls through.
+          if (
+            testEditGateArmed(ctx.sessionID) &&
+            isTestFilePath(filePath) &&
+            (yield* afs.existsSafe(filePath))
+          ) {
+            throw new Error(testEditDenialMessage(path.relative(instance.worktree, filePath)))
+          }
 
           let diff = ""
           let contentOld = ""
@@ -199,6 +211,13 @@ export const EditTool = Tool.define(
           const normalizedFilePath = FSUtil.normalizePath(filePath)
           const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
           if (block) output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+
+          // S6.3 in-loop governance gate: non-blocking, fail-open callers-at-risk
+          // warning for a breaking signature change (never rejects the edit).
+          const callersAtRisk = yield* Effect.promise(() =>
+            callersAtRiskWarning(filePath, contentOld, contentNew),
+          )
+          if (callersAtRisk) output += `\n\n${callersAtRisk}`
 
           return {
             metadata: {

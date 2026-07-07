@@ -3,12 +3,17 @@
  *
  * Covers:
  *  1. inferTier — oracle / reasoner / cheap / unknown branches (order matters:
- *     oracle checked first, then reasoner, then cheap).
+ *     oracle checked first, then reasoner, then cheap); attributeTier —
+ *     model-id-first attribution with agent-name disambiguation/fallback.
  *  2. emitUsageEvent — normalisation, clamping, return value, tier default vs
  *     explicit override, sink callback, timestamp default.
  *  3. TelemetryStore — totals / byTier rollup / totalTokens, cacheHitRatio,
  *     status snapshot (contextFill, tier/model from latest), latest/count/clear.
  *  4. installUsageSink — process-level install, forwarding, disposer cleanup.
+ *  5. U6 decode events — emitTurnTriageEvent / emitEvaluatorVerdictEvent /
+ *     emitSliceContainedEvent / emitEscalationProvenanceEvent: each stamps its
+ *     literal `type` tag + a default timestamp, forwards through an optional
+ *     sink, round-trips through JSON.stringify/parse.
  */
 
 import { describe, it, expect } from "bun:test"
@@ -17,10 +22,23 @@ import {
   emitUsageEvent,
   inferTier,
   tierFromAgent,
+  attributeTier,
   installUsageSink,
   EfficiencyMetrics,
+  emitTurnTriageEvent,
+  emitEvaluatorVerdictEvent,
+  emitSliceContainedEvent,
+  emitEscalationProvenanceEvent,
 } from "../src/telemetry.ts"
-import type { RawUsage, CompactionOutcomeEvent } from "../src/telemetry.ts"
+import type {
+  RawUsage,
+  CompactionOutcomeEvent,
+  TurnTriageEvent,
+  EvaluatorVerdictEvent,
+  SliceContainedEvent,
+  EscalationProvenanceEvent,
+} from "../src/telemetry.ts"
+import { ECON_TIER_BINDING, ECON_PERSONAS } from "../src/model-registry.ts"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -92,17 +110,25 @@ describe("inferTier", () => {
   it("cheap: small", () => expect(inferTier("phi-small-128k")).toBe("cheap"))
   it("cheap: lite", () => expect(inferTier("mixtral-lite")).toBe("cheap"))
 
-  // econ's pinned tier models (opencode.json) — recognised authoritatively before the generic
-  // heuristic, whose substrings collide on these ids. Regression guard for the savings-receipt bug
-  // where a cheap conductor turn was mislabelled a large tier (deepseek-v4-flash matched "deepseek").
-  it("econ conductor: deepseek-v4-flash is cheap (not reasoner via 'deepseek')", () =>
-    expect(inferTier("deepseek/deepseek-v4-flash")).toBe("cheap"))
-  it("econ executor: gpt-oss-20b is cheap (not unknown)", () =>
-    expect(inferTier("openai/gpt-oss-20b")).toBe("cheap"))
-  it("econ oracle/reasoner: glm-5.2 is a large tier (not unknown)", () =>
-    expect(inferTier("z-ai/glm-5.2")).toBe("oracle"))
+  // econ's pinned tier models — recognised authoritatively (via the registry binding) before the
+  // generic heuristic, whose substrings can collide on pinned ids. Regression guard for the
+  // savings-receipt bug where a conductor turn was mislabelled a large tier. Derived from
+  // ECON_TIER_BINDING so a model swap keeps guarding the CURRENT binding, not a stale id.
+  // conductor/executor now resolve to their own exact tier, not a collapsed "cheap".
+  it("econ conductor model resolves to its exact tier (registry beats name heuristic)", () =>
+    expect(inferTier(ECON_TIER_BINDING.conductor)).toBe("conductor"))
+  it("econ executor model resolves to its exact tier (not unknown)", () =>
+    expect(inferTier(ECON_TIER_BINDING.executor)).toBe("executor"))
+  it("econ oracle model resolves to oracle", () =>
+    expect(inferTier(ECON_TIER_BINDING.oracle)).toBe("oracle"))
+  it("econ reasoner model resolves to reasoner", () =>
+    expect(inferTier(ECON_TIER_BINDING.reasoner)).toBe("reasoner"))
   it("generic deepseek (non-flash) stays reasoner", () =>
     expect(inferTier("deepseek-chat")).toBe("reasoner"))
+  it("resolves a 'litellm/'-prefixed gateway ref to the same tier as the bare model id", () =>
+    expect(inferTier(`litellm/${ECON_TIER_BINDING.conductor}`)).toBe(
+      inferTier(ECON_TIER_BINDING.conductor),
+    ))
 
   // fallback
   it("unknown: unrecognised model", () =>
@@ -115,14 +141,51 @@ describe("inferTier", () => {
 // ---------------------------------------------------------------------------
 
 describe("tierFromAgent", () => {
-  // #110: authoritative tier from the router's agent name — reasoner and oracle share glm-5.2,
-  // so this is the only signal that tells them apart (inferTier(model) cannot).
-  it("conductor is cheap", () => expect(tierFromAgent("conductor")).toBe("cheap"))
-  it("executor is cheap", () => expect(tierFromAgent("executor")).toBe("cheap"))
+  // Agent-name tier claim — used by attributeTier as a disambiguator/fallback only. conductor
+  // and executor are no longer merged into "cheap" — the receipt groups small vs large tiers
+  // itself.
+  it("conductor is conductor", () => expect(tierFromAgent("conductor")).toBe("conductor"))
+  it("executor is executor", () => expect(tierFromAgent("executor")).toBe("executor"))
   it("reasoner is reasoner (not oracle)", () => expect(tierFromAgent("reasoner")).toBe("reasoner"))
   it("oracle is oracle", () => expect(tierFromAgent("oracle")).toBe("oracle"))
   it("non-econ agent is unknown (caller falls back to inferTier)", () =>
     expect(tierFromAgent("build")).toBe("unknown"))
+
+  // OL-9.1: every ECON_PERSONAS agent runs on the executor model, so it must attribute to
+  // "executor" too — derived from the constant (not a hardcoded name list) so a new persona
+  // added to the registry stays covered automatically.
+  for (const persona of ECON_PERSONAS) {
+    it(`persona "${persona}" attributes to executor`, () =>
+      expect(tierFromAgent(persona)).toBe("executor"))
+  }
+})
+
+describe("attributeTier", () => {
+  // W9 regression guard (2026-07-06 benchmark): spend must be attributed by the model that
+  // billed, not by the dispatching agent's name — an agent named after one tier running
+  // another tier's model previously relabelled the whole escalation in the receipt.
+  it("model beats a disagreeing agent name (reasoner model under an oracle-named agent)", () =>
+    expect(attributeTier(ECON_TIER_BINDING.reasoner, "oracle")).toBe("reasoner"))
+  it("model beats a disagreeing agent name (conductor model under a reasoner-named agent)", () =>
+    expect(attributeTier(ECON_TIER_BINDING.conductor, "reasoner")).toBe("conductor"))
+  it("gateway-prefixed model ref still wins over the agent name", () =>
+    expect(attributeTier(`litellm/${ECON_TIER_BINDING.reasoner}`, "oracle")).toBe("reasoner"))
+
+  // Every pinned binding resolves to its exact tier with no agent hint at all.
+  for (const [tier, model] of Object.entries(ECON_TIER_BINDING)) {
+    it(`binding "${tier}" resolves from model id alone`, () =>
+      expect(attributeTier(model)).toBe(tier))
+  }
+
+  // Agent name is the fallback when the model id resolves to nothing.
+  it("unknown model falls back to the agent name", () =>
+    expect(attributeTier("my-custom-model-v1", "reasoner")).toBe("reasoner"))
+  it("unknown model + persona agent attributes to executor", () =>
+    expect(attributeTier("my-custom-model-v1", ECON_PERSONAS[0]!)).toBe("executor"))
+  it("unknown model + non-econ agent falls back to the name heuristic", () =>
+    expect(attributeTier("claude-haiku-3", "build")).toBe("cheap"))
+  it("unknown model + no agent is unknown", () =>
+    expect(attributeTier("my-custom-model-v1")).toBe("unknown"))
 })
 
 describe("emitUsageEvent", () => {
@@ -181,6 +244,20 @@ describe("emitUsageEvent", () => {
     const event = emitUsageEvent(store, cheapRaw({ tokens: { input: -200, output: -50 } }))
     expect(event.tokens.input).toBe(0)
     expect(event.tokens.output).toBe(0)
+  })
+
+  it("wires toolCalls through from raw usage, defaulting to 0 when omitted", () => {
+    const store = new TelemetryStore()
+    const withCalls = emitUsageEvent(store, cheapRaw({ toolCalls: 3 }))
+    expect(withCalls.toolCalls).toBe(3)
+    const withoutCalls = emitUsageEvent(store, cheapRaw({ toolCalls: undefined }))
+    expect(withoutCalls.toolCalls).toBe(0)
+  })
+
+  it("clamps a negative toolCalls to 0", () => {
+    const store = new TelemetryStore()
+    const event = emitUsageEvent(store, cheapRaw({ toolCalls: -2 }))
+    expect(event.toolCalls).toBe(0)
   })
 
   it("calls the sink with the emitted event", () => {
@@ -281,6 +358,54 @@ describe("TelemetryStore", () => {
       emitUsageEvent(store, oracleRaw())
       expect(store.totals().totalTokens).toBe(1700 + 1200)
     })
+
+    it("aggregates toolCalls across turns, both top-level and per-tier", () => {
+      const store = new TelemetryStore()
+      emitUsageEvent(store, cheapRaw({ toolCalls: 2 }))
+      emitUsageEvent(store, cheapRaw({ toolCalls: 3 }))
+      emitUsageEvent(store, oracleRaw({ toolCalls: 1 }))
+      const t = store.totals()
+      expect(t.toolCalls).toBe(6)
+      expect(t.byTier["cheap"]?.toolCalls).toBe(5)
+      expect(t.byTier["oracle"]?.toolCalls).toBe(1)
+    })
+
+    it("peakContextTokens is the MAX prompt-side context (input+cacheRead+cacheWrite), not the sum", () => {
+      const store = new TelemetryStore()
+      // cheap turn 1: 1000+400+100 = 1500
+      emitUsageEvent(
+        store,
+        cheapRaw({ tokens: { input: 1000, cache: { read: 400, write: 100 } } }),
+      )
+      // cheap turn 2 (smaller context): 200+50+0 = 250
+      emitUsageEvent(store, cheapRaw({ tokens: { input: 200, cache: { read: 50 } } }))
+      // oracle turn: 800+0+0 = 800 — a different tier's peak, smaller than the cheap tier's peak
+      emitUsageEvent(store, oracleRaw({ tokens: { input: 800 } }))
+      const t = store.totals()
+      expect(t.byTier["cheap"]?.peakContextTokens).toBe(1500)
+      expect(t.byTier["oracle"]?.peakContextTokens).toBe(800)
+      expect(t.peakContextTokens).toBe(1500)
+    })
+
+    it("byTier rows expose the tokens breakdown, totalTokens, and per-tier cacheHitRatio", () => {
+      const store = new TelemetryStore()
+      emitUsageEvent(
+        store,
+        cheapRaw({ tokens: { input: 100, output: 20, cache: { read: 300, write: 0 } } }),
+      )
+      const t = store.totals()
+      const cheap = t.byTier["cheap"]
+      expect(cheap?.tokens).toEqual({
+        input: 100,
+        output: 20,
+        reasoning: 0,
+        cacheRead: 300,
+        cacheWrite: 0,
+      })
+      expect(cheap?.totalTokens).toBe(420)
+      // 300 / (300 + 100 + 0)
+      expect(cheap?.cacheHitRatio).toBeCloseTo(300 / 400)
+    })
   })
 
   // ---- cacheHitRatio() ----------------------------------------------------
@@ -291,28 +416,28 @@ describe("TelemetryStore", () => {
       expect(store.cacheHitRatio()).toBe(0)
     })
 
-    it("returns 0 when no input tokens have been seen (denom=0)", () => {
+    it("returns 0 when there are no cache reads, even though cacheWrite alone makes the denominator nonzero", () => {
       const store = new TelemetryStore()
-      // cache-write only — no cacheRead, no input
+      // cache-write only — no cacheRead, no input; denom=500 (cacheWrite counts as a miss), ratio=0
       emitUsageEvent(store, cheapRaw({ tokens: { cache: { write: 500 } } }))
       expect(store.cacheHitRatio()).toBe(0)
     })
 
-    it("= cacheRead / (cacheRead + input)", () => {
+    it("= cacheRead / (cacheRead + input + cacheWrite)", () => {
       const store = new TelemetryStore()
-      // cheapRaw: cacheRead=400, input=1000 → 400/1400
+      // cheapRaw: cacheRead=400, input=1000, cacheWrite=100 → 400/1500
       emitUsageEvent(store, cheapRaw())
-      expect(store.cacheHitRatio()).toBeCloseTo(400 / 1400)
+      expect(store.cacheHitRatio()).toBeCloseTo(400 / 1500)
     })
 
-    it("excludes cacheWrite from the denominator", () => {
+    it("includes cacheWrite in the denominator as a miss (write tokens missed the cache)", () => {
       const store = new TelemetryStore()
-      // cacheRead=200, cacheWrite=800, input=200 → 200/(200+200) = 0.5
+      // cacheRead=200, cacheWrite=800, input=200 → 200/(200+200+800) = 1/6
       emitUsageEvent(
         store,
         cheapRaw({ tokens: { input: 200, cache: { read: 200, write: 800 } } }),
       )
-      expect(store.cacheHitRatio()).toBeCloseTo(0.5)
+      expect(store.cacheHitRatio()).toBeCloseTo(200 / 1200)
     })
 
     it("accumulates cacheRead and input across multiple events", () => {
@@ -507,5 +632,223 @@ describe("EfficiencyMetrics", () => {
     expect(received).toHaveLength(1)
     expect(received[0]).toEqual(event)
     expect(event.timestamp).toBe(TS)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// U6 — orchestration decode events
+// ---------------------------------------------------------------------------
+
+describe("emitTurnTriageEvent", () => {
+  it("constructs a turn_triage event carrying every goal, stamping the given timestamp", () => {
+    const event = emitTurnTriageEvent({
+      sessionID: SESSION,
+      goals: [
+        { summary: "add retry to boot path", shape: "mechanical" },
+        { summary: "explain the retry design", shape: "judgment" },
+      ],
+      timestamp: TS,
+    })
+    expect(event.type).toBe("turn_triage")
+    expect(event.sessionID).toBe(SESSION)
+    expect(event.timestamp).toBe(TS)
+    expect(event.goals).toHaveLength(2)
+    expect(event.goals[1]?.shape).toBe("judgment")
+  })
+
+  it("defaults timestamp to Date.now() when omitted", () => {
+    const before = Date.now()
+    const event = emitTurnTriageEvent({ sessionID: SESSION, goals: [] })
+    expect(event.timestamp).toBeGreaterThanOrEqual(before)
+  })
+
+  it("forwards the built event through the optional sink", () => {
+    const received: TurnTriageEvent[] = []
+    const event = emitTurnTriageEvent(
+      { sessionID: SESSION, goals: [{ summary: "x", shape: "mechanical" }], timestamp: TS },
+      (e) => received.push(e),
+    )
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(event)
+  })
+
+  it("serializes and round-trips through JSON", () => {
+    const event = emitTurnTriageEvent({
+      sessionID: SESSION,
+      goals: [{ summary: "x", shape: "mechanical" }],
+      timestamp: TS,
+    })
+    expect(JSON.parse(JSON.stringify(event))).toEqual(event)
+  })
+})
+
+describe("emitEvaluatorVerdictEvent", () => {
+  it("constructs an evaluator_verdict event with tier, venue, and reasons", () => {
+    const event = emitEvaluatorVerdictEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      tier: "reasoner",
+      venue: "child",
+      reasons: ["high fan-in", "history: prior fail"],
+      timestamp: TS,
+    })
+    expect(event.type).toBe("evaluator_verdict")
+    expect(event.sliceId).toBe("slice-1")
+    expect(event.tier).toBe("reasoner")
+    expect(event.venue).toBe("child")
+    expect(event.reasons).toEqual(["high fan-in", "history: prior fail"])
+    expect(event.timestamp).toBe(TS)
+  })
+
+  it("forwards the built event through the optional sink", () => {
+    const received: EvaluatorVerdictEvent[] = []
+    const event = emitEvaluatorVerdictEvent(
+      { sessionID: SESSION, sliceId: "slice-1", tier: "executor", venue: "inline", reasons: [], timestamp: TS },
+      (e) => received.push(e),
+    )
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(event)
+  })
+
+  it("serializes and round-trips through JSON", () => {
+    const event = emitEvaluatorVerdictEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      tier: "executor",
+      venue: "inline",
+      reasons: ["low blast radius"],
+      timestamp: TS,
+    })
+    expect(JSON.parse(JSON.stringify(event))).toEqual(event)
+  })
+})
+
+describe("emitSliceContainedEvent", () => {
+  it("constructs a slice_contained event, toTier omitted when the attempt wasn't re-dispatched", () => {
+    const event = emitSliceContainedEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      fromTier: "executor",
+      rungReason: "sound-reject",
+      reverted: true,
+      timestamp: TS,
+    })
+    expect(event.type).toBe("slice_contained")
+    expect(event.fromTier).toBe("executor")
+    expect(event.toTier).toBeUndefined()
+    expect(event.rungReason).toBe("sound-reject")
+    expect(event.reverted).toBe(true)
+  })
+
+  it("carries toTier when the slice was re-dispatched to a different tier", () => {
+    const event = emitSliceContainedEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      fromTier: "executor",
+      toTier: "conductor",
+      rungReason: "behavior-gate",
+      reverted: true,
+      timestamp: TS,
+    })
+    expect(event.toTier).toBe("conductor")
+  })
+
+  it("forwards the built event through the optional sink", () => {
+    const received: SliceContainedEvent[] = []
+    const event = emitSliceContainedEvent(
+      { sessionID: SESSION, sliceId: "slice-1", fromTier: "executor", rungReason: "shrink-reject", reverted: false, timestamp: TS },
+      (e) => received.push(e),
+    )
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(event)
+  })
+
+  it("serializes and round-trips through JSON", () => {
+    const event = emitSliceContainedEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      fromTier: "executor",
+      toTier: "reasoner",
+      rungReason: "qe-veto",
+      reverted: true,
+      timestamp: TS,
+    })
+    expect(JSON.parse(JSON.stringify(event))).toEqual(event)
+  })
+})
+
+describe("emitEscalationProvenanceEvent", () => {
+  it("constructs an escalation_provenance event naming from/to tier and the reason", () => {
+    const event = emitEscalationProvenanceEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      fromTier: "executor",
+      toTier: "oracle",
+      reason: "verify-reject rung 3",
+      timestamp: TS,
+    })
+    expect(event.type).toBe("escalation_provenance")
+    expect(event.fromTier).toBe("executor")
+    expect(event.toTier).toBe("oracle")
+    expect(event.reason).toBe("verify-reject rung 3")
+  })
+
+  it("forwards the built event through the optional sink", () => {
+    const received: EscalationProvenanceEvent[] = []
+    const event = emitEscalationProvenanceEvent(
+      { sessionID: SESSION, sliceId: "slice-1", fromTier: "conductor", toTier: "reasoner", reason: "stall", timestamp: TS },
+      (e) => received.push(e),
+    )
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(event)
+  })
+
+  it("serializes and round-trips through JSON", () => {
+    const event = emitEscalationProvenanceEvent({
+      sessionID: SESSION,
+      sliceId: "slice-1",
+      fromTier: "conductor",
+      toTier: "oracle",
+      reason: "double-escalation",
+      timestamp: TS,
+    })
+    expect(JSON.parse(JSON.stringify(event))).toEqual(event)
+  })
+})
+
+describe("U6 decode events — no comparison-shaped fields (standing rule)", () => {
+  it("none of the four event shapes ever serialize a frontier/counterfactual field", () => {
+    const events = [
+      emitTurnTriageEvent({ sessionID: SESSION, goals: [{ summary: "x", shape: "mechanical" }], timestamp: TS }),
+      emitEvaluatorVerdictEvent({
+        sessionID: SESSION,
+        sliceId: "slice-1",
+        tier: "reasoner",
+        venue: "child",
+        reasons: ["blast-radius"],
+        timestamp: TS,
+      }),
+      emitSliceContainedEvent({
+        sessionID: SESSION,
+        sliceId: "slice-1",
+        fromTier: "executor",
+        toTier: "reasoner",
+        rungReason: "shrink-reject",
+        reverted: true,
+        timestamp: TS,
+      }),
+      emitEscalationProvenanceEvent({
+        sessionID: SESSION,
+        sliceId: "slice-1",
+        fromTier: "executor",
+        toTier: "oracle",
+        reason: "verify-reject",
+        timestamp: TS,
+      }),
+    ]
+    const serialized = JSON.stringify(events).toLowerCase()
+    for (const banned of ["frontier", "counterfactual", "wouldhavecost", "netsaved", "grosssaved", "vsclaude", "vscursor"]) {
+      expect(serialized).not.toContain(banned)
+    }
   })
 })

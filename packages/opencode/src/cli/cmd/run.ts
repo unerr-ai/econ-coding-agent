@@ -27,19 +27,9 @@ import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
 import { econStepCost, econModelLabel, type EconTokens } from "../../../../code-intelligence/src/econ-cost"
 import { computeCacheHitRate } from "../../../../code-intelligence/src/cache-meter"
-import { TelemetryStore, emitUsageEvent, inferTier, tierFromAgent } from "../../../../code-intelligence/src/telemetry"
+import { TelemetryStore, emitUsageEvent, attributeTier } from "../../../../code-intelligence/src/telemetry"
 import { DoublePayLedger } from "../../../../code-intelligence/src/double-pay"
-import { buildReceipt, formatReceipt, type FrontierBaseline } from "../../../../code-intelligence/src/receipt"
-
-// OL-6.2: frontier reference pricing for the savings receipt's "vs frontier"
-// comparison — Claude Opus 4 per-million-token rates, the same reference
-// receipt.test.ts prices its fixtures against. Not a real-time price feed;
-// update alongside that fixture if the reference model changes.
-const FRONTIER_BASELINE: FrontierBaseline = {
-  model: "claude-opus-4",
-  inputPerMTok: 15,
-  outputPerMTok: 75,
-}
+import { buildReceipt, formatReceipt } from "../../../../code-intelligence/src/receipt"
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -261,6 +251,16 @@ export const RunCommand = effectCmd({
     yield* Effect.promise(async () => {
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
+      // OL-9.0b headless backstop: permission/index.ts's ask() reads this marker
+      // to auto-reject any "ask" instead of parking forever on a Deferred nobody
+      // headless will ever resolve. Only the non-interactive `opencode run` path
+      // sets it — `--mini` (interactive) leaves it unset so approval prompts are
+      // unaffected, and `--dangerously-skip-permissions` leaves it unset too (that
+      // flag's own auto-approve loop in the event stream below still owns the root
+      // session; this backstop is for the asks nothing else answers). Server +
+      // ask() run in this same process, so one process-wide marker covers every
+      // session depth (parent, task subagents, future paths).
+      if (!interactive && !args["dangerously-skip-permissions"]) process.env["OPENCODE_HEADLESS"] = "1"
       const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
         UI.error(message)
@@ -581,9 +581,9 @@ export const RunCommand = effectCmd({
         process.exit(1)
       }
 
-      // OL-4.1: --agent/--model are no longer user-settable CLI flags — the
-      // live tier-router is the only thing that picks agent/model, so these
-      // resolvers always defer to the default (undefined).
+      // OL-4.1: --agent/--model are no longer user-settable CLI flags — econ picks
+      // agent/model internally (config default lead + slice-level allocation), so
+      // these resolvers always defer to the default (undefined).
       async function localAgent() {
         return undefined
       }
@@ -627,12 +627,19 @@ export const RunCommand = effectCmd({
             string,
             { providerID: string; modelID: string; tokens: EconTokens; agent?: string }
           >()
+          // Tool-call ids seen per assistant messageID, deduped (a part can update
+          // more than once) — folded into the usage receipt's per-model toolCalls.
+          const toolParts = new Map<string, Set<string>>()
           // OL-0.1: turn-phase telemetry state (turn_phase events below) — a step
           // counter and the last-seen agent, both derived from events already on
           // this stream, so no new server-side event type is needed.
           let turnStep = 0
           let lastAgent: string | undefined
           let error: string | undefined
+          // OL-9.6b: track the last assistant finish reason so a run that ends
+          // on an output-cap truncation (finish=length) is reported honestly —
+          // run 9 exited 0 with a success receipt after a truncated turn.
+          let lastAssistantFinish: string | undefined
           // OL-3.6: cheap-tier spend discarded when a turn escalates and has to
           // be re-run on a higher tier (double-pay). The current router only
           // escalates at turn-open (no intra-turn re-run), so nothing on this
@@ -642,19 +649,79 @@ export const RunCommand = effectCmd({
           // migration when that lands.
           let discarded = 0
 
+          // econ visibility — live streaming. The Fireworks reasoning models put
+          // their substance in reasoning_content + tool_calls and leave visible
+          // `content` near-empty, so painting text/reasoning only at part.time.end
+          // left the terminal on the agent header for many seconds while tokens
+          // were actively flowing. streamedLen tracks how much of each part is
+          // already on screen so message.part.updated can paint just the delta.
+          const streamedLen = new Map<string, number>()
+          let openStream: { id: string; kind: "text" | "reasoning" } | undefined
+          function streamDelta(id: string, kind: "text" | "reasoning", full: string) {
+            const shown = streamedLen.get(id) ?? 0
+            if (full.length <= shown) return
+            if (openStream && openStream.id !== id) streamFlush()
+            if (!openStream) {
+              UI.empty()
+              if (kind === "reasoning" && process.stdout.isTTY)
+                process.stdout.write(`${UI.Style.TEXT_DIM}[3m`)
+              openStream = { id, kind }
+            }
+            process.stdout.write(full.slice(shown))
+            streamedLen.set(id, full.length)
+          }
+          function streamFlush() {
+            if (!openStream) return
+            if (openStream.kind === "reasoning" && process.stdout.isTTY)
+              process.stdout.write(`[0m${UI.Style.TEXT_NORMAL}`)
+            process.stdout.write(EOL)
+            openStream = undefined
+          }
+
+          // econ visibility — slice progress. Decomposition runs each slice in a
+          // CHILD session whose parts are dropped by the sessionID guard below, so
+          // the long orchestration looked frozen. Track this turn's child sessions
+          // and surface each child tool call as one condensed dim line for motion.
+          const childSessions = new Set<string>()
+          const childToolSeen = new Set<string>()
+          function sliceProgress(part: { type: string; id: string; tool?: string; state?: { status?: string; input?: unknown } }) {
+            if (part.type !== "tool") return
+            const status = part.state?.status
+            if (status !== "running" && status !== "completed") return
+            if (childToolSeen.has(part.id)) return
+            childToolSeen.add(part.id)
+            const input = (part.state?.input ?? {}) as Record<string, unknown>
+            const raw = input["filePath"] ?? input["path"] ?? input["command"] ?? input["pattern"] ?? ""
+            const short = String(raw).split("/").slice(-2).join("/").slice(0, 60)
+            streamFlush()
+            UI.println(`${UI.Style.TEXT_DIM}  ↳ slice · ${part.tool ?? "?"}${short ? " " + short : ""}${UI.Style.TEXT_NORMAL}`)
+          }
+
           for await (const event of events.stream) {
             if (
-              event.type === "message.updated" &&
-              event.properties.sessionID === sessionID &&
-              event.properties.info.role === "assistant"
+              (event.type === "session.created" || event.type === "session.updated") &&
+              "info" in event.properties &&
+              (event.properties.info as { parentID?: string }).parentID === sessionID
             ) {
+              childSessions.add((event.properties.info as { id: string }).id)
+            }
+
+            if (event.type === "message.updated" && event.properties.info.role === "assistant") {
               const info = event.properties.info
-              messageModels.set(info.id, {
-                providerID: info.providerID,
-                modelID: info.modelID,
-                tokens: info.tokens,
-                agent: info.agent,
-              })
+              const isRoot = event.properties.sessionID === sessionID
+              // #51: the receipt covers the WHOLE turn — child slice sessions bill real
+              // tokens on their own tiers (run-21: root-only $0.28 vs $1.84 with slices),
+              // so their assistant messages join the same per-model fold as the root's.
+              if (isRoot || childSessions.has(event.properties.sessionID)) {
+                messageModels.set(info.id, {
+                  providerID: info.providerID,
+                  modelID: info.modelID,
+                  tokens: info.tokens,
+                  agent: info.agent,
+                })
+              }
+              if (!isRoot) continue
+              lastAssistantFinish = (info as { finish?: string }).finish ?? lastAssistantFinish
 
               if (args.format !== "json" && toggles.get("start") !== true) {
                 UI.empty()
@@ -684,7 +751,21 @@ export const RunCommand = effectCmd({
 
             if (event.type === "message.part.updated") {
               const part = event.properties.part
-              if (part.sessionID !== sessionID) continue
+              if (part.sessionID !== sessionID) {
+                if (childSessions.has(part.sessionID)) {
+                  // #51: fold child tool calls into the receipt's per-model toolCalls
+                  // (their messageIDs are in messageModels via the child fold above).
+                  if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+                    const seen = toolParts.get(part.messageID) ?? new Set<string>()
+                    seen.add(part.id)
+                    toolParts.set(part.messageID, seen)
+                  }
+                  // Surface child tool activity as condensed progress on the parent
+                  // view instead of dropping it silently.
+                  if (args.format !== "json") sliceProgress(part)
+                }
+                continue
+              }
 
               if (part.type === "tool" && part.tool === "task" && part.state.status === "completed") {
                 // No dedicated "verify" tool — same text-field heuristic as
@@ -702,6 +783,10 @@ export const RunCommand = effectCmd({
               }
 
               if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
+                streamFlush() // close any open live stream before block/inline tool UI
+                const seen = toolParts.get(part.messageID) ?? new Set<string>()
+                seen.add(part.id)
+                toolParts.set(part.messageID, seen)
                 if (emit("tool_use", { part })) continue
                 if (part.state.status === "completed") {
                   await tool(part)
@@ -723,6 +808,7 @@ export const RunCommand = effectCmd({
               }
 
               if (part.type === "step-start") {
+                streamFlush() // close any open live stream at a step boundary
                 // A step only exists once the model call actually starts, so
                 // gating turn_phase here (not on message.updated) keeps a request
                 // that errors before any step runs (e.g. an unresolvable model)
@@ -754,24 +840,36 @@ export const RunCommand = effectCmd({
                 if (emit("step_finish", { part, ...enriched })) continue
               }
 
-              if (part.type === "text" && part.time?.end) {
-                if (emit("text", { part })) continue
-                const text = part.text.trim()
-                if (!text) continue
-                if (!process.stdout.isTTY) {
-                  process.stdout.write(text + EOL)
+              if (part.type === "text") {
+                // json: one structured event per completed part (contract unchanged).
+                if (args.format === "json") {
+                  if (part.time?.end) emit("text", { part })
                   continue
                 }
-                UI.empty()
-                UI.println(text)
-                UI.empty()
+                // human: paint the delta live so the answer appears as it is written
+                // rather than in one burst at part completion. Wait for the first
+                // non-whitespace before opening (these models emit "\n\n" content).
+                if (part.text.trim()) streamDelta(part.id, "text", part.text)
+                if (part.time?.end) streamFlush()
+                continue
               }
 
-              if (part.type === "reasoning" && part.time?.end && thinking) {
-                if (emit("reasoning", { part })) continue
-                const text = part.text.trim()
-                if (!text) continue
-                const line = `Thinking: ${text}`
+              if (part.type === "reasoning") {
+                if (args.format === "json") {
+                  if (part.time?.end) emit("reasoning", { part })
+                  continue
+                }
+                // human: stream reasoning live (dim) — the reasoning models front-load
+                // a long reasoning phase, so this is what turns the frozen agent header
+                // into visible motion. Gated by --thinking (interactive default: on).
+                if (!thinking) continue
+                streamDelta(part.id, "reasoning", part.text)
+                if (part.time?.end) streamFlush()
+                continue
+              }
+
+              if (false) {
+                const line = ``
                 if (process.stdout.isTTY) {
                   UI.empty()
                   UI.println(`${UI.Style.TEXT_DIM}\u001b[3m${line}\u001b[0m${UI.Style.TEXT_NORMAL}`)
@@ -783,6 +881,7 @@ export const RunCommand = effectCmd({
             }
 
             if (event.type === "session.error") {
+              streamFlush() // close any open live stream before the error prints
               const props = event.properties
               if (props.sessionID !== sessionID || !props.error) continue
               let err = String(props.error.name)
@@ -799,6 +898,7 @@ export const RunCommand = effectCmd({
               event.properties.sessionID === sessionID &&
               event.properties.status.type === "idle"
             ) {
+              streamFlush() // close any open live stream before the receipt prints
               break
             }
 
@@ -825,6 +925,17 @@ export const RunCommand = effectCmd({
             }
           }
 
+          // OL-9.6b: the loop above breaks on idle regardless of WHY the session
+          // stopped. If the final assistant message ended on finish=length the
+          // answer was cut off by the output cap (continuations exhausted) —
+          // surface it and fail the run instead of printing a success receipt.
+          if (lastAssistantFinish === "length") {
+            const msg =
+              "run ended on an output-cap truncation (finish=length): the final response was cut off and the task may be incomplete"
+            error = error ? error + EOL + msg : msg
+            if (!emit("error", { error: { name: "TruncatedResponse", data: { message: msg } } })) UI.error(msg)
+          }
+
           if (messageModels.size > 0) {
             const zeroTokens = (): EconTokens => ({ input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
             const addTokens = (target: EconTokens, tokens: EconTokens) => {
@@ -837,32 +948,36 @@ export const RunCommand = effectCmd({
 
             const models: Record<
               string,
-              { label: string; tokens: EconTokens; cost: number; cacheHitRate: number }
+              { label: string; tokens: EconTokens; cost: number; cacheHitRate: number; toolCalls: number }
             > = {}
-            const cumulative = { tokens: zeroTokens(), cost: 0 }
-            // OL-6.2: mirror the per-model buckets into a TelemetryStore as we
-            // go, so the human-readable path can render the real savings
-            // receipt (buildReceipt/formatReceipt) without a second pass over
+            const cumulative = { tokens: zeroTokens(), cost: 0, toolCalls: 0 }
+            // Mirror the per-model buckets into a TelemetryStore as we go, so
+            // the human-readable path can render the real usage receipt
+            // (buildReceipt/formatReceipt) without a second pass over
             // messageModels.
             const telemetryStore = new TelemetryStore()
-            for (const { modelID, providerID, tokens, agent } of messageModels.values()) {
+            for (const [messageID, { modelID, providerID, tokens, agent }] of messageModels.entries()) {
               const cost = econStepCost({ modelID, providerID, tokens })
+              const toolCalls = toolParts.get(messageID)?.size ?? 0
               const bucket =
-                models[modelID] ?? { label: econModelLabel(modelID), tokens: zeroTokens(), cost: 0, cacheHitRate: 0 }
+                models[modelID] ??
+                { label: econModelLabel(modelID), tokens: zeroTokens(), cost: 0, cacheHitRate: 0, toolCalls: 0 }
               addTokens(bucket.tokens, tokens)
               bucket.cost += cost
+              bucket.toolCalls += toolCalls
               models[modelID] = bucket
               addTokens(cumulative.tokens, tokens)
               cumulative.cost += cost
-              // #110: the router tags each message with its authoritative agent — prefer it over the
-              // model-name heuristic (reasoner and oracle share glm-5.2, so inferTier(model) can't
-              // distinguish them). Fall back to inferTier only for a non-econ agent.
-              const agentTier = agent ? tierFromAgent(agent) : "unknown"
+              cumulative.toolCalls += toolCalls
+              // Tier attribution is model-id-first (billing follows the model); the agent name
+              // only disambiguates a multi-tier model or an unknown model id — an agent whose
+              // name claims one tier while running another tier's model must not relabel spend.
               emitUsageEvent(telemetryStore, {
                 sessionID,
                 model: modelID,
-                tier: agentTier !== "unknown" ? agentTier : inferTier(modelID),
+                tier: attributeTier(modelID, agent),
                 cost,
+                toolCalls,
                 tokens: {
                   input: tokens.input,
                   output: tokens.output,
@@ -875,19 +990,23 @@ export const RunCommand = effectCmd({
             // per-token price can't be shopped down, so compute it for every
             // tier (not just the oracle) once each bucket's tokens are final.
             for (const bucket of Object.values(models)) {
-              bucket.cacheHitRate = computeCacheHitRate({ cacheRead: bucket.tokens.cache.read, input: bucket.tokens.input })
+              bucket.cacheHitRate = computeCacheHitRate({
+                cacheRead: bucket.tokens.cache.read,
+                input: bucket.tokens.input,
+                cacheWrite: bucket.tokens.cache.write,
+              })
             }
             // OL-3.6: net = cumulative spend minus cheap-tier spend discarded by
             // mid-turn escalations (`discarded`, 0 today — see declaration above).
             const net = cumulative.cost - discarded
 
-            if (!emit("cost_breakdown", { cumulative, models, discarded, net })) {
-              // OL-6.2: the machine-readable `cost_breakdown` NDJSON event above
-              // is unchanged (--format json never reaches this branch); only the
-              // human-readable surface below moves from bare per-model lines to
-              // the formatted savings receipt.
+            if (!emit("cost_breakdown", { cumulative, models, tiers: telemetryStore.totals().byTier, discarded, net })) {
+              // The machine-readable `cost_breakdown` NDJSON event above is
+              // unchanged (--format json never reaches this branch); only the
+              // human-readable surface below renders the formatted usage
+              // receipt (overall + per-tier drilldown).
               const ledger = new DoublePayLedger()
-              const receipt = buildReceipt({ store: telemetryStore, ledger, baseline: FRONTIER_BASELINE })
+              const receipt = buildReceipt({ store: telemetryStore, ledger })
               UI.empty()
               for (const line of formatReceipt(receipt).split("\n")) {
                 UI.println(UI.Style.TEXT_DIM + line + UI.Style.TEXT_NORMAL)

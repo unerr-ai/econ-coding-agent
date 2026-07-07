@@ -76,4 +76,50 @@ export const LOOP_CASES: LoopCase[] = [
       toolCalls: [],
     },
   },
+
+  // ── side-task delegation: fix lands, cross-TZ jest matrix delegated to a runner ──
+  // side-task instead of run inline (modeled on the dayjs #3123 trace failure — 14
+  // jest commands run inline with zero task calls).
+  {
+    id: "side-task-delegation",
+    prompt: "Fix the dayjs UTC-offset parsing bug (issue #3123) and confirm it holds across timezones.",
+    nontrivial: true,
+    expectDelegation: true,
+    expectVerification: true,
+    threshold: 1.0,
+    mockTrace: {
+      textParts: [
+        "Fix verified locally once; I'll delegate the cross-TZ jest matrix to a runner side-task, " +
+          "then review its digest before reporting.",
+      ],
+      toolCalls: [
+        {
+          name: "todowrite",
+          input: {
+            todos: [
+              "apply the UTC-offset fix",
+              "verify locally once",
+              "delegate cross-TZ jest matrix to a runner side-task",
+              "review runner digest",
+              "report",
+            ],
+          },
+        },
+        {
+          name: "task",
+          input: {
+            subagent_type: "runner",
+            description: "run the cross-timezone jest verification matrix and report a pass/fail digest",
+            prompt:
+              "Verify the UTC-offset fix holds across timezones by running these suites and reporting " +
+              "pass/fail per run:\n" +
+              "TZ=America/Sao_Paulo npx jest test/parse.test.js\n" +
+              "TZ=Pacific/Kiritimati npx jest test/utc.test.js\n" +
+              "TZ=Asia/Kolkata npx jest test/timezone.test.js\n" +
+              "TZ=Pacific/Apia npx jest test/plugin/utc.test.js",
+          },
+        },
+      ],
+    },
+  },
 ]

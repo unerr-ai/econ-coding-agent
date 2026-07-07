@@ -10,8 +10,13 @@
     "dry-run": "bun run src/index.ts --dry-run",
     "loop": "bun run src/loop-index.ts",
     "loop-live": "bun run src/loop-live.ts",
+    "decomp": "bun run src/decomp-index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/code-intelligence": "workspace:*",
+    "opencode": "workspace:*"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",

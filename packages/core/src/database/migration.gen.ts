@@ -42,5 +42,7 @@ export const migrations = (
     import("./migration/20260622202450_simplify_session_input"),
     // Z3 — S1.3: canonical state table
     import("./migration/20260627000001_s1_3_canonical_state"),
+    // OL-7.1b: todo slice_meta column (typed decomposition tags)
+    import("./migration/20260703140820_add_todo_slice_meta"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

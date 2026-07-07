@@ -14,6 +14,8 @@ import { InstanceState } from "@/effect/instance-state"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
+import { seedReadDedup } from "./_shared"
+import { callersAtRiskWarning, isTestFilePath, testEditGateArmed, testEditDenialMessage } from "./edit-governance"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -44,6 +46,14 @@ export const WriteTool = Tool.define(
           yield* assertExternalDirectoryEffect(ctx, filepath)
 
           const exists = yield* fs.existsSafe(filepath)
+
+          // B3 no-test-edit gate: on a fix-shaped turn, overwriting an
+          // existing test file is denied with the reason — writing a NEW
+          // test file (a repro) falls through.
+          if (exists && testEditGateArmed(ctx.sessionID) && isTestFilePath(filepath)) {
+            throw new Error(testEditDenialMessage(path.relative(instance.worktree, filepath)))
+          }
+
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
@@ -71,6 +81,19 @@ export const WriteTool = Tool.define(
             event: exists ? "change" : "add",
           })
 
+          // Seed the read-dedup memo from the content we just wrote, so a
+          // re-read of this file later in the session hits immediately
+          // instead of waiting for a first read to populate the memo. A
+          // subsequent formatter pass (below) can still change the on-disk
+          // bytes; the seeded hash simply misses on the next read in that
+          // case and the memo re-arms as usual — best-effort, never fails
+          // the write.
+          try {
+            seedReadDedup({ sessionID: ctx.sessionID, filePath: filepath, content: contentNew })
+          } catch {
+            // best-effort only
+          }
+
           let output = "Wrote file successfully."
           yield* lsp.touchFile(filepath, "document")
           const diagnostics = yield* lsp.diagnostics()
@@ -88,6 +111,13 @@ export const WriteTool = Tool.define(
             projectDiagnosticsCount++
             output += `\n\nLSP errors detected in other files:\n${block}`
           }
+
+          // S6.3 in-loop governance gate: non-blocking, fail-open callers-at-risk
+          // warning for a breaking signature change (never rejects the write).
+          const callersAtRisk = yield* Effect.promise(() =>
+            callersAtRiskWarning(filepath, contentOld, contentNew),
+          )
+          if (callersAtRisk) output += `\n\n${callersAtRisk}`
 
           return {
             title: path.relative(instance.worktree, filepath),

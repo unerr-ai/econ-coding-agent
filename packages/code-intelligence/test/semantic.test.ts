@@ -102,4 +102,37 @@ describe("Semantic layer — @sem domain/role extraction and propagation", () =>
     expect(router.domain).toBe("routing")
     expect(router.role).toBe("decision")
   })
+
+  // -------------------------------------------------------------------------
+  // summary — doc-comment prose capture
+  // -------------------------------------------------------------------------
+
+  it("captures the prose summary preceding an @sem-annotated entity", async () => {
+    const entity = await graph.getEntity("computeRisk")
+    expect(entity).not.toBeNull()
+    expect(entity!.summary).toBe(
+      "Computes a risk score for an entity based on its import fan-in count. Used to gate expensive escalation decisions."
+    )
+  })
+
+  it("entity with no doc comment has undefined summary", async () => {
+    const entity = await graph.getEntity("Calculator.add")
+    expect(entity).not.toBeNull()
+    expect(entity!.summary).toBeUndefined()
+  })
+
+  it("name-echo prose (camelCase-split match) yields undefined summary", async () => {
+    const entity = await graph.getEntity("normalizePath")
+    expect(entity).not.toBeNull()
+    expect(entity!.summary).toBeUndefined()
+  })
+
+  it("getEntitiesInFile rows carry summary", async () => {
+    const entities = await graph.getEntitiesInFile("sem.ts")
+    const risk = entities.find((e) => e.name === "computeRisk")
+    expect(risk).toBeDefined()
+    expect(risk!.summary).toBe(
+      "Computes a risk score for an entity based on its import fan-in count. Used to gate expensive escalation decisions."
+    )
+  })
 })

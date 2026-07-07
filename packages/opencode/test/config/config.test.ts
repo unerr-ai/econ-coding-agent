@@ -16,6 +16,7 @@ import { Account } from "../../src/account/account"
 import { AccessToken, AccountID, OrgID } from "../../src/account/schema"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Env } from "../../src/env"
+import { tierModelRef, ECON_TIER_BINDING } from "../../../code-intelligence/src/model-registry"
 import {
   provideTmpdirInstance,
   TestInstance,
@@ -302,6 +303,49 @@ it.instance("loads config with defaults when no files exist", () =>
     const config = yield* Config.use.get()
     expect(config.username).toBeDefined()
   }),
+)
+
+// FIX-10 — the econ built-in tier defaults are the base config layer: with no config file
+// anywhere, the effective config still carries econ's tier agents, model pins, and disabled
+// build/plan agents, so the agent works from any working directory. The inherited harness sets
+// ECON_DISABLE_DEFAULT_CONFIG (preload.ts) to keep native agents, so these two tests unset it to
+// exercise the real base-layer merge.
+it.instance("no config anywhere yields the econ tier defaults (FIX-10 base layer)", () =>
+  withProcessEnv(
+    "ECON_DISABLE_DEFAULT_CONFIG",
+    undefined,
+    Effect.gen(function* () {
+      const config = yield* Config.use.get()
+      expect(config.default_agent).toBe("conductor")
+      expect(config.model).toBe(tierModelRef("conductor"))
+      expect(config.small_model).toBe(tierModelRef("executor"))
+      expect(config.agent?.conductor?.model).toBe(tierModelRef("conductor"))
+      expect(config.agent?.oracle?.model).toBe(tierModelRef("oracle"))
+      expect(config.agent?.reasoner?.model).toBe(tierModelRef("reasoner"))
+      expect(config.agent?.executor?.model).toBe(tierModelRef("executor"))
+      expect(config.agent?.build?.disable).toBe(true)
+      expect(config.agent?.plan?.disable).toBe(true)
+      expect(Object.keys(config.provider?.litellm?.models ?? {})).toContain(ECON_TIER_BINDING.conductor)
+    }),
+  ),
+)
+
+// FIX-10 — a project opencode.json key overrides the embedded default (base-layer precedence),
+// while keys the project config does not set still fall through to the econ defaults.
+it.instance(
+  "project opencode.json overrides the econ embedded default model (FIX-10 precedence)",
+  withProcessEnv(
+    "ECON_DISABLE_DEFAULT_CONFIG",
+    undefined,
+    Effect.gen(function* () {
+      const config = yield* Config.use.get()
+      expect(config.model).toBe(tierModelRef("oracle"))
+      expect(config.default_agent).toBe("conductor")
+      expect(config.agent?.conductor?.model).toBe(tierModelRef("conductor"))
+    }),
+  ),
+  // Any non-default ref works as the override; the oracle ref is derived, not hardcoded.
+  { config: { model: tierModelRef("oracle") } },
 )
 
 it.instance("falls back to generic username when system user info is unavailable", () =>

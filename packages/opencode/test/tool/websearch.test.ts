@@ -30,11 +30,27 @@ describe("websearch provider", () => {
   })
 
   test("routes to Exa when the Exa flag is enabled", () => {
-    expect(selectWebSearchProvider(SESSION_ID, { exa: true, parallel: false })).toBe("exa")
+    const original = process.env.OPENCODE_WEBSEARCH_PROVIDER
+
+    try {
+      delete process.env.OPENCODE_WEBSEARCH_PROVIDER
+      expect(selectWebSearchProvider(SESSION_ID, { exa: true, parallel: false })).toBe("exa")
+    } finally {
+      if (original === undefined) delete process.env.OPENCODE_WEBSEARCH_PROVIDER
+      else process.env.OPENCODE_WEBSEARCH_PROVIDER = original
+    }
   })
 
   test("routes to Parallel when the Parallel flag is enabled", () => {
-    expect(selectWebSearchProvider(SESSION_ID, { exa: false, parallel: true })).toBe("parallel")
+    const original = process.env.OPENCODE_WEBSEARCH_PROVIDER
+
+    try {
+      delete process.env.OPENCODE_WEBSEARCH_PROVIDER
+      expect(selectWebSearchProvider(SESSION_ID, { exa: false, parallel: true })).toBe("parallel")
+    } finally {
+      if (original === undefined) delete process.env.OPENCODE_WEBSEARCH_PROVIDER
+      else process.env.OPENCODE_WEBSEARCH_PROVIDER = original
+    }
   })
 
   test("is only enabled for opencode or explicit websearch provider flags", () => {

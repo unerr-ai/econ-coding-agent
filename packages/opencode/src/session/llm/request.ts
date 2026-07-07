@@ -14,6 +14,8 @@ import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
+import { applyAdaptiveReasoning } from "./reasoning-gate"
+import { sessionAffinityFor } from "@opencode-ai/code-intelligence"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
@@ -121,6 +123,16 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
+  // Adaptive conductor reasoning gate: default stays non-thinking; this un-mutes
+  // thinking only for the turn's plan step, the step right after a failed command,
+  // and the step right after a tool result contradicted the model's premise (F4).
+  // Small (housekeeping) calls skip the gate entirely: a stateless one-shot like
+  // turn triage ends in a user message and would always read as a "plan" step —
+  // un-muted thinking then starves/slows its JSON output (live-fire: triage null
+  // on every real turn until this guard).
+  const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(input.messages, options)
+  if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID, reason: reasoningGate })
+
   const messages =
     isOpenaiOauth || input.isWorkflow
       ? input.messages
@@ -209,11 +221,20 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             "User-Agent": USER_AGENT,
           }
         : {
-            "x-session-affinity": input.sessionID,
             "X-Session-Id": input.sessionID,
             ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
             "User-Agent": USER_AGENT,
           }),
+      // OL-9.2b: the litellm gateway's upstream honors x-session-affinity for prompt-cache
+      // routing, pinning a session's successive calls to one backend replica. W8 (2026-07-06):
+      // a live probe proved this helps some models and actively breaks cache + latency on
+      // others, so the header is registry-driven per model (sessionAffinityFor), never sent
+      // unconditionally. Scoped to litellm only — other providers don't route on this header,
+      // and openai's ws-pool (plugin/openai/ws-pool.ts) keys off the same header name for an
+      // unrelated purpose.
+      ...(input.model.providerID === "litellm" && sessionAffinityFor(input.model.id)
+        ? { "x-session-affinity": input.sessionID }
+        : {}),
       ...input.model.headers,
       ...headers,
     },

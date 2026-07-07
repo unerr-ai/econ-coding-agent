@@ -14,6 +14,22 @@ export const Parameters = Schema.Struct({
   }),
 })
 
+const GLOB_METACHARACTERS = /[*?[{]/
+
+/**
+ * Broadens a plain, metacharacter-free glob pattern that missed into a
+ * recursive last-segment wildcard, so a bare filename/path guess still finds
+ * near matches instead of forcing a manual retry.
+ *
+ * @sem domain=search role=pattern-broadening
+ */
+export function broadenPattern(pattern: string): string | undefined {
+  if (GLOB_METACHARACTERS.test(pattern)) return undefined
+  const lastSegment = pattern.split("/").pop() ?? pattern
+  const broadened = `**/${lastSegment}*`
+  return broadened === pattern ? undefined : broadened
+}
+
 export const GlobTool = Tool.define(
   "glob",
   Effect.gen(function* () {
@@ -47,12 +63,30 @@ export const GlobTool = Tool.define(
           })
 
           const limit = 100
-          const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
-          const truncated = files.length === limit
+          let files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
+          let truncated = files.length === limit
+
+          let broadened: string | undefined
+          if (files.length === 0) {
+            broadened = broadenPattern(params.pattern)
+            if (broadened !== undefined) {
+              files = yield* ripgrep.glob({ cwd: search, pattern: broadened, limit })
+              truncated = files.length === limit
+            }
+          }
 
           const output = []
-          if (files.length === 0) output.push("No files found")
+          if (files.length === 0) {
+            output.push(
+              broadened === undefined
+                ? "No files found"
+                : `No files found for "${params.pattern}" (also tried "${broadened}")`,
+            )
+          }
           if (files.length > 0) {
+            if (broadened !== undefined) {
+              output.push(`[econ-ctx] no matches for "${params.pattern}" — auto-broadened to "${broadened}":`)
+            }
             output.push(...files.map((file) => path.resolve(search, file.path)))
             if (truncated) {
               output.push("")
@@ -67,6 +101,7 @@ export const GlobTool = Tool.define(
             metadata: {
               count: files.length,
               truncated,
+              broadened,
             },
             output: output.join("\n"),
           }

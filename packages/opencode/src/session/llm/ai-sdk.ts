@@ -41,6 +41,24 @@ function copilotTotalNanoAiu(value: unknown) {
   return total
 }
 
+// W8: some gateways surface prompt-cache hits only in the raw provider usage
+// JSON (the nested OpenAI/Fireworks `prompt_tokens_details.cached_tokens`, or
+// the flat OpenAI-compat `cache_read_input_tokens`) without the AI SDK having
+// normalized it into `inputTokenDetails.cacheReadTokens` / `cachedInputTokens`
+// for that particular transport. Reads the raw payload as a last-resort
+// fallback so reasoner/oracle turns still report a real cache-read count on
+// whichever path (streamed or non-streamed) the usage arrived on.
+function rawCacheReadTokens(raw: unknown): number | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const item = raw as {
+    prompt_tokens_details?: { cached_tokens?: number }
+    cache_read_input_tokens?: number
+  }
+  const nested = item.prompt_tokens_details?.cached_tokens
+  if (typeof nested === "number") return nested
+  return typeof item.cache_read_input_tokens === "number" ? item.cache_read_input_tokens : undefined
+}
+
 function usage(value: unknown) {
   if (!value || typeof value !== "object") return undefined
   const item = value as {
@@ -51,13 +69,15 @@ function usage(value: unknown) {
     cachedInputTokens?: number
     inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }
     outputTokenDetails?: { reasoningTokens?: number }
+    raw?: unknown
   }
   const entries = Object.entries({
     inputTokens: item.inputTokens,
     outputTokens: item.outputTokens,
     totalTokens: item.totalTokens,
     reasoningTokens: item.outputTokenDetails?.reasoningTokens ?? item.reasoningTokens,
-    cacheReadInputTokens: item.inputTokenDetails?.cacheReadTokens ?? item.cachedInputTokens,
+    cacheReadInputTokens:
+      item.inputTokenDetails?.cacheReadTokens ?? item.cachedInputTokens ?? rawCacheReadTokens(item.raw),
     cacheWriteInputTokens: item.inputTokenDetails?.cacheWriteTokens,
   }).filter((entry) => entry[1] !== undefined)
   return entries.length === 0 ? undefined : Object.fromEntries(entries)

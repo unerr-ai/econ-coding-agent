@@ -11,6 +11,7 @@ import { BackgroundJob } from "@/background/job"
 import { Command } from "@/command"
 import { Config } from "@/config/config"
 import { Workspace } from "@/control-plane/workspace"
+import { InstanceRef } from "@/effect/instance-ref"
 import { Env } from "@/env"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Format } from "@/format"
@@ -39,7 +40,7 @@ import { SessionRunState } from "@/session/run-state"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
-import { Todo } from "@/session/todo"
+import { SessionTodo } from "@opencode-ai/core/session/todo"
 import { SessionShare } from "@/share/session"
 import { ShareNext } from "@/share/share-next"
 import { Skill } from "@/skill"
@@ -213,30 +214,56 @@ type RouteRequirements =
 const routerLayerConfigNode = LayerNode.make(
   Layer.effect(
     SessionRunnerModel.RouterLayerConfigTag,
-    // Provide a DEFERRED resolver, not a resolved value. The outer effect runs
-    // at app-layer construction and only captures the Config service (safe);
-    // the inner effect — which calls config.get() (dies unless InstanceRef is
-    // live in the running fiber) — runs later, when the location layer unwraps
-    // this reference per-instance. Resolving eagerly here crashed the whole
-    // server with "InstanceRef not provided".
-    Effect.map(Config.Service, (config) =>
-      Effect.gen(function* () {
-        const cfg = yield* config.get()
-        const triageModelString = cfg.triage?.model ?? cfg.small_model ?? undefined
-        const triageConfig: SessionRunnerModel.TriageLayerConfig | undefined = triageModelString
-          ? {
-              model: ((parsed) => ({ id: parsed.modelID, providerID: parsed.providerID }))(
-                Provider.parseModel(triageModelString),
-              ),
-              enabled: cfg.triage?.enabled !== false,
-              escalateOn: cfg.triage?.escalate_on,
-            }
-          : undefined
-        return { triageConfig }
-      }),
-    ),
+    // Provide a SELF-SUFFICIENT resolver function of the location directory.
+    // The outer effect runs at app-layer construction and only captures
+    // services (safe). The returned function runs when core builds a
+    // location's layers — in whatever fiber first touches that location.
+    // v2 /api fibers carry no InstanceRef (OL-9.6g: the TUI is v2-only, so a
+    // resolver that read InstanceRef from the calling fiber 500'd every TUI
+    // request with "InstanceRef not provided"), so the resolver binds its own
+    // instance context: reuse the fiber's InstanceRef when it matches the
+    // directory (instance-bootstrap path — avoids re-entering the store), else
+    // derive a lightweight context via project.fromDirectory (no instance
+    // boot, so no LayerMap re-entry deadlock).
+    Effect.gen(function* () {
+      const config = yield* Config.Service
+      const project = yield* Project.Service
+      return (directory: string) =>
+        Effect.gen(function* () {
+          const resolved = FSUtil.resolve(directory)
+          const live = yield* InstanceRef
+          const ctx =
+            live && FSUtil.resolve(live.directory) === resolved
+              ? live
+              : yield* project.fromDirectory(resolved).pipe(
+                  Effect.map((result) => ({
+                    directory: resolved,
+                    worktree: result.sandbox,
+                    project: result.project,
+                  })),
+                )
+          const cfg = yield* config.get().pipe(Effect.provideService(InstanceRef, ctx))
+          const triageModelString = cfg.triage?.model ?? cfg.small_model ?? undefined
+          const triageConfig: SessionRunnerModel.TriageLayerConfig | undefined = triageModelString
+            ? {
+                model: ((parsed) => ({ id: parsed.modelID, providerID: parsed.providerID }))(
+                  Provider.parseModel(triageModelString),
+                ),
+                enabled: cfg.triage?.enabled !== false,
+                escalateOn: cfg.triage?.escalate_on,
+              }
+            : undefined
+          return { triageConfig } satisfies SessionRunnerModel.RouterLayerConfig
+        }).pipe(
+          Effect.catch((error: unknown) =>
+            Effect.logWarning("router layer config resolution failed — routing degrades open", { error }).pipe(
+              Effect.as({} satisfies SessionRunnerModel.RouterLayerConfig),
+            ),
+          ),
+        )
+    }),
   ),
-  [Config.node],
+  [Config.node, Project.node],
 )
 
 const app = LayerNode.group([
@@ -261,7 +288,7 @@ const app = LayerNode.group([
   Discovery.node,
   Question.node,
   Permission.node,
-  Todo.node,
+  SessionTodo.node,
   Session.node,
   SessionProjector.node,
   SessionStatus.node,

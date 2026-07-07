@@ -10,13 +10,47 @@ import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 
-import { type Tool as AITool, tool, jsonSchema } from "ai"
+import { type Tool as AITool, tool, jsonSchema, generateText } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
-import { resolveTier, isEconTierAgent } from "./tier-router"
-import { probeTurnRisk } from "../tool/graph-tools"
-import { detectAbstention } from "../../../code-intelligence/src/abstention"
+import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
+import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
+import { setTestEditGate, testEditGateArmed } from "../tool/edit-governance"
+import {
+  createRmVerifierRung,
+  resolveVerifierTier,
+  resolveJudgeTier,
+  isReadOnlySlice,
+  type RmClient,
+} from "@opencode-ai/code-intelligence"
+import {
+  runConductorOrchestration,
+  resolveSliceModel,
+  hasPendingTypedSlices,
+  classifyTurnShape,
+  categoryPreamble,
+  diagnosisPrepassSeed,
+  isFixShapedPrompt,
+  promptAuthorizesTestEdits,
+  triagePreamble,
+  buildTriageTodoSkeleton,
+  roundUpTriageShapes,
+  LOCALIZATION_SLICE_CONTENT,
+  PLANNER_SLICE_CONTENT,
+  childSlicePermission,
+  isDeciderSeat,
+  personaForSlice,
+  sliceStepBudget,
+  countToolCalls,
+  budgetExhaustedMarker,
+  buildRepoPrimer,
+  renderSliceDigestLedger,
+  type ConductorSliceDispatch,
+  type OrchestrationTodo,
+  type SliceDigestEntry,
+} from "./slice-orchestrator"
+import { runTurnTriage, triageTelemetry, type TriageComplete, type TriageVerdict, type TriageGoalShape } from "./turn-triage"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
@@ -32,6 +66,7 @@ import { pathToFileURL, fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { ConfigMarkdown } from "@/config/markdown"
 import { SessionSummary } from "./summary"
+import { Snapshot } from "@/snapshot"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
@@ -47,7 +82,9 @@ import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { TaskTool, type TaskPromptOps } from "@/tool/task"
+import { TaskTool, buildChildPrompt, type TaskPromptOps } from "@/tool/task"
+import { EffectBridge } from "@/effect/bridge"
+import { SessionTodo } from "@opencode-ai/core/session/todo"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -88,6 +125,9 @@ IMPORTANT:
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 
+/** Stable prefix of the hidden title-generation turn's opening user message — lets an out-of-band test harness (e.g. a scripted LLM stub) recognize the turn-open title call without duplicating the full prompt text. */
+export const TITLE_GENERATION_PROMPT_MARKER = "Generate a title for this conversation"
+
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
   const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
@@ -117,6 +157,37 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
 
+/**
+ * Test-harness seam for the turn-open LLM calls (triage + title). Production
+ * never provides this service — absent means both calls run (always-on, no
+ * feature flag). Mock-provider test harnesses provide `{ triage: false,
+ * titles: false }` so the extra turn-open requests don't consume their
+ * scripted responses.
+ *
+ * @sem domain=routing role=config
+ */
+export class TurnOpenCalls extends Context.Service<
+  TurnOpenCalls,
+  { readonly triage: boolean; readonly titles: boolean }
+>()("@opencode/SessionPrompt/TurnOpenCalls") {}
+
+/** The most-frequent goal shape in a verdict (first-occurrence tiebreak) — the `triage_vs_heuristic` telemetry's "triage" side; `undefined` for a null verdict. */
+function dominantTriageShape(verdict: TriageVerdict | null): TriageGoalShape | undefined {
+  if (!verdict || verdict.goals.length === 0) return undefined
+  const counts = new Map<TriageGoalShape, number>()
+  for (const g of verdict.goals) counts.set(g.shape, (counts.get(g.shape) ?? 0) + 1)
+  let best: TriageGoalShape | undefined
+  let bestCount = -1
+  for (const g of verdict.goals) {
+    const c = counts.get(g.shape)!
+    if (c > bestCount) {
+      bestCount = c
+      best = g.shape
+    }
+  }
+  return best
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -142,12 +213,22 @@ export const layer = Layer.effect(
     const state = yield* SessionRunState.Service
     const revert = yield* SessionRevert.Service
     const summary = yield* SessionSummary.Service
+    const snapshot = yield* Snapshot.Service
     const sys = yield* SystemPrompt.Service
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
+    // OL-7.3b — the conductor slice-loop hook reads the just-written typed DAG and
+    // mirrors slice status back onto the todo tracker through this service.
+    const todoStore = yield* SessionTodo.Service
+    // Turn-open LLM calls (triage + title) are always-on in production; only
+    // mock-provider test harnesses provide TurnOpenCalls to switch them off.
+    const turnOpen = Option.getOrElse(yield* Effect.serviceOption(TurnOpenCalls), () => ({
+      triage: true,
+      titles: true,
+    }))
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -239,7 +320,7 @@ export const layer = Layer.effect(
           model: mdl,
           sessionID: input.session.id,
           retries: 2,
-          messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
+          messages: [{ role: "user", content: `${TITLE_GENERATION_PROMPT_MARKER}:\n` }, ...msgs],
         })
         .pipe(
           Stream.filter(LLMEvent.is.textDelta),
@@ -257,6 +338,63 @@ export const layer = Layer.effect(
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => Effect.logError("failed to generate title", { error: Cause.squash(cause) })))
+    })
+
+    /**
+     * §1.1/§4.1 — the `TriageComplete` port for `runTurnTriage`: one
+     * forced-schema, all-tools-denied completion, adapted from the
+     * title/summary hidden-agent precedent above (`llm.stream` directly, no
+     * child session — `tools: {}` is what "all tools denied" means here;
+     * borrowing the "summary" agent's permission/mode shape rather than
+     * registering a new hidden agent). `tier:"conductor"` reuses the turn's
+     * own bound model — the spine never moves (§1.7); `tier:"reasoner"`
+     * resolves via the same tier->model path child slices use
+     * (`resolveSliceModel`) for the low-confidence re-run (§4.1). Returns
+     * `null` on any failure — `runTurnTriage` always falls back to
+     * `classifyTurnShape` in that case.
+     *
+     * @sem domain=routing role=extractor
+     */
+    const triageDispatch = Effect.fn("SessionPrompt.triageDispatch")(function* (input: {
+      sessionID: SessionID
+      lastUser: SessionV1.User
+      tier: "conductor" | "reasoner"
+      userPrompt: string
+    }) {
+      const { sessionID, lastUser, tier, userPrompt } = input
+      const { providerID, modelID } =
+        tier === "conductor"
+          ? { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID }
+          : ((): { providerID: ProviderV2.ID; modelID: ModelV2.ID } => {
+              const m = resolveSliceModel(tier)
+              return { providerID: ProviderV2.ID.make(m.providerID), modelID: ModelV2.ID.make(m.modelID) }
+            })()
+      const mdl = yield* getModel(providerID, modelID, sessionID)
+      const ag = yield* agents.get("summary")
+      if (!ag) return null
+      const bridge = yield* EffectBridge.make()
+      const complete: TriageComplete = ({ system, user }) =>
+        bridge.promise(
+          llm
+            .stream({
+              agent: ag,
+              user: lastUser,
+              system: [system],
+              small: true,
+              tools: {},
+              model: mdl,
+              sessionID,
+              retries: 0,
+              messages: [{ role: "user", content: user }],
+            })
+            .pipe(
+              Stream.filter(LLMEvent.is.textDelta),
+              Stream.map((e) => e.text),
+              Stream.mkString,
+              Effect.orDie,
+            ),
+        )
+      return yield* Effect.promise(() => runTurnTriage({ userPrompt, complete }))
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -667,32 +805,27 @@ export const layer = Layer.effect(
         throw error
       }
 
-      // OL-3.1: automatic tier routing — the B-into-A router seam (OL-0.3 decision). Only the
-      // top-level user turn is auto-routed: a caller that pinned an agent (a delegated subtask) or a
-      // model keeps its explicit choice. The router may lift the default conductor to the reasoner/
-      // oracle for a hard turn; reassigning `ag` carries the tier's model, prompt delta, and switch
-      // telemetry coherently. If the chosen tier's agent can't be resolved, the conductor stands.
+      // Turn-level tier routing demoted 2026-07-06 (run-19 live-fire): the lead agent is never
+      // swapped at turn-open. Escalation is slice-level only — allocateSlice (coupling ×
+      // test-strength + the conductor's `need` hint) routes each decomposed slice and the
+      // escalation ladder retries a failed slice upward. A prior-turn abstention is visible to
+      // the conductor in its own transcript and rides the ladder; it no longer forces a
+      // whole-turn oracle lead. What survives here is OL-7.5: raise the conductor's plan-time
+      // reasoning for this turn's decomposition step when the turn-open signals (prompt
+      // heaviness, structural risk of the prompt's entities) call for it; a trivial turn stays
+      // at the conductor's configured baseline (reasoningEffort:"none"), spending zero reasoning
+      // tokens on planning. reasoningEffort is the AI-SDK camelCase option key that
+      // @ai-sdk/openai-compatible actually validates and lowers to the wire param
+      // reasoning_effort for the LiteLLM→Fireworks path — a snake_case key here would be
+      // silently dropped instead (OL-9.6e). The OpenRouter-era `reasoning` object still 400s
+      // at Fireworks: "Extra inputs are not permitted".
       if (!input.agent && !input.model && isEconTierAgent(ag.name)) {
         const promptText = input.parts.map((p) => (p.type === "text" ? p.text : "")).join("\n")
-        // OL-3.5: escalate when the previous turn's assistant output abstained ([[ABSTAIN]]/[[UNSURE]]/
-        // low-confidence). Best-effort: any failure to read history leaves priorAbstained false, so
-        // abstention never breaks a turn — it only adds an escalation.
-        const priorMatch = yield* sessions
-          .findMessage(input.sessionID, (m) => m.info.role === "assistant")
-          .pipe(Effect.orDie)
-        const priorAbstained = Option.isSome(priorMatch)
-          ? detectAbstention({
-              text: priorMatch.value.parts.map((p) => (p.type === "text" ? p.text : "")).join("\n"),
-            }).abstained
-          : false
-        // OL-3.3: code-structural risk from the live graph (blast-radius / fan-in / centrality of
-        // the entities the prompt names). Best-effort and bounded — probeTurnRisk swallows a cold
-        // graph, an index-latency timeout, or any error into 0, so risk only ever adds an escalation.
+        // OL-3.3 signal, reused: bounded, best-effort structural risk — probeTurnRisk swallows a
+        // cold graph, an index-latency timeout, or any error into 0.
         const risk = yield* Effect.promise(() => probeTurnRisk(promptText))
-        const decision = resolveTier({ sessionID: input.sessionID, prompt: promptText, priorAbstained, risk })
-        if (decision.tier !== ag.name) {
-          const tierAgent = yield* agents.get(decision.tier)
-          if (tierAgent) ag = tierAgent
+        if (ag.name === "conductor" && planRaiseForTurn({ prompt: promptText, risk })) {
+          ag = { ...ag, options: { ...ag.options, reasoningEffort: "high" } }
         }
       }
 
@@ -1220,6 +1353,31 @@ export const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        // OL-9.5: edge-triggered orchestration — remember the todo-list shape the
+        // slice hook last engaged on, so later steps of the same turn cannot
+        // re-dispatch the same batch (run 8: status mirrors raced, todos stayed
+        // pending, and every subsequent step re-ran the whole DAG).
+        let engagedTodoFingerprint: string | undefined
+        // F1 — the turn-open diagnosis pre-pass arms at most once per run.
+        let prepassSeeded = false
+        // §8 casting — the root turn's category preamble, set once at turn
+        // open. Appended to every step's system array this turn: the shared
+        // prefix stays byte-stable (the AC-7.2 golden hash never sees it) and
+        // the casting stance rides the tail, varying per turn without a
+        // prompt swap.
+        let turnPreamble: string | undefined
+        // U1/U2 — the root turn's triage goal count, set once at turn open
+        // alongside turnPreamble; fed into shouldOrchestrate's width check at
+        // the orchestration hook further down this same turn. Undefined on a
+        // null-verdict (legacy classifyTurnShape) turn.
+        let turnGoalCount: number | undefined
+        // OL-9.6b: finish="length" is an output-cap truncation, not a completed
+        // turn (run 9: a 7.9k-token think hit the 8192 cap on the root-cause
+        // step, returned zero parts, and the run exited 0 as if finished).
+        // Nudge the model to continue, bounded so a pathological truncation
+        // loop still terminates — but never as a silent success.
+        const MAX_LENGTH_CONTINUATIONS = 2
+        let lengthContinuations = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1245,6 +1403,46 @@ export const layer = Layer.effect(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
 
+          // OL-9.6b: an output-cap truncation with no surviving tool calls means
+          // the step produced nothing actionable — continue the turn instead of
+          // exiting as if it finished. Bounded: after MAX_LENGTH_CONTINUATIONS
+          // the loop exits through the generic break below, with an error log
+          // so the exit is attributable, and the run CLI surfaces the truncated
+          // finish to stderr.
+          if (lastAssistant?.finish === "length" && !hasToolCalls && lastUser.id < lastAssistant.id) {
+            if (lengthContinuations < MAX_LENGTH_CONTINUATIONS) {
+              lengthContinuations++
+              yield* Effect.logWarning("length_continuation", {
+                "session.id": sessionID,
+                messageID: lastAssistant.id,
+                attempt: lengthContinuations,
+              })
+              const nudge: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(nudge)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: nudge.id,
+                sessionID,
+                type: "text",
+                text: "Your previous response was cut off by the output-token limit before any tool call or final answer was produced. Continue from where you stopped: re-issue the intended tool calls or give the final answer, and keep any visible reasoning brief.",
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
+            yield* Effect.logError("loop exit on repeated output-cap truncation", {
+              "session.id": sessionID,
+              messageID: lastAssistant.id,
+              continuations: lengthContinuations,
+            })
+          }
+
           if (
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
@@ -1266,8 +1464,136 @@ export const layer = Layer.effect(
             break
           }
 
+          // §8 casting — the turn-open block, root sessions only, once per
+          // run. classifyTurnShape reads the prompt's EVIDENCE SHAPE (the
+          // same regexes the structural nets run on), logs category +
+          // confidence for the receipt decode, and picks the turn-scoped
+          // preamble the system assembly appends below.
+          //
+          // F1 — a diagnosis-vague verdict seeds a frame slice into the todo
+          // store BEFORE the conductor's first step, so the OL-7.3b hook
+          // dispatches it on the first step boundary — the higher tier frames
+          // the turn instead of rescuing it (casting policy: proactive
+          // escalation). Hard shapes (diagnosisPrepassSeed) buy the reasoner
+          // PLANNER seat; ordinary ones keep the localization slice. The old
+          // trigger sat at todowrite time, downstream of the conductor's
+          // explore-first localization, and never fired on diagnosis turns
+          // (cases 1A/1B: todos arrive as retro logs). Never over an existing
+          // todo list.
+          //
+          // B3 — the same turn-open point arms the no-test-edit gate: on a
+          // fix-shaped turn with no explicit test-work ask, modifying an
+          // existing test file is denied at the edit/write boundary. Child
+          // slice sessions inherit the parent's gate unless their own task is
+          // test-work-shaped (the repro/test-authoring slice stays free).
+          if (step === 0 && !prepassSeeded) {
+            prepassSeeded = true
+            const userText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+              .map((p) => (p.type === "text" ? p.text : ""))
+              .filter(Boolean)
+              .join("\n")
+            if (session.parentID) {
+              setTestEditGate(sessionID, testEditGateArmed(session.parentID) && !promptAuthorizesTestEdits(userText))
+            } else {
+              // U1 — triage reads the prompt BEFORE classifyTurnShape decides
+              // anything; classifyTurnShape itself still runs unconditionally
+              // (it feeds the regex fallback signal below AND the
+              // triage_vs_heuristic evaluation telemetry either way).
+              const shape = classifyTurnShape(userText)
+              const regexDenyTestEdits = isFixShapedPrompt(userText) && !promptAuthorizesTestEdits(userText)
+
+              // U1 — turn triage runs on every root turn open (always-on, no
+              // feature flag). Any failure inside it degrades to the
+              // null-verdict branch below, which runs exactly as it did
+              // before triage existed; TurnOpenCalls is the test-only off
+              // switch so mock harnesses keep their scripted choreography.
+              let verdict: TriageVerdict | null = null
+              if (turnOpen.triage) {
+                verdict = yield* triageDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
+                if (verdict && verdict.confidence === "low") {
+                  const reasonerVerdict = yield* triageDispatch({
+                    sessionID,
+                    lastUser,
+                    tier: "reasoner",
+                    userPrompt: userText,
+                  })
+                  if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length) verdict = reasonerVerdict
+                }
+
+                const dominantShape = dominantTriageShape(verdict)
+                yield* Effect.logInfo("triage_vs_heuristic", {
+                  "session.id": sessionID,
+                  triage: dominantShape ?? null,
+                  heuristic: shape.category,
+                  agree: dominantShape === shape.category,
+                })
+
+                // Round-up net (case-1 decode): a "diagnosis-grounded" goal in
+                // a prompt naming no concrete code-file location rounds up to
+                // "diagnosis-vague", re-arming the skeleton's frame seed.
+                // Runs AFTER triage_vs_heuristic so that telemetry keeps
+                // scoring the raw extractor.
+                if (verdict) {
+                  const rounded = roundUpTriageShapes(verdict, userText)
+                  if (rounded !== verdict) {
+                    yield* Effect.logInfo("triage_rounded_up", {
+                      "session.id": sessionID,
+                      shapes: rounded.goals.map((g) => g.shape),
+                    })
+                    verdict = rounded
+                  }
+                }
+              }
+
+              if (verdict) {
+                // U1/U2 — a non-null verdict is the decider: it replaces
+                // classifyTurnShape's preamble/gate/seed role for this turn.
+                turnPreamble = triagePreamble(verdict)
+                turnGoalCount = verdict.goals.length
+                yield* Effect.logInfo("turn_triage", { "session.id": sessionID, ...triageTelemetry(verdict) })
+
+                // B3 — triage's constraint is the primary armer; OR in the
+                // regex signal so a triage MISS can never disarm a gate the
+                // regex would have armed on its own.
+                const triageDenyTestEdits = verdict.constraints.some((c) => c.kind === "no-test-edit")
+                const denyTestEdits = regexDenyTestEdits || triageDenyTestEdits
+                setTestEditGate(sessionID, denyTestEdits)
+                if (denyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
+
+                const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                if (existingTodos.length === 0) {
+                  const skeleton = buildTriageTodoSkeleton(verdict)
+                  yield* todoStore.update({ sessionID, todos: skeleton }).pipe(Effect.ignore)
+                }
+              } else {
+                // Null verdict — the legacy classifyTurnShape path, unchanged.
+                turnPreamble = categoryPreamble(shape.category)
+                yield* Effect.logInfo("turn_shape", {
+                  "session.id": sessionID,
+                  category: shape.category,
+                  confidence: shape.confidence,
+                })
+                setTestEditGate(sessionID, regexDenyTestEdits)
+                if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
+                const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                if (existingTodos.length === 0 && shape.category === "diagnosis-vague") {
+                  const seed = diagnosisPrepassSeed(userText)
+                  yield* todoStore.update({ sessionID, todos: [seed] }).pipe(Effect.ignore)
+                  yield* Effect.logInfo("diagnosis_prepass_armed", {
+                    "session.id": sessionID,
+                    seed: seed.content === PLANNER_SLICE_CONTENT ? "planner" : "localization",
+                  })
+                }
+              }
+            }
+          }
+
           step++
-          if (step === 1)
+          // Session-title generation: one forked/non-blocking small-model call,
+          // already gated to the first user turn of a top-level session inside
+          // `title` (ensureTitle). Always-on; TurnOpenCalls is the test-only off
+          // switch.
+          if (step === 1 && turnOpen.titles)
             yield* title({
               session,
               modelID: lastUser.model.modelID,
@@ -1426,6 +1752,11 @@ export const layer = Layer.effect(
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            // §8 rule 4 — the turn's casting preamble rides the TAIL of the
+            // system array, never a prefix swap: byte-stable across this
+            // turn's steps (they cache against each other), and the shared
+            // prefix above it never varies.
+            if (turnPreamble) system.push(turnPreamble)
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
@@ -1491,6 +1822,370 @@ export const layer = Layer.effect(
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
           if (outcome === "break") break
+
+          // OL-7.3b — the conductor slice-loop hook. Decomposition orchestration is
+          // unconditional; engagement is driven solely by the `hasPendingTypedSlices`
+          // precondition below, which is FIRST and total: with no typed todos nothing
+          // past it is constructed or run, so a plain turn pays zero extra work (no
+          // bridge, no promptOps). When the step just wrote a typed DAG with pending
+          // slices, the loop executes that DAG as child sessions and mirrors each
+          // slice's status onto the tracker. Every failure — a bad DAG, a probe,
+          // dispatch, or ladder throw — is caught here and metered, and the turn falls
+          // back to the legacy path: a broken orchestrator must never kill a user turn.
+          {
+            const sliceHook: Effect.Effect<void> = Effect.gen(function* () {
+              // OL-9.5: children never orchestrate — run 8's "write summary"
+              // procedure child wrote its own todo list and self-orchestrated 43
+              // grandchild sessions. Decomposition is the root session's privilege.
+              if (session.parentID) return
+              const pendingTodos = yield* todoStore.get(sessionID)
+              if (!hasPendingTypedSlices(pendingTodos)) return
+              // OL-9.5: level→edge trigger — one engagement per distinct todo list.
+              const fingerprint = JSON.stringify(
+                pendingTodos.map((t) => [t.content, t.status, (t as { sliceType?: string }).sliceType ?? ""]),
+              )
+              if (fingerprint === engagedTodoFingerprint) return
+              engagedTodoFingerprint = fingerprint
+
+              const bridge = yield* EffectBridge.make()
+              const promptOps = yield* ops()
+
+              const rmClient: RmClient = async (endpoint, input) => {
+                const res = await fetch(endpoint, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify(input),
+                })
+                const json = (await res.json()) as { score: number; detail?: string }
+                return { score: json.score, detail: json.detail }
+              }
+              const rmRung = createRmVerifierRung(resolveVerifierTier(process.env["ECON_VERIFIER_RM"]), rmClient)
+
+              // OL-7.8 cross-model judge sampler: a one-shot, tool-free completion
+              // on the judge tier's model through the normal provider path — no
+              // child session, no tools, no streaming. The tier resolves via the
+              // registry (default reasoner: cross-family vs every judge-cell
+              // generator; ECON_VERIFIER_JUDGE=off / =<tier> overrides). A thrown
+              // sampler is fine — runCrossModelJudge awaits and degrades to the
+              // next rung — so failures reject here rather than being swallowed.
+              const judgeTier = resolveJudgeTier(process.env["ECON_VERIFIER_JUDGE"])
+              const judgeGenerate = judgeTier.enabled
+                ? (judgePrompt: string): Promise<string> =>
+                    bridge.promise(
+                      Effect.gen(function* () {
+                        const m = resolveSliceModel(judgeTier.tier)
+                        const resolved = yield* provider.getModel(
+                          ProviderV2.ID.make(m.providerID),
+                          ModelV2.ID.make(m.modelID),
+                        )
+                        const language = yield* provider.getLanguage(resolved)
+                        const out = yield* Effect.promise(() =>
+                          generateText({ model: language, prompt: judgePrompt, maxOutputTokens: 400, temperature: 0 }),
+                        )
+                        return out.text
+                      }),
+                    )
+                : undefined
+
+              // OL-9.4b: built once per orchestration run and reused across every
+              // dispatched slice — live-run evidence showed parallel wave-1 slices
+              // each independently re-reading package.json and re-listing
+              // directories before their real work. completedSliceDigests
+              // accumulates as slices actually finish (never before), so it is
+              // naturally empty for every wave-1 dispatch and only ever holds
+              // slices from earlier, already-settled waves.
+              const repoPrimer = buildRepoPrimer({ cwd: ctx.directory })
+              const completedSliceDigests: SliceDigestEntry[] = []
+
+              // A slice child sees only its one-line todo text by default, so carry the
+              // parent task verbatim: concrete details (file paths, commands, acceptance
+              // criteria) must survive decomposition. Shared prefix across slices also
+              // keeps the provider prefix-cache warm.
+              const parentTask = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                .map((p) => (p.type === "text" ? p.text : ""))
+                .filter(Boolean)
+                .join("\n")
+
+              // One slice → one child session on the slice's tier model, carrying slice
+              // metadata so OL-7.7 wiring briefs attach; returns text + parts for the
+              // trajectory monitor. This is the Effect→Promise bridge the pure loop needs.
+              // The child is HEADLESS: an executor that stops to ask "which files?" is a
+              // real observed failure (no one can answer a child session), so the framing
+              // forbids clarifying questions outright.
+              // Lane enforcement: a recon/verify slice observes and reports — it must
+              // never mutate the working tree (a live recon slice editing source raced
+              // the implement slice). The deny rule is mechanical: edit/write/patch all
+              // ask the "edit" permission, deny rules survive --dangerously-skip-permissions,
+              // and the rule rides escalation rescues too (sliceType travels in the request).
+              // Ask-coercion: childSlicePermission also flattens every askable surface to
+              // allow/deny — an "ask" in a headless child parks the run on a Deferred no
+              // one resolves (runs 4 and 5 froze exactly there, on bash asks).
+              const dispatch: ConductorSliceDispatch = (req) =>
+                bridge.promise(
+                  Effect.gen(function* () {
+                    const readOnly = isReadOnlySlice(req.sliceType)
+                    // OL-9.1b: resolve the intern persona this slice runs as (this is the
+                    // run-6 root-bug fix — the child used to inherit the conductor's own
+                    // agent identity). An explicit `persona` on the originating todo wins
+                    // when present (read defensively — the field may not exist on every
+                    // todo yet); otherwise it derives from sliceType. Drives both the
+                    // child's agent identity and its permission overlay.
+                    const sourceTodo = pendingTodos.find((t) => t.content === req.sliceId) as
+                      | OrchestrationTodo
+                      | undefined
+                    const persona = personaForSlice({ sliceType: req.sliceType, persona: sourceTodo?.persona })
+                    // OL-9.5: an escalation must actually change the brain — run 8's
+                    // ladder re-dispatched the same executor persona for every hop
+                    // (req.tier was ignored; zero reasoner/oracle children existed in
+                    // the DB). A non-executor tier runs as its tier agent; the persona
+                    // still shapes the permission overlay and step budget.
+                    const childAgent = req.tier === "executor" ? persona : req.tier
+                    // F6 seat-scoping: design/verify at reasoner/oracle is a decider
+                    // seat — grind surfaces (bash/edit) come off by construction, so
+                    // downward delegation stops being advisory. Escalated mechanical
+                    // rescues keep their tools (worker seat at any tier).
+                    const deciderSeat = isDeciderSeat(req.tier, req.sliceType)
+                    const child = yield* sessions.create({
+                      parentID: sessionID,
+                      title: `slice: ${req.sliceId}`.slice(0, 100),
+                      agent: childAgent,
+                      permission: childSlicePermission(session.permission, readOnly, persona, deciderSeat),
+                    })
+                    const sliceFiles = [...req.prompt.matchAll(/[\w./-]+\/[\w.-]+\.[a-z]{1,5}\b/gi)].map((m) => m[0])
+                    const framed = [
+                      "You are a headless slice executor: you run ONE slice of a decomposed parent task, unattended.",
+                      "Never ask the user questions — no one can answer a child session. If a detail seems ambiguous, take the most reasonable interpretation from the parent task below and proceed to a concrete result.",
+                      deciderSeat
+                        ? "SEAT: decider. Shell and file-mutation tools are disabled for this session — judge from evidence gathered with the read/search/graph tools and deliver your verdict or plan as text. Command evidence (suite runs, typechecks) is produced by the verification rungs and runner slices, not by you."
+                        : readOnly
+                          ? "LANE: this slice is READ-ONLY (reconnaissance/verification). Do NOT create, edit, or write any file — file-mutation tools are disabled for this session. Run commands and read code as needed, and deliver your findings as text."
+                          : "",
+                      repoPrimer,
+                      renderSliceDigestLedger(completedSliceDigests),
+                      parentTask ? `## Parent task (context only — do ONLY your slice)\n${parentTask}` : "",
+                      `## Your slice\n${req.prompt}`,
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")
+                    const childPrompt = yield* Effect.promise(() =>
+                      buildChildPrompt(framed, sliceFiles.length > 0 ? { files: sliceFiles } : undefined),
+                    )
+                    const parts = yield* promptOps.resolvePromptParts(childPrompt)
+                    const model = (() => {
+                      const m = resolveSliceModel(req.tier)
+                      return { providerID: ProviderV2.ID.make(m.providerID), modelID: ModelV2.ID.make(m.modelID) }
+                    })()
+                    // OL-9.3a per-persona step budget: no native per-child max-steps knob
+                    // exists on promptOps.prompt (the core runner's own MAX_STEPS_PROMPT
+                    // gate is per-turn, not persona-aware), so this races the child's
+                    // prompt call against a watchdog that polls the child's own message
+                    // history for completed tool calls. If the persona's budget is
+                    // exhausted first, the watchdog wins the race — Effect interrupts the
+                    // losing prompt fiber, so the child ends GRACEFULLY instead of running
+                    // away — and whatever it already wrote is read back from the session
+                    // and becomes the digest, fail-loud-marked for the verifier rather
+                    // than silently truncated.
+                    let budgetExhausted = false
+                    const budget = sliceStepBudget(persona, req.sliceId)
+                    const watchdog: Effect.Effect<void> = Effect.gen(function* () {
+                      while (true) {
+                        yield* Effect.sleep("2 seconds")
+                        const msgs = yield* sessions
+                          .messages({ sessionID: child.id })
+                          .pipe(Effect.orElseSucceed(() => [] as SessionV1.WithParts[]))
+                        const steps = msgs.reduce((sum, m) => sum + countToolCalls(m.parts), 0)
+                        if (steps < budget) continue
+                        budgetExhausted = true
+                        yield* promptOps.cancel(child.id).pipe(Effect.ignore)
+                        return
+                      }
+                    })
+                    const raced = yield* Effect.race(
+                      promptOps.prompt({
+                        messageID: MessageID.ascending(),
+                        sessionID: child.id,
+                        model,
+                        agent: childAgent,
+                        parts,
+                      }),
+                      watchdog,
+                    )
+                    let dispatchResult: { text: string; parts: readonly unknown[] }
+                    if (budgetExhausted) {
+                      const msgs = yield* sessions
+                        .messages({ sessionID: child.id })
+                        .pipe(Effect.orElseSucceed(() => [] as SessionV1.WithParts[]))
+                      const finalParts = msgs.at(-1)?.parts ?? []
+                      const priorText = finalParts.findLast((p) => p.type === "text")?.text ?? ""
+                      dispatchResult = { text: `${budgetExhaustedMarker(persona, budget)}\n\n${priorText}`, parts: finalParts }
+                    } else {
+                      const result = raced as SessionV1.WithParts
+                      dispatchResult = {
+                        text: result.parts.findLast((p) => p.type === "text")?.text ?? "",
+                        parts: result.parts,
+                      }
+                    }
+                    // OL-9.4b: record this slice's output for later-wave dispatches'
+                    // digest ledger — pushed only once the slice has actually
+                    // completed, so an earlier-wave slice can never appear in its own
+                    // or a same-wave sibling's ledger.
+                    completedSliceDigests.push({ id: req.sliceId, text: dispatchResult.text })
+                    return dispatchResult
+                  }),
+                )
+
+              const orch = yield* Effect.promise(() =>
+                runConductorOrchestration({
+                  getTodos: () => bridge.promise(todoStore.get(sessionID)),
+                  probes: {
+                    probeCoupling: async (text, files) => probeSliceCoupling(text, files, await ensureGraphReady()),
+                    probeTestStrength: (files) => probeSliceTestStrength(files),
+                    probeVerifyCommands: (files) => probeSliceVerifyCommands(files),
+                  },
+                  dispatch,
+                  setTodoStatus: (index, status) =>
+                    bridge.promise(
+                      Effect.gen(function* () {
+                        const current = yield* todoStore.get(sessionID)
+                        const next = current.map((t, i) => (i === index ? { ...t, status } : t))
+                        yield* todoStore.update({ sessionID, todos: next })
+                      }),
+                    ),
+                  goalCount: turnGoalCount,
+                  options: {
+                    cwd: ctx.directory,
+                    rmRung,
+                    judgeGenerate,
+                    // U3 — the opencode-side snapshot adapter (opencode's
+                    // git-based snapshot subsystem) bracketing each attempt;
+                    // absent snapshot ⇒ today's dirty-tree behavior.
+                    snapshot: {
+                      track: () => bridge.promise(snapshot.track()),
+                      restore: (hash: string) => bridge.promise(snapshot.restore(hash)),
+                      diff: (hash: string) => bridge.promise(snapshot.diff(hash)),
+                    },
+                    onProvenance: (e) => {
+                      bridge.fork(Effect.logInfo("escalation_provenance", { "session.id": sessionID, ...e }))
+                    },
+                  },
+                }),
+              )
+
+              if (orch.fellBack)
+                yield* Effect.logWarning("orchestration_fallback", { "session.id": sessionID })
+              else if (orch.engaged)
+                yield* Effect.logInfo("orchestration_engaged", {
+                  "session.id": sessionID,
+                  slices: orch.result?.outcomes.length ?? 0,
+                })
+
+              // Synthesis-as-a-hop: the final user-facing answer is a crucial output,
+              // so it is authored by a tier allocated to the turn's weight — the
+              // reasoner for any decomposed turn, the oracle when oracle-grade work
+              // (or an unverified residue) is being narrated — from compiled slice
+              // digests, never the raw transcript. The conductor then RELAYS it: the
+              // cheap tier keeps the session, the capable tier writes the artifact.
+              const outcomes = orch.engaged ? (orch.result?.outcomes ?? []) : []
+              // F1/§8 — a pre-pass-only engagement (the seeded frame slice —
+              // localization or planner — and nothing else) produced a FRAME
+              // for the turn, not a final answer: relay it as the working
+              // frame the conductor executes against, instead of synthesizing
+              // a premature "final" answer from a diagnosis artifact. The
+              // planner relay is execute-shaped: the conductor transcribes
+              // the plan's DAG into typed todowrite slices, never re-derives.
+              const prepassOnly =
+                outcomes.length > 0 &&
+                outcomes.every((o) => o.id === LOCALIZATION_SLICE_CONTENT || o.id === PLANNER_SLICE_CONTENT)
+              if (prepassOnly) {
+                const frame = outcomes[0]!
+                const isPlan = frame.id === PLANNER_SLICE_CONTENT
+                const body = frame.output.length > 4000 ? `${frame.output.slice(0, 4000)}\n…[truncated]` : frame.output
+                const frameMsg: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(frameMsg)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: frameMsg.id,
+                  sessionID,
+                  type: "text",
+                  text: [
+                    isPlan
+                      ? "Planning pre-pass (completed before your work): a higher-tier plan slice mapped this turn. Its plan:"
+                      : "Diagnosis pre-pass (completed before your work): a higher-tier localization slice analyzed the reported defect. Its analysis:",
+                    "---",
+                    body,
+                    "---",
+                    isPlan
+                      ? "Treat this as the turn's execution plan: (1) transcribe its slice DAG into typed todowrite items verbatim (content, sliceType, deps as given) and let them dispatch — execute the plan, do not re-derive it or do the sliced work inline; (2) run each discriminating probe it names and confirm the chosen site BEFORE any edit; (3) if evidence contradicts the plan, stop and enumerate at least two candidate layers — with a cheap probe for each — before choosing."
+                      : "Treat this as the frame for the turn: (1) run each discriminating probe/check it names and confirm the target BEFORE any edit; (2) if evidence contradicts the analysis, stop and enumerate at least two candidate layers — with a cheap probe for each — before choosing; (3) do not re-derive the localization from scratch.",
+                  ].join("\n"),
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+              } else if (outcomes.length > 0) {
+                const oracleTouched = outcomes.some(
+                  (o) => o.allocation.tier === "oracle" || o.escalation?.tier === "oracle" || o.state === "unverified",
+                )
+                const synthesisTier = oracleTouched ? ("oracle" as const) : ("reasoner" as const)
+                const digests = outcomes
+                  .map((o) => {
+                    const body = o.output.length > 1500 ? `${o.output.slice(0, 1500)}\n…[truncated]` : o.output
+                    return `### ${o.id} [tier=${o.escalation?.tier ?? o.tier}, state=${o.state}]\n${body}`
+                  })
+                  .join("\n\n")
+                const synthesis = yield* Effect.tryPromise(() =>
+                  dispatch({
+                    sliceId: "synthesize final answer",
+                    tier: synthesisTier,
+                    prompt: [
+                      "Write the FINAL user-facing answer for the parent task by synthesizing the completed slice results below.",
+                      "Be faithful to what actually happened — cite the concrete evidence (files changed, commands run, test results, root cause) from the slices and invent nothing beyond them.",
+                      "Lead with the outcome, then the substance (root cause / changes / evidence) in clean prose.",
+                      `\n## Completed slice results\n${digests}`,
+                    ].join("\n"),
+                    escalated: false,
+                  }),
+                ).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("synthesis_fallback", { "session.id": sessionID, cause: Cause.squash(cause) }).pipe(
+                      Effect.map(() => undefined),
+                    ),
+                  ),
+                )
+                if (synthesis?.text) {
+                  const relayMsg: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(relayMsg)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: relayMsg.id,
+                    sessionID,
+                    type: "text",
+                    text: `A higher-tier synthesis of the completed slices follows. Deliver it to the user as your final answer — relay it faithfully (verbatim where possible) and add nothing beyond it:\n\n---\n${synthesis.text}`,
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                }
+              }
+            })
+            // Last-ditch boundary: even a defect in the hook's own setup falls back
+            // to the legacy path rather than aborting the turn.
+            yield* sliceHook.pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("orchestration_fallback", { "session.id": sessionID, cause: Cause.squash(cause) }),
+              ),
+            )
+          }
           continue
         }
 
@@ -1680,6 +2375,8 @@ export const defaultLayer = Layer.suspend(() =>
         CrossSpawnSpawner.defaultLayer,
         RuntimeFlags.defaultLayer,
         EventV2Bridge.defaultLayer,
+        SessionTodo.defaultLayer,
+        Snapshot.defaultLayer,
       ),
     ),
   ),
@@ -1810,6 +2507,8 @@ export const node = LayerNode.make(layer, [
   SessionRunState.node,
   SessionRevert.node,
   SessionSummary.node,
+  Snapshot.node,
+  SessionTodo.node,
   SystemPrompt.node,
   LLM.node,
   EventV2Bridge.node,

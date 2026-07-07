@@ -24,7 +24,8 @@ import { Git } from "../../src/git"
 import { Image } from "../../src/image/image"
 
 import { Question } from "../../src/question"
-import { Todo } from "../../src/session/todo"
+import { SessionTodo } from "@opencode-ai/core/session/todo"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
@@ -185,7 +186,7 @@ function makePrompt(input?: { processor?: "blocking" }) {
     EventV2Bridge.defaultLayer,
   ).pipe(Layer.provideMerge(infra))
   const question = Question.layer.pipe(Layer.provideMerge(deps))
-  const todo = Todo.layer.pipe(Layer.provideMerge(deps))
+  const todo = SessionTodo.layer.pipe(Layer.provide(EventV2.defaultLayer), Layer.provideMerge(deps))
   const registry = ToolRegistry.layer.pipe(
     Layer.provide(Skill.defaultLayer),
     Layer.provide(FetchHttpClient.layer),
@@ -217,6 +218,10 @@ function makePrompt(input?: { processor?: "blocking" }) {
     Layer.provideMerge(deps),
   )
   return SessionPrompt.layer.pipe(
+    // Turn-open LLM calls (triage + title) are always-on in the product; this
+    // harness scripts the mock provider's responses one-by-one, so switch
+    // them off or they'd consume the choreography.
+    Layer.provide(Layer.succeed(SessionPrompt.TurnOpenCalls, { triage: false, titles: false })),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(Image.defaultLayer),
     Layer.provide(summary),
@@ -969,7 +974,9 @@ it.instance(
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(fiber)
     }),
-  10_000,
+  // 15s not 10s: this test consistently runs ~10.8s here since the turn-open
+  // todo path moved to SessionTodo (turn triage is env-gated off in tests).
+  15_000,
 )
 
 it.instance(

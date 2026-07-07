@@ -4,14 +4,17 @@
 means for econ's self-hosting. Covers the idle-GPU problem, buy-vs-rent, the utilization playbook,
 offsetting India's timezone trough, the sovereign hosting model, and the sovereignty/CLOUD-Act rules
 around rented + Confidential-Computing GPUs. Companion to
-[TOKEN_ECONOMICS.md](./TOKEN_ECONOMICS.md) (cost/pricing model), [SOVEREIGN_HOSTING.md](./SOVEREIGN_HOSTING.md)
-(rent-vs-own + capital), and [MODEL_RESEARCH.md](./MODEL_RESEARCH.md) (model facts).
+[TOKEN_ECONOMICS.md](./TOKEN_ECONOMICS.md) (cost/pricing model) and [MODEL_RESEARCH.md](./MODEL_RESEARCH.md)
+(model facts); buy-vs-rent + capital is covered here (§2), and per-tier self-host boxes in
+[MODEL_SELECTION.md §1.3](./MODEL_SELECTION.md).
 
 > **One-line thesis.** Utilization *is* the margin. An India-only coding agent runs GPUs ~8 h/day →
 > **~27% effective utilization**, at which **renting per-token beats owning**. You earn the right to
 > own by *aggregating uncorrelated demand* (models × timezones × workload-types × tenants) onto one
 > continuously-batched fleet. Cheap out-of-region rental is fine — but **only for non-customer-data
-> work**, because the US CLOUD Act reaches the *provider*, not you.
+> work**, because the US CLOUD Act reaches the *provider*, not you. And out-of-region is not even the
+> cost win it appears to be: **IndiaAI-subsidized in-region rental is the cheapest H100 anywhere *and*
+> keeps residency** (§2.1) — the cost-optimal path and the sovereign path are the same path.
 
 Figures are vendor/market data as of mid-2026 (sources §9); treat as directional, re-check before commitments.
 
@@ -56,6 +59,63 @@ effective 24×7 utilization ≈ 0.33 × 0.80 ≈ 27%.** At ~27%:
 
 > **econ verdict:** at ~27% util, **rent** (hosted per-token today). Only buy the tiers/hours you can
 > guarantee near-100% for 18+ months — which requires first building the demand in §4.
+
+### 2.1 In-region vs out-of-region rental — the price reality (2026)
+
+A common assumption is "out-of-region GPUs are cheaper, so host abroad." For econ that is **mostly
+false** — and where it's true, it isn't an India problem. Live single-H100 rates:
+
+| Source | H100 $/hr | H100 $/mo (730 h) | Residency | Notes |
+|---|---|---|---|---|
+| **India — IndiaAI Mission (subsidized)** | **$0.65–1.35** | **~$475–985** | ✅ India | Govt program; Indian AI startups eligible; ~38k GPUs live, 100k target 2026; **application- + capacity-gated** |
+| India — spot (E2E) | $0.82 | ~$600 | ✅ India | Interruptible, no SLA |
+| India — neocloud on-demand (NeevCloud/E2E/Cyfuture) | $2.25–2.93 | ~$1,640–2,140 | ✅ India | Transparent, available now |
+| India — reserved 3–12 mo | $1.53–2.12 | ~$1,120–1,550 | ✅ India | 40–50% off on-demand |
+| **Global — on-demand (Voltage Park/RunPod)** | **$1.99** | ~$1,450 | ❌ US | Cheapest reliable out-of-region |
+| Global — spot (Vast.ai/RunPod community) | $1.03–1.53 | ~$750–1,120 | ❌ US/EU | No SLA; **fails sovereignty (§6)** |
+| Global — reserved (Nebius) | $2.00 | ~$1,460 | ❌ EU/RU | 3–12 mo commit |
+| Hyperscaler (any region, incl. Mumbai) | $10–12.29 | ~$7,300–8,970 | varies | 4–6× neocloud everywhere — avoid |
+
+**The premise flips three ways:**
+
+1. **"Out-of-region is cheaper" is only true vs India *hyperscalers*** (AWS/Azure/GCP Mumbai) — and
+   hyperscalers are 4–6× overpriced in *every* region, so that's a hyperscaler tax, not an India tax.
+2. **India neoclouds sit within ~15–30% of the global cheapest on-demand** ($2.25 vs $1.99), and
+   **India spot ($0.82) beats global on-demand** — so leaving India buys little or nothing on raw cost.
+3. **IndiaAI-subsidized in-region ($0.65–1.35/hr) is the cheapest H100 in this whole table** — *and* it
+   satisfies residency. The cost-optimal path and the residency-correct path (§6) are the **same** path.
+
+So out-of-region rental trades away the residency differentiator (§6) for **cost parity at best** —
+incoherent for customer-data inference. It keeps its narrow, already-stated role: **non-customer-data
+work only** (own training / synth-data / evals — §6 + §4 lever 3).
+
+**Per-econ-box monthly cost** (tier boxes per [MODEL_SELECTION.md §1.3](./MODEL_SELECTION.md) — executor
+`gpt-oss-120b` on 1×H100; conductor/reasoner/oracle on 8×H100 *if* DeepSeek-V3/GLM-large-MoE class):
+
+| Box | IndiaAI subsidized | India neocloud on-demand | Global cheapest |
+|---|---|---|---|
+| **1×H100** (executor) | ~$475–985 | ~$1,640–2,140 | ~$1,450 on-demand / ~$750 spot |
+| **8×H100** (big tiers) | ~$3,800–7,900 | ~$13k–17.5k (mostly quote-only) | ~$11,700–13,900 reserved |
+
+Subsidized in-region roughly **halves-to-thirds** the 8×H100 node vs global reserved, and drops the
+executor's self-host break-even from ~3.0B (un-subsidized 1×H100) to **~1.2B (IndiaAI-subsidized) output
+tok/mo** (the region/box-parameterized model lives in `packages/code-intelligence/src/econ-cost.ts` —
+`HOSTING_SCENARIOS` + `selfHostFixedMonthlyUsd`, calibrated in `SELF_HOST_BREAK_EVEN_DEFAULTS`).
+
+**Caveats that decide the play:**
+
+- **IndiaAI subsidy is application- and capacity-gated** — treat $0.65–1.35 as "if we qualify + get
+  allocation," not a spot-buyable rate. **Validate eligibility + capacity first; it decides the hosting
+  strategy.**
+- **Spot fits the stateless executor tier only, not the conductor** — the conductor relies on
+  session-affinity KV-cache locality (~84% hit ratio); a spot eviction blows that cache.
+- **Domestic 8×H100 nodes are mostly quote-only** (Yotta/Sify/Tata/Jio/CtrlS don't publish); IndiaAI is
+  the realistic in-region path to an 8× box.
+
+> **econ verdict (2.1):** out-of-region is not a cost lever — it's a residency *cost*. Pursue
+> **IndiaAI-subsidized in-region** as the primary self-host path (cheapest *and* sovereign); use India
+> neocloud on-demand/reserved as the un-subsidized floor; reserve out-of-region spot for
+> non-customer-data batch only.
 
 ---
 
@@ -289,6 +349,15 @@ Buy vs rent: [buy-vs-rent decision guide (DigitalApplied)](https://www.digitalap
 [H100 cost + break-even (CloudZero)](https://www.cloudzero.com/blog/h100-gpu-cost/),
 [batch inference 10× cheaper (Spheron)](https://www.spheron.network/blog/batch-llm-inference-gpu-cloud/),
 [idle GPU monetization / Aethir](https://ecosystem.aethir.com/blog-posts/monetize-idle-gpus-in-2025-7-proven-strategies-for-cloud-hosts).
+
+In-region vs out-of-region rental (§2.1): [IndiaAI Mission compute capacity](https://indiaai.gov.in/hub/indiaai-compute-capacity),
+[IndiaAI subsidy per-GPU-hour rates (SME Futures)](https://smefutures.com/india-ai-mission-subsidy-rate-gpu-per-hour-service-provider/),
+[NVIDIA H100 price in India (HuggingFace)](https://huggingface.co/blog/daya-shankar/nvidia-h100-price-india),
+[GPU cloud India 2026 (Spheron)](https://www.spheron.network/blog/gpu-cloud-india-2026/),
+[E2E Networks pricing](https://www.e2enetworks.com/pricing), [Cyfuture GPU-as-a-service](https://cyfuture.ai/gpu-as-a-service),
+[H100 rental across 47+ providers (GetDeploying)](https://getdeploying.com/gpus/nvidia-h100),
+[H100 pricing July 2026 (Thunder Compute)](https://www.thundercompute.com/blog/nvidia-h100-pricing),
+[TensorDock H100 on-demand](https://www.tensordock.com/gpu-h100.html), [RunPod pricing](https://www.runpod.io/pricing).
 
 Sovereignty / CLOUD Act: [CLOUD Act FAQ (Cross-Border Data Forum)](https://www.crossborderdataforum.org/cloudactfaqs/),
 [CLOUD Act CRS R45173 (Congress.gov)](https://www.congress.gov/crs-product/R45173),

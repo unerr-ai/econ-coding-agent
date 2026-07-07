@@ -449,6 +449,147 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance(
+    "execute uses the subagent's own pinned model over the executor tier",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const promptOps = stubOps()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "pinned",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.model).toEqual({
+          providerID: ProviderV2.ID.make("pinned-provider"),
+          modelID: ModelV2.ID.make("pinned-model"),
+        })
+      }),
+    {
+      config: {
+        agent: {
+          executor: {
+            mode: "subagent",
+            model: "executor-provider/executor-model",
+          },
+          pinned: {
+            mode: "subagent",
+            model: "pinned-provider/pinned-model",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute falls back to the executor tier when the subagent has no pinned model",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const promptOps = stubOps()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "helper",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        // The lead (parent) session runs on `ref` (test/test-model); an
+        // unpinned subagent must resolve to the executor tier, not inherit
+        // that lead model.
+        expect(result.metadata.model).toEqual({
+          providerID: ProviderV2.ID.make("executor-provider"),
+          modelID: ModelV2.ID.make("executor-model"),
+        })
+      }),
+    {
+      config: {
+        agent: {
+          executor: {
+            mode: "subagent",
+            model: "executor-provider/executor-model",
+          },
+          helper: {
+            mode: "subagent",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute inherits the parent model when the subagent is unpinned and no executor agent is configured",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const promptOps = stubOps()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "helper",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.model).toEqual({
+          providerID: ref.providerID,
+          modelID: ref.modelID,
+        })
+      }),
+    {
+      config: {
+        agent: {
+          helper: {
+            mode: "subagent",
+          },
+        },
+      },
+    },
+  )
+
   it.instance("rejects background execution when the experiment is disabled", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()

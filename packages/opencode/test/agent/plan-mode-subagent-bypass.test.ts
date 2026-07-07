@@ -157,3 +157,60 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
     expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
   }),
 )
+
+// OL-9.3d: a project-wide `permission: { task: "allow" }` block (agent.ts merges it into
+// every agent as `user`) must not defeat the task/todowrite safety net for an agent that
+// never configured task/todowrite itself — that's exactly the persona/executor case.
+it.effect("a global permission.task allow does not defeat the safety-net deny for an unconfigured agent", () =>
+  Effect.sync(() => {
+    const globalPermission = Permission.fromConfig({ task: "allow" })
+    // Mirrors agent.ts building a persona/tier agent's base ruleset: the global block is
+    // merged in, and the agent declares no task override of its own.
+    const persona = testAgent({
+      name: "explorer",
+      mode: "subagent",
+      permission: { read: "allow", bash: "allow" },
+    })
+    persona.permission = Permission.merge(persona.permission, globalPermission)
+
+    const effective = Permission.merge(
+      persona.permission,
+      deriveSubagentSessionPermission({
+        parentSessionPermission: [],
+        subagent: persona,
+        globalPermission,
+      }),
+    )
+
+    expect(Permission.evaluate("task", "worker", effective).action).toBe("deny")
+  }),
+)
+
+it.effect("an agent's own task grant survives alongside a global permission.task allow", () =>
+  Effect.sync(() => {
+    const globalPermission = Permission.fromConfig({ task: "allow" })
+    // The conductor explicitly wants task on top of the global default — its own grant
+    // (added last, per agent.ts's merge order for custom agents) must still hold.
+    const conductor = testAgent({
+      name: "conductor",
+      mode: "primary",
+      permission: { read: "allow" },
+    })
+    conductor.permission = Permission.merge(
+      conductor.permission,
+      globalPermission,
+      Permission.fromConfig({ task: { worker: "allow" } }),
+    )
+
+    const effective = Permission.merge(
+      conductor.permission,
+      deriveSubagentSessionPermission({
+        parentSessionPermission: [],
+        subagent: conductor,
+        globalPermission,
+      }),
+    )
+
+    expect(Permission.evaluate("task", "worker", effective).action).toBe("allow")
+  }),
+)

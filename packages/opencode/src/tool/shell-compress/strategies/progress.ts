@@ -3,6 +3,8 @@
  * Ported from unerr-cli src/proxy/shell-strategies/progress.ts — no external deps.
  */
 
+import { isSalientLine } from "./salience"
+
 const KEEP_LAST = 18
 
 const SUMMARY_PATTERNS = [
@@ -51,12 +53,22 @@ export function compressProgress(text: string, command?: string): string {
     .find((l) => SUMMARY_PATTERNS.some((p) => p.test(l.trim())))
 
   if (summary) {
-    return summary.trim()
+    // Collapsing to just the summary would silently swallow an interleaved
+    // salient line (e.g. "ERROR: disk full" mid-install) — emit any such
+    // lines in place alongside the summary instead of dropping them.
+    const extra = lines.filter((l) => l !== summary && isSalientLine(l))
+    return extra.length > 0 ? [...extra, summary.trim()].join("\n") : summary.trim()
   }
 
   if (lines.length <= KEEP_LAST) {
     return text
   }
-  const tail = lines.slice(-KEEP_LAST).join("\n")
-  return `… ${lines.length - KEEP_LAST} progress line(s) omitted …\n${tail}`
+
+  const head = lines.slice(0, -KEEP_LAST)
+  const tail = lines.slice(-KEEP_LAST)
+  const headSalient = head.filter((l) => isSalientLine(l))
+  const omitted = head.length - headSalient.length
+  const headOut = headSalient.length > 0 ? `${headSalient.join("\n")}\n` : ""
+  const omittedLine = omitted > 0 ? `… ${omitted} progress line(s) omitted …\n` : ""
+  return `${headOut}${omittedLine}${tail.join("\n")}`
 }

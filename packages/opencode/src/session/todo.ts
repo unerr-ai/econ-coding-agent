@@ -8,6 +8,20 @@ import { TodoTable } from "@opencode-ai/core/session/sql"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 
+/**
+ * @deprecated This is the opencode-package-local SessionTodo, wired into the
+ * opencode server's LayerNode graph (app-runtime.ts, tool/registry.ts,
+ * server.ts) under the `@opencode/SessionTodo` tag and bridged onto the
+ * local EventV2Bridge event bus. `@opencode-ai/core/session/todo`
+ * (`@opencode/v2/SessionTodo`) is the actively-developed successor (OL-7.1
+ * typed decomposition fields), but it composes via `location-layer.ts`
+ * (LayerMap/`locationLayer`), not LayerNode, and publishes through core's
+ * own EventV2 rather than the bridge — redirecting this module's 6 runtime
+ * importers would mean re-deriving a LayerNode `node` for the core service
+ * and re-pointing the event bridge, which is DI-graph/architecture work,
+ * not a mechanical import swap. Kept in place until that unification lands;
+ * do not add new call sites — extend `@opencode-ai/core/session/todo` instead.
+ */
 export const Info = Schema.Struct({
   content: Schema.String.annotate({ description: "Brief description of the task" }),
   status: Schema.String.annotate({

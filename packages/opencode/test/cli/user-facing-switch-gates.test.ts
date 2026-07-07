@@ -5,8 +5,8 @@ import path from "path"
 /**
  * Guardrail: no USER-FACING model/agent switch entry point may reappear.
  *
- * The tier-router is the only thing allowed to pick a model/agent, and it is
- * internal (not exposed as a CLI flag, TUI command/keybind, or composer
+ * Model/agent selection is internal to econ (config default lead + slice-level
+ * allocation; not exposed as a CLI flag, TUI command/keybind, or composer
  * control). If any of these assertions fail, a regression re-introduced a
  * user-facing switch surface — fix the regression, do not weaken this test.
  *

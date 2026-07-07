@@ -54,6 +54,13 @@ export const Flag = {
   get OPENCODE_DISABLE_PROJECT_CONFIG() {
     return truthy("OPENCODE_DISABLE_PROJECT_CONFIG")
   },
+  // econ: opt out of the built-in econ tier defaults (the base config layer). Truthy → the agent
+  // behaves as vanilla OpenCode (native build/plan agents, no tier pins). Left unset in real runs so
+  // econ ships its cost-routing surface from any cwd; the inherited engine test harness sets it so
+  // those tests keep exercising OpenCode-native agent mechanics. Access-time so tests can toggle it.
+  get ECON_DISABLE_DEFAULT_CONFIG() {
+    return truthy("ECON_DISABLE_DEFAULT_CONFIG")
+  },
   get OPENCODE_EXPERIMENTAL_REFERENCES() {
     return enabledByExperimental("OPENCODE_EXPERIMENTAL_REFERENCES")
   },

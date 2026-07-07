@@ -14,3 +14,6 @@ Usage notes:
 - Pass `startLine`/`endLine` (1-indexed, inclusive) to pull back a slice
   instead of the whole retained body, when you only need part of a large
   result.
+- Omitting `messageID`/`partID` returns the most recently masked tool output
+  in this session instead of erroring, so a malformed or missing pointer
+  still recovers useful context.

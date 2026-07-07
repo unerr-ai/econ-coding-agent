@@ -1,0 +1,34 @@
+# econ LiteLLM gateway — Fly.io app (Sprint OL-8, docs/features/08-litellm-gateway.md).
+# Org: vamsee-k-933 (team space) · Region: bom (Mumbai) — in-region egress control.
+app = "econ-litellm"
+# bom (Mumbai) is the target region but had no machine capacity on 2026-07-04 (tried
+# shared-cpu-2x/2gb and 1x/1gb). sin is the nearest fallback; move back with
+# `fly scale count 1 --region bom` when capacity returns. Residency is unaffected today —
+# the gateway proxies to US-hosted Fireworks either way.
+primary_region = "sin"
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 4000
+force_https = true
+# The gateway is on econ's every-turn hot path — never scale to zero.
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+
+# LiteLLM boots slowly — the docs' own k8s probes allow 120s initial delay; a short
+# grace period gets machines killed mid-boot.
+[[http_service.checks]]
+interval = "15s"
+timeout = "5s"
+grace_period = "120s"
+method = "GET"
+path = "/health/liveliness"
+
+# 2gb is a hard floor: on 1gb LiteLLM OOM-boot-looped (~870MB RSS at startup,
+# kernel SIGKILL — verified in fly logs 2026-07-04).
+[[vm]]
+size = "shared-cpu-2x"
+memory = "2gb"

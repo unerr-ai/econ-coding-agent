@@ -3,6 +3,8 @@ import * as Http from "node:http"
 import { Deferred, Effect, Layer, Context, Stream } from "effect"
 import * as HttpServer from "effect/unstable/http/HttpServer"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+import { TRIAGE_PROMPT_MARKER } from "../../src/session/turn-triage"
+import { TITLE_GENERATION_PROMPT_MARKER } from "../../src/session/prompt"
 
 export type Usage = { input: number; output: number }
 
@@ -606,7 +608,13 @@ function hit(url: string, body: unknown) {
 
 function isTitleRequest(body: unknown): boolean {
   if (!body || typeof body !== "object") return false
-  return JSON.stringify(body).includes("Generate a title for this conversation")
+  return JSON.stringify(body).includes(TITLE_GENERATION_PROMPT_MARKER)
+}
+
+/** Turn-open turn-triage call (§4.1) — detected by the extractor's stable system-prompt prefix so it can be answered out-of-band, same as a title call. */
+function isTriageRequest(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false
+  return JSON.stringify(body).includes(TRIAGE_PROMPT_MARKER)
 }
 
 namespace TestLLMServer {
@@ -672,14 +680,20 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
       const handle = Effect.fn("TestLLMServer.handle")(function* (mode: "chat" | "responses") {
         const req = yield* HttpServerRequest.HttpServerRequest
         const body = yield* req.json.pipe(Effect.orElseSucceed(() => ({})))
-        const current = hit(req.originalUrl, body)
-        if (isTitleRequest(body)) {
-          hits = [...hits, current]
-          yield* notify()
-          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
+        // Turn-open housekeeping calls (turn-triage, session title) are answered
+        // out-of-band: no queue dequeue, no hits/inputs/calls recording — they
+        // run ahead of every scripted turn and would otherwise shift it off by one.
+        if (isTriageRequest(body)) {
+          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("turn-open-stub"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
           return send(auto)
         }
+        if (isTitleRequest(body)) {
+          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("test session"), finishLine("stop")] }
+          if (mode === "responses") return send(responses(auto, modelFrom(body)))
+          return send(auto)
+        }
+        const current = hit(req.originalUrl, body)
         const next = pull(current)
         if (!next) {
           hits = [...hits, current]

@@ -35,6 +35,8 @@ export interface Entity {
   domain?: string
   /** Semantic role tag from a `@sem role=<tag>` annotation in the entity's doc comment. */
   role?: string
+  /** Prose summary from the entity's doc comment (what + why); undefined when empty or a name-echo. */
+  summary?: string
 }
 
 /** A directed reference edge between two entities or files. */
@@ -170,7 +172,7 @@ export interface CodeIntelligence {
 // Re-exports for consumers
 // ---------------------------------------------------------------------------
 export { BunSqliteGraph } from "./bun-sqlite-graph.js"
-export { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool } from "./tools.js"
+export { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool } from "./tools.js"
 export type { GraphToolDef } from "./tools.js"
 
 // econ S3.1: risk scoring
@@ -200,11 +202,32 @@ export {
 // Router/oracle decision surface — the modules feeding routeTurn's hooks and the
 // oracle escalation path. (S2 compression modules stay path-internal to the plugins.)
 export * from "./abstention.js"
+export * from "./allocation.js"
+export * from "./qe.js"
+export * from "./verifier.js"
+export * from "./plan-reasoning.js"
 export * from "./triage.js"
 export * from "./reasoner.js"
 export * from "./brief.js"
 export * from "./double-pay.js"
 export * from "./model-registry.js"
+export * from "./rm-verifier.js"
+export * from "./judge.js"
+export * from "./compose-rungs.js"
+export * from "./slice-loop.js"
+export * from "./evaluator.js"
+export * from "./cache-switch.js"
+
+// econ OL-7.7: retrieval-augmented slice wiring — deterministic graph facts
+// (callers/blast-radius, entity summaries, signatures) woven into a slice's
+// child-session brief, hard token-capped.
+export {
+  assembleSliceWiring,
+  DEFAULT_WIRING_TOKEN_BUDGET,
+  type SliceWiringGraph,
+  type SliceWiringInput,
+  type SliceWiringResult,
+} from "./slice-wiring.js"
 
 // econ S4.3 specialists · S4.2/S4.4 fan-out
 export {
@@ -223,7 +246,7 @@ export {
   BATCH_THEN_FANOUT_RULE,
   isReadOnly,
   callsConflict,
-  planWaves,
+  planFanoutWaves,
   isSingleWave,
   type FanoutCall,
 } from "./fanout.js"
@@ -279,18 +302,21 @@ export { detectConventions, type ConventionRule, type ConventionDetector } from 
 export { decayConfidence, DEFAULT_DECAY_CONFIG, type DecayConfig } from "./decay.js"
 export { buildResumeStrip, type SessionStateLike, type ResumeStrip } from "./continuity.js"
 
-// econ S7.1 telemetry · S7.3 savings receipt (the proof surface)
+// econ S7.1 telemetry · S7.3 usage receipt (the proof surface)
 // econ AC-5.2 efficiency metrics loop (tokens-per-task, re-read rate, post-compaction signal)
 export {
   TelemetryStore,
   emitUsageEvent,
   installUsageSink,
   inferTier,
+  tierFromAgent,
+  attributeTier,
   EfficiencyMetrics,
   type UsageEvent,
   type UsageEventTokens,
   type UsageTier,
   type UsageTotals,
+  type TierUsage,
   type StatusSnapshot,
   type RawUsage,
   type EfficiencyMetricsSnapshot,
@@ -299,10 +325,12 @@ export {
 export {
   buildReceipt,
   formatReceipt,
-  type SavingsReceipt,
+  type EconReceipt,
   type ReceiptInput,
   type ReceiptCatch,
-  type FrontierBaseline,
+  type ReceiptGoal,
+  type ReceiptEvaluation,
+  type ReceiptContainment,
   type TierSplitRow,
 } from "./receipt.js"
 // econ AC-0.4 cache-hit-rate meter + AC-8.4 per-tier rollup / cross-tier transitions

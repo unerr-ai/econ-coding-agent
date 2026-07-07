@@ -1,0 +1,90 @@
+# econ LiteLLM gateway config — Sprint OL-8 (docs/features/08-litellm-gateway.md).
+#
+# Dumb-pipe stance: model_name entries are econ's VERBATIM model ids (they must match
+# ECON_MODELS keys in packages/code-intelligence/src/model-registry.ts — drift-tested in
+# OL-8.B2); no router fallbacks or aliasing that could substitute models. Tier routing is
+# econ's product, not the gateway's.
+#
+# Fireworks deployment slugs verified live against the API on 2026-07-04 (OL-8.A2):
+# each answered a direct completion, and glm-5p2's usage carried
+# prompt_tokens_details.cached_tokens (the A3 passthrough prerequisite).
+
+# Per-model pricing (2026-07-06): litellm's default fireworks_ai cost map has no
+# cache-read rates, so response-cost/key-spend priced cold and fully-cached hops
+# identically (v3 probe: discount-amount 0.0 on a 6.5k-token 100%-cached hop).
+# These per-token rates MIRROR ECON_COST_MATRIX (econ-cost.ts, USD per 1M ÷ 1e6)
+# — that matrix is the source of truth and the OL-8.B2 drift test asserts this
+# file never diverges from it. cache_read_input_token_cost is what activates
+# litellm's cached-token discount.
+model_list:
+  - model_name: deepseek/deepseek-v4-flash
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/deepseek-v4-flash
+      api_key: os.environ/FIREWORKS_API_KEY
+      # Fireworks priority tier (2026-07-06): dedicated capacity / faster tokens for
+      # the two hot-path tiers (conductor + executor). Forwarded verbatim to the
+      # provider (drop_params: false). Pricing impact, if any, is settled by the
+      # ECON_COST_MATRIX mirror above — revisit rates if Fireworks bills priority differently.
+      service_tier: "priority"
+      input_cost_per_token: 0.00000014
+      output_cost_per_token: 0.00000028
+      cache_read_input_token_cost: 0.00000003
+    model_info:
+      input_cost_per_token: 0.00000014
+      output_cost_per_token: 0.00000028
+      cache_read_input_token_cost: 0.00000003
+
+  - model_name: z-ai/glm-5.2
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/glm-5p2
+      api_key: os.environ/FIREWORKS_API_KEY
+      input_cost_per_token: 0.0000014
+      output_cost_per_token: 0.0000044
+      cache_read_input_token_cost: 0.00000014
+    model_info:
+      input_cost_per_token: 0.0000014
+      output_cost_per_token: 0.0000044
+      cache_read_input_token_cost: 0.00000014
+
+  - model_name: deepseek/deepseek-v4-pro
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/deepseek-v4-pro
+      api_key: os.environ/FIREWORKS_API_KEY
+      input_cost_per_token: 0.00000174
+      output_cost_per_token: 0.00000348
+      cache_read_input_token_cost: 0.00000015
+    model_info:
+      input_cost_per_token: 0.00000174
+      output_cost_per_token: 0.00000348
+      cache_read_input_token_cost: 0.00000015
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/gpt-oss-120b
+      api_key: os.environ/FIREWORKS_API_KEY
+      # Fireworks priority tier — see the conductor entry's comment.
+      service_tier: "priority"
+      input_cost_per_token: 0.00000015
+      output_cost_per_token: 0.0000006
+      cache_read_input_token_cost: 0.00000001
+    model_info:
+      input_cost_per_token: 0.00000015
+      output_cost_per_token: 0.0000006
+      cache_read_input_token_cost: 0.00000001
+
+litellm_settings:
+  # Pass request params through untouched — reasoning-effort pins ride the request from econ
+  # (executor/oracle models must never see reasoning-off; registry wrn).
+  drop_params: false
+  num_retries: 2 # same-deployment retries only; never a different model
+
+# Deliberately empty: no fallbacks, no load-balancing groups, no model substitution.
+router_settings: {}
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Debugging visibility (2026-07-04): persist request/response bodies into the
+  # DB-backed spend logs so the /ui Logs page shows full prompts. Deliberately
+  # NOT store_model_in_db — models stay config-file-owned (dumb-pipe stance
+  # above); a UI-editable model list could drift from the OL-8.B2 drift test.
+  store_prompts_in_spend_logs: true

@@ -21,6 +21,13 @@ export interface ClassifyResult {
   category: OutputCategory
   confidence: number
   hint_source: HintSource
+  /**
+   * Count of non-silent segments (&&/||/;/|-split) in the source command.
+   * >1 means a composite command whose interleaved output a single category
+   * would misrepresent — callers should route those to a dedup-only fallback
+   * instead of a single lossy strategy.
+   */
+  non_silent_segments: number
 }
 
 /** Normalized substring → category (longest match wins in lookup). */
@@ -991,12 +998,16 @@ function matchPrefixHint(seg: string): { category: OutputCategory; key: string }
   return best ? { category: best.category, key: best.key } : null
 }
 
-export function matchCommandHint(cmd: string): { category: OutputCategory; key: string } | null {
+function splitCommandSegments(cmd: string): string[] {
   const n = normalizeShellCommand(cmd)
-  const segments = n
+  return n
     .split(/\s*(?:&&|\|\||;|\|)\s*/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
+}
+
+export function matchCommandHint(cmd: string): { category: OutputCategory; key: string } | null {
+  const segments = splitCommandSegments(cmd)
 
   if (segments.length === 0) return null
 
@@ -1015,7 +1026,16 @@ export function matchCommandHint(cmd: string): { category: OutputCategory; key: 
   return null
 }
 
-function scoreContent(lines: string[]): { category: OutputCategory; score: number } | null {
+/**
+ * Count non-silent segments in a (possibly composite) shell command, split
+ * the same way matchCommandHint splits on &&/||/;/|. >1 signals a composite
+ * command whose interleaved output a single category would misrepresent.
+ */
+export function countNonSilentSegments(cmd: string): number {
+  return splitCommandSegments(cmd).filter((seg) => !isSilentSegment(seg)).length
+}
+
+export function scoreContent(lines: string[]): { category: OutputCategory; score: number } | null {
   const sample = lines.slice(0, 20).join("\n")
   let best: { category: OutputCategory; score: number } | null = null
 
@@ -1121,6 +1141,7 @@ export function classifyShellOutput(command: string, strippedStdout: string): Cl
   const head = strippedStdout.split("\n").slice(0, 20)
   const hint = matchCommandHint(command)
   const content = scoreContent(head)
+  const nonSilentSegments = countNonSilentSegments(command)
 
   if (hint) {
     const agree = content && content.category === hint.category
@@ -1130,18 +1151,34 @@ export function classifyShellOutput(command: string, strippedStdout: string): Cl
       content.score >= 0.85 &&
       PASSTHROUGH_COMMANDS.has(hint.key.split(" ")[0] ?? "")
     ) {
-      return { category: content.category, confidence: content.score, hint_source: "content_heuristic" }
+      return {
+        category: content.category,
+        confidence: content.score,
+        hint_source: "content_heuristic",
+        non_silent_segments: nonSilentSegments,
+      }
     }
     return {
       category: hint.category,
       confidence: agree ? CONFIDENCE_BOTH : CONFIDENCE_HINT,
       hint_source: agree ? "both" : "command_name",
+      non_silent_segments: nonSilentSegments,
     }
   }
 
   if (content) {
-    return { category: content.category, confidence: Math.min(0.88, content.score), hint_source: "content_heuristic" }
+    return {
+      category: content.category,
+      confidence: Math.min(0.88, content.score),
+      hint_source: "content_heuristic",
+      non_silent_segments: nonSilentSegments,
+    }
   }
 
-  return { category: "structured", confidence: 0.42, hint_source: "content_heuristic" }
+  return {
+    category: "structured",
+    confidence: 0.42,
+    hint_source: "content_heuristic",
+    non_silent_segments: nonSilentSegments,
+  }
 }

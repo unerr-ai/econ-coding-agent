@@ -39,6 +39,8 @@ export interface AnchoredNote {
   polarity: Polarity
   content: string
   confidence?: number
+  /** Set by a graph's index() ghost-file sweep when the note's f:<path> anchor points to a file no longer on disk. Absent/false for a note whose anchor is still current. */
+  stale?: boolean
 }
 
 /**

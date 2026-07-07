@@ -22,3 +22,8 @@ export class ModelRouter {
 
 /** No @sem annotation — domain/role should be undefined in the graph. */
 export function unannotated(): void {}
+
+/** normalize path */
+export function normalizePath(fp: string): string {
+  return fp
+}

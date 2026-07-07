@@ -45,7 +45,7 @@ export interface FanoutCall {
 // ---------------------------------------------------------------------------
 
 /**
- * The batch-then-fan-out rule, as enforced by `planWaves`. Surfaced as a
+ * The batch-then-fan-out rule, as enforced by `planFanoutWaves`. Surfaced as a
  * constant so it can be cited in prompts, docs, and logs.
  */
 export const BATCH_THEN_FANOUT_RULE =
@@ -95,7 +95,7 @@ export function callsConflict(a: FanoutCall, b: FanoutCall): boolean {
  *
  * @sem domain=routing role=analysis
  */
-export function planWaves(calls: FanoutCall[]): FanoutCall[][] {
+export function planFanoutWaves(calls: FanoutCall[]): FanoutCall[][] {
   const waves: FanoutCall[][] = []
   for (const call of calls) {
     let placed = false
@@ -113,10 +113,10 @@ export function planWaves(calls: FanoutCall[]): FanoutCall[][] {
 
 /**
  * True when every call in the set is mutually independent — i.e. the whole set
- * runs as a single fan-out wave. A convenience over `planWaves(calls).length`.
+ * runs as a single fan-out wave. A convenience over `planFanoutWaves(calls).length`.
  *
  * @sem domain=routing role=analysis
  */
 export function isSingleWave(calls: FanoutCall[]): boolean {
-  return planWaves(calls).length <= 1
+  return planFanoutWaves(calls).length <= 1
 }

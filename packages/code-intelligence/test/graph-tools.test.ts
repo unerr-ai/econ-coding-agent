@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
 import { BunSqliteGraph } from "../src/bun-sqlite-graph.js"
-import { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool } from "../src/tools.js"
+import { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool } from "../src/tools.js"
 
 const FIXTURE_DIR = join(import.meta.dir, "fixture")
 
@@ -345,6 +345,20 @@ describe("Graph tools — execute() interface smoke test", () => {
     expect(typeof first.preview).toBe("string")
   })
 
+  it("caller_count dedupes an import edge + a call edge from the same file to 1 (a.ts greet ← c.ts)", async () => {
+    // c.ts imports greet from a.ts AND calls it inside main() — one caller
+    // file, one dependency, must count as 1 not 2.
+    const tool = makeSearchCodeTool(graph, FIXTURE_DIR)
+    const raw = await tool.execute({ query: "greet", mode: "symbol" })
+    const entities = JSON.parse(raw)
+
+    const aGreet = entities.find(
+      (e: { name: string; filePath: string }) => e.name === "greet" && e.filePath.includes("a.ts"),
+    )
+    expect(aGreet).toBeDefined()
+    expect(aGreet.caller_count).toBe(1)
+  })
+
   // -------------------------------------------------------------------------
   // Sprint 2B: notes store — upsertNote + getNotesForAnchors + recon notes
   // -------------------------------------------------------------------------
@@ -398,5 +412,175 @@ describe("Graph tools — execute() interface smoke test", () => {
     )
     expect(match).toBeDefined()
     expect(match.content).toBe("always use greet for user-facing strings")
+  })
+
+  // -------------------------------------------------------------------------
+  // Task #14: note_save tool — validates + calls graph.upsertNote
+  // -------------------------------------------------------------------------
+
+  it("note_save id is note_save", () => {
+    const tool = makeNoteSaveTool(graph)
+    expect(tool.id).toBe("note_save")
+  })
+
+  it("note_save wire string round-trips through getNotesForAnchors", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "rul|f:note-save-wire.ts|-|no direct db access" })
+
+    expect(result).not.toMatch(/^Invalid note/)
+    expect(result).toContain("rul")
+    expect(result).toContain("f:note-save-wire.ts")
+
+    const notes = await graph.getNotesForAnchors(["f:note-save-wire.ts"])
+    expect(notes.length).toBeGreaterThanOrEqual(1)
+    const saved = notes.find((n) => n.content === "no direct db access")
+    expect(saved).toBeDefined()
+    expect(saved!.kind).toBe("rul")
+    expect(saved!.polarity).toBe("-")
+  })
+
+  it("note_save structured input works", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({
+      kind: "fct",
+      anchor: "e:someEntity",
+      polarity: "~",
+      content: "surfaced via structured fields",
+    })
+
+    expect(result).not.toMatch(/^Invalid note/)
+
+    const notes = await graph.getNotesForAnchors(["e:someEntity"])
+    expect(notes.length).toBeGreaterThanOrEqual(1)
+    const saved = notes.find((n) => n.content === "surfaced via structured fields")
+    expect(saved).toBeDefined()
+    expect(saved!.kind).toBe("fct")
+    expect(saved!.polarity).toBe("~")
+  })
+
+  it("note_save rejects an invalid kind and persists nothing", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "bogus|f:note-save-badkind.ts|+|should not persist" })
+
+    expect(result).toMatch(/^Invalid note/)
+    expect(result).toContain("kind")
+
+    const notes = await graph.getNotesForAnchors(["f:note-save-badkind.ts"])
+    expect(notes.length).toBe(0)
+  })
+
+  it("note_save rejects a malformed anchor and persists nothing", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "rul|x:not-a-real-prefix|+|should not persist" })
+
+    expect(result).toMatch(/^Invalid note/)
+    expect(result).toContain("anchor")
+
+    const notes = await graph.getNotesForAnchors(["x:not-a-real-prefix"])
+    expect(notes.length).toBe(0)
+  })
+
+  it("note_save rejects an empty f: anchor suffix and persists nothing", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "rul|f:|+|should not persist" })
+
+    expect(result).toMatch(/^Invalid note/)
+
+    const notes = await graph.getNotesForAnchors(["f:"])
+    expect(notes.length).toBe(0)
+  })
+
+  it("note_save rejects an invalid polarity and persists nothing", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "rul|f:note-save-badpolarity.ts|*|should not persist" })
+
+    expect(result).toMatch(/^Invalid note/)
+    expect(result).toContain("polarity")
+
+    const notes = await graph.getNotesForAnchors(["f:note-save-badpolarity.ts"])
+    expect(notes.length).toBe(0)
+  })
+
+  it("note_save preserves content with extra pipes intact", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({
+      note: "dec|f:note-save-pipes.ts|+|use A|B as the separator, not A or B alone",
+    })
+
+    expect(result).not.toMatch(/^Invalid note/)
+
+    const notes = await graph.getNotesForAnchors(["f:note-save-pipes.ts"])
+    const saved = notes.find((n) => n.anchor === "f:note-save-pipes.ts")
+    expect(saved).toBeDefined()
+    expect(saved!.content).toBe("use A|B as the separator, not A or B alone")
+  })
+
+  it("note_save accepts a bare p: (project-wide) anchor", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({ note: "fct|p:|+|project-wide fact" })
+
+    expect(result).not.toMatch(/^Invalid note/)
+    const notes = await graph.getNotesForAnchors(["p:"])
+    expect(notes.some((n) => n.content === "project-wide fact")).toBe(true)
+  })
+
+  it("note_save with neither wire string nor structured fields returns an error", async () => {
+    const tool = makeNoteSaveTool(graph)
+    const result = await tool.execute({})
+    expect(result).toMatch(/^Invalid note/)
+  })
+})
+
+describe("Graph tools — same-named entity in two files (fixture-dup)", () => {
+  const DUP_FIXTURE_DIR = join(import.meta.dir, "fixture-dup")
+  let dupGraph: BunSqliteGraph
+
+  beforeAll(async () => {
+    dupGraph = new BunSqliteGraph(":memory:", DUP_FIXTURE_DIR)
+    const stats = await dupGraph.index(DUP_FIXTURE_DIR)
+    expect(stats.files).toBeGreaterThanOrEqual(4)
+  })
+
+  afterAll(() => dupGraph.close())
+
+  it("search_code symbol mode returns both same-named entities with their own caller_count", async () => {
+    const tool = makeSearchCodeTool(dupGraph, DUP_FIXTURE_DIR)
+    const raw = await tool.execute({ query: "greet", mode: "symbol" })
+    const entities = JSON.parse(raw)
+
+    const named = entities.filter((e: { name: string }) => e.name === "greet")
+    expect(named.length).toBe(2)
+
+    const xGreet = named.find((e: { filePath: string }) => e.filePath.includes("x.ts"))
+    const yGreet = named.find((e: { filePath: string }) => e.filePath.includes("y.ts"))
+    expect(xGreet).toBeDefined()
+    expect(yGreet).toBeDefined()
+
+    expect(xGreet.caller_count).toBe(1)
+    expect(yGreet.caller_count).toBe(1)
+  })
+
+  it("get_references by full key never leaks the other same-named entity's callers", async () => {
+    const searchTool = makeSearchCodeTool(dupGraph, DUP_FIXTURE_DIR)
+    const raw = await searchTool.execute({ query: "greet", mode: "symbol" })
+    const entities = JSON.parse(raw)
+    const xGreet = entities.find(
+      (e: { name: string; filePath: string }) => e.name === "greet" && e.filePath.includes("x.ts"),
+    )
+    const yGreet = entities.find(
+      (e: { name: string; filePath: string }) => e.name === "greet" && e.filePath.includes("y.ts"),
+    )
+
+    const refTool = makeGetReferencesTool(dupGraph, DUP_FIXTURE_DIR)
+
+    const xRaw = await refTool.execute({ entity: xGreet.key, direction: "callers" })
+    const xRefs = JSON.parse(xRaw)
+    expect(xRefs.length).toBeGreaterThan(0)
+    expect(xRefs.every((r: { fromFile: string }) => r.fromFile.includes("callerX.ts"))).toBe(true)
+
+    const yRaw = await refTool.execute({ entity: yGreet.key, direction: "callers" })
+    const yRefs = JSON.parse(yRaw)
+    expect(yRefs.length).toBeGreaterThan(0)
+    expect(yRefs.every((r: { fromFile: string }) => r.fromFile.includes("callerY.ts"))).toBe(true)
   })
 })

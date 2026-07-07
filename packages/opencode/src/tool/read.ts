@@ -9,14 +9,19 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
-import { ensureGraphReady } from "./graph-tools"
+import { ensureGraphReadyBounded } from "./graph-tools"
 import { makeFileReadTool } from "@opencode-ai/code-intelligence"
-import { withMeta, recordToolCall } from "./_shared"
+import {
+  withMeta,
+  recordToolCall,
+  checkReadDedup,
+  IncrementalLineHasher,
+  READ_MAX_LINE_LENGTH as MAX_LINE_LENGTH,
+  READ_MAX_BYTES as MAX_BYTES,
+} from "./_shared"
 
 const DEFAULT_READ_LIMIT = 2000
-const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
@@ -41,6 +46,9 @@ export const Parameters = Schema.Struct({
       "Optional entity name or key. If provided, returns that entity's profile (signature, kind, " +
       "line range) from the in-process code graph instead of raw file content. Falls back to a " +
       "normal raw read of the file when the entity isn't in the graph.",
+  }),
+  force: Schema.optional(Schema.Boolean).annotate({
+    description: "Return the full content even if this exact read was already delivered this session.",
   }),
 })
 
@@ -147,6 +155,13 @@ export const ReadTool = Tool.define<
       const start = opts.offset - 1
       const raw: string[] = []
       const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+      // Incremental whole-file hash for the read-dedup guard's subset match — every
+      // line the stream sees (not just the delivered slice) feeds the hasher, so the
+      // digest identifies the file's content independent of the requested offset/limit.
+      // Shared with write.ts's seedReadDedup (see _shared/read-dedup.ts) so a hash
+      // computed here and one computed from a just-written file's content agree
+      // byte-for-byte.
+      const hasher = new IncrementalLineHasher()
 
       // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
       // ends without flushing, decodeText drops the final unterminated line. We also
@@ -160,6 +175,7 @@ export const ReadTool = Tool.define<
         Stream.runForEach((text) =>
           Effect.gen(function* () {
             if (flags.done) return yield* new ReadStop()
+            hasher.update(text)
             flags.count += 1
             if (flags.count <= start) return
 
@@ -185,7 +201,14 @@ export const ReadTool = Tool.define<
         Effect.catchTag("ReadStop", () => Effect.void),
       )
 
-      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
+      return {
+        raw,
+        count: flags.count,
+        cut: flags.cut,
+        more: flags.more,
+        offset: opts.offset,
+        fileHash: hasher.digest(),
+      }
     })
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
@@ -270,13 +293,16 @@ export const ReadTool = Tool.define<
 
       // econ graph-aware read (Sprint 6.1): when `entity` is supplied, return that entity's
       // profile (signature / kind / line range) from the in-process code graph instead of the raw
-      // file. Placed after the read-permission gate so it honors the same permissions; on a graph
-      // miss (entity absent, or daemon not yet indexed) it falls through to the full raw read below,
-      // so the call always succeeds. Records an econ meter entry on the graph path.
+      // file. Placed after the read-permission gate so it honors the same permissions; bounded on
+      // the initial index (ensureGraphReadyBounded) so a cold graph can't stall this call — on a
+      // graph miss (entity absent, not ready yet, or index still running) it falls through to the
+      // full raw read below, so the call always succeeds. Records an econ meter entry on the graph path.
       if (params.entity) {
         const profile = yield* Effect.promise(() =>
-          ensureGraphReady().then((graph) =>
-            makeFileReadTool(graph, instance.directory).execute({ path: filepath, entity: params.entity }),
+          ensureGraphReadyBounded().then(({ graph, ready }) =>
+            ready
+              ? makeFileReadTool(graph, instance.directory).execute({ path: filepath, entity: params.entity })
+              : undefined,
           ),
         ).pipe(Effect.catch(() => Effect.succeed<string | undefined>(undefined)))
         if (profile && !profile.startsWith("Entity not found in graph:")) {
@@ -288,7 +314,7 @@ export const ReadTool = Tool.define<
             metadata: { preview: profile.slice(0, 200), truncated: false, loaded: [filepath] },
           }
         }
-        // entity not in graph → fall through to the raw read below (raw fallback).
+        // entity not in graph, or graph not ready yet → fall through to the raw read below (raw fallback).
       }
 
       if (!stat) return yield* miss(filepath)
@@ -386,6 +412,30 @@ export const ReadTool = Tool.define<
 
       if (loaded.length > 0) {
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+      }
+
+      // econ read-dedup guard: a requested range that is a subset of an
+      // already-delivered range of the same unchanged file (an exact repeat
+      // included) returns a short notice instead of re-delivering the body,
+      // saving the round-trip. `force` bypasses and refreshes the memo; a
+      // changed file naturally misses the stored fileHash.
+      const dedup = checkReadDedup({
+        sessionID: ctx.sessionID,
+        filePath: filepath,
+        start: file.offset,
+        end: last + 1,
+        fileHash: file.fileHash,
+        force: params.force,
+      })
+      if (dedup.hit) {
+        const notice = dedup.exact
+          ? `[econ-ctx] ${title} (lines ${file.offset}-${last}) already delivered earlier this session, unchanged — reuse the prior read. Pass force:true if it is no longer in your context.`
+          : `[econ-ctx] ${title} (lines ${file.offset}-${last}) already delivered within an earlier read this session (lines ${dedup.covering!.start}-${dedup.covering!.end - 1}), unchanged — reuse the prior read. Pass force:true if it is no longer in your context.`
+        return {
+          title,
+          output: notice,
+          metadata: { preview: notice, truncated: false, loaded: loaded.map((item) => item.filepath) },
+        }
       }
 
       return {

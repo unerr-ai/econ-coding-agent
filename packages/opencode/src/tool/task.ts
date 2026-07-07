@@ -10,10 +10,18 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Permission } from "@/permission"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import {
+  assembleSliceWiring,
+  DEFAULT_WIRING_TOKEN_BUDGET,
+  type SliceWiringGraph,
+  type SliceWiringInput,
+} from "@opencode-ai/code-intelligence"
+import { getGraph } from "./graph-tools"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -21,7 +29,68 @@ export interface TaskPromptOps {
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
 }
 
+/**
+ * Minimal structural shape for slice metadata that may ride along on a task
+ * spawn's `ctx.extra.sliceMetadata` (sliceType, target files/entities,
+ * external unknowns). Deliberately NOT imported from the todo tool's own
+ * schema — that schema is owned by a parallel workstream — so any
+ * shape-compatible object works here without a build-time coupling.
+ */
+export interface TaskSliceMetadata {
+  readonly sliceType?: string
+  readonly files?: readonly string[]
+  readonly entities?: readonly string[]
+  readonly externalUnknowns?: readonly string[]
+}
+
 const id = "task"
+
+/**
+ * Hard cap on graph access inside buildChildPrompt. A cold/slow graph must
+ * never delay a child spawn — the race in buildChildPrompt falls back to the
+ * unwired prompt once this elapses, regardless of what the graph is doing.
+ */
+const SLICE_WIRING_GRAPH_BUDGET_MS = 500
+
+/**
+ * OL-7.7: append a compact deterministic-wiring section (callers/blast
+ * radius, signatures) to the child prompt when the spawn carries slice
+ * metadata, so the child doesn't have to re-guess the coupling. Graph access
+ * is capped at SLICE_WIRING_GRAPH_BUDGET_MS so a cold/slow graph never delays the spawn
+ * past that bound, and degrades silently to the prompt unchanged on any
+ * timeout, error, missing metadata, or empty wiring.
+ *
+ * @sem domain=infrastructure role=digest
+ */
+export async function buildChildPrompt(
+  prompt: string,
+  slice: TaskSliceMetadata | undefined,
+  graph: SliceWiringGraph = getGraph(),
+): Promise<string> {
+  if (!slice) return prompt
+  try {
+    const input: SliceWiringInput = {
+      text: prompt,
+      files: slice.files,
+      entities: slice.entities,
+      externalUnknowns: slice.externalUnknowns,
+      tokenBudget: DEFAULT_WIRING_TOKEN_BUDGET,
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const budget = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), SLICE_WIRING_GRAPH_BUDGET_MS)
+    })
+    try {
+      const raced = await Promise.race([assembleSliceWiring(input, graph), budget])
+      if (raced === "timeout" || !raced.text) return prompt
+      return [prompt, raced.text].join("\n\n")
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  } catch {
+    return prompt
+  }
+}
 const BACKGROUND_DESCRIPTION = [
   "Background mode: background=true launches the subagent asynchronously and returns immediately.",
   "Foreground is the default; use it when you need the result before continuing.",
@@ -250,6 +319,10 @@ export const TaskTool = Tool.define(
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
+        // OL-9.3d: exclude rules that only exist because the project's global
+        // `permission` block turned them on for every agent — a persona/tier
+        // agent that never configured task/todowrite itself stays denied.
+        globalPermission: Permission.fromConfig(cfg.permission ?? {}),
       })
       const childToolDenies = [
         ...(next.permission.some((rule) => rule.permission === "todowrite")
@@ -289,7 +362,16 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
+      // Children default to the cheap executor tier when their own agent
+      // config has no model pinned — never to whatever model the parent/lead
+      // happens to be running (a reasoner/oracle lead must not hand its
+      // expensive model down to a read-only recon child). An explicit model
+      // pin on the subagent's config always wins; only when "executor" isn't
+      // configured either (non-econ setups) do we fall back to today's
+      // parent-model inheritance.
+      const executor = next.model ? undefined : yield* agent.get("executor")
+      const inheritsParentModel = !next.model && !executor?.model
+      const model = next.model ?? executor?.model ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
@@ -309,7 +391,9 @@ export const TaskTool = Tool.define(
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
-        const parts = yield* ops.resolvePromptParts(params.prompt)
+        const sliceMetadata = ctx.extra?.["sliceMetadata"] as TaskSliceMetadata | undefined
+        const childPrompt = yield* Effect.promise(() => buildChildPrompt(params.prompt, sliceMetadata))
+        const parts = yield* ops.resolvePromptParts(childPrompt)
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -317,7 +401,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: inheritsParentModel ? variant : undefined,
           agent: next.name,
           parts,
         })

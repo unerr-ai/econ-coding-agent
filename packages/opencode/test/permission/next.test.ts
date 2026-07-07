@@ -9,7 +9,7 @@ import { Permission } from "../../src/permission"
 import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 import { InstanceStore } from "../../src/project/instance-store"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 
 const events = EventV2Bridge.defaultLayer
@@ -692,6 +692,108 @@ it.instance(
 
       yield* rejectAll()
       yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+// headless backstop tests (OL-9.0b) — run.ts sets OPENCODE_HEADLESS for the
+// non-interactive `opencode run` path; ask() must auto-reject instead of
+// parking on the Deferred forever.
+
+it.instance(
+  "ask - headless backstop auto-rejects with feedback and does not hang",
+  () =>
+    Effect.gen(function* () {
+      process.env["OPENCODE_HEADLESS"] = "1"
+      try {
+        const err = yield* awaitWithTimeout(
+          fail(
+            ask({
+              sessionID: SessionID.make("session_test"),
+              permission: "bash",
+              patterns: ["ls"],
+              metadata: {},
+              always: [],
+              ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+            }),
+          ),
+          "headless ask hung instead of auto-rejecting",
+          "1 second",
+        )
+        expect(err).toBeInstanceOf(PermissionV1.CorrectedError)
+        expect((err as PermissionV1.CorrectedError).feedback).toContain("headless")
+        expect(yield* list()).toHaveLength(0)
+      } finally {
+        delete process.env["OPENCODE_HEADLESS"]
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - headless backstop resolves two sequential asks independently",
+  () =>
+    Effect.gen(function* () {
+      process.env["OPENCODE_HEADLESS"] = "1"
+      try {
+        const ruleset: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "ask" }]
+
+        const first = yield* awaitWithTimeout(
+          fail(
+            ask({
+              sessionID: SessionID.make("session_test"),
+              permission: "bash",
+              patterns: ["ls"],
+              metadata: {},
+              always: [],
+              ruleset,
+            }),
+          ),
+          "first headless ask hung instead of auto-rejecting",
+          "1 second",
+        )
+        expect(first).toBeInstanceOf(PermissionV1.CorrectedError)
+
+        const second = yield* awaitWithTimeout(
+          fail(
+            ask({
+              sessionID: SessionID.make("session_test"),
+              permission: "bash",
+              patterns: ["pwd"],
+              metadata: {},
+              always: [],
+              ruleset,
+            }),
+          ),
+          "second headless ask hung instead of auto-rejecting",
+          "1 second",
+        )
+        expect(second).toBeInstanceOf(PermissionV1.CorrectedError)
+        expect(yield* list()).toHaveLength(0)
+      } finally {
+        delete process.env["OPENCODE_HEADLESS"]
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - non-headless asks still park until reply()",
+  () =>
+    Effect.gen(function* () {
+      delete process.env["OPENCODE_HEADLESS"]
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+      }).pipe(Effect.forkScoped)
+
+      const items = yield* waitForPending(1)
+      yield* reply({ requestID: items[0]!.id, reply: "once" })
+      yield* Fiber.join(fiber)
     }),
   { git: true },
 )

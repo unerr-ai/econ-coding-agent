@@ -2,12 +2,14 @@
  * econ's model abstraction: the single source of truth binding each abstract
  * tier (conductor / executor / reasoner / oracle) to a concrete model, plus the
  * tracked capabilities that let us swap models by config instead of code —
- * context window, max output, reasoning support, and BYOK cost. Add a model to
- * ECON_MODELS to make it available; repoint a tier by editing ECON_TIER_BINDING.
- * Nothing downstream hard-codes a model id: the router, receipt, and loop query
- * this registry, so a model swap (e.g. gpt-oss-20b → Nemotron 3) is a one-line
- * binding change, and a capability question ("can this tier's model take a
- * reasoning-effort bump?") is a lookup, not a guess.
+ * context window, max output, reasoning support, BYOK cost, and the two
+ * litellm-gateway routing/accounting behaviors probed per-model (cache
+ * accounting, session affinity). Add a model to ECON_MODELS to make it
+ * available; repoint a tier by editing ECON_TIER_BINDING. Nothing downstream
+ * hard-codes a model id: the router, receipt, and loop query this registry, so
+ * a model swap (e.g. gpt-oss-120b → Nemotron 3) is a one-line binding change,
+ * and a capability question ("can this tier's model take a reasoning-effort
+ * bump?") is a lookup, not a guess.
  *
  * @sem domain=routing role=registry
  */
@@ -25,7 +27,7 @@ import type { EconTier } from "./region"
  * @sem domain=routing role=type
  */
 export interface EconModelProfile {
-  /** Provider id the model is served through (e.g. "openrouter"). */
+  /** Provider id the model is served through (e.g. "litellm"). */
   providerID: string
   /** Provider-local model id (e.g. "deepseek/deepseek-v4-flash"); the ECON_COST_MATRIX key. */
   modelID: string
@@ -37,6 +39,29 @@ export interface EconModelProfile {
   maxOutput: number
   /** Reasoning channel enabled in econ's opencode.json (a per-call effort is settable). */
   reasoning: boolean
+  /**
+   * How the served deployment accounts prompt-cache hits (probed 2026-07-04,
+   * re-verified 2026-07-06 — W8 fixed the client-side gap below): "stream" =
+   * cached_tokens is read off the usage payload (prompt_tokens_details.cached_tokens
+   * / cache_read_input_tokens), telemetry sees real hit ratios, on BOTH the
+   * streamed and non-streamed usage path — session/llm/ai-sdk.ts's usage() maps it
+   * regardless of transport, so this no longer depends on which path a turn took;
+   * "nonstream-only" is now reserved for a hypothetical future model whose
+   * provider's own wire protocol omits the field on a streaming response
+   * (a gateway/provider limitation, not a client gap — none of today's four
+   * models hit this); "none" = provider does not cache this model at all
+   * (identical-repeat probe returned 0 cached).
+   */
+  cacheAccounting: "stream" | "nonstream-only" | "none"
+  /**
+   * Whether econ's litellm gateway should receive the `x-session-affinity`
+   * header (OL-9.2b) for this model — pins a session's successive calls to one
+   * backend replica for prefix-cache locality. Probed 2026-07-06: helps some
+   * models, actively breaks prompt-cache + latency on others (see per-entry
+   * notes) — this is why the header must be looked up per model, never sent
+   * unconditionally for the provider.
+   */
+  sessionAffinity: boolean
   /** BYOK rates in $/1M tokens, sourced from ECON_COST_MATRIX (its single home). */
   cost: EconModelRate
   /** Serving / provenance / capability nuance not captured by the fields above. */
@@ -53,34 +78,52 @@ export interface EconModelProfile {
  */
 export const ECON_MODELS: Record<string, EconModelProfile> = {
   "deepseek/deepseek-v4-flash": {
-    providerID: "openrouter",
+    providerID: "litellm",
     modelID: "deepseek/deepseek-v4-flash",
     name: "DeepSeek V4 Flash",
     contextWindow: 1_000_000,
     maxOutput: 8192,
     reasoning: false,
+    cacheAccounting: "stream",
+    sessionAffinity: true,
     cost: ECON_COST_MATRIX["deepseek/deepseek-v4-flash"]!,
-    notes: "econ conductor. Fireworks BYOK. No reasoning channel enabled in opencode.json (treated as a fast non-reasoning model — see OL-3.8 won't-build).",
+    notes: "econ conductor. Served via the econ LiteLLM gateway. No reasoning channel enabled in opencode.json (treated as a fast non-reasoning model — see OL-3.8 won't-build). Cache accounting verified live 2026-07-04: 84% hit ratio reported on stream. Thinking is explicitly disabled on the wire via opencode.json options.reasoningEffort:\"none\" (the AI-SDK camelCase config key that lowers to the wire param reasoning_effort), because this hybrid model's server-side default is thinking ON (run-9 post-mortem, 2026-07-05). Since 2026-07-05 the request layer un-mutes thinking adaptively — packages/opencode/src/session/llm/reasoning-gate.ts drops the key (server default ON) on plan steps and failure-recovery steps only; reasoning:false stays correct because the config-level channel remains off. Session affinity ON (OL-9.2b): W8 probe 2026-07-06 proved the header keeps a ~98% hop2-3 cache hit ratio via per-replica locality (3.34s → 1.83s → 1.51s) — proven beneficial for this model.",
   },
   "z-ai/glm-5.2": {
-    providerID: "openrouter",
+    providerID: "litellm",
     modelID: "z-ai/glm-5.2",
     name: "GLM 5.2",
-    contextWindow: 200_000,
-    maxOutput: 8192,
+    contextWindow: 1_048_576,
+    maxOutput: 32768,
     reasoning: true,
+    cacheAccounting: "stream",
+    sessionAffinity: true,
     cost: ECON_COST_MATRIX["z-ai/glm-5.2"]!,
-    notes: "econ oracle + reasoner (shared model). Reasoning ENABLED in opencode.json (effort:high, exclude:true — the trace is hidden from customers); these are the think-hard tiers used sparingly on the hard tail. Reasoning tokens bill at the output rate. Cached read ($0.14) is ~1/10th the input rate: keep oracle hops prefix-shared (OL-3.7).",
+    notes: "econ oracle (OL-8.B4+: no longer shared with reasoner — deliberate verifier de-correlation, reasoner is now a distinct model family). Reasoning ENABLED in opencode.json (options.reasoningEffort:high, the AI-SDK camelCase config key that lowers to the wire param reasoning_effort; Fireworks returns the trace as a separate reasoning_content field, never customer-facing content); this is the think-hard tier used sparingly on the hard tail. Reasoning tokens bill at the output rate. Cached read ($0.14) is ~1/10th the input rate: keep oracle hops prefix-shared (OL-3.7). W8 (2026-07-06): the client-side cached_tokens mapping gap is fixed (session/llm/ai-sdk.ts), so cache is now measurable — upgraded from nonstream-only. Session affinity kept ON but UNVERIFIED for this tier: the probe showed a cache hit alongside a +166% hop3 latency anomaly (1.80s → 4.79s) — provisional default, revisit after run-20.",
   },
-  "openai/gpt-oss-20b": {
-    providerID: "openrouter",
-    modelID: "openai/gpt-oss-20b",
-    name: "gpt-oss-20b",
+  "deepseek/deepseek-v4-pro": {
+    providerID: "litellm",
+    modelID: "deepseek/deepseek-v4-pro",
+    name: "DeepSeek V4 Pro",
+    contextWindow: 1_048_576,
+    maxOutput: 32768,
+    reasoning: true,
+    cacheAccounting: "stream",
+    sessionAffinity: false,
+    cost: ECON_COST_MATRIX["deepseek/deepseek-v4-pro"]!,
+    notes: "econ reasoner (OL-8.B4+, was shared glm-5.2). A distinct model family from both the conductor (DeepSeek V4 Flash) and the oracle (GLM 5.2) — deliberate verifier de-correlation. Reasoning ENABLED in opencode.json (options.reasoningEffort:high, the AI-SDK camelCase config key that lowers to the wire param reasoning_effort); hybrid reasoning family, served via the econ LiteLLM gateway. V4 Pro caches on Fireworks ($0.15/M cached vs $1.74/M uncached, ≈11.6× discount). W8 (2026-07-06): the client-side cached_tokens mapping gap is fixed, so cache is now measurable — upgraded from nonstream-only. Session affinity OFF (OL-9.2b): the W8 probe proved the header actively breaks this model — WITH affinity, hop2 misses cache entirely and hop3 spikes to 18.86s (678% slower); WITHOUT it, the model gets a 100% cache hit immediately on hop1 and stays consistent across hops. Opposite of flash — do not re-enable without new probe evidence. Persistent reasoner sessions remain gated on this finding (docs/architecture/ORCHESTRATION_MECHANISM.md §7.3); stateless compiled briefs (brief.ts) remain the default meanwhile.",
+  },
+  "openai/gpt-oss-120b": {
+    providerID: "litellm",
+    modelID: "openai/gpt-oss-120b",
+    name: "gpt-oss-120b",
     contextWindow: 131_072,
     maxOutput: 8192,
     reasoning: true,
-    cost: ECON_COST_MATRIX["openai/gpt-oss-20b"]!,
-    notes: "econ executor. Self-hosted → $0 marginal in the cost matrix (real fixed GPU cost tracked separately in econ-cost). reasoning:true, effort:low, exclude:true. Post-POC swap target: NVIDIA Nemotron 3 (OL-M.1) — add its entry and repoint the executor binding.",
+    cacheAccounting: "stream",
+    sessionAffinity: true,
+    cost: ECON_COST_MATRIX["openai/gpt-oss-120b"]!,
+    notes: "econ executor (OL-8.B4+, was gpt-oss-20b — 20b carries no function-calling tag on Fireworks serverless, disqualifying it for the tool-executing tier). reasoning:true, options.reasoningEffort:low (the AI-SDK camelCase config key that lowers to the wire param reasoning_effort) — the gpt-oss family 400s with reasoning off, and it also 400s on the OpenRouter-era `reasoning` object shape (strict body validation at Fireworks). Real Fireworks serverless rate, no longer a $0 self-hosted row. Post-POC swap target: NVIDIA Nemotron 3 (OL-M.1) — add its entry and repoint the executor binding. W8 (2026-07-06): the client-side cached_tokens mapping gap is fixed, so cache is now measurable — upgraded from nonstream-only (the executor itself wasn't in the W8 probe's model set, but the fix is a generic client mapping, not per-model). Session affinity kept ON but UNVERIFIED — not covered by the W8 probe (flash/glm/deepseek-pro only); provisional default, revisit after run-20.",
   },
 }
 
@@ -94,10 +137,22 @@ export const ECON_MODELS: Record<string, EconModelProfile> = {
  */
 export const ECON_TIER_BINDING: Record<EconTier, string> = {
   conductor: "deepseek/deepseek-v4-flash",
-  executor: "openai/gpt-oss-20b",
-  reasoner: "z-ai/glm-5.2",
+  executor: "openai/gpt-oss-120b",
+  reasoner: "deepseek/deepseek-v4-pro",
   oracle: "z-ai/glm-5.2",
 }
+
+/**
+ * The executor tier's persona agents (OL-9.1): stateless intern shapes with a
+ * job-specific system prompt and a reduced toolset, all backed by the executor
+ * model. One source of truth for every consumer — agent declarations, dispatch
+ * persona selection, and telemetry tier attribution all resolve through this
+ * list, so adding a persona is a one-line change here plus its prompt delta.
+ *
+ * @sem domain=routing role=config
+ */
+export const ECON_PERSONAS = ["explorer", "runner", "applier", "author", "researcher", "procedure"] as const
+export type EconPersona = (typeof ECON_PERSONAS)[number]
 
 /** A model profile resolved for a specific tier. */
 export interface TierProfile extends EconModelProfile {
@@ -112,6 +167,20 @@ export interface TierProfile extends EconModelProfile {
  */
 export function modelProfile(key: string): EconModelProfile | undefined {
   return ECON_MODELS[key]
+}
+
+/**
+ * Whether the litellm gateway's `x-session-affinity` header (OL-9.2b) should be
+ * sent for the given model id. Registry-driven per the W8 probe (2026-07-06):
+ * request.ts must never hard-code a model id, so it resolves the current turn's
+ * model against this lookup instead. A model absent from ECON_MODELS (unpinned
+ * / non-econ) defaults to `true` — the header's historical always-on-for-litellm
+ * behavior — so an unlisted litellm model doesn't silently lose affinity.
+ *
+ * @sem domain=routing role=query
+ */
+export function sessionAffinityFor(key: string): boolean {
+  return modelProfile(key)?.sessionAffinity ?? true
 }
 
 /**
@@ -165,10 +234,133 @@ export function contextWindow(tier: EconTier): number {
 /**
  * The tiers a given model backs (reverse of ECON_TIER_BINDING). Lets a
  * model-keyed signal (a usage event's modelID) be mapped back to its tier(s)
- * without hard-coded string matching — glm-5.2 backs both oracle and reasoner.
+ * without hard-coded string matching. As of OL-8.B4+ every tier binds a
+ * distinct model (oracle/reasoner de-correlated), but the reverse lookup stays
+ * multi-tier-safe should two tiers ever share a model again.
  *
  * @sem domain=routing role=query
  */
 export function tiersForModel(key: string): EconTier[] {
   return (Object.keys(ECON_TIER_BINDING) as EconTier[]).filter((t) => ECON_TIER_BINDING[t] === key)
+}
+
+// ---------------------------------------------------------------------------
+// OL-7.8a — optional execution-free reward-model verifier tier
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolved state of the OL-7.8a execution-free reward-model verifier tier.
+ * Deliberately not an `EconTier` / `ECON_TIER_BINDING` member — it never
+ * routes turn traffic, only scores finished work — so adding it can never
+ * change the shape the tier drift tests guard.
+ *
+ * @sem domain=routing role=type
+ */
+export interface VerifierTierConfig {
+  enabled: boolean
+  /** The hosted RM endpoint URL. Present only when `enabled`. */
+  endpoint?: string
+}
+
+/**
+ * Resolve the verifier tier from `ECON_VERIFIER_RM` ("off"/unset ⇒ disabled;
+ * any other value is the hosted RM endpoint URL). Off by default so every
+ * existing verifier-ladder path stays byte-identical when the flag is unset —
+ * consumers must check `.enabled` before reading `.endpoint`.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveVerifierTier(envValue: string | undefined): VerifierTierConfig {
+  if (!envValue || envValue === "off") return { enabled: false }
+  return { enabled: true, endpoint: envValue }
+}
+
+// ---------------------------------------------------------------------------
+// OL-7.8 — cross-model judge rung tier
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolved state of the OL-7.8 cross-model judge rung: whether the judge runs
+ * and which tier samples the verdict. Like `VerifierTierConfig`, deliberately
+ * not an `ECON_TIER_BINDING` member — the judge scores finished work for an
+ * untestable slice, it never routes turn traffic.
+ *
+ * @sem domain=routing role=type
+ */
+export interface JudgeTierConfig {
+  enabled: boolean
+  /** The tier whose bound model samples the verdict. Meaningful only when `enabled`. */
+  tier: EconTier
+}
+
+/**
+ * Resolve the judge tier from `ECON_VERIFIER_JUDGE`. ON by default — unlike the
+ * OL-7.8a RM (an external endpoint that can't exist unconfigured), the judge is
+ * the verification safety net for untestable slices and runs entirely on econ's
+ * own tiers, so absence of config must not silently drop the rung. The default
+ * tier is the reasoner: every `allocateSlice` cell that yields
+ * `verification === "judge"` generates on the oracle (the high-coupling ·
+ * untestable residual, and the risk-broken borderline which the same risk
+ * condition raises to oracle — see allocation.ts), so the reasoner is
+ * cross-family in all standard cells (§4.3 — a model self-judging its own work
+ * is unreliable). `ECON_VERIFIER_JUDGE=off` disables; a valid tier name
+ * overrides the tier; an unrecognized value falls back to the default rather
+ * than silently disabling the safety net.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveJudgeTier(envValue: string | undefined): JudgeTierConfig {
+  if (envValue === "off") return { enabled: false, tier: "reasoner" }
+  if (envValue && envValue in ECON_TIER_BINDING) return { enabled: true, tier: envValue as EconTier }
+  return { enabled: true, tier: "reasoner" }
+}
+
+// ---------------------------------------------------------------------------
+// OL-7.10 — frontier escape-hatch for the residual
+// ---------------------------------------------------------------------------
+
+/** The OL-7.10 frontier escape-hatch modes — `off` is the default, no-op state. */
+export type FrontierHatchMode = "off" | "api" | "human"
+
+/**
+ * Resolved state of the OL-7.10 frontier escape-hatch. Not an `EconTier` /
+ * `ECON_TIER_BINDING` member for the same reason as `VerifierTierConfig` — it
+ * is a config-gated override at resolution time, not a routed tier.
+ *
+ * @sem domain=routing role=type
+ */
+export interface FrontierHatchConfig {
+  mode: FrontierHatchMode
+}
+
+/**
+ * Resolve the frontier escape-hatch from `ECON_FRONTIER_HATCH` ("off"/unset,
+ * "api", or "human"). Off by default; an unrecognized value fails safe to
+ * "off" rather than silently routing to a frontier price.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveFrontierHatch(envValue: string | undefined): FrontierHatchConfig {
+  if (envValue === "api" || envValue === "human") return { mode: envValue }
+  return { mode: "off" }
+}
+
+/**
+ * Resolve a tier's model reference honoring the OL-7.10 hatch: "off" (the
+ * default) is byte-identical to `tierModelRef`; "api" overrides the
+ * reference with an explicit frontier model id (no default — unpinned until
+ * an eval selects one, injected by the caller rather than hard-coded here,
+ * same as the OL-7.8a RM endpoint); "human" returns undefined (no model call
+ * — the slice hands off to a human reviewer instead).
+ *
+ * @sem domain=routing role=query
+ */
+export function resolveTierModelRef(
+  tier: EconTier,
+  hatch: FrontierHatchConfig,
+  frontierModelId?: string,
+): string | undefined {
+  if (hatch.mode === "human") return undefined
+  if (hatch.mode === "api") return frontierModelId
+  return tierModelRef(tier)
 }

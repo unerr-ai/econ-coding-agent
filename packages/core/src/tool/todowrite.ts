@@ -18,7 +18,14 @@ export const Output = Schema.Struct({
 })
 export type Output = typeof Output.Type
 
-export const toModelOutput = (output: Output) => JSON.stringify(output.todos, null, 2)
+export const toModelOutput = (output: Output) => {
+  const completed = output.todos.filter((todo) => todo.status === "completed").length
+  const pending = output.todos.filter((todo) => todo.status === "pending").length
+  const inProgress = output.todos.find((todo) => todo.status === "in_progress")
+  return `ok: ${output.todos.length} todos — ${completed} completed, ${pending} pending, in_progress: ${
+    inProgress ? `"${inProgress.content}"` : "none"
+  }`
+}
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {

@@ -828,6 +828,111 @@ describe("session.compaction.prune", () => {
   )
 })
 
+describe("session.compaction.maskObservations", () => {
+  it.live(
+    "never masks a completed task digest, only its sibling bash output",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const a = yield* ssn.updateMessage({
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID: info.id,
+            agent: "build",
+            model: ref,
+            time: { created: Date.now() },
+          })
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: info.id,
+            type: "text",
+            text: "first",
+          })
+          const b: SessionV1.Assistant = {
+            id: MessageID.ascending(),
+            role: "assistant",
+            sessionID: info.id,
+            mode: "build",
+            agent: "build",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: {
+              output: 0,
+              input: 0,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            },
+            modelID: ref.modelID,
+            providerID: ref.providerID,
+            parentID: a.id,
+            time: { created: Date.now() },
+            finish: "end_turn",
+          }
+          yield* ssn.updateMessage(b)
+          // Same vintage — both land in the same assistant message, back to back.
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: b.id,
+            sessionID: info.id,
+            type: "tool",
+            callID: crypto.randomUUID(),
+            tool: "task",
+            state: {
+              status: "completed",
+              input: {},
+              output: "task digest: ran 3 checks, all passed",
+              title: "done",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          })
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: b.id,
+            sessionID: info.id,
+            type: "tool",
+            callID: crypto.randomUUID(),
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {},
+              output: "x".repeat(200_000),
+              title: "done",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          })
+
+          yield* compact.maskObservations({ sessionID: info.id })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const parts = msgs.flatMap((msg) => msg.parts)
+          const taskPart = parts.find((p): p is SessionV1.ToolPart => p.type === "tool" && p.tool === "task")
+          const bashPart = parts.find((p): p is SessionV1.ToolPart => p.type === "tool" && p.tool === "bash")
+          expect(taskPart).toBeTruthy()
+          expect(bashPart).toBeTruthy()
+          if (taskPart?.state.status === "completed") {
+            expect(taskPart.state.output).toBe("task digest: ran 3 checks, all passed")
+            expect(taskPart.state.metadata?.masked).toBeUndefined()
+          }
+          if (bashPart?.state.status === "completed") {
+            expect(bashPart.state.output).not.toBe("x".repeat(200_000))
+            expect(bashPart.state.metadata?.masked).toBeDefined()
+          }
+        }),
+      {
+        config: {
+          compaction: { keep_raw_tool_results: 0 },
+        },
+      },
+    ),
+  )
+})
+
 describe("session.compaction.process", () => {
   it.instance(
     "throws when parent is not a user message",

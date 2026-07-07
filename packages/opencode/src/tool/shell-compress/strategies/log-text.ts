@@ -3,7 +3,11 @@
  * Deduplicates by normalized pattern, preserves errors, emits compact summary.
  * Ported from unerr-cli src/proxy/shell-strategies/log-text.ts.
  * Dropped: query/rankChunksByQuery dependency (path: unerr-cli intelligence/chunk-ranker).
+ * Runs mineTemplates as a pre-pass so repeated near-identical lines are
+ * collapsed before the pattern-normalization dedup below runs.
  */
+
+import { mineTemplates } from "./template-mine"
 
 const SMALL_THRESHOLD = 80
 const MAX_PATTERNS = 20
@@ -67,8 +71,8 @@ function isCleanSuccess(text: string): { ok: boolean; line?: string } {
 }
 
 export function compressLogText(text: string, command?: string): string {
-  const lines = text.replace(/\r\n/g, "\n").split("\n")
-  const total = lines.length
+  const rawLines = text.replace(/\r\n/g, "\n").split("\n")
+  const total = rawLines.length
 
   if (total <= SMALL_THRESHOLD) return text
 
@@ -81,6 +85,8 @@ export function compressLogText(text: string, command?: string): string {
       return `${label} — ${probe.line ?? "succeeded"} (${total} lines suppressed)`
     }
   }
+
+  const lines = mineTemplates(rawLines)
 
   const patterns = new Map<string, LogPattern>()
   const errorLines: string[] = []

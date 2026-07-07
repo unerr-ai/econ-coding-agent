@@ -4,7 +4,11 @@
  * Handles: tsc, eslint, node_stack, gcc/clang, rustc, go, python_tb,
  *          javac, shellcheck, line_diagnostic, and generic fallback.
  * Ported from unerr-cli src/proxy/shell-strategies/error-diagnostic.ts — no external deps.
+ * Runs mineTemplates as a pre-pass so repeated near-identical lines are
+ * collapsed before format-specific parsing runs.
  */
+
+import { mineTemplates } from "./template-mine"
 
 type ErrorFormat =
   | "tsc"
@@ -828,7 +832,7 @@ export function compressErrorDiagnostic(raw: string, command?: string): string {
   const short = tryDiagShortCircuit(raw, command)
   if (short) return short
 
-  const lines = raw.split("\n")
+  const lines = mineTemplates(raw.split("\n"))
   const format = detectErrorFormat(command, lines)
 
   let result = ""

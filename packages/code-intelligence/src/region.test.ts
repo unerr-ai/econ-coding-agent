@@ -15,6 +15,10 @@ import {
   type RegionConfig,
   type ResidencyPolicy,
 } from "./region.js"
+// Tier model ids are asserted against ECON_TIER_BINDING (the authoritative source of truth
+// in model-registry.ts) rather than hardcoded literals, so a tier swap there can't silently
+// drift these tests out of sync.
+import { ECON_TIER_BINDING } from "./model-registry.js"
 
 // ---------------------------------------------------------------------------
 // Helpers / fixtures
@@ -41,30 +45,30 @@ function withConductorChain(
 describe("DEFAULT_REGION_CONFIG — tier model ids", () => {
   it("conductor has the right global model", () => {
     expect(DEFAULT_REGION_CONFIG.tiers.conductor).toHaveLength(1)
-    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.model).toBe("qwen/qwen3.7-plus")
+    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.model).toBe(ECON_TIER_BINDING.conductor)
     expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.region).toBe("global")
-    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.providerId).toBe("openrouter")
+    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.providerId).toBe("litellm")
   })
 
   it("oracle has the right global model", () => {
     expect(DEFAULT_REGION_CONFIG.tiers.oracle).toHaveLength(1)
-    expect(DEFAULT_REGION_CONFIG.tiers.oracle[0]!.model).toBe("z-ai/glm-5.2")
+    expect(DEFAULT_REGION_CONFIG.tiers.oracle[0]!.model).toBe(ECON_TIER_BINDING.oracle)
     expect(DEFAULT_REGION_CONFIG.tiers.oracle[0]!.region).toBe("global")
-    expect(DEFAULT_REGION_CONFIG.tiers.oracle[0]!.providerId).toBe("openrouter")
+    expect(DEFAULT_REGION_CONFIG.tiers.oracle[0]!.providerId).toBe("litellm")
   })
 
   it("reasoner has the right global model", () => {
     expect(DEFAULT_REGION_CONFIG.tiers.reasoner).toHaveLength(1)
-    expect(DEFAULT_REGION_CONFIG.tiers.reasoner[0]!.model).toBe("z-ai/glm-5.2")
+    expect(DEFAULT_REGION_CONFIG.tiers.reasoner[0]!.model).toBe(ECON_TIER_BINDING.reasoner)
     expect(DEFAULT_REGION_CONFIG.tiers.reasoner[0]!.region).toBe("global")
-    expect(DEFAULT_REGION_CONFIG.tiers.reasoner[0]!.providerId).toBe("openrouter")
+    expect(DEFAULT_REGION_CONFIG.tiers.reasoner[0]!.providerId).toBe("litellm")
   })
 
   it("executor has the right global model", () => {
     expect(DEFAULT_REGION_CONFIG.tiers.executor).toHaveLength(1)
-    expect(DEFAULT_REGION_CONFIG.tiers.executor[0]!.model).toBe("openai/gpt-oss-20b")
+    expect(DEFAULT_REGION_CONFIG.tiers.executor[0]!.model).toBe(ECON_TIER_BINDING.executor)
     expect(DEFAULT_REGION_CONFIG.tiers.executor[0]!.region).toBe("global")
-    expect(DEFAULT_REGION_CONFIG.tiers.executor[0]!.providerId).toBe("openrouter")
+    expect(DEFAULT_REGION_CONFIG.tiers.executor[0]!.providerId).toBe("litellm")
   })
 
   it("default residency mode is preferred", () => {
@@ -258,24 +262,24 @@ describe("parseRegionConfig — garbage input returns default clone", () => {
   it("returns a deep clone of DEFAULT_REGION_CONFIG for null", () => {
     const result = parseRegionConfig(null)
     expect(result.residency.mode).toBe("preferred")
-    expect(result.tiers.conductor[0]!.model).toBe("qwen/qwen3.7-plus")
+    expect(result.tiers.conductor[0]!.model).toBe(ECON_TIER_BINDING.conductor)
     expect(result).not.toBe(DEFAULT_REGION_CONFIG)
   })
 
   it("returns defaults for undefined", () => {
     const result = parseRegionConfig(undefined)
     expect(result.residency.mode).toBe("preferred")
-    expect(result.tiers.oracle[0]!.model).toBe("z-ai/glm-5.2")
+    expect(result.tiers.oracle[0]!.model).toBe(ECON_TIER_BINDING.oracle)
   })
 
   it("returns defaults for a number", () => {
     const result = parseRegionConfig(42)
-    expect(result.tiers.executor[0]!.model).toBe("openai/gpt-oss-20b")
+    expect(result.tiers.executor[0]!.model).toBe(ECON_TIER_BINDING.executor)
   })
 
   it("returns defaults for a string", () => {
     const result = parseRegionConfig("bad")
-    expect(result.tiers.reasoner[0]!.model).toBe("z-ai/glm-5.2")
+    expect(result.tiers.reasoner[0]!.model).toBe(ECON_TIER_BINDING.reasoner)
   })
 
   it("returns defaults for an array", () => {
@@ -290,9 +294,9 @@ describe("parseRegionConfig — partial overlays", () => {
     const result = parseRegionConfig({ tiers: { conductor: [customEp] } })
     expect(result.tiers.conductor[0]).toEqual(customEp)
     // Other tiers remain default
-    expect(result.tiers.oracle[0]!.model).toBe("z-ai/glm-5.2")
-    expect(result.tiers.reasoner[0]!.model).toBe("z-ai/glm-5.2")
-    expect(result.tiers.executor[0]!.model).toBe("openai/gpt-oss-20b")
+    expect(result.tiers.oracle[0]!.model).toBe(ECON_TIER_BINDING.oracle)
+    expect(result.tiers.reasoner[0]!.model).toBe(ECON_TIER_BINDING.reasoner)
+    expect(result.tiers.executor[0]!.model).toBe(ECON_TIER_BINDING.executor)
   })
 
   it("overlays residency.mode without changing allow lists", () => {
@@ -315,14 +319,14 @@ describe("parseRegionConfig — partial overlays", () => {
   it("ignores non-array tier values", () => {
     const result = parseRegionConfig({ tiers: { conductor: "not-an-array" } })
     // Falls back to default chain for conductor
-    expect(result.tiers.conductor[0]!.model).toBe("qwen/qwen3.7-plus")
+    expect(result.tiers.conductor[0]!.model).toBe(ECON_TIER_BINDING.conductor)
   })
 
   it("does not mutate DEFAULT_REGION_CONFIG when overlaying", () => {
     const customEp: RegionEndpoint = { providerId: "custom", model: "c", region: "in" }
     parseRegionConfig({ tiers: { conductor: [customEp] } })
     // DEFAULT_REGION_CONFIG must be unchanged
-    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.model).toBe("qwen/qwen3.7-plus")
+    expect(DEFAULT_REGION_CONFIG.tiers.conductor[0]!.model).toBe(ECON_TIER_BINDING.conductor)
     expect(DEFAULT_REGION_CONFIG.tiers.conductor).toHaveLength(1)
   })
 

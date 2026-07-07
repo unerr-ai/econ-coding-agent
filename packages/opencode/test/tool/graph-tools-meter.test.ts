@@ -34,23 +34,28 @@ const ctx = {
 const GRAPH_TOOLS_PATH = "src/tool/graph-tools.ts"
 
 describe("graph tools — meter integration", () => {
-  it.effect("file_outline: invoking the tool records a meter entry with tool='file_outline'", () =>
-    Effect.gen(function* () {
-      clearRecords()
+  it.effect(
+    "file_outline: invoking the tool records a meter entry with tool='file_outline'",
+    () =>
+      Effect.gen(function* () {
+        clearRecords()
 
-      const info = yield* GraphFileOutlineTool
-      const tool = yield* info.init()
-      // Capture Exit: meter write happens before truncation; we ignore any
-      // subsequent truncation error from the minimal test layer.
-      yield* tool.execute({ file_path: GRAPH_TOOLS_PATH }, ctx).pipe(Effect.exit)
+        const info = yield* GraphFileOutlineTool
+        const tool = yield* info.init()
+        // Capture Exit: meter write happens before truncation; we ignore any
+        // subsequent truncation error from the minimal test layer.
+        yield* tool.execute({ file_path: GRAPH_TOOLS_PATH }, ctx).pipe(Effect.exit)
 
-      const records = getRecords()
-      const rec = records.find((r) => r.tool === "file_outline")
-      expect(rec).toBeDefined()
-      expect(typeof rec!.raw_tokens).toBe("number")
-      expect(typeof rec!.returned_tokens).toBe("number")
-      expect(typeof rec!.ratio).toBe("number")
-    }),
+        const records = getRecords()
+        const rec = records.find((r) => r.tool === "file_outline")
+        expect(rec).toBeDefined()
+        expect(typeof rec!.raw_tokens).toBe("number")
+        expect(typeof rec!.returned_tokens).toBe("number")
+        expect(typeof rec!.ratio).toBe("number")
+      }),
+    // First touch cold-indexes the whole monorepo root (~9-10s on this
+    // machine) before the outline can answer — the default 5s budget flakes
+    // on every cold-db run.
+    { timeout: 30_000 },
   )
-
 })

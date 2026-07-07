@@ -4,6 +4,8 @@
  * Ported from unerr-cli src/proxy/shell-strategies/test-results.ts — no external deps.
  */
 
+import { isSalientLine } from "./salience"
+
 type TestFramework =
   | "vitest"
   | "jest"
@@ -15,6 +17,7 @@ type TestFramework =
   | "dotnet_test"
   | "elixir_test"
   | "playwright"
+  | "bun_test"
   | "generic"
 
 interface FailureBlock {
@@ -41,6 +44,7 @@ function detectTestFramework(command: string | undefined, lines: string[]): Test
     if (cmd.includes("cargo test")) return "cargo_test"
     if (cmd.includes("go test")) return "go_test"
     if (cmd.includes("playwright")) return "playwright"
+    if (/\bbun( run)? test\b/.test(cmd)) return "bun_test"
   }
   const sample = lines.slice(0, 50).join("\n")
   if (/\[(chromium|firefox|webkit)\]\s+›/.test(sample)) return "playwright"
@@ -55,6 +59,12 @@ function detectTestFramework(command: string | undefined, lines: string[]): Test
   if (/^(Passed|Failed)!\s+-\s+(Passed|Failed):/m.test(sample) || /^Total tests: \d+/m.test(sample))
     return "dotnet_test"
   if (/^\d+ tests?, \d+ failures?$/m.test(sample) && /^Finished in /m.test(sample)) return "elixir_test"
+  if (
+    /^bun test v\d/m.test(sample) ||
+    (/^\s*\d+ pass$/m.test(sample) && /^\s*\d+ fail$/m.test(sample)) ||
+    /^Ran \d+ tests? across \d+ files?\./m.test(sample)
+  )
+    return "bun_test"
   return "generic"
 }
 
@@ -145,6 +155,26 @@ function parseJest(lines: string[]): ParsedTestOutput {
   }
   if (currentFail) failures.push(currentFail)
   return { framework: "jest", passed, failed, skipped, duration, failures, summaryLines }
+}
+
+// Jest prints "Test suite failed to run" (e.g. a file with no it()/describe blocks, or a
+// require/syntax error) with 0 parsed tests and no "N failed" count — that combination looks
+// identical to an empty passing run to the counters above, so the one-liner emitter would
+// otherwise render a bare `jest: 0 tests (...)` and silently drop the actual reason. A
+// composite `| tail -N` pipe also masks the real exit code behind tail's own (0), so this
+// textual signature must be checked regardless of exitCode. Returns the first non-blank line
+// after the signature (the actual reason, e.g. "Your test suite must contain at least one
+// test.") or undefined when the signature isn't present.
+const JEST_SUITE_FAILED_RE = /Test suite failed to run/
+
+function findJestSuiteFailureDetail(lines: string[]): string | undefined {
+  const idx = lines.findIndex((l) => JEST_SUITE_FAILED_RE.test(l))
+  if (idx === -1) return undefined
+  for (let i = idx + 1; i < lines.length && i < idx + 8; i++) {
+    const trimmed = lines[i]!.trim()
+    if (trimmed) return trimmed
+  }
+  return "Test suite failed to run"
 }
 
 function parsePytest(lines: string[]): ParsedTestOutput {
@@ -420,6 +450,64 @@ function parsePlaywright(lines: string[]): ParsedTestOutput {
   return { framework: "playwright", passed, failed, skipped, duration, failures, summaryLines }
 }
 
+// Bun's non-TTY reporter prints failures inline (code-frame + error, no header)
+// and only names the test in a trailing `(fail) describe > name [Nms]` line —
+// the opposite order from every other parser here, so a block is closed (and
+// its header assigned) when the trailer is seen, not when it's opened.
+function parseBunTest(lines: string[]): ParsedTestOutput {
+  const failures: FailureBlock[] = []
+  let passed = 0
+  let failed = 0
+  let skipped = 0
+  let duration = ""
+  const summaryLines: string[] = []
+  let buffer: string[] = []
+
+  for (const line of lines) {
+    const passMatch = /^\s*(\d+) pass$/.exec(line)
+    if (passMatch) { passed = Number.parseInt(passMatch[1]!, 10); summaryLines.push(line.trim()); continue }
+    const failCountMatch = /^\s*(\d+) fail$/.exec(line)
+    if (failCountMatch) { failed = Number.parseInt(failCountMatch[1]!, 10); summaryLines.push(line.trim()); continue }
+    const skipMatch = /^\s*(\d+) skip$/.exec(line)
+    if (skipMatch) { skipped = Number.parseInt(skipMatch[1]!, 10); summaryLines.push(line.trim()); continue }
+    if (/^\s*\d+ expect\(\) calls?$/.test(line)) { summaryLines.push(line.trim()); continue }
+    const ranMatch = /^Ran \d+ tests? across \d+ files?\.(?:\s*\[(.+)\])?\s*$/.exec(line)
+    if (ranMatch) {
+      if (ranMatch[1]) duration = ranMatch[1]
+      summaryLines.push(line.trim()); continue
+    }
+    if (/^\(fail\)\s.+\[.+\]$/.test(line.trim())) {
+      failures.push({ header: line.trim(), lines: buffer })
+      buffer = []
+      continue
+    }
+    if (buffer.length === 0) {
+      if (/^bun test v[\d.]+/.test(line)) continue
+      if (/^\S+\.(test|spec)\.\w+:$/.test(line.trim())) continue
+      if (line.trim() === "") continue
+    }
+    buffer.push(line)
+  }
+  return { framework: "bun_test", passed, failed, skipped, duration, failures, summaryLines }
+}
+
+// Truncates a failure block's lines to `limit`, but never at the cost of a
+// salient line (assertion/exception/etc.) — those are kept in full even if
+// that pushes the kept count past `limit`; only non-salient context lines are
+// the ones actually cut.
+function truncatePreferSalient(lines: string[], limit: number): { kept: string[]; omitted: number } {
+  if (lines.length <= limit) return { kept: lines, omitted: 0 }
+  const keepIdx = new Set<number>()
+  lines.forEach((l, i) => {
+    if (isSalientLine(l)) keepIdx.add(i)
+  })
+  for (let i = 0; i < lines.length && keepIdx.size < limit; i++) {
+    keepIdx.add(i)
+  }
+  const kept = [...keepIdx].sort((a, b) => a - b).map((i) => lines[i]!)
+  return { kept, omitted: lines.length - kept.length }
+}
+
 function emitCompressed(parsed: ParsedTestOutput): string {
   const parts: string[] = []
   const counts: string[] = []
@@ -433,13 +521,15 @@ function emitCompressed(parsed: ParsedTestOutput): string {
   for (const fail of parsed.failures.slice(0, 10)) {
     parts.push("")
     parts.push(fail.header)
-    const truncated = fail.lines.slice(0, 20)
-    parts.push(...truncated)
-    if (fail.lines.length > 20) parts.push(`  … ${fail.lines.length - 20} more lines`)
+    const { kept, omitted } = truncatePreferSalient(fail.lines, 20)
+    parts.push(...kept)
+    if (omitted > 0) parts.push(`  … ${omitted} more lines`)
   }
   if (parsed.failures.length > 10) parts.push(`\n… and ${parsed.failures.length - 10} more failures`)
 
-  if (parsed.summaryLines.length > 0 && parsed.failures.length > 0) {
+  // Counts said failure but blocks are missing (evicted by a tail ring-buffer) — the summary
+  // line carrying "N failed" must still survive, or the failure disappears silently.
+  if (parsed.summaryLines.length > 0 && (parsed.failures.length > 0 || parsed.failed > 0)) {
     parts.push("")
     parts.push(...parsed.summaryLines)
   }
@@ -450,10 +540,9 @@ function compressFallback(lines: string[]): string {
   const kept: string[] = []
   let passStreak = 0
   const isPassLine = (l: string) => /\b(passing|PASS|✓|ok\s+\d+)\b/i.test(l) && !/\bfail/i.test(l)
-  const isFailLine = (l: string) => /\b(FAIL|failing|AssertionError|Error:|✗|✕)\b/i.test(l)
 
   for (const line of lines) {
-    if (isFailLine(line)) {
+    if (isSalientLine(line)) {
       if (passStreak > 3) kept.push(`… (${passStreak} passing lines collapsed) …`)
       passStreak = 0; kept.push(line); continue
     }
@@ -466,6 +555,14 @@ function compressFallback(lines: string[]): string {
   const summary = lines.find((l) => /\b(tests?\s+\d+|passed|failed|suites?)/i.test(l)) ?? ""
   const body = kept.join("\n").trim()
   return summary && !kept.includes(summary) ? `${summary}\n${body}` : body
+}
+
+// A composite command (`;` chains, or any `|`/`||` pipe) can mask a real failure's exit code
+// behind an unrelated trailing command's success — don't trust exitCode === 0 in that shape.
+// A plain `&&` chain is safe: it short-circuits on the first non-zero exit.
+function isExitCodeTrusted(command: string | undefined): boolean {
+  if (!command) return true
+  return !/[;|]/.test(command)
 }
 
 export function compressTestResults(text: string, command?: string, exitCode?: number): string {
@@ -496,16 +593,40 @@ export function compressTestResults(text: string, command?: string, exitCode?: n
         parsed = parseElixirTest(lines); break
       case "playwright":
         parsed = parsePlaywright(lines); break
+      case "bun_test":
+        parsed = parseBunTest(lines); break
     }
   } catch {
     return compressFallback(lines)
+  }
+
+  // "Test suite failed to run" (e.g. no it()/describe blocks) parses to 0 passed/0 failed —
+  // indistinguishable from an empty passing run to the counts below — so this check runs
+  // first and independent of exitCode/isExitCodeTrusted: a masked exit code (piped through
+  // `| tail -N`) must never suppress the one piece of information that explains the failure.
+  if (framework === "jest") {
+    const suiteFailureDetail = findJestSuiteFailureDetail(lines)
+    if (suiteFailureDetail) {
+      const counts: string[] = []
+      if (parsed.passed > 0) counts.push(`${parsed.passed} passed`)
+      if (parsed.failed > 0) counts.push(`${parsed.failed} failed`)
+      if (parsed.skipped > 0) counts.push(`${parsed.skipped} skipped`)
+      const countStr = counts.length > 0 ? counts.join(", ") : "0 tests"
+      return `jest: suite failed to run — ${suiteFailureDetail} (${countStr})`
+    }
   }
 
   if (parsed.passed === 0 && parsed.failed === 0 && parsed.summaryLines.length === 0) {
     return compressFallback(lines)
   }
 
-  if (exitCode === 0 && parsed.failures.length === 0 && parsed.passed > 0) {
+  if (
+    exitCode === 0 &&
+    parsed.failures.length === 0 &&
+    parsed.failed === 0 &&
+    parsed.passed > 0 &&
+    isExitCodeTrusted(command)
+  ) {
     const durStr = parsed.duration ? ` (${parsed.duration})` : ""
     return `${parsed.framework}: ${parsed.passed} passed${parsed.skipped > 0 ? `, ${parsed.skipped} skipped` : ""}${durStr}`
   }

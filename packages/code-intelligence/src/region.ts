@@ -3,7 +3,7 @@
  *
  * Provides the config schema, residency policy, and per-tier endpoint fallback chains
  * that enable routing LLM calls to Indian in-region infrastructure when it becomes
- * available. All production defaults today point to the existing global OpenRouter
+ * available. All production defaults today point to the existing global LiteLLM gateway
  * endpoints from opencode.json — real in-region (India) OSS endpoints are GATED
  * (no infrastructure or credentials yet). Pure data and pure functions only: no I/O,
  * no network calls, no external imports.
@@ -119,7 +119,7 @@ export const DEFAULT_RESIDENCY_POLICY: ResidencyPolicy = {
 
 /**
  * The baseline region configuration for econ, wiring each tier to exactly one global
- * OpenRouter endpoint matching opencode.json; in-region chains are empty until infra
+ * LiteLLM gateway endpoint matching opencode.json; in-region chains are empty until infra
  * is provisioned and prepended via parseRegionConfig.
  *
  * @sem domain=intelligence role=config
@@ -129,13 +129,14 @@ export const DEFAULT_REGION_CONFIG: RegionConfig = {
   // Tier→model bindings must match ECON_TIER_BINDING in model-registry.ts (the authoritative
   // source of truth) and opencode.json; model-registry.test.ts guards the two against drift.
   tiers: {
-    conductor: [{ providerId: "openrouter", model: "deepseek/deepseek-v4-flash", region: "global" }],
-    oracle: [{ providerId: "openrouter", model: "z-ai/glm-5.2", region: "global" }],
+    conductor: [{ providerId: "litellm", model: "deepseek/deepseek-v4-flash", region: "global" }],
+    oracle: [{ providerId: "litellm", model: "z-ai/glm-5.2", region: "global" }],
     reasoner: [
-      // Shares the oracle model (GLM 5.2) for now — see opencode.json reasoner agent.
-      { providerId: "openrouter", model: "z-ai/glm-5.2", region: "global" },
+      // OL-8.B4+: a distinct model from the oracle (deliberate verifier de-correlation) — see
+      // opencode.json reasoner agent.
+      { providerId: "litellm", model: "deepseek/deepseek-v4-pro", region: "global" },
     ],
-    executor: [{ providerId: "openrouter", model: "openai/gpt-oss-20b", region: "global" }],
+    executor: [{ providerId: "litellm", model: "openai/gpt-oss-120b", region: "global" }],
   },
 }
 

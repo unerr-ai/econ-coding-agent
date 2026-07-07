@@ -103,10 +103,12 @@ export class LocationServiceMap extends LayerMap.Service<LocationServiceMap>()("
     // `{}`, identical to pre-AC-3.3 behaviour.
     const model = Layer.unwrap(
       Effect.gen(function* () {
-        // RouterLayerConfigTag holds a DEFERRED resolver (an Effect) rather than
-        // a resolved object: the opencode producer reads instance-scoped Config,
-        // which is only valid here (InstanceRef live), not at app construction.
-        const routerLayerConfig = yield* yield* SessionRunnerModel.RouterLayerConfigTag
+        // RouterLayerConfigTag holds a resolver FUNCTION of the location's
+        // directory: this build runs in whatever fiber first touches the
+        // location (a v2 /api request fiber carries no instance context —
+        // OL-9.6g), so the producer binds its own instance scope from the
+        // directory instead of reading it from the calling fiber.
+        const routerLayerConfig = yield* (yield* SessionRunnerModel.RouterLayerConfigTag)(ref.directory)
         return SessionRunnerModel.locationLayerWith(routerLayerConfig)
       }),
     ).pipe(Layer.provide(services))

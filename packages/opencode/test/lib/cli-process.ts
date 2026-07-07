@@ -249,8 +249,9 @@ export function withCliFixture<A, E>(
 
     const runArgs = (message: string, opts?: RunOpts) => {
       // OL-4.1 removed the user-facing `--model`/`--agent` flags from `opencode
-      // run` (the live tier-router picks the model) — `opts.model`/`opts.agent`
-      // flow into the injected config instead, via `runOpts` below.
+      // run` (econ picks internally: config default lead + slice-level allocation)
+      // — `opts.model`/`opts.agent` flow into the injected config instead, via
+      // `runOpts` below.
       const argv: string[] = ["run"]
       if (opts?.printLogs) argv.push("--print-logs")
       if (opts?.format) argv.push("--format", opts.format)
