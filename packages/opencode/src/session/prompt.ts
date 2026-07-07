@@ -1887,8 +1887,36 @@ export const layer = Layer.effect(
                         )
                         const language = yield* provider.getLanguage(resolved)
                         const startedAt = Date.now()
-                        const out = yield* Effect.promise(() =>
-                          generateText({ model: language, prompt: judgePrompt, maxOutputTokens: 400, temperature: 0 }),
+                        // OL-7.8b: live-fire proved two silent degrades — a reasoning
+                        // judge model burns the output budget on thinking before the
+                        // verdict token (400 truncated every time; 1024 gives headroom),
+                        // and a transient gateway throw looked identical to an abstain.
+                        // One retry absorbs the blip; a still-failing final attempt logs
+                        // before rethrowing so the caller's degrade stays traceable.
+                        const runOnce = () =>
+                          Effect.tryPromise({
+                            try: () =>
+                              generateText({ model: language, prompt: judgePrompt, maxOutputTokens: 1024, temperature: 0 }),
+                            catch: (err) => err,
+                          })
+                        let retried = false
+                        const out = yield* runOnce().pipe(
+                          Effect.matchEffect({
+                            onFailure: () => {
+                              retried = true
+                              return runOnce()
+                            },
+                            onSuccess: (value) => Effect.succeed(value),
+                          }),
+                          Effect.tapError((err) =>
+                            Effect.logInfo("judge_failed", {
+                              "session.id": sessionID,
+                              tier: judgeTier.tier,
+                              modelID: m.modelID,
+                              error: String(err).slice(0, 200),
+                              retried,
+                            }),
+                          ),
                         )
                         // OL-7.8 observability: a fired judge sample was otherwise
                         // indistinguishable from a skipped one in the decode — one
@@ -1900,6 +1928,7 @@ export const layer = Layer.effect(
                           elapsedMs: Date.now() - startedAt,
                           inputTokens: out.usage?.inputTokens ?? 0,
                           outputTokens: out.usage?.outputTokens ?? 0,
+                          retried,
                         })
                         return out.text
                       }),
