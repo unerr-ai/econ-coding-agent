@@ -398,11 +398,19 @@ remain awaiting explicit go-ahead** — this section is the plan, not the change
    conductor explores; convergence budget + contradiction trigger escalate mid-flight;
    probe-gated acceptance. Explorer becomes the default middle rung (2-for-2 benchmark
    evidence).
-   **Status: PARTIAL 2026-07-06.** Turn-open trigger + frame relay landed:
-   `shouldRunDiagnosisPrepass` seeds the localization slice before the conductor's
-   first step, and a prepass-only fold-back relays the result as the turn frame
-   (`slice-orchestrator.ts`, `prompt.ts`). Deferred: explorer middle rung (→ item 9),
-   convergence budget, contradiction trigger (→ item 4).
+   **Status: PARTIAL 2026-07-06, verification landed 2026-07-08.** Turn-open trigger and
+   frame relay landed 2026-07-06: `shouldRunDiagnosisPrepass` seeds the localization slice
+   before the conductor's first step, and a prepass-only fold-back relays the result as the
+   turn frame (`slice-orchestrator.ts`, `prompt.ts`). The §2 acceptance rule — "a localization
+   is accepted only with a discriminating probe result attached" — is now a structural
+   verify-ladder rung, not narrative alone: `VerifySpec.probeCommand` + the "probe" rung
+   (`checkProbeRung`, `packages/code-intelligence/src/verifier.ts`) reject a bug-fix slice
+   whose pinned reproduction is still red, and `todosToLoopSlices`
+   (`packages/opencode/src/session/slice-orchestrator.ts`) pins the most-specific reproduction
+   it can identify as that slice's `probeCommand` (design in
+   [ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §1.5; grounded
+   quotes in [tier-prompts.md](./tier-prompts.md) §7.6). Still deferred: explorer middle rung
+   (→ item 9), convergence budget.
 4. **Reasoning-gate un-mute on contradicting facts + enumeration requirement** (F4, B1).
    The cheapest anti-anchoring intervention: spend reasoning tokens at exactly the
    moments the decode showed they were withheld.

@@ -271,7 +271,7 @@ All four set `parallel_tool_calls: true`. Pricing and provider facts: [models.md
 
 ## 5. Mutation surfaces — everything that rewrites a prompt or request at runtime
 
-Ordered by lifecycle stage. ~26 distinct surfaces.
+Ordered by lifecycle stage. ~27 distinct surfaces.
 
 ### 5.1 Per-request: the adaptive reasoning gate
 
@@ -345,7 +345,7 @@ each independently — never conflate or drop one for another."
 markers like `intermittent|race|flaky|deadlock|under load`), localization otherwise. Seeds are
 deduped by content across goals (finding 1, commit `3f1b4ab46`).
 
-`LOCALIZATION_SLICE_CONTENT` (`:607`):
+`LOCALIZATION_SLICE_CONTENT` (`:640`):
 
 ```
 Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s)
@@ -356,10 +356,12 @@ symptom to cause with the graph tools (graph search, callers) and targeted file 
 write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline:
 your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If
 budget runs short, deliver the ranked candidates with their discriminating probes still OPEN —
-never assert a single site as the cause without a probe result that rules the others out.
+name each probe as a single runnable shell command on its own backticked line so it can be
+pinned and re-run — never assert a single site as the cause without a probe result that rules
+the others out.
 ```
 
-`PLANNER_SLICE_CONTENT` (`:637`):
+`PLANNER_SLICE_CONTENT` (`:670`):
 
 ```
 Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly:
@@ -371,9 +373,15 @@ dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and 
 Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget
 discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the
 plan. If budget runs short, deliver the ranked candidates with their discriminating probes
-still OPEN — never assert a single site as the cause without a probe result that rules the
-others out.
+still OPEN — name each probe as a single runnable shell command on its own backticked line so
+it can be pinned and re-run — never assert a single site as the cause without a probe result
+that rules the others out.
 ```
+
+Both blocks gained the same trailing clause in the same edit as the M1 probe rung (task #7,
+2026-07-08): naming each open probe as a single runnable, backticked shell command is what lets
+`todosToLoopSlices` (§5.5) later rank and pin it as `probeCommand` — so a localization/plan
+artifact's stated probe becomes the exact command the verify ladder re-runs, not just narrative.
 
 **Fold-back guard — narrative-only flag** (`prompt.ts` `prepassOnly` branch, `:~2197`;
 `isProbeGrounded`, `prompt.ts:~155`, 2026-07-08). When a localization/plan pre-pass is the only
@@ -427,6 +435,17 @@ Applied to conductor-authored todos when no typed slice is already in flight:
   `--write/--fix/--watch/-w` are **skipped** (`MUTATING_OR_NONTERMINATING_SCRIPT_RE`,
   `graph-tools.ts:~650`, commit `7553842f4`): a sound check must be side-effect-free and
   terminating.
+- **Probe-command derivation (task #7, 2026-07-08)** — an edit-emitting slice
+  (`isPatchEmittingSlice`) additionally gets `probeCommand`: the most-specific pinned
+  reproduction among its own extracted commands (`mostSpecificRepro` ranks
+  `extractVerifyCommands`'s own output — a `kind:"test"` command naming a test file or
+  carrying a `-t/-k/--grep` filter scores highest, `:502-524`), falling back to a resolved
+  upstream dependency's content (e.g. a diagnosis slice's) when the slice names nothing
+  itself, and left unset — never fabricated — when nothing identifiable exists (`:1386-1393`).
+  `probeCommand` rides on `VerifySpec.probeCommand` into the verifier's separate "probe" rung
+  (`checkProbeRung`, `verifier.ts:515-533`): a red pinned reproduction rejects even when the
+  generic `verifyCommands` list passed, gating both the sound-accept path and the untestable
+  path (ORCHESTRATION_MECHANISM.md §1.5/§7.6).
 - **Test-tree guard** (`TEST_TREE_GUARD_COMMAND`, `:506-510`) — prepended to every
   command-backed spec unless the batch authors tests: fails the sound rung when tracked test
   files have modifications (`git diff --diff-filter=M` against test-path patterns), because "a
@@ -540,6 +559,7 @@ is rebuilt as:
 | 24 | System assembly order | every request | system[] composition | request.ts:64-72 |
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
 | 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2197 (`isProbeGrounded` :~155) |
+| 27 | Probe-rung reproduction gate | pinned `probeCommand` still red | rejects rung `probe` | verifier.ts:515-533 (`checkProbeRung`), slice-orchestrator.ts:1386-1393 (pin) |
 
 ---
 
@@ -636,3 +656,22 @@ The design-sensitive tail of the overhaul. All three shipped, unconditional, no 
   `knobs.ts`** (the numeric effort dial is already single-sourced in `model-registry.ts` /
   `econ-defaults.ts` under a drift test — a second home would compete with it). This delivers the
   "single location to modify prompts" goal (§1).
+
+### 7.6 Task #7's verification landing — the probe rung (2026-07-08)
+
+A pinned-reproduction rung closes the loop the fold-back warning (§7.5 #7) could only flag: a
+new `VerifySpec.probeCommand?: VerifyCommand` plus a "probe" rung in `runVerifierLadder`, via
+the shared `checkProbeRung` helper (`packages/code-intelligence/src/verifier.ts`), reject a
+bug-fix slice unless its own pinned reproduction transitions red→green — gating BOTH the
+sound-accept path (a green generic `verifyCommands` list is not enough on its own) and the
+untestable path; a broken build still rejects first, before the probe ever runs (§1.5's real
+gating order: behavior-gate → sound → probe). `todosToLoopSlices`
+(`packages/opencode/src/session/slice-orchestrator.ts`, §5.5) pins the most-specific
+reproduction it can identify as `probeCommand` on every edit-emitting slice — ranking
+`extractVerifyCommands`'s own output (no second extractor), falling back to a resolved
+upstream dependency's content, and left unset when nothing identifiable exists (never
+fabricated). The shared trailing sentence of `LOCALIZATION_SLICE_CONTENT` /
+`PLANNER_SLICE_CONTENT` (§5.3) now also asks the generator to name each open probe as a single
+runnable, backticked shell command — the exact string this rung later pins and re-runs.
+Design-level treatment: [ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md)
+§1.5, §2.1, §2.2 (G5).

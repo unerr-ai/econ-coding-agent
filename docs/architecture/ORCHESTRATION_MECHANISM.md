@@ -207,13 +207,18 @@ plan in 9 read-only steps; the zod runner ran the build with edit permissions de
 
 ### 1.5 Verify: the work is checked, not trusted
 
-Also unchanged — the seven-rung verifier ladder runs the actual build/test commands, watches
+Also unchanged — the eight-rung verifier ladder runs the actual build/test commands, watches
 the trajectory for test-dodging, rejects suspicious skips and shrinking test counts, and
-falls back to judge/consistency checks when no tests exist. This is the load-bearing wall:
-both the cheap-first gamble (§1.3) and the containment story (§1.6) only work because
-failure is *detected* here. Notably, the incumbent doesn't have this wall at all — Claude
-Code merges subagent work back on pure trust (§3.1). It can afford trust; a system built on
-cheap tiers cannot.
+falls back to judge/consistency checks when no tests exist. Gating order is behavior-gate →
+sound → probe: a suspicious trajectory rejects before the sound check is even trusted, and
+once sound has passed (or is inapplicable) a bug-fix slice's own pinned reproduction
+(`VerifySpec.probeCommand`, the "probe" rung, task #7 — landed 2026-07-08, §7.6 of
+[tier-prompts.md](../design/tier-prompts.md)) must also go red→green — rejecting even when the
+generic `verifyCommands` list passed — before an untestable slice degrades further to the
+extension rung, judge, or QE. This is the load-bearing wall: both the cheap-first gamble
+(§1.3) and the containment story (§1.6) only work because failure is *detected* here. Notably,
+the incumbent doesn't have this wall at all — Claude Code merges subagent work back on pure
+trust (§3.1). It can afford trust; a system built on cheap tiers cannot.
 
 ### 1.6 Contain: a failed attempt costs its tokens, not the tree
 
@@ -243,6 +248,13 @@ The escalated tier starts from a **clean tree**, and the failed diff rides along
 can see what was tried) without the corruption risk. Parallel slices get the same guarantee
 via worktree isolation — borrowing Claude Code's mechanic but not its blind merge: econ
 merges only diffs that passed the rungs.
+
+A reject doesn't escalate on the first miss either: it first squeezes the SAME tier while the
+rejection's evidence keeps changing, and only climbs once that stalls (M2, §4.2) — the ladder
+climb becomes the second-to-last resort, not the first hop. A structurally critical slice
+(high coupling, or risk over the allocator's tiebreak) additionally may never settle
+unverified below the oracle (M3, the escalation floor, §4.2) — it forces the climb the cost
+cap would otherwise stop, settling loudly only once genuinely stuck at the ceiling.
 
 ### 1.7 The cache rule: the owner stays put; only briefs travel
 
@@ -283,8 +295,8 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 | probe | coupling / testStrength / verifyCommands probed **once, at decompose time** | `probeSlice*` in `packages/opencode/src/tool/graph-tools.ts` |
 | allocate | static matrix sliceType × coupling × testStrength × need → tier; risk breaks exactly one borderline cell toward oracle (`risk > 70`); **no hysteresis, no de-escalation, no dispatch-time re-eval** | `packages/code-intelligence/src/allocation.ts:132-212` (risk tiebreak `:201-210`) |
 | execute | seat-scoped child sessions, personas, step budgets, lean briefs | `childSlicePermission`, dispatch site in `session/prompt.ts` |
-| verify | 7 rungs: sound (runs `verifyCommands`, case counts), behavior gate, shrink reject, skip flags, extra rung, QE veto, flagged unverified-accept | `packages/code-intelligence/src/verifier.ts:518-601` |
-| escalate | executor → conductor → reasoner → oracle with type ceilings; escalation brief (verdict + ≤6k-char digest + files/commands lists); **failed edits NOT reverted**; double-pay booked per rung | `slice-loop.ts:271-282` (chain), `:414-443` (brief), `:702-716` (booking into `double-pay.ts`) |
+| verify | 8 rungs: behavior gate, sound (runs `verifyCommands`, case counts), shrink reject, skip flags, probe (task #7 pinned reproduction — gates sound-accept + untestable paths), extra rung, QE veto, flagged unverified-accept | `packages/code-intelligence/src/verifier.ts:515-533` (probe), `:568-662` (ladder) |
+| escalate | a genuine reject first squeezes the SAME tier while its failure signature keeps changing (M2, ≤2 retries), climbing only on stall — executor → conductor → reasoner → oracle with type ceilings; a CRITICAL slice (high coupling or risk>70) forces a climb at every exhaustion point instead of settling unverified below the oracle (M3, the escalation floor); each hop's escalation brief carries the rejected diff as REVERTED advice (verdict + ≤6k-char digest + files/commands lists, U3 containment); double-pay booked per rung | `slice-loop.ts:981-1102` (squeeze+climb chain), `:495-531` (brief), `:611-625` (booking into `double-pay.ts`) |
 | observe | `turn_shape` / `orchestration_engaged` events; `EconReceipt` per-tier drilldown | session logs, receipt |
 
 Live-fire status: diagnosis-planner door FIRED with payoff (django gold-file fix, ~$0.15);
@@ -311,7 +323,7 @@ but is wired only to user-facing revert.
 models. Already measured internally: one tier's provider discounts cached reads ≈11.6×;
 session-affinity behavior differs per model (W8 probe, `model-registry.ts` notes).
 
-**G5 — the mechanism runs invisibly to the models that must cooperate with it.** Several stages need model cooperation the prompts don't supply: the generator is never shown the judge's checks (§1.5), so it can't pre-satisfy them; the reasoner delta described a delegating principal, not the leaf slice it actually runs as; the conductor is never told that inline edits escape the containment bracket (§1.6). Verify (generator pre-satisfies checks), Track (conductor types slices correctly), Execute (well-formed edits) and Contain (route uncertain edits into slices) each have a cooperation seam the prompts were silent on. Being closed by the prompt-content overhaul — the prompt-side companion to U3/U4.
+**G5 — the mechanism runs invisibly to the models that must cooperate with it.** Several stages need model cooperation the prompts don't supply: the generator is never shown the judge's checks (§1.5), so it can't pre-satisfy them; the reasoner delta described a delegating principal, not the leaf slice it actually runs as; the conductor is never told that inline edits escape the containment bracket (§1.6). Verify (generator pre-satisfies checks), Track (conductor types slices correctly), Execute (well-formed edits) and Contain (route uncertain edits into slices) each have a cooperation seam the prompts were silent on. Being closed by the prompt-content overhaul — the prompt-side companion to U3/U4. The Verify seam narrows further with the task #7 probe rung (§1.5, landed 2026-07-08): a bug-fix slice's own pinned reproduction becomes a checked verify rung rather than a flag-and-continue warning, and the LOCALIZATION/PLANNER prompt tweak (tier-prompts.md §5.3) now asks the generator to name each discriminating probe as a single runnable, backticked command — so the artifact the conductor produces is the exact string the probe rung later pins and re-runs.
 
 ---
 
@@ -522,6 +534,21 @@ suspect a hidden sequential dependency and re-order.
 
 Mid-flight: the convergence-budget and contradiction triggers become evaluator re-entry
 points — a stalled slice is re-classified, not just un-muted.
+
+**The squeeze-then-climb chain (M2/M3, `runSlice` in `slice-loop.ts`).** A rejected slice does
+not climb immediately: it first retries the SAME tier while its failure signature
+(`rung|missing`) keeps changing, up to `SAME_TIER_RETRY_BUDGET` (2) — squeezing the cheap tier
+before paying for an escalation — and only climbs once the signature repeats or the squeeze
+budget is spent (a stall). Climb depth is its own counter (`climbs` vs `maxClimbs`), decoupled
+from `MAX_SLICE_ATTEMPTS` (8, a runaway backstop on total dispatches only, not the real
+control): a non-critical slice climbs at most once (`maxClimbs = 1`, executor→conductor)
+before it may settle unverified; a read-only (recon/verify) slice never squeezes or climbs
+(`maxClimbs = 0`). A CRITICAL slice (`isCritical` — high coupling, or risk above the
+allocator's tiebreak) bypasses `maxClimbs` via `forceFloorClimb` and keeps climbing at every
+exhaustion point up to the oracle ceiling, settling loudly
+(`rungReason: "critical-unverified-at-ceiling"`) only once it is genuinely stuck there. The
+invariant this guarantees: a non-read-only slice failing at the cheap tier always reaches at
+least the conductor before it may settle unverified.
 
 ### 4.3 Failure containment
 
