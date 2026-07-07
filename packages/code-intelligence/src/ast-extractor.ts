@@ -496,9 +496,10 @@ function findEnclosingEntity(lineNo: number, entities: ExtractedEntity[]): Extra
 
 /**
  * Extract import and call edges from source using regex. Import edges parse
- * ES named/default/namespace bindings and Python-style `from X import Y`,
- * resolving relative ES specifiers to an absolute `toFile` (null for
- * external/unresolved). Call edges scan each entity's body for bare
+ * ES named/default/namespace bindings, CommonJS `require()` destructured and
+ * whole-module bindings, and Python-style `from X import Y`, resolving
+ * relative specifiers to an absolute `toFile` (null for external/unresolved).
+ * Call edges scan each entity's body for bare
  * `identifier(` call sites and for `X.fn(` property calls whose receiver `X`
  * resolves to a same-file namespace or default import binding — excluding
  * other member access (`obj.foo(` where `obj` isn't an import) and language
@@ -550,6 +551,38 @@ export function extractEdges(
     const n = m[1]
     const toFile = resolveRelativeImport(m[2] ?? "", filePath)
     if (n) importNameToFile.set(n, toFile)
+  }
+
+  // CommonJS: const/let/var { A, B } = require("./x") — leading whitespace
+  // allowed since lazy in-function requires are a real Node idiom (unlike ES
+  // imports, which must be top-level). A piece may rename (`source: local`)
+  // and/or carry a default (`source: local = fallback`); the SOURCE name
+  // becomes the import edge's target, the LOCAL name is what call sites use.
+  const cjsNamedImport = /^\s*(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(\s*["']([^"']+)["']\s*\)/gm
+  while ((m = cjsNamedImport.exec(content)) !== null) {
+    const toFile = resolveRelativeImport(m[2] ?? "", filePath)
+    const pieces = (m[1] ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+    for (const piece of pieces) {
+      const withoutDefault = piece.replace(/=.*$/, "").trim()
+      const [sourceRaw, localRaw] = withoutDefault.split(":").map((s) => s.trim())
+      if (!sourceRaw) continue
+      const local = localRaw || sourceRaw
+      edges.push({ fromEntity: "", toEntity: sourceRaw, toFile, kind: "import" })
+      importNameToFile.set(local, toFile)
+    }
+  }
+
+  // CommonJS: const/let/var X = require("./x") — X is usable as both a bare
+  // call (X(...)) and a namespace-like property-call receiver (X.fn(...)),
+  // resolved below through the same importNameToFile map ES bindings use.
+  const cjsWholeImport = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*["']([^"']+)["']\s*\)/gm
+  while ((m = cjsWholeImport.exec(content)) !== null) {
+    const n = m[1]
+    const toFile = resolveRelativeImport(m[2] ?? "", filePath)
+    if (n) {
+      edges.push({ fromEntity: "", toEntity: n, toFile, kind: "import" })
+      importNameToFile.set(n, toFile)
+    }
   }
 
   // Python: from X import A, B (path resolution not attempted — dotted modules)
