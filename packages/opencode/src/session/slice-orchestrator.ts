@@ -976,8 +976,11 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * for any goal carrying `needsPlan` or shaped `diagnosis-vague`, one
  * frame-seed child (`diagnosisPrepassSeed`, reused verbatim) linked by the
  * goal-tree's `parentID` position index (goal -> task, one level — well
- * inside the tracker's depth-3 cap). Dedup is structural: exactly one seed
- * check per goal, so a goal can never carry two frame seeds.
+ * inside the tracker's depth-3 cap). Dedup is by CONTENT across goals, not
+ * per-goal: two qualifying goals whose seed resolves to the same content
+ * (both LOCALIZATION_PREPASS_TODO or both PLANNER_PREPASS_TODO) plant it
+ * once, parented to the first qualifying goal in dependency order — a mixed
+ * pair (one localization, one planner) still plants two distinct seeds.
  *
  * @sem domain=routing role=router
  */
@@ -990,10 +993,13 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict): TriageTodoRow[]
     const goal = verdict.goals[origIdx]!
     todos.push({ content: goal.quote, status: "pending", priority: "medium" })
   }
+  const plantedSeedContent = new Set<string>()
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
     if (goal.needsPlan || goal.shape === "diagnosis-vague") {
       const seed = diagnosisPrepassSeed(goal.quote)
+      if (plantedSeedContent.has(seed.content)) continue
+      plantedSeedContent.add(seed.content)
       todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
     }
   }

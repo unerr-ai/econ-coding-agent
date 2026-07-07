@@ -599,7 +599,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos[2]!.parentID).toBe(0)
   })
 
-  it("at most one frame seed per goal — the check is per-goal, never duplicated", () => {
+  it("at most one frame seed per goal — the per-goal check never plants two seeds for one goal", () => {
     const verdict: TriageVerdict = {
       goals: [
         { quote: "goal one, needs plan", shape: "build", deliverable: "", needsPlan: true },
@@ -609,9 +609,62 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       confidence: "high",
     }
     const todos = buildTriageTodoSkeleton(verdict)
-    expect(todos).toHaveLength(4) // 2 root goals + 2 frame seeds, one each
+    // both quotes are non-hard, so both resolve to the same LOCALIZATION seed content — cross-goal
+    // content dedup collapses them to ONE planted seed, parented to the first qualifying goal.
+    expect(todos).toHaveLength(3) // 2 root goals + 1 shared frame seed
+    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 0)).toHaveLength(1)
-    expect(todos.filter((t) => t.parentID === 1)).toHaveLength(1)
+    expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
+  })
+
+  it("duplicate-dispatch fix: two goals whose seeds resolve to the SAME content plant it once, parented to the first (case-2 live-fire, $0.112/36% of run)", () => {
+    const verdict: TriageVerdict = {
+      goals: [
+        {
+          quote: "the `SessionStore` cache and `flushQueue` worker disagree — writes during flush are dropped",
+          shape: "diagnosis-vague",
+          deliverable: "root cause found",
+        },
+        { quote: "second goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
+        { quote: "third goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
+      ],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict)
+    // goal 0 is hard -> PLANNER seed; goals 1 and 2 are both non-hard -> both resolve to the SAME
+    // LOCALIZATION seed content. Total seeds planted = 2 (planner once, localization once), not 3.
+    expect(todos).toHaveLength(5) // 3 root goals + 2 distinct frame seeds
+    expect(todos.filter((t) => t.content === PLANNER_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    const planterSeed = todos.find((t) => t.content === PLANNER_SLICE_CONTENT)!
+    expect(planterSeed.parentID).toBe(0)
+    // the localization seed is parented to the FIRST qualifying goal that resolved it (goal 1, write position 1) —
+    // goal 2's identical-content seed is skipped, not replanted or reparented.
+    const localizationSeed = todos.find((t) => t.content === LOCALIZATION_SLICE_CONTENT)!
+    expect(localizationSeed.parentID).toBe(1)
+  })
+
+  it("two goals whose seeds resolve to DIFFERENT content both plant — dedup is by content, not a one-seed-max cap", () => {
+    const verdict: TriageVerdict = {
+      goals: [
+        {
+          quote: "the `SessionStore` cache and `flushQueue` worker disagree — writes during flush are dropped",
+          shape: "build",
+          deliverable: "",
+          needsPlan: true,
+        },
+        { quote: "second goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
+      ],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict)
+    expect(todos).toHaveLength(4) // 2 root goals + 2 distinct frame seeds (planner + localization)
+    expect(todos.filter((t) => t.content === PLANNER_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.find((t) => t.content === PLANNER_SLICE_CONTENT)!.parentID).toBe(0)
+    expect(todos.find((t) => t.content === LOCALIZATION_SLICE_CONTENT)!.parentID).toBe(1)
   })
 })
 
