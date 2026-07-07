@@ -12,8 +12,10 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { BunSqliteGraph } from "@opencode-ai/code-intelligence"
-import { probeSliceCoupling, probeSliceTestStrength } from "../../src/tool/graph-tools"
+import { probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands } from "../../src/tool/graph-tools"
 
 const COUPLING_FIXTURE = join(import.meta.dir, "fixtures/ol79-coupling")
 const TS_FIXTURE = join(import.meta.dir, "fixtures/ol79-teststrength")
@@ -168,5 +170,62 @@ describe("OL-7.9 — the four (coupling × testStrength) matrix cells", () => {
     const testStrength = await probeSliceTestStrength([join(TS_FIXTURE, "pkg-none/src/qux.ts")])
     expect(coupling.coupling).toBe("high")
     expect(testStrength.testStrength).toBe("untestable")
+  })
+})
+
+/** A synthetic package root: a package.json with the given scripts (F2 reads scripts, not repo VCS state). */
+function makeScriptFixture(scripts: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "econ-graph-verifycmds-"))
+  mkdirSync(join(root, "src"), { recursive: true })
+  writeFileSync(join(root, "package.json"), JSON.stringify({ scripts }))
+  writeFileSync(join(root, "src", "index.ts"), "export const x = 1\n")
+  return root
+}
+
+describe("F2 — probeSliceVerifyCommands — mutating/non-terminating script guard", () => {
+  it("skips a --write lint script but keeps a clean test script", async () => {
+    const root = makeScriptFixture({ lint: "biome lint --write .", test: "vitest run" })
+    try {
+      const commands = await probeSliceVerifyCommands([join(root, "src", "index.ts")])
+      expect(commands).toHaveLength(1)
+      expect(commands[0].kind).toBe("test")
+      expect(commands[0].command).toContain("npm run test")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("skips a --watch test script entirely — empty result, no throw", async () => {
+    const root = makeScriptFixture({ test: "vitest --watch" })
+    try {
+      const commands = await probeSliceVerifyCommands([join(root, "src", "index.ts")])
+      expect(commands).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a plain lint script with no mutation/watch flag", async () => {
+    const root = makeScriptFixture({ lint: "eslint src" })
+    try {
+      const commands = await probeSliceVerifyCommands([join(root, "src", "index.ts")])
+      expect(commands).toHaveLength(1)
+      expect(commands[0].kind).toBe("lint")
+      expect(commands[0].command).toContain("npm run lint")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("word-boundary pins: --fixtures is not mistaken for --fix", async () => {
+    const root = makeScriptFixture({ test: "vitest run --fixtures ./f" })
+    try {
+      const commands = await probeSliceVerifyCommands([join(root, "src", "index.ts")])
+      expect(commands).toHaveLength(1)
+      expect(commands[0].kind).toBe("test")
+      expect(commands[0].command).toContain("npm run test")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

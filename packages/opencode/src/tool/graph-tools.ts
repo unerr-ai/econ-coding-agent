@@ -648,6 +648,15 @@ const VERIFY_SCRIPT_KINDS: ReadonlyArray<{ script: string; kind: VerifyCommand["
 ]
 
 /**
+ * Sound-rung contract: a verify command must be side-effect-free and
+ * terminating. A script that rewrites the tree (--write/--fix) or never
+ * exits (--watch/-w) is not a check, so it's excluded even when its name
+ * matches typecheck/test/lint. Deliberately conservative — a false skip only
+ * degrades to the ladder's other rungs, a false emit mutates the user's tree.
+ */
+const MUTATING_OR_NONTERMINATING_SCRIPT_RE = /(?:^|\s)(?:--write|--fix|--watch|-w)\b/
+
+/**
  * F2 — repo-derived sound-rung commands for a slice whose text names none:
  * resolve the owning package root of the slice's files (cwd's own package.json
  * as the fallback), read its scripts, and emit `<pm> run <script>` for the
@@ -655,7 +664,9 @@ const VERIFY_SCRIPT_KINDS: ReadonlyArray<{ script: string; kind: VerifyCommand["
  * lockfile. Each command cd's to its package root so a monorepo slice verifies
  * in the right package regardless of the runner's cwd. Fully defensive: any
  * unreadable root contributes nothing; no root with scripts ⇒ [] (the sound
- * rung stays inapplicable, exactly as before this probe existed).
+ * rung stays inapplicable, exactly as before this probe existed). Scripts
+ * carrying a mutation or watch flag (e.g. `biome lint --write`, `vitest --watch`)
+ * are skipped so verification never edits the tree or hangs on the runner timeout.
  *
  * @sem domain=routing role=analysis
  */
@@ -682,7 +693,9 @@ export async function probeSliceVerifyCommands(files: string[]): Promise<VerifyC
               : existsSync(path.join(root, "yarn.lock"))
                 ? "yarn"
                 : "npm"
-        const commands = VERIFY_SCRIPT_KINDS.filter(({ script }) => script in scripts).map(({ script, kind }) => ({
+        const commands = VERIFY_SCRIPT_KINDS.filter(
+          ({ script }) => script in scripts && !MUTATING_OR_NONTERMINATING_SCRIPT_RE.test(scripts[script]),
+        ).map(({ script, kind }) => ({
           kind,
           command: `cd "${root}" && ${pm} run ${script}`,
         }))
