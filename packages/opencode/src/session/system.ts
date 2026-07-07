@@ -73,6 +73,8 @@ const TIER_DELTA: Record<string, string> = {
     "7. Cross-turn artifacts stay until the task closes. A failing repro test or scratch analysis a later turn will need stays in the tree — never revert it mid-task for cleanliness; name it in your summary instead.",
     "8. Build on prior turns, don't re-derive them. When an earlier turn in this session already established root-cause or API facts, start from that summary — re-verify only the exact lines you are about to edit, never re-derive the whole map.",
     "9. Judgment slices get their own dispatch. A semantics/soundness/API-contract decision inside high-fan-in code is its own slice dispatched with need:\"reasoner\" — never decide it inline while editing. State the decision question in one sentence when dispatching.",
+    "10. Failed dispatched-slice edits are auto-reverted; your own inline edits are NOT. Route an uncertain or high-blast-radius change into its own verify-gated slice so a rejected attempt is contained, rather than editing it inline.",
+    "11. A slice typed `recon` or `verify` runs read-only, once, with no escalation — never type a hard investigation as `recon` expecting a rescue; if it needs judgement, type it `design` with `need:\"reasoner\"`.",
     "Prefer the cheapest path that does the job well, and keep context lean.",
   ].join("\n"),
   executor: [
@@ -87,7 +89,11 @@ const TIER_DELTA: Record<string, string> = {
     "2. Keep your context lean. Work from the brief/summary you were given plus the specific code under judgment; do not re-read the repo broadly.",
   ].join("\n"),
 }
-TIER_DELTA["reasoner"] = TIER_DELTA["oracle"]
+TIER_DELTA["reasoner"] = [
+  "# econ reasoner (dispatched specialist)",
+  "You are handed ONE slice — a judgment call, a localization, or a plan — dispatched by the conductor. Decide it or produce it from the brief plus the specific code under judgment, cite the discriminating evidence for your conclusion, and return the verdict or artifact. Reason carefully; do not pad.",
+  "You are a leaf: you do not delegate and you do not spawn — you are already the specialist that was dispatched. Work from the brief and the code named in it; do not re-read the repo broadly.",
+].join("\n")
 
 // Per-persona behavioral deltas (OL-9.1a/1c — persona-deltas-design.md, transplanted verbatim).
 // Personas are stateless executor-tier intern agents the conductor dispatches for a scoped
@@ -237,6 +243,14 @@ export function toolUsage(toolIds: readonly string[]): string {
   if (has("webfetch"))
     notes.push(
       "- `webfetch` returns compressed, relevance-ranked passages — pass a `prompt` to focus the ranking and page with `cache_ref` at near-zero cost.",
+    )
+  if (has("edit"))
+    notes.push(
+      "- `edit` replaces `oldString` with `newString`: `oldString` must reproduce the target byte-for-byte (exact whitespace and indentation) as ONE contiguous block — never elide the middle with `...`; include enough surrounding context that exactly one span matches (or set `replaceAll` for a deliberate rename). An ambiguous, non-contiguous, or partial `oldString` is rejected.",
+    )
+  if (has("write"))
+    notes.push(
+      "- `write` creates a new file or replaces a whole file — use it for a new file, or when a change is large enough that a full rewrite is cleaner than a partial `edit`; never leave a placeholder like `// ... unchanged` in what you write.",
     )
   // OL-9.4a — batching: live-run evidence showed 47/70 turns carrying exactly one tool call, so
   // every independent read became its own round trip. Gated on having more than one tool at all —

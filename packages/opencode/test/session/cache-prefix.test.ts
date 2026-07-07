@@ -93,7 +93,7 @@ const buildPrefix = Effect.fn("test.buildPrefix")(function* (model: Provider.Mod
 
 // Regenerate intentionally when the system prompt changes; an unintended change here
 // means a cache-busting prefix drift.
-const GOLDEN_PREFIX_HASH = "5f8351c2e3bc8bea5c93708eb8d30d5aec2f627dc6b6e553b3fdb0733c678426"
+const GOLDEN_PREFIX_HASH = "799bf7e2dd56389f16f27c36c66e47c1c89b2603efc353ae356cb052f380ff3f"
 
 describe("session.cache-prefix", () => {
   it.instance("system-prompt prefix is byte-identical across turns in the same session", () =>

@@ -2,7 +2,7 @@
 
 Every system prompt econ sends per model tier, plus **every runtime mutation** the engine
 applies to prompts and requests after assembly. All quotes below are verbatim from the code
-with `file:line` anchors (as of commit `7553842f4`, 2026-07-07). **The code is authoritative** —
+with `file:line` anchors (current as of the 2026-07-08 failure-mode overhaul — see §7). **The code is authoritative** —
 when a prompt constant changes, update this doc in the same change.
 
 Related docs (facts live there, not here): tier↔model bindings, pricing and model facts in
@@ -40,15 +40,17 @@ evaluator, containment) in
                  └──────────────────────────────────────────────────────────┘
 ```
 
-The **base prompt** is OpenCode's `packages/opencode/src/session/prompt/default.txt` (96
+The **base prompt** is OpenCode's `packages/opencode/src/session/prompt/default.txt` (107
 lines): tool usage, conventions-following, code style ("DO NOT ADD ***ANY*** COMMENTS unless
-asked"), concise-output tone. Every tier below layers a **delta** on top of it.
+asked"), concise-output tone, plus the cross-cutting discipline every tier now inherits —
+root-cause finding, edit correctness (no elision/placeholders), and honest reporting (added
+2026-07-08, §7). Every tier below layers a **delta** on top of it.
 
 ---
 
-## 2. Tier deltas (`packages/opencode/src/session/system.ts:59-100`)
+## 2. Tier deltas (`packages/opencode/src/session/system.ts:56-96`)
 
-### 2.1 Conductor (`system.ts:59-89`) — the default tier, orchestrator
+### 2.1 Conductor (`system.ts:57-79`) — the default tier, orchestrator
 
 ```
 # econ conductor (default engineer — you orchestrate the whole turn)
@@ -166,10 +168,18 @@ you are about to edit, never re-derive the whole map.
 high-fan-in code is its own slice dispatched with need:"reasoner" — never decide it inline
 while editing. State the decision question in one sentence when dispatching.
 
+10. Failed dispatched-slice edits are auto-reverted; your own inline edits are NOT. Route an
+uncertain or high-blast-radius change into its own verify-gated slice so a rejected attempt is
+contained, rather than editing it inline.
+
+11. A slice typed `recon` or `verify` runs read-only, once, with no escalation — never type a
+hard investigation as `recon` expecting a rescue; if it needs judgement, type it `design` with
+need:"reasoner".
+
 Prefer the cheapest path that does the job well, and keep context lean.
 ```
 
-### 2.2 Executor (`system.ts:91-94`) — scoped assistant
+### 2.2 Executor (`system.ts:80-84`) — scoped assistant
 
 ```
 # econ executor (scoped assistant)
@@ -179,7 +189,7 @@ You execute one clearly-scoped task handed to you. Do exactly that task, verify 
 Do not expand scope, redesign, or make unrelated changes.
 ```
 
-### 2.3 Oracle (`system.ts:96-99`) — the expert
+### 2.3 Oracle (`system.ts:85-90`) — the expert
 
 ```
 # econ oracle (expert)
@@ -195,17 +205,25 @@ context at the expensive tier.
 under judgment; do not re-read the repo broadly.
 ```
 
-### 2.4 Reasoner (`system.ts:100`)
+### 2.4 Reasoner (`system.ts:92-96`)
 
-The reasoner tier **reuses the oracle delta verbatim**:
+The reasoner now carries **its own delta** — it no longer aliases the oracle. It runs as a
+dispatched leaf slice, not a delegating principal, so the oracle's "delegate mechanical work
+via the task tool" line (which the reasoner cannot act on) is gone:
 
-```typescript
-TIER_DELTA["reasoner"] = TIER_DELTA["oracle"]
+```
+# econ reasoner (dispatched specialist)
+You are handed ONE slice — a judgment call, a localization, or a plan — dispatched by the
+conductor. Decide it or produce it from the brief plus the specific code under judgment, cite
+the discriminating evidence for your conclusion, and return the verdict or artifact. Reason
+carefully; do not pad.
+You are a leaf: you do not delegate and you do not spawn — you are already the specialist that
+was dispatched. Work from the brief and the code named in it; do not re-read the repo broadly.
 ```
 
 ---
 
-## 3. Executor personas (`system.ts:98-189`)
+## 3. Executor personas (`PERSONA_DELTA`, `system.ts:104-195`)
 
 Six persona deltas layered on the executor tier. Each embeds the same batching directive
 ("Issue every independent tool call in the SAME response … Act from your first response") and
@@ -222,7 +240,7 @@ a strict NEVER block; the distinctive parts:
 
 All personas have `task`, `question`, and `todowrite` **removed from the tool set entirely**
 (no orchestration recursion) — `econ-defaults.ts:27-56`. Full verbatim persona texts:
-`system.ts:99-189`. Persona list constant: `ECON_PERSONAS`
+`system.ts:105-195`. Persona list constant: `ECON_PERSONAS`
 (`packages/code-intelligence/src/model-registry.ts:154`). Notable prompt-embedded shell lore
 (runner): "jest swallows console.log by default — add --silent=false"; "in zsh an unmatched
 glob aborts the whole && chain".
@@ -268,7 +286,7 @@ Recovery wins when both recovery and contradiction match. Live effect (trace run
 
 ### 5.2 Turn-open: turn-shape preambles (system tail)
 
-`slice-orchestrator.ts:772-809` — one of five casting briefs appended to the system array by
+`slice-orchestrator.ts:772-810` — one of five casting briefs appended to the system array by
 turn category:
 
 ```
@@ -281,13 +299,14 @@ If evidence contradicts the frame, enumerate at least two candidate layers with 
 ```
 TURN SHAPE: diagnosis (grounded — the prompt names the site).
 Verify the named site before editing: one discriminating probe that confirms the mechanism, then the fix.
-No broad exploration — the localization decision already happened in the prompt.
+Confirm the named site is the CAUSE, not just where the symptom surfaces — trace one edge upstream before editing; keep exploration to that confirmation.
 ```
 
 ```
 TURN SHAPE: build.
 Type the plan: write the full pending list first; decided changes become typed slices and parallel-eligible slices run as a DAG.
 Give every check-run item a real runnable command — a verify slice without one cannot reject.
+If the build uncovers a defect, localize its cause before patching — do not fix the first symptom site.
 ```
 
 ```
@@ -322,11 +341,13 @@ deduped by content across goals (finding 1, commit `3f1b4ab46`).
 ```
 Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s)
 that must change, the defect mechanism (why the current behavior is wrong), and the minimal
-fix strategy — every claim backed by evidence (file/line or call edge). Trace the failure path
-from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do
-not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget
-discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the
-deliverable — a partial localization delivered beats a perfect one unwritten.
+fix strategy — every claim backed by evidence — and for the named cause, the call edge that
+connects the symptom to it, not just a file/line at the symptom. Trace the failure path from
+symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not
+write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline:
+your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If
+budget runs short, deliver the ranked candidates with their discriminating probes still OPEN —
+never assert a single site as the cause without a probe result that rules the others out.
 ```
 
 `PLANNER_SLICE_CONTENT` (`:637`):
@@ -337,10 +358,12 @@ Produce a bounded execution PLAN for this turn — a plan artifact, not code. De
 rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome
 separates it from the rest; (3) the fix layer(s) the evidence points to, with the
 risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to
-dispatch — per slice: content, sliceType (recon/mechanical/verify), and deps. Writing code,
-diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline:
-your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan — a
-partial plan delivered beats a perfect plan unwritten.
+dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps.
+Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget
+discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the
+plan. If budget runs short, deliver the ranked candidates with their discriminating probes
+still OPEN — never assert a single site as the cause without a probe result that rules the
+others out.
 ```
 
 ### 5.4 Typing-time: autoTypeTodos mutations (`slice-orchestrator.ts:1134-1200`)
@@ -366,8 +389,9 @@ Applied to conductor-authored todos when no typed slice is already in flight:
 
 ### 5.5 Conversion-time: todo → LoopSlice (`todosToLoopSlices`, `:1240-1368`)
 
-- **PATCH_CONTRACT** (`:1314`) — appended to a design slice's prompt when a mechanical slice
-  depends on it:
+- **PATCH_CONTRACT** (`:1317`, guard `isPatchEmittingSlice` `:1338`) — appended to **every
+  edit-emitting slice**: a design slice that feeds a mechanical dependent, or any `mechanical`
+  or `author` slice itself (widened 2026-07-08, was design→mechanical only):
 
   ```
   Output contract: a mechanical slice will apply your design verbatim. End your output with
@@ -473,7 +497,7 @@ is rebuilt as:
 | 1 | Reasoning gate: plan | turn-open user msg | deletes `reasoningEffort:"none"` | reasoning-gate.ts:76 |
 | 2 | Reasoning gate: recovery | bash failure signature | same | reasoning-gate.ts:92 |
 | 3 | Reasoning gate: contradiction | empty/error tool result | same | reasoning-gate.ts:97 |
-| 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:772-809 |
+| 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:772-810 |
 | 5 | Triage preamble | multi-goal verdict | replaces #4 | slice-orchestrator.ts:922-935 |
 | 6 | Localization seed | bug-shaped, not localized | injects todo | slice-orchestrator.ts:607,1147 |
 | 7 | Planner seed | hard-diagnosis prompt | injects todo | slice-orchestrator.ts:637,849 |
@@ -482,7 +506,7 @@ is rebuilt as:
 | 10 | Build-plan typing | MECHANICAL_START, ≥2 changes | typeBuildPlan | slice-orchestrator.ts:1141 |
 | 11 | Verdict dep injection | VERDICT_SHAPED_RE, no deps | deps | slice-orchestrator.ts:1185 |
 | 12 | Derived-type backstop | ≥3 untyped todos | sliceType | slice-orchestrator.ts:1216 |
-| 13 | PATCH_CONTRACT | design→mechanical dep | prompt suffix | slice-orchestrator.ts:1314,1356 |
+| 13 | PATCH_CONTRACT | design→mech dep, or any mechanical/author slice | prompt suffix | slice-orchestrator.ts:1317,1338 |
 | 14 | Verify-command extract | backticked runner cmd | verifyCommands | slice-orchestrator.ts:481 |
 | 15 | Verify-command probe | no text cmd | verifyCommands | graph-tools.ts:662 |
 | 16 | Mutating-script skip | `--write/--fix/--watch/-w` | drops script | graph-tools.ts:~650 |
@@ -495,3 +519,76 @@ is rebuilt as:
 | 23 | Judge prompt | judge-cell verification | session-less call | judge.ts:60-74 |
 | 24 | System assembly order | every request | system[] composition | request.ts:64-72 |
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
+
+---
+
+## 7. Change record — the failure-mode prompt overhaul (2026-07-08)
+
+This section records *what* changed and *why*. The code stays authoritative for the current
+text; the verbatim quotes + `file:line` anchors in §2–§5 are re-synced to the new strings in
+the same commit that lands the change (task #5/#6). Deep evidence: the five research digests
+of 2026-07-08 (leaked Claude Code / Codex / Cursor / Gemini / OSS prompts) and
+[ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §2.2 (its new **G5**)
+and §3.1–3.2.
+
+### 7.1 Why this wave
+
+Live use surfaced four failure modes that are **econ-specific**, not standalone-prompt-polish:
+
+- **F1 — Format fidelity.** The model's coding logic is correct but its edit/patch output is
+  malformed or misinterpreted.
+- **F2 — Localization.** Bug exploration finds *symptoms*, not the *root cause*.
+- **F3 — Orchestration support.** The tier/persona prompts don't reinforce the machinery in
+  ORCHESTRATION_MECHANISM.md — the gap it now tracks as **G5** (the mechanism runs invisibly
+  to the models that must cooperate with it).
+- **F4 — Tool association.** Tools aren't confidently bound to the right action.
+
+### 7.2 Root diagnosis — one cause behind all four
+
+econ's cross-cutting discipline — edit-format fidelity, tool association, root-cause method,
+honest reporting — was **absent from the shared base** (`default.txt`) and present only in
+scattered, partial places: the `edit.txt` tool schema, the single `diagnosis-vague`
+turn-shape seed, and the design→mechanical `PATCH_CONTRACT`. Nothing landed that discipline in
+the cached prefix that **every** tier and persona actually reads.
+
+### 7.3 The architecture principle adopted
+
+From the research pass over leading coding-agent prompts:
+
+- **One shared-discipline base + role-only deltas.** Anthropic ships a byte-identical base
+  across sibling models with a tiny per-model delta; Codex forks one body via a
+  `{{ personality }}` placeholder. So cross-cutting discipline belongs in the base (inherited
+  by all tiers/personas), and each delta carries *role* only.
+- **Effort is a numeric dial, not prose.** OpenAI's `o3-high` vs `o3-low` differ by one line
+  (`# Juice: 512` → `32`), everything else byte-identical; output verbosity is a *separate*
+  knob. → don't fork prompt *prose* per tier by capability; vary `reasoningEffort` + a
+  verbosity cap. (Motivates the Wave-2 `knobs.ts`.)
+- **Tool specifics live in the tool block, not the base.** Confirms `toolUsage()` (§5, surface
+  drift-proofing) as the right home for the edit/write format contract.
+
+### 7.4 Changes in this wave
+
+| Change | File | Why | Fixes | Task |
+|---|---|---|---|---|
+| Base gains root-cause + edit-correctness + honest-reporting discipline; tool refs de-Claude'd to real ids | `default.txt` | put discipline in the cached prefix every tier/persona reads | F2·F4 | #1 |
+| `toolUsage()` gains an `edit`/`write` branch (unique, verbatim, contiguous `oldString`; never elide the middle; write-vs-edit) | `system.ts` | the edit tool had zero format reinforcement outside its schema | F1·F4 | #1 |
+| Reasoner gets its own delta (was `TIER_DELTA["reasoner"] = TIER_DELTA["oracle"]`) | `system.ts` | reasoner runs as a leaf slice; the oracle "delegate via `task`" line was dead/harmful | F3 | #1 |
+| Conductor delta: containment-asymmetry + recon-one-shot warnings | `system.ts` | inline edits escape the revert bracket; `recon`/`verify` slices are one-shot, unrescued | F3 | #1 |
+| `PATCH_CONTRACT` widened from design→mechanical only to **every** edit-emitting slice | `slice-orchestrator.ts` | plain mechanical/author/inline edits got no edit-format guidance | F1 | #2 |
+| `design` added to the planner's handoff vocab | `slice-orchestrator.ts` | plans couldn't floor an irreducible design decision at the reasoner/oracle | F3 | #2 |
+| Budget-settling clause rewritten to preserve the fork; evidence bar raised to a causal chain | `slice-orchestrator.ts` | the seed's "a partial localization beats a perfect one unwritten" authorized settling on a symptom | F2 | #2 |
+| `diagnosis-grounded` "No broad exploration" fixed; build-turn localization cue added | `slice-orchestrator.ts` | root-cause discipline lived in only 1 of 5 turn shapes | F2 | #2 |
+| Edit-tool errors made self-correcting; `edit.txt` doc drift fixed | `edit.ts`, `edit.txt` | for a low-reasoning OSS tier the thrown error is the only in-loop teacher | F1 | #3 |
+
+### 7.5 Deferred to Wave 2 (design-sensitive / refactor)
+
+- **Localization verification rung** — an executable "probe result attached, not narrative"
+  check before a localization folds back. Adds a rung to a slice type §4.3 currently defines
+  as unverified → a real mechanism change, live-fire gated (task #7).
+- **Contradiction gate → semantic.** `reasoning-gate.ts` `isContradictionResult` is purely
+  syntactic; it misses a lookup that *succeeds but disproves* the hypothesis, muting the
+  conductor exactly when rule 4b needs thinking budget (task #8).
+- **Single prompt-config registry** — `packages/code-intelligence/src/prompts/`
+  (`base.ts` / `roles.ts` / `personas.ts` / `fragments.ts` / `knobs.ts` / `assemble.ts`)
+  consolidating the base + role deltas + `toolUsage()` + the numeric knobs into one editable,
+  test-guarded location (task #9). This is the "single location to modify prompts" goal.

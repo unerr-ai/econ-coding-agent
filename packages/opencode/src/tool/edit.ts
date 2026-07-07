@@ -727,7 +727,7 @@ export function replace(content: string, oldString: string, newString: string, r
       notFound = false
       if (isDisproportionateMatch(search, oldString)) {
         throw new Error(
-          "Refusing replacement because the matched span is much larger than oldString. Re-read the file and provide the full exact oldString for the intended replacement.",
+          "Refusing replacement because the matched span is much larger than oldString. Re-read the file and provide the full exact oldString for the intended replacement. This happens when `oldString` omits middle lines; include the full contiguous region instead.",
         )
       }
       if (replaceAll) {
@@ -741,10 +741,12 @@ export function replace(content: string, oldString: string, newString: string, r
 
   if (notFound) {
     throw new Error(
-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings. To fix: re-read the target region with `read`, copy the lines verbatim including exact indentation, and provide a slightly larger UNIQUE anchor — do not elide any middle lines.",
     )
   }
-  throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+  throw new Error(
+    "Found multiple matches for oldString. Provide more surrounding context to make the match unique. To fix: include more surrounding context so exactly one span matches, or set the replaceAll flag for a deliberate rename.",
+  )
 }
 
 function isDisproportionateMatch(search: string, oldString: string) {

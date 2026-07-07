@@ -131,11 +131,11 @@ describe("SystemPrompt.select", () => {
     expect(result[1]).toContain("econ oracle")
   })
 
-  test("reasoner: returns 2-element array and delta contains 'econ oracle' (same delta as oracle)", () => {
+  test("reasoner: returns 2-element array and delta contains 'econ reasoner' (its own delta, distinct from oracle)", () => {
     const agent = { name: "reasoner" } as any
     const result = SystemPrompt.select(qwenModel, agent)
     expect(result).toHaveLength(2)
-    expect(result[1]).toContain("econ oracle")
+    expect(result[1]).toContain("econ reasoner")
   })
 
   test("non-econ agent falls back to provider() selection — returns single-element array", () => {

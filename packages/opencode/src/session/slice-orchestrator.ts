@@ -605,7 +605,7 @@ function isFreshPlan(todos: readonly OrchestrationTodo[]): boolean {
  * item verbatim.
  */
 export const LOCALIZATION_SLICE_CONTENT =
-  "Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s) that must change, the defect mechanism (why the current behavior is wrong), and the minimal fix strategy — every claim backed by evidence (file/line or call edge). Trace the failure path from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable — a partial localization delivered beats a perfect one unwritten."
+  "Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s) that must change, the defect mechanism (why the current behavior is wrong), and the minimal fix strategy — every claim backed by evidence — and for the named cause, the call edge that connects the symptom to it, not just a file/line at the symptom. Trace the failure path from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — never assert a single site as the cause without a probe result that rules the others out."
 
 /**
  * Shape of the todo the diagnosis pre-pass injects: OrchestrationTodo plus the
@@ -635,7 +635,7 @@ export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
  * relay recognizes the frame slice by id, same as LOCALIZATION_SLICE_CONTENT.
  */
 export const PLANNER_SLICE_CONTENT =
-  "Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly: (1) ranked candidate defect sites (file + function), each with the evidence that earns its rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome separates it from the rest; (3) the fix layer(s) the evidence points to, with the risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to dispatch — per slice: content, sliceType (recon/mechanical/verify), and deps. Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan — a partial plan delivered beats a perfect plan unwritten."
+  "Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly: (1) ranked candidate defect sites (file + function), each with the evidence that earns its rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome separates it from the rest; (3) the fix layer(s) the evidence points to, with the risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps. Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — never assert a single site as the cause without a probe result that rules the others out."
 
 /** The planner seat's seed (§8): the localization pre-pass's frame-slice shape pinned `need:"reasoner"` — a hard diagnosis turn buys one bounded plan up front, and the pin is what carries a lone frame slice through the shouldOrchestrate benefit gate. */
 export const PLANNER_PREPASS_TODO: InjectedSliceTodo = {
@@ -779,12 +779,13 @@ const CATEGORY_PREAMBLE: Record<TurnShapeCategory, string> = {
   "diagnosis-grounded": [
     "TURN SHAPE: diagnosis (grounded — the prompt names the site).",
     "Verify the named site before editing: one discriminating probe that confirms the mechanism, then the fix.",
-    "No broad exploration — the localization decision already happened in the prompt.",
+    "Confirm the named site is the CAUSE, not just where the symptom surfaces — trace one edge upstream before editing; keep exploration to that confirmation.",
   ].join("\n"),
   build: [
     "TURN SHAPE: build.",
     "Type the plan: write the full pending list first; decided changes become typed slices and parallel-eligible slices run as a DAG.",
     "Give every check-run item a real runnable command — a verify slice without one cannot reject.",
+    "If the build uncovers a defect, localize its cause before patching — do not fix the first symptom site.",
   ].join("\n"),
   audit: [
     "TURN SHAPE: audit.",
@@ -1309,8 +1310,10 @@ export async function todosToLoopSlices(
           return ids.filter((_, j) => stages[j] === prev)
         })
 
-  // Design-emits-the-patch: a design slice that feeds a mechanical slice must end
-  // with the concrete edit — the downstream executor transcribes, it does not invent.
+  // Design-emits-the-patch (widened): every edit-emitting slice — a design
+  // slice that feeds a mechanical dependent, or a mechanical/author slice
+  // itself — must end with the concrete edit; the downstream executor
+  // transcribes, it does not invent.
   const PATCH_CONTRACT =
     "\n\nOutput contract: a mechanical slice will apply your design verbatim. End your output with the CONCRETE edit(s) — for each change: the file path, the precise location, and the exact new code (or a unified diff). Prose without the exact code is an incomplete result."
   const sliceTypeAt = new Map(typed.map((t, i) => [ids[i]!, t.sliceType]))
@@ -1332,7 +1335,10 @@ export async function todosToLoopSlices(
           : probes.probeTestStrength(files),
       ])
       const deps = effectiveDeps[i]!.filter((d) => used.has(d))
-      const isPatchEmittingDesign = t.sliceType === "design" && hasMechanicalDependent(ids[i]!)
+      const isPatchEmittingSlice =
+        (t.sliceType === "design" && hasMechanicalDependent(ids[i]!)) ||
+        t.sliceType === "mechanical" ||
+        t.sliceType === "author"
 
       // F2 — sound-rung spec: a verify slice always wants commands; a testable
       // mechanical slice wants its edit checked the same way. Text-named
@@ -1353,7 +1359,7 @@ export async function todosToLoopSlices(
 
       return {
         id: ids[i]!,
-        prompt: isPatchEmittingDesign ? `${t.content}${PATCH_CONTRACT}` : t.content,
+        prompt: isPatchEmittingSlice ? `${t.content}${PATCH_CONTRACT}` : t.content,
         sliceType: t.sliceType as LoopSlice["sliceType"],
         need: t.need,
         deps: deps.length > 0 ? deps : undefined,

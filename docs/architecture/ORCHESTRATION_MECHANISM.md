@@ -272,7 +272,7 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 
 ---
 
-## 2. Today's mechanism, and the four gaps
+## 2. Today's mechanism, and the five gaps
 
 ### 2.1 As built (2026-07-06 — seam map verified by direct code recon)
 
@@ -291,7 +291,7 @@ Live-fire status: diagnosis-planner door FIRED with payoff (django gold-file fix
 mechanical-dispatch door FIRED (zod, ~$0.07); escalation ladder FIRED live with double-pay
 visible; judgment door proven 4×; residual/judge-sampler door awaits an express-style case.
 
-### 2.2 The four gaps
+### 2.2 The five gaps
 
 **G1 — one label per prompt.** Compound requests are unrepresentable; even a clean build
 prompt was mislabeled `qa/low` in live fire (harmless only because a structural net caught
@@ -310,6 +310,8 @@ but is wired only to user-facing revert.
 **G4 — cache-blind switching.** Nothing prices the cold-start cost of moving work between
 models. Already measured internally: one tier's provider discounts cached reads ≈11.6×;
 session-affinity behavior differs per model (W8 probe, `model-registry.ts` notes).
+
+**G5 — the mechanism runs invisibly to the models that must cooperate with it.** Several stages need model cooperation the prompts don't supply: the generator is never shown the judge's checks (§1.5), so it can't pre-satisfy them; the reasoner delta described a delegating principal, not the leaf slice it actually runs as; the conductor is never told that inline edits escape the containment bracket (§1.6). Verify (generator pre-satisfies checks), Track (conductor types slices correctly), Execute (well-formed edits) and Contain (route uncertain edits into slices) each have a cooperation seam the prompts were silent on. Being closed by the prompt-content overhaul — the prompt-side companion to U3/U4.
 
 ---
 
