@@ -146,6 +146,36 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
 
+/**
+ * Whether a localization/plan slice's output shows a discriminating probe was
+ * actually run (a runnable backticked command, an explicit rule-out/
+ * elimination claim, or an honest OPEN/MISSING gap) rather than only
+ * asserting a cause from narrative alone — the frame-slice fold-back uses
+ * this to decide whether the relayed frame needs a narrative-only warning.
+ *
+ * @sem domain=routing role=guard
+ */
+export function isProbeGrounded(text: string): boolean {
+  const lower = text.toLowerCase()
+  const hasProbeCommand =
+    /`(?:bun|npm|pnpm|yarn|node|tsc|tsgo|jest|vitest|pytest|go|cargo|make|grep|rg|git)\b[^`]*`/i.test(text)
+  const hasProbePhrase = [
+    "ruled out",
+    "rules out",
+    "eliminated",
+    "discriminating probe",
+    "probe result",
+    "probe:",
+    "open:",
+    "missing:",
+  ].some((phrase) => lower.includes(phrase))
+  if (hasProbeCommand || hasProbePhrase) return true
+  const assertsCause = ["root cause", "the cause is", "the bug is", "caused by", "the culprit"].some((phrase) =>
+    lower.includes(phrase),
+  )
+  return !assertsCause
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -2167,7 +2197,11 @@ export const layer = Layer.effect(
               if (prepassOnly) {
                 const frame = outcomes[0]!
                 const isPlan = frame.id === PLANNER_SLICE_CONTENT
-                const body = frame.output.length > 4000 ? `${frame.output.slice(0, 4000)}\n…[truncated]` : frame.output
+                const truncatedOutput =
+                  frame.output.length > 4000 ? `${frame.output.slice(0, 4000)}\n…[truncated]` : frame.output
+                const body = isProbeGrounded(frame.output)
+                  ? truncatedOutput
+                  : `⚠ Localization is narrative-only — no discriminating probe result rules out the alternatives. Before you edit, run the probe yourself and confirm this site is the CAUSE, not just where the symptom surfaces.\n\n${truncatedOutput}`
                 const frameMsg: SessionV1.User = {
                   id: MessageID.ascending(),
                   sessionID,

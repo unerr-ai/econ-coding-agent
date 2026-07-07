@@ -401,6 +401,140 @@ describe("reasoning-gate", () => {
     expect(options.reasoningEffort).toBe("none")
   })
 
+  test("a scoped search that succeeded but missed its named scope un-mutes as contradiction (scope-miss)", () => {
+    const messages = [
+      { role: "user", content: "fix the retry bug" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "searching" },
+          {
+            type: "tool-call",
+            toolCallId: "1",
+            toolName: "search",
+            input: { query: "retry handler in src/middleware" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "1",
+            toolName: "search",
+            output: {
+              type: "text",
+              value: '[{"key":"retryHandler","file":"src/test/retry.test.ts"}]',
+            },
+          },
+        ],
+      },
+    ] as any
+    const options: Record<string, any> = { reasoningEffort: "none" }
+    const result = applyAdaptiveReasoning(messages, options)
+    expect(result).toBe("contradiction")
+    expect(options.reasoningEffort).toBeUndefined()
+  })
+
+  test("a scoped search that found a match inside the named scope leaves the marker untouched", () => {
+    const messages = [
+      { role: "user", content: "fix the retry bug" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "searching" },
+          {
+            type: "tool-call",
+            toolCallId: "1",
+            toolName: "search",
+            input: { query: "retry handler in src/middleware" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "1",
+            toolName: "search",
+            output: {
+              type: "text",
+              value:
+                '[{"key":"retryHandler","file":"src/test/retry.test.ts"},{"key":"retryMiddleware","file":"src/middleware/retry.ts"}]',
+            },
+          },
+        ],
+      },
+    ] as any
+    const options: Record<string, any> = { reasoningEffort: "none" }
+    const result = applyAdaptiveReasoning(messages, options)
+    expect(result).toBeUndefined()
+    expect(options.reasoningEffort).toBe("none")
+  })
+
+  test("a vague query with no scope token does not trip scope-miss even on off-topic results", () => {
+    const messages = [
+      { role: "user", content: "fix the retry bug" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "searching" },
+          {
+            type: "tool-call",
+            toolCallId: "1",
+            toolName: "search",
+            input: { query: "where is retry handled" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "1",
+            toolName: "search",
+            output: {
+              type: "text",
+              value: '[{"key":"unrelatedThing","file":"src/other/unrelated.ts"}]',
+            },
+          },
+        ],
+      },
+    ] as any
+    const options: Record<string, any> = { reasoningEffort: "none" }
+    const result = applyAdaptiveReasoning(messages, options)
+    expect(result).toBeUndefined()
+    expect(options.reasoningEffort).toBe("none")
+  })
+
+  test("a scoped search with no recoverable originating tool-call does not trip scope-miss", () => {
+    const messages = [
+      { role: "user", content: "fix the retry bug" },
+      { role: "assistant", content: "searching" },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "1",
+            toolName: "search",
+            output: {
+              type: "text",
+              value: '[{"key":"retryHandler","file":"src/test/retry.test.ts"}]',
+            },
+          },
+        ],
+      },
+    ] as any
+    const options: Record<string, any> = { reasoningEffort: "none" }
+    const result = applyAdaptiveReasoning(messages, options)
+    expect(result).toBeUndefined()
+    expect(options.reasoningEffort).toBe("none")
+  })
+
   test("content-array output shape with a FAIL banner un-mutes as recovery", () => {
     const messages = [
       { role: "user", content: "run tests" },
