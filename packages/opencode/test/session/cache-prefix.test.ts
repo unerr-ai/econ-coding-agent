@@ -8,6 +8,7 @@ import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { SystemPrompt } from "@/session/system"
+import { select } from "@/session/prompts"
 import { SessionTools } from "@/session/tools"
 import { ToolRegistry } from "@/tool/registry"
 import type { Provider } from "@/provider/provider"
@@ -85,7 +86,7 @@ const getBuildAgent = Effect.gen(function* () {
 const buildPrefix = Effect.fn("test.buildPrefix")(function* (model: Provider.Model) {
   const sys = yield* SystemPrompt.Service
   const agentInfo = yield* getBuildAgent
-  const base = SystemPrompt.select(model, agentInfo)
+  const base = select(model, agentInfo)
   const env = (yield* sys.environment(model)).filter((block): block is string => block !== undefined)
   const skills = yield* sys.skills(agentInfo)
   return [...base, ...env, ...(skills ? [skills] : [])].join("\n\n")
