@@ -6,10 +6,10 @@ Docs are organized by **feature**, not by sprint. Four layers, outermost first:
 docs/
 ├── architecture/   the system-design narrative (what we're building, and why it fits together)
 │   ├── ECON_ARCHITECTURE.md   + diagrams/ (TikZ figures)
-│   ├── SELF_ORCHESTRATION_PLAN.md   sprint/task plan for the self-orchestrating agent loop
-│   └── DECOMPOSITION_ORCHESTRATION_PLAN.md   detailed plan: decomposition-first (risk → one feature)
+│   └── ORCHESTRATION_MECHANISM.md   the orchestration/state-machine mechanism
 ├── features/       how each feature is built on the forked OpenCode base — seams + status
 ├── design/         deeper per-topic design notes the features draw on
+├── testing/        live-fire playbooks + reference approaches for benchmark cases
 └── strategy/       the business case — positioning, economics, market
 ```
 
@@ -28,14 +28,13 @@ multi-tier model team, the risk-escalation router, the context engine, anchored 
 in-loop governance gate, caching, economics, and market framing. Read two ways: plain-language
 framing plus an "Under the hood" track. TikZ figures live in
 [architecture/diagrams/](./architecture/diagrams/). Alongside it,
-[SELF_ORCHESTRATION_PLAN.md](./architecture/SELF_ORCHESTRATION_PLAN.md) is the sprint/task plan for
-moving econ to a self-orchestrating agent loop (models switch themselves; context managed per switch)
-— grounded in the current codebase and the checked-out Claude Code source. Its next direction,
-[DECOMPOSITION_ORCHESTRATION_PLAN.md](./architecture/DECOMPOSITION_ORCHESTRATION_PLAN.md), is the
-detailed engineering plan for the **decomposition-first** reframe: the conductor splits a task into
-typed slices and allocates each to the cheapest capable tier (execute-cheap-then-verify, escalate only
-failures), with whole-turn *risk* demoted from the routing decision to one per-slice feature —
-grounded in the 2026-07 model/reasoning/cost research (F1–F8).
+[ORCHESTRATION_MECHANISM.md](./architecture/ORCHESTRATION_MECHANISM.md) is the single
+orchestration-mechanism doc: how the conductor triages a task, decomposes it into typed slices,
+allocates each to the cheapest capable tier (execute-cheap-then-verify, escalate only the failures),
+verifies, and hardens the loop as an explicit state machine (the squeeze-then-climb ladder + the
+SM-series). It absorbed and superseded the three earlier plan docs (`SELF_ORCHESTRATION_PLAN`,
+`DECOMPOSITION_ORCHESTRATION_PLAN`, `PERSONA_ORCHESTRATION_PLAN`) — grounded in the current codebase,
+the checked-out Claude Code source, and the 2026-07 model/reasoning/cost research (F1–F8).
 
 ### `features/` — the build docs
 One doc per feature area (foundations → conductor core → context engine → router → model team
@@ -62,6 +61,17 @@ seam table: [features/README.md](./features/README.md).
 - [tier-prompts.md](./design/tier-prompts.md) — the grounded reference for every tier/persona
   system prompt (verbatim, `file:line`-anchored) and all ~25 runtime prompt-mutation surfaces
   (reasoning gate, preambles, frame seeds, typing, wrappers, escalation briefs, verifier prompts).
+
+### `testing/` — live-fire playbooks + reference approaches
+- [TIER_FIRING_CHECKLIST.md](./testing/TIER_FIRING_CHECKLIST.md) — the acceptance-test playbook for
+  econ's escalation machinery on real repos: five canonical cases (one per routing door) + the
+  decode/debug discipline for a door that won't open.
+- [SHELL_COMPRESSION_CHECKLIST.md](./testing/SHELL_COMPRESSION_CHECKLIST.md) — live-testing checklist
+  verifying shell-output compression end-to-end (lossy path triggers only when appropriate, recovery
+  intact, audit trails).
+- [REFERENCE_APPROACHES.md](./testing/REFERENCE_APPROACHES.md) — per benchmark case, the reference
+  approach (gold patch + how a strong agent independently decomposes/verifies it), used to audit the
+  orchestration *expectation* separately from econ's actual outcome.
 
 ### `strategy/` — the business case
 - [POSITIONING.md](./strategy/POSITIONING.md) — who econ is for, the wedge, and the

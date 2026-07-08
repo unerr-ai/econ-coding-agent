@@ -157,6 +157,13 @@ read-only exploration inside a research child is the one place a second level is
                                          folds its sub-plan back to the hub
 ```
 
+**Correction (2026-07-08, SM-series):** the tree above governs *mechanical* decomposition —
+splitting a build-list or an audit into independently verifiable pieces. An atomic-insight
+bug (one line of correct code away, but the "one line" takes real reasoning to find) does
+not decompose usefully; it routes **whole** to a reasoning tier that owns edit → run →
+verify end to end. Decomposition's job is peeling off the mechanical propagation around an
+insight, never slicing the insight itself (see §7.2's matching correction).
+
 ### 1.3 Evaluate: a pre-flight check before anyone is hired
 
 This is the third mechanism the system has been missing. Today a task's tier is decided
@@ -219,6 +226,11 @@ extension rung, judge, or QE. This is the load-bearing wall: both the cheap-firs
 (§1.3) and the containment story (§1.6) only work because failure is *detected* here. Notably,
 the incumbent doesn't have this wall at all — Claude Code merges subagent work back on pure
 trust (§3.1). It can afford trust; a system built on cheap tiers cannot.
+
+**Correction (2026-07-08):** the turn-level pin that arms this wall on the inline path (M4,
+§4.6) has a real gap of its own — it derives the pinned reproduction from prompt text, which
+finds nothing to pin on a narrative SWE-bench-shaped prompt. See §4.6's correction and §6's
+SM-series (SM1) for the fix: derive from tests red at turn-open, not prompt text.
 
 ### 1.6 Contain: a failed attempt costs its tokens, not the tree
 
@@ -633,6 +645,13 @@ signal, hard-gated, content-specific) — complementary to, not a replacement fo
 no-test-edit hard gate (`setTestEditGate` / `edit-governance.ts`). Full mutation-surface
 bookkeeping: [tier-prompts.md](../design/tier-prompts.md) §5.9, §6.
 
+**Correction (2026-07-08, SM1, §6):** `deriveTurnProbe`'s prompt-text extraction is a real
+gap, not a theoretical one — it finds no command in a narrative SWE-bench-shaped prompt (no
+literal `pytest …` span to quote), so the turn-open pin never arms and the turn-end gate
+no-ops on exactly the prompts this mechanism most needs to cover. SM1 replaces text-extraction
+with tests-RED-at-turn-open as the pin's source of truth, restores any test files the attempt
+modified before the gate runs, and regression-gates on neighboring tests.
+
 ---
 
 ## 5. Open decisions
@@ -699,6 +718,92 @@ Suggested order: **U1 → U2 → U3 → U4 → U5**, U6 riding along. U3 can lan
 U1/U2 (no shared seams). Each step re-fires the relevant live-fire case from
 [TIER_FIRING_CHECKLIST](../testing/TIER_FIRING_CHECKLIST.md) before the next begins.
 
+### SM-series — state-machine hardening
+
+North star: a cheap model inside a disciplined state machine should behave like Claude
+Code — the discipline is harness-supplied and fully transferable (understand → plan → act →
+verify → don't-fake-green → don't-thrash). What is *not* transferable is the hard-tail
+reasoning itself: it is *routed to* — un-mute the conductor's own thinking, then escalate to
+the reasoner — never manufactured inside a cheap model. Per Anthropic's own framing: *"the
+guarantees in loop engineering live in the harness, not the model's good intentions."*
+
+**Two loops, one gap.** The ROOT turn loop (`runLoop`'s `while(true)` at `prompt.ts:1430` —
+the inline path every non-decomposed fix runs on) currently has **no per-step supervisor**.
+That gap is where django-11885 thrashed 12× on the same red test, then fake-green-edited
+`test_large_delete` to make it pass. The SLICE loop (`slice-loop.ts`) already has real
+discipline — a `verdictSignature` stall detector plus the squeeze-then-climb chain (M2/M3,
+§4.2) — but it only runs on slices the conductor actually dispatched via `todowrite`; the
+inline path bypasses all of it (the same shape of gap M4, §4.6, closed for verification —
+this series closes it for supervision).
+
+```
+ ROOT loop (prompt.ts:1430)            SLICE loop (slice-loop.ts)
+ while(true), the inline path           runSlice, dispatched slices only
+ NO per-step supervisor  ◄── the gap    verdictSignature stall detector
+ (django-11885: 12× thrash,             squeeze-then-climb (M2/M3)
+  then fake-green via test edit)
+```
+
+**Pattern decision.** The ROOT loop is already the `while(true)` shape, so it adopts Claude
+Code's loop pattern outright (`query.ts:204–239,307`): one explicit `State` object plus
+`Continue`/`Terminal` discriminated unions carrying a named `reason` per
+continuation/termination, so every loop exit is a labeled decision instead of an implicit
+fallthrough. The branchier SLICE loop instead gets a pure `transition(state, event)`
+reducer, reserved for it alone — its state carries more live axes (rung, climb depth,
+squeeze budget) than a `Continue`/`Terminal` pair fits cleanly. Explicit **do-not-copy list**
+from the incumbent: trust-merge of subagent results, streaming-trust, and its total lack of
+stuck-detection — econ's supervisor + escalation ladder + verification gate are the
+differentiators the incumbent deliberately doesn't have; adopt the loop *shape*, not its
+trust model.
+
+**SM0 — Shared state-machine contract.** *(shipped, unwired)*
+`packages/code-intelligence/src/orchestration-fsm.ts` now holds the `State`/`Event` types,
+the pure `sliceTransition` reducer, and `createStuckSupervisor` — deterministic, no clock or
+randomness, table-testable without a live model or shell. Nothing calls it yet; SM3 and SM4
+below are the wiring.
+
+**SM1 — Verification: make red real** *(first — red must be real before any stuck signal can
+exist)*
+Derive the turn probe from tests that are RED at turn-open, not from prompt text — M4's
+`deriveTurnProbe` → `extractVerifyCommands` finds no command in a narrative SWE-bench prompt,
+so the gate no-ops (detail + correction in §1.5 and §4.6). Restore any test files the attempt
+modified before the gate runs, and regression-gate on neighboring tests, not just the pinned
+one.
+
+**SM2 — Governance: close fake-green.**
+The no-test-edit gate becomes ALWAYS-ON and structural — armed by the turn's actual state,
+not derived from prompt `constraintKinds`. A red→green transition reached via a test edit
+becomes a *stuck signal routed to the reasoner*, which adjudicates code-wrong vs. test-stale
+— not a blanket ban (gold patches legitimately edit tests).
+
+**SM3 — Slice FSM substrate.**
+Extract `slice-loop.ts`'s implicit tuple (rung, climb depth, squeeze budget, failure
+signature) into SM0's pure reducer; add real terminal states so a settled slice is never
+re-dispatched — this fixes the logged run-8 blocker where slices were never marked settled
+and the whole batch re-ran 4–12×.
+
+**SM4 — Orchestration: supervise the root loop.**
+Add a per-step supervisor to the ROOT loop (the inline-path gap) and extend the existing
+child watchdog (`prompt.ts:2145`). On stuck: rung 1 un-mutes the conductor's own reasoning
+(the adaptive reasoning gate, §7.4); rung 2 escalates to the reasoner as the edit-and-run
+**owner**, not an oracle of last resort — the reasoner is the first climb rung here.
+Escalations are capped.
+
+**SM5 — Allocation-matrix design-bug fix.**
+High coupling + testable does not imply the executor is sufficient: an atomic INSIGHT bug can
+sit in that cell and still exceed executor capability outright, because coupling and
+difficulty are different axes (correction landed in §7.2). Insight-heavy work routes up
+regardless of coupling. Also adds internal-trace telemetry for the routing decision.
+
+**SM6 — Validation live-fire.**
+Re-fire django-11885 end to end. Pass bar: no thrash, no test-edit-as-fix, and a probe that
+was genuinely red at turn-open.
+
+Ordering: **SM0 → SM1 → SM2 → SM3 → SM4 → SM5 → SM6.** SM1 goes first because red must be
+real before any stuck signal can exist; SM2 (governance) precedes SM4 (orchestration) because
+the test-edit escape hatch both closes a governance hole and *feeds* the stuck trigger SM4
+depends on.
+
 ---
 
 ## 7. Inherited foundations
@@ -748,6 +853,14 @@ tiebreaker (one cell, >70) — never the primary decision:
 Design slices always floor at the oracle; recon/verify slices ceiling at the conductor. The
 operational recipe per slice: inject wiring → dispatch cheap → sound-verify → accept, or
 climb the ladder with the reverted diff as advice (§4.3).
+
+**Correction (2026-07-08, SM5, §6):** the high-coupling+testable cell reads as "the executor
+is sufficient because a safety net exists" — it isn't, for an atomic INSIGHT bug. Coupling
+and difficulty are different axes: a bug can touch few files (low coupling) yet need real
+reasoning to find, or touch many (high coupling) yet be pure propagation. SM5 routes
+insight-heavy work up regardless of which coupling cell it lands in; the matrix's coupling
+axis governs *wiring strategy* for mechanical work, not whether the executor's reasoning is
+enough.
 
 ### 7.3 Execution substrate — shipped invariants
 

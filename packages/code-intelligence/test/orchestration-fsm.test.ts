@@ -1,0 +1,308 @@
+/**
+ * Unit tests for orchestration-fsm.ts — the pure squeeze-then-climb slice
+ * reducer and the stuck supervisor. Everything is deterministic (no clock,
+ * no randomness): the tier ladder, retry budgets, and climb ceiling are all
+ * injected via `SliceTransitionCtx`, so every transition is table-tested
+ * without a live model or shell.
+ *
+ * Covers `sliceTransition`: accept-first, reject→squeeze→accept (escalated),
+ * unchanged-signature stall skips the squeeze, the same-tier retry budget,
+ * a read-only slice never squeezing/climbing, a critical slice's
+ * forced-floor climb past its normal cap up to the slice's ceiling, plain
+ * ladder exhaustion, budget-exhausted → abandoned, and the terminal-is-
+ * absorbing re-dispatch guard (run-8).
+ *
+ * Covers `createStuckSupervisor`: test-edit priority, repeated-red
+ * (tolerating interleaved non-command steps), repeated-tool, a changing
+ * signature never firing, no-progress after stagnant fingerprints, and
+ * reset() clearing all internal counters.
+ */
+
+import { describe, it, expect } from "bun:test"
+import {
+  sliceTransition,
+  initialSliceState,
+  createStuckSupervisor,
+  type SliceTransitionCtx,
+  type SliceMachineState,
+  type SliceEvent,
+  type StuckSupervisorConfig,
+} from "../src/orchestration-fsm.js"
+import type { EconTier } from "../src/region.js"
+
+// ---------------------------------------------------------------------------
+// Test doubles
+// ---------------------------------------------------------------------------
+
+/** A small, deterministic tier ladder: executor → conductor → reasoner → oracle. */
+const LADDER: EconTier[] = ["executor", "conductor", "reasoner", "oracle"]
+
+/**
+ * Builds a `SliceTransitionCtx` over `LADDER`. `sliceCeiling` is the tier at
+ * which `escalate` stops returning a next tier (the slice's own allowed cap,
+ * which may sit below the global ladder top). `atCeiling` always checks the
+ * global top ("oracle") per the source doc — distinct from `sliceCeiling` so
+ * the forced-floor/ladder-exhausted split is exercisable in tests.
+ */
+function makeCtx(opts: {
+  sliceCeiling?: EconTier
+  sameTierRetryBudget?: number
+  maxClimbs?: number
+  maxAttempts?: number
+  isReadOnly?: boolean
+  isCritical?: boolean
+}): SliceTransitionCtx {
+  const sliceCeiling = opts.sliceCeiling ?? "oracle"
+  const ceilingIdx = LADDER.indexOf(sliceCeiling)
+  return {
+    sameTierRetryBudget: opts.sameTierRetryBudget ?? 2,
+    maxClimbs: opts.maxClimbs ?? 1,
+    maxAttempts: opts.maxAttempts ?? 8,
+    isReadOnly: opts.isReadOnly ?? false,
+    isCritical: opts.isCritical ?? false,
+    escalate: (tier: EconTier) => {
+      const i = LADDER.indexOf(tier)
+      if (i >= ceilingIdx) return undefined
+      return LADDER[i + 1]
+    },
+    atCeiling: (tier: EconTier) => tier === "oracle",
+  }
+}
+
+const reject = (signature: string): SliceEvent => ({
+  type: "verdict",
+  verdict: { accepted: false, signature },
+})
+const accept = (signature = "ok"): SliceEvent => ({
+  type: "verdict",
+  verdict: { accepted: true, signature },
+})
+
+// ---------------------------------------------------------------------------
+// sliceTransition
+// ---------------------------------------------------------------------------
+
+describe("sliceTransition", () => {
+  it("accepts on the first verdict → terminal accepted", () => {
+    const ctx = makeCtx({})
+    const state = initialSliceState("executor")
+    const next = sliceTransition(state, accept(), ctx)
+    expect(next.phase).toBe("settled")
+    expect(next.terminal?.outcome).toBe("accepted")
+    expect(next.terminal?.atTier).toBe("executor")
+    expect(next.terminal?.attempts).toBe(1)
+  })
+
+  it("reject (new signature) then accept → terminal escalated, phase went through squeezing", () => {
+    const ctx = makeCtx({})
+    let state = initialSliceState("executor")
+    state = sliceTransition(state, reject("sig-1"), ctx)
+    expect(state.phase).toBe("squeezing")
+    expect(state.terminal).toBeUndefined()
+
+    state = sliceTransition(state, accept(), ctx)
+    expect(state.phase).toBe("settled")
+    expect(state.terminal?.outcome).toBe("escalated")
+    expect(state.terminal?.atTier).toBe("executor")
+    expect(state.terminal?.attempts).toBe(2)
+  })
+
+  it("reject with an unchanged signature (stall) does not squeeze again — climbs instead", () => {
+    const ctx = makeCtx({})
+    let state = initialSliceState("executor")
+    state = sliceTransition(state, reject("same-sig"), ctx)
+    expect(state.phase).toBe("squeezing")
+    expect(state.sameTierRetries).toBe(1)
+
+    // same signature again — no new evidence, so the squeeze budget is not consumed
+    state = sliceTransition(state, reject("same-sig"), ctx)
+    expect(state.phase).toBe("climbing")
+    expect(state.atTier).toBe("conductor")
+    expect(state.climbs).toBe(1)
+    expect(state.sameTierRetries).toBe(0) // reset on climb
+  })
+
+  it("respects sameTierRetryBudget — squeezes at most that many times before climbing", () => {
+    const ctx = makeCtx({ sameTierRetryBudget: 2, maxClimbs: 1 })
+    let state = initialSliceState("executor")
+
+    state = sliceTransition(state, reject("a"), ctx)
+    expect(state.phase).toBe("squeezing")
+    expect(state.sameTierRetries).toBe(1)
+
+    state = sliceTransition(state, reject("b"), ctx)
+    expect(state.phase).toBe("squeezing")
+    expect(state.sameTierRetries).toBe(2)
+
+    // third reject: budget (2) exhausted even though the signature is still changing
+    state = sliceTransition(state, reject("c"), ctx)
+    expect(state.phase).toBe("climbing")
+    expect(state.atTier).toBe("conductor")
+    expect(state.attempts).toBe(4)
+  })
+
+  it("a read-only slice (isReadOnly, maxClimbs:0) never squeezes or climbs — settles unverified immediately", () => {
+    const ctx = makeCtx({ isReadOnly: true, maxClimbs: 0 })
+    const state = initialSliceState("executor")
+    const next = sliceTransition(state, reject("sig"), ctx)
+
+    expect(next.phase).toBe("settled")
+    expect(next.terminal?.outcome).toBe("unverified")
+    expect(next.terminal?.atTier).toBe("executor")
+    expect(next.terminal?.attempts).toBe(1)
+  })
+
+  it("a critical slice forced-floor climbs past maxClimbs up to the slice's ceiling, then settles unverified/critical-unverified-at-ceiling", () => {
+    // ceiling below the global top ("reasoner") so forcedFloor stays true throughout
+    // (atCeiling only trips at "oracle" per the source contract).
+    const ctx = makeCtx({
+      sliceCeiling: "reasoner",
+      maxClimbs: 0,
+      sameTierRetryBudget: 0, // never squeeze — isolate the climb behavior
+      isCritical: true,
+    })
+    let state = initialSliceState("executor")
+
+    state = sliceTransition(state, reject("s"), ctx)
+    expect(state.phase).toBe("climbing")
+    expect(state.atTier).toBe("conductor")
+    expect(state.climbs).toBe(1) // past maxClimbs:0 — forced floor
+
+    state = sliceTransition(state, reject("s"), ctx)
+    expect(state.phase).toBe("climbing")
+    expect(state.atTier).toBe("reasoner")
+    expect(state.climbs).toBe(2)
+
+    // at the slice's ceiling now — escalate() returns undefined, no further climb
+    state = sliceTransition(state, reject("s"), ctx)
+    expect(state.phase).toBe("settled")
+    expect(state.terminal?.outcome).toBe("unverified")
+    expect(state.terminal?.atTier).toBe("reasoner")
+    expect(state.terminal?.reason).toBe("critical-unverified-at-ceiling")
+  })
+
+  it("non-critical exhaustion settles unverified with reason ladder-exhausted", () => {
+    const ctx = makeCtx({ maxClimbs: 1, sameTierRetryBudget: 0 })
+    let state = initialSliceState("executor")
+
+    state = sliceTransition(state, reject("s"), ctx)
+    expect(state.phase).toBe("climbing")
+    expect(state.atTier).toBe("conductor")
+
+    // climbs (1) now equals maxClimbs (1) — no further climb allowed
+    state = sliceTransition(state, reject("s"), ctx)
+    expect(state.phase).toBe("settled")
+    expect(state.terminal?.outcome).toBe("unverified")
+    expect(state.terminal?.atTier).toBe("conductor")
+    expect(state.terminal?.reason).toBe("ladder-exhausted")
+  })
+
+  it("a budget-exhausted event settles abandoned, with and without an explicit reason", () => {
+    const ctx = makeCtx({})
+    const withReason = sliceTransition(
+      initialSliceState("executor"),
+      { type: "budget-exhausted", reason: "overall-loop-timeout" },
+      ctx,
+    )
+    expect(withReason.terminal?.outcome).toBe("abandoned")
+    expect(withReason.terminal?.reason).toBe("overall-loop-timeout")
+
+    const withoutReason = sliceTransition(
+      initialSliceState("executor"),
+      { type: "budget-exhausted" },
+      ctx,
+    )
+    expect(withoutReason.terminal?.outcome).toBe("abandoned")
+    expect(withoutReason.terminal?.reason).toBe("budget-exhausted")
+  })
+
+  it("a terminal state is absorbing — re-applying any event returns it unchanged (run-8 re-dispatch guard)", () => {
+    const ctx = makeCtx({})
+    const settled = sliceTransition(initialSliceState("executor"), accept(), ctx)
+    expect(settled.terminal).toBeDefined()
+
+    const reapplied1 = sliceTransition(settled, accept(), ctx)
+    const reapplied2 = sliceTransition(settled, reject("anything"), ctx)
+    const reapplied3 = sliceTransition(settled, { type: "budget-exhausted" }, ctx)
+
+    expect(reapplied1).toBe(settled) // same reference — no new object allocated
+    expect(reapplied2).toBe(settled)
+    expect(reapplied3).toBe(settled)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// createStuckSupervisor
+// ---------------------------------------------------------------------------
+
+describe("createStuckSupervisor", () => {
+  const DEFAULT: StuckSupervisorConfig = { repeatThreshold: 3, noProgressThreshold: 4 }
+
+  it("a test-edit observation fires immediately — highest priority, overrides everything else", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+    const signal = sup.observe({
+      toolSignature: "edit|args-1",
+      resultSignature: "0|clean", // would not otherwise be enough to fire on its own
+      editedTestFile: "src/foo.test.ts",
+    })
+    expect(signal).toEqual({ reason: "test-edit", signature: "src/foo.test.ts", count: 1 })
+  })
+
+  it("the same resultSignature seen repeatThreshold times fires repeated-red, tolerating interleaved non-command steps", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+
+    expect(sup.observe({ toolSignature: "t1", resultSignature: "1|fail" })).toBeUndefined()
+    // a non-command step (no resultSignature) interleaved — must not reset the red tally
+    expect(sup.observe({ toolSignature: "t2" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "t3", resultSignature: "1|fail" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "t4" })).toBeUndefined()
+
+    const signal = sup.observe({ toolSignature: "t5", resultSignature: "1|fail" })
+    expect(signal).toEqual({ reason: "repeated-red", signature: "1|fail", count: 3 })
+  })
+
+  it("the same toolSignature repeated repeatThreshold times fires repeated-tool", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+
+    expect(sup.observe({ toolSignature: "read|foo.ts" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "read|foo.ts" })).toBeUndefined()
+
+    const signal = sup.observe({ toolSignature: "read|foo.ts" })
+    expect(signal).toEqual({ reason: "repeated-tool", signature: "read|foo.ts", count: 3 })
+  })
+
+  it("a changing signature never fires — no premature stuck signal", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+    for (let i = 0; i < 5; i++) {
+      const signal = sup.observe({ toolSignature: `tool-${i}`, resultSignature: `${i}|out` })
+      expect(signal).toBeUndefined()
+    }
+  })
+
+  it("no-progress fires after noProgressThreshold stagnant identical fingerprints", () => {
+    // repeatThreshold set high so repeated-tool cannot fire first — isolates the fingerprint check
+    const sup = createStuckSupervisor({ repeatThreshold: 10, noProgressThreshold: 4 })
+
+    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // baseline fingerprint
+    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 1
+    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 2
+    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 3
+
+    const signal = sup.observe({ toolSignature: "same" }) // stagnant 4 — fires
+    expect(signal).toEqual({ reason: "no-progress", signature: "same#", count: 4 })
+  })
+
+  it("reset() clears all internal counters", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+
+    // build up state on every counter without tripping any of them
+    expect(sup.observe({ toolSignature: "tool-x", resultSignature: "red-x" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "tool-x", resultSignature: "red-x" })).toBeUndefined()
+
+    sup.reset()
+
+    // if state were not cleared, this next identical observation would tip the
+    // (pre-reset) count of 2 to 3 and fire — asserting undefined proves the reset
+    expect(sup.observe({ toolSignature: "tool-x", resultSignature: "red-x" })).toBeUndefined()
+  })
+})
