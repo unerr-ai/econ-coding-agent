@@ -1,6 +1,6 @@
 # The econ Orchestration Mechanism
 
-**Status: v1.4 (2026-07-07) — implemented (U1–U6 + wave-2 wiring), live-fire smoked, always-on.**
+**Status: v1.5 (2026-07-08) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), and the M2/M3/M4 gates; live-fire smoked. Open work: U5 (cache-aware casting — helper + tests written, not yet wired into dispatch) and the §6 SM-series hardening.**
 This doc also absorbed the still-relevant content of the three retired plan docs
 (DECOMPOSITION_ORCHESTRATION_PLAN, PERSONA_ORCHESTRATION_PLAN, SELF_ORCHESTRATION_PLAN —
 deleted 2026-07-07) into §7 "Inherited foundations".
@@ -10,7 +10,7 @@ service). Two live-fire fixes landed during the smoke: small (housekeeping) call
 adaptive reasoning gate (un-muted thinking starved the triage JSON), and the triage cap is 8s
 (a triage-shaped completion measures ~3.7–4.3s through the live gateway). All research
 streams are in (Claude Code source recon, econ seam map, routing/triage literature, cache
-economics, hierarchy/fan-out); every §5 decision is closed; §6 U1–U6 are being built. Companion docs:
+economics, hierarchy/fan-out); every §5 decision is closed; §6's U1–U4 + U3 have shipped (always-on), leaving U5 and the SM-series as the open build. Companion docs:
 [ECON_ARCHITECTURE](./ECON_ARCHITECTURE.md) (whole-system design),
 [failure-taxonomy](../design/failure-taxonomy.md) (the evidence this doc is built on; its §8
 holds the flow-selection verdict + casting policy this doc extends),
@@ -62,7 +62,7 @@ everything else already runs in production today (§2 has the as-built detail).
     │
     ▼
  ┌─────────────────────────────────────────────────────────────────┐
- │ [5] VERIFY ── 7-rung ladder (exists): run the actual build/     │
+ │ [5] VERIFY ── 5-rung ladder (exists): run the actual build/     │
  │     tests, watch for test-dodging, case-count shrink, skips     │
  └─────────────────────────────────────────────────────────────────┘
     │ pass                          │ reject
@@ -214,7 +214,7 @@ plan in 9 read-only steps; the zod runner ran the build with edit permissions de
 
 ### 1.5 Verify: the work is checked, not trusted
 
-Also unchanged — the eight-rung verifier ladder runs the actual build/test commands, watches
+Also unchanged — the five-rung verifier ladder runs the actual build/test commands, watches
 the trajectory for test-dodging, rejects suspicious skips and shrinking test counts, and
 falls back to judge/consistency checks when no tests exist. Gating order is behavior-gate →
 sound → probe: a suspicious trajectory rejects before the sound check is even trusted, and
@@ -305,17 +305,22 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 
 ## 2. Today's mechanism, and the five gaps
 
-### 2.1 As built (2026-07-06 — seam map verified by direct code recon)
+### 2.1 As built (updated 2026-07-08 — seam map verified by direct code recon)
+
+> Since the original 2026-07-06 snapshot, §6's U1–U4 and the containment bracket (U3) have
+> shipped and are always-on (see the status header); the rows below reflect that current state.
+> §6 stays the ordered plan — most of its rungs are now complete, with U5 (cache-aware casting)
+> and the SM-series still open.
 
 | stage | what runs today | where |
 |---|---|---|
 | classify | `classifyTurnShape` regex heuristic → one label + confidence; preamble; gates; frame-slice seed on diagnosis-vague | `packages/opencode/src/session/slice-orchestrator.ts`, step-0 block in `session/prompt.ts` |
 | decompose | conductor plans; structural nets type todos (`autoTypeTodos`: judgment / diagnosis / `typeBuildPlan`); `shouldOrchestrate` benefit gate | `slice-orchestrator.ts` |
 | probe | coupling / testStrength / verifyCommands probed **once, at decompose time** | `probeSlice*` in `packages/opencode/src/tool/graph-tools.ts` |
-| allocate | static matrix sliceType × coupling × testStrength × need → tier; risk breaks exactly one borderline cell toward oracle (`risk > 70`); **no hysteresis, no de-escalation, no dispatch-time re-eval** | `packages/code-intelligence/src/allocation.ts:132-212` (risk tiebreak `:201-210`) |
+| allocate | static matrix sliceType × coupling × testStrength × need → tier; risk breaks exactly one borderline cell toward oracle (`risk > 70`). U4's `evaluate()` (§4.2) now runs at dispatch and re-dispatch — the earlier "no dispatch-time re-eval" gap is closed | `packages/code-intelligence/src/allocation.ts:147-227` (risk tiebreak `:205-211`); `evaluate()` at `slice-loop.ts:914` (dispatch) + `:599` (escalation re-eval) |
 | execute | seat-scoped child sessions, personas, step budgets, lean briefs | `childSlicePermission`, dispatch site in `session/prompt.ts` |
-| verify | 8 rungs: behavior gate, sound (runs `verifyCommands`, case counts), shrink reject, skip flags, probe (task #7 pinned reproduction — gates sound-accept + untestable paths), extra rung, QE veto, flagged unverified-accept | `packages/code-intelligence/src/verifier.ts:515-533` (probe), `:568-662` (ladder) |
-| escalate | a genuine reject first squeezes the SAME tier while its failure signature keeps changing (M2, ≤2 retries), climbing only on stall — executor → conductor → reasoner → oracle with type ceilings; a CRITICAL slice (high coupling or risk>70) forces a climb at every exhaustion point instead of settling unverified below the oracle (M3, the escalation floor); each hop's escalation brief carries the rejected diff as REVERTED advice (verdict + ≤6k-char digest + files/commands lists, U3 containment); double-pay booked per rung | `slice-loop.ts:981-1102` (squeeze+climb chain), `:495-531` (brief), `:611-625` (booking into `double-pay.ts`) |
+| verify | 5 rungs — behavior gate → sound (runs `verifyCommands`; case-count, shrink-reject and skip-flag checks live inside it) → probe (task #7 pinned reproduction — gates sound-accept + untestable paths) → extra/judge rung → QE veto; a terminal flagged unverified-accept when none apply | `packages/code-intelligence/src/verifier.ts:544-562` (probe), `:597-691` (ladder) |
+| escalate | a genuine reject first squeezes the SAME tier while its failure signature keeps changing (M2, ≤2 retries), climbing only on stall — executor → conductor → reasoner → oracle with type ceilings; a CRITICAL slice (high coupling or risk>70) forces a climb at every exhaustion point instead of settling unverified below the oracle (M3, the escalation floor); each hop's escalation brief carries the rejected diff as REVERTED advice (verdict + ≤6k-char digest + files/commands lists, U3 containment); double-pay booked per rung | `slice-loop.ts:1048-1097` (squeeze+climb chain), `:503-539` (brief), `:619-633` (`recordEscalation` booking into `double-pay.ts`) |
 | observe | `turn_shape` / `orchestration_engaged` events; M4's `turn_probe_pinned` / `turn_probe_gate` / `turn_probe_unresolved` (§4.6); `EconReceipt` per-tier drilldown | session logs, receipt |
 
 Live-fire status: diagnosis-planner door FIRED with payoff (django gold-file fix, ~$0.15);
@@ -323,6 +328,11 @@ mechanical-dispatch door FIRED (zod, ~$0.07); escalation ladder FIRED live with 
 visible; judgment door proven 4×; residual/judge-sampler door awaits an express-style case.
 
 ### 2.2 The five gaps
+
+> Status (2026-07-08): G1/G2/G3 are now closed by the shipped U1/U2, U4 and U3, and G5 is being
+> closed by the prompt-content overhaul. **G4 (cache-blind switching) is the one still open** —
+> its U5 casting helper has tests but no production caller. The descriptions below are retained
+> as the motivation for §6.
 
 **G1 — one label per prompt.** Compound requests are unrepresentable; even a clean build
 prompt was mislabeled `qa/low` in live fire (harmless only because a structural net caught
@@ -623,7 +633,7 @@ re-run the reproduction that proved the bug.
 (`packages/opencode/src/session/prompt.ts`) — always-on (no flag) and root-session-only
 (`!session.parentID`; child slice sessions already have M1's slice-level probe rung):
 
-- **Turn-open pin** (`step === 0`, on a fix-shaped prompt per `isFixShapedPrompt`, `prompt.ts:1601-1611`):
+- **Turn-open pin** (`step === 0`, on a fix-shaped prompt per `isFixShapedPrompt`, `slice-orchestrator.ts:808`, used at `prompt.ts:1599,1604`):
   `deriveTurnProbe(userText)` (`slice-orchestrator.ts:556-558`) extracts the most-specific
   pinned reproduction COMMAND straight from the prompt text — not from dispatched slices, which
   are empty on the inline path. Logs `turn_probe_pinned`.
