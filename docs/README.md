@@ -59,11 +59,18 @@ seam table: [features/README.md](./features/README.md).
 - [tooling-context-opt.md](./design/tooling-context-opt.md) — collapsing the native tool
   surface + the unerr-cli port backlog that makes tool output lean.
 - [models.md](./design/models.md) — the open-weight model facts and the per-role selection.
+- [tier-prompts.md](./design/tier-prompts.md) — the grounded reference for every tier/persona
+  system prompt (verbatim, `file:line`-anchored) and all ~25 runtime prompt-mutation surfaces
+  (reasoning gate, preambles, frame seeds, typing, wrappers, escalation briefs, verifier prompts).
 
 ### `strategy/` — the business case
 - [POSITIONING.md](./strategy/POSITIONING.md) — who econ is for, the wedge, and the
   one-product/three-triggers regional model; [COMPETITORS.md](./strategy/COMPETITORS.md) covers
   the competitive field.
+- [ENTERPRISE_SEGMENTATION.md](./strategy/ENTERPRISE_SEGMENTATION.md) — the cross-segment,
+  global demand map: affordability × independence as two axes (affordability splitting into
+  parity vs scale), the 2×2 by business type and region, the model-per-tier config that lets one
+  product serve every segment, and the three GTM lanes. The segment cut of POSITIONING's regional cut.
 - Model strategy — [MODEL_SELECTION.md](./strategy/MODEL_SELECTION.md) (which open/rented models
   we run per tier, Phase 1) + [MODEL_TRAINING_STRATEGY.md](./strategy/MODEL_TRAINING_STRATEGY.md)
   (how we post-train our *own* mid-tier reasoner in Phase 2 — recipe, data flywheel, parity math).
