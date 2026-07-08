@@ -195,9 +195,11 @@ export function econDefaultConfig(): ConfigV1.Info {
             reasoningEffort: "low",
             parallel_tool_calls: true,
           }),
-          // Catalog models (2026-07-08): available in the gateway/registry, not bound to a tier yet
-          // (conductor stays DeepSeek V4 Flash). Reasoning channel OFF; no reasoningEffort until bound.
-          "minimax/minimax-m3": econModel("minimax/minimax-m3", "MiniMax M3 (catalog)", {
+          // 2026-07-08 catalog add; 2026-07-09 conductor swap: minimax-m3 is now bound to the
+          // conductor tier (see ECON_TIER_BINDING in model-registry.ts), reasoning channel off at
+          // config level via reasoningEffort:"none". kimi remains catalog-only, not bound to a tier.
+          "minimax/minimax-m3": econModel("minimax/minimax-m3", "MiniMax M3 (econ conductor — experiment)", {
+            reasoningEffort: "none",
             parallel_tool_calls: true,
           }),
           "moonshotai/kimi-k2p7-code": econModel("moonshotai/kimi-k2p7-code", "Kimi K2.7 Code (catalog)", {

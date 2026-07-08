@@ -136,7 +136,7 @@ export const ECON_MODELS: Record<string, EconModelProfile> = {
     sessionAffinity: true,
     cost: ECON_COST_MATRIX["minimax/minimax-m3"]!,
     notes:
-      "CATALOG — available in the gateway/registry, NOT bound to any tier (added 2026-07-08; the conductor stays DeepSeek V4 Flash). MiniMax M3, 428B MoE (MiniMax Sparse Attention), served via the econ LiteLLM gateway on Fireworks (accounts/fireworks/models/minimax-m3) at the priority service tier. Context: the API serves up to 1M with a 512K guaranteed minimum — we pin the safe floor here (524_288); raise toward 1M when a tier binds it and the deployment confirms it. maxOutput 64_000 is the provider-payload capability, not a tuned tier cap. reasoning:false = the reasoning channel is OFF at the config level (M3 is a hybrid with toggleable thinking); enable it via options.reasoningEffort if/when a tier binds this model. cacheAccounting:\"stream\" and sessionAffinity:true are defaults, UNPROBED for this model. Costs $0.30/$1.20 per M in/out, $0.06/M cached (ECON_COST_MATRIX).",
+      "CONDUCTOR TIER — bound 2026-07-09 (provisional experiment; catalog-added 2026-07-08). MiniMax M3, 428B MoE (MiniMax Sparse Attention), served via the econ LiteLLM gateway on Fireworks (accounts/fireworks/models/minimax-m3) at the priority service tier. Context: the API serves up to 1M with a 512K guaranteed minimum — we pin the safe floor here (524_288); raise toward 1M when a tier binds it and the deployment confirms it. maxOutput 64_000 is the provider-payload capability, not a tuned tier cap. reasoning:false = the reasoning channel is OFF at the config level (M3 is a hybrid with toggleable thinking); the conductor binds it with options.reasoningEffort:\"none\" — whether M3 honors a no-think default the way the prior conductor did is UNVERIFIED. cacheAccounting:\"stream\" and sessionAffinity:true are defaults, UNPROBED for this model. Costs $0.30/$1.20 per M in/out, $0.06/M cached (ECON_COST_MATRIX).",
   },
   "moonshotai/kimi-k2p7-code": {
     providerID: "litellm",
@@ -162,7 +162,7 @@ export const ECON_MODELS: Record<string, EconModelProfile> = {
  * @sem domain=routing role=config
  */
 export const ECON_TIER_BINDING: Record<EconTier, string> = {
-  conductor: "deepseek/deepseek-v4-flash",
+  conductor: "minimax/minimax-m3",
   executor: "openai/gpt-oss-120b",
   reasoner: "deepseek/deepseek-v4-pro",
   oracle: "z-ai/glm-5.2",

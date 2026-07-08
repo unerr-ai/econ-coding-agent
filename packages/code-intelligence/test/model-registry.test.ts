@@ -152,7 +152,7 @@ describe("infra/litellm/config.yaml vs ECON_MODELS (drift guard — OL-8.B2)", (
 
 describe("API", () => {
   it("tierProfile resolves the conductor model", () => {
-    expect(tierProfile("conductor").modelID).toBe("deepseek/deepseek-v4-flash")
+    expect(tierProfile("conductor").modelID).toBe("minimax/minimax-m3")
   })
 
   it("supportsReasoning is false for conductor", () => {
@@ -183,7 +183,7 @@ describe("API", () => {
 describe("OL-7.8a / OL-7.10 — flag-off byte-identical (registry snapshot equality)", () => {
   it("ECON_TIER_BINDING is unchanged by the optional verifier/frontier additions", () => {
     expect(ECON_TIER_BINDING).toEqual({
-      conductor: "deepseek/deepseek-v4-flash",
+      conductor: "minimax/minimax-m3",
       executor: "openai/gpt-oss-120b",
       reasoner: "deepseek/deepseek-v4-pro",
       oracle: "z-ai/glm-5.2",

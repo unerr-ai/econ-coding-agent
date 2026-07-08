@@ -129,7 +129,7 @@ export const DEFAULT_REGION_CONFIG: RegionConfig = {
   // Tier→model bindings must match ECON_TIER_BINDING in model-registry.ts (the authoritative
   // source of truth) and opencode.json; model-registry.test.ts guards the two against drift.
   tiers: {
-    conductor: [{ providerId: "litellm", model: "deepseek/deepseek-v4-flash", region: "global" }],
+    conductor: [{ providerId: "litellm", model: "minimax/minimax-m3", region: "global" }],
     oracle: [{ providerId: "litellm", model: "z-ai/glm-5.2", region: "global" }],
     reasoner: [
       // OL-8.B4+: a distinct model from the oracle (deliberate verifier de-correlation) — see
