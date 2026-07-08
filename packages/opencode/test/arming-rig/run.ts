@@ -10,7 +10,9 @@ import {
   LOCALIZATION_SLICE_CONTENT,
   PLANNER_SLICE_CONTENT,
 } from "../../src/session/slice-orchestrator"
-import { heuristicArming, type ArmingVerdict } from "../../src/session/arming-judge"
+import { heuristicArming, judgeArming, type ArmingVerdict } from "../../src/session/arming-judge"
+import { runTurnTriage, type TriageComplete, type TriageCompleteRequest } from "../../src/session/turn-triage"
+import { ECON_TIER_BINDING } from "../../../code-intelligence/src/model-registry"
 import type { ArmingScenario, TriageVerdict } from "./types"
 
 // Fallback corpus — used only when ./corpus.ts (authored in parallel by a
@@ -75,28 +77,66 @@ async function loadCorpus(): Promise<readonly ArmingScenario[]> {
   return STUB_CORPUS
 }
 
-// Live-triage seam. Wiring a real model/gateway call here means adapting a
-// `TriageComplete` (system, user) => text callback bound to a live provider —
-// non-trivial for this offline harness — so every scenario runs deterministic
-// (scenario.mockVerdict) until this is filled in. See `runTurnTriage` in
-// packages/opencode/src/session/turn-triage.ts for the real entrypoint to
-// wire in once that adapter exists.
-async function liveTriage(prompt: string): Promise<TriageVerdict> {
-  void prompt
-  throw new Error("live mode not wired yet — TODO")
+// Live mode gate: RIG_LIVE=1 hits the real econ gateway (spends money); no env
+// (the default) stays fully deterministic — scoreScenario never reaches
+// gatewayComplete unless this is true.
+const RIG_LIVE = process.env.RIG_LIVE === "1"
+
+const GATEWAY_BASE_URL =
+  process.env.ECON_CONDUCTOR_BASE_URL ?? process.env.ECON_BASE_URL ?? "https://econ-litellm.fly.dev/v1"
+const GATEWAY_API_KEY = process.env.LITELLM_API_KEY ?? process.env.OPENAI_API_KEY
+// Pinned to the CONDUCTOR TIER, not a model: the rig exercises whichever
+// model the registry currently binds to "conductor" — no model-name literal
+// or model-name env anywhere in this file, only the tier→model SSOT.
+const GATEWAY_MODEL = ECON_TIER_BINDING.conductor
+
+// The one real `TriageComplete` port: POSTs {system,user} to the econ conductor
+// endpoint and returns the assistant message content. Shared by liveTriage and
+// liveArming — both build their own system+user prompts internally, this only
+// carries the request across the wire (mirrors packages/eval/src/index.ts's
+// gateway call).
+const gatewayComplete: TriageComplete = async (request: TriageCompleteRequest): Promise<string> => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), request.timeoutMs)
+  try {
+    const res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${GATEWAY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GATEWAY_MODEL,
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.user },
+        ],
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    })
+    if (!res.ok) throw new Error(`gateway ${res.status}: ${await res.text()}`)
+    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
+    return json.choices?.[0]?.message?.content ?? ""
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
-// Live-arming seam. Wiring a real model/gateway call here means adapting the
-// same `TriageComplete` (system, user) => text callback the judge needs
-// (`judgeArming({ userPrompt, verdict, complete })`) bound to a live provider —
-// non-trivial for this offline harness — so every scenario runs deterministic
-// (heuristicArming) until this is filled in. See `judgeArming` in
-// packages/opencode/src/session/arming-judge.ts for the real entrypoint to
-// wire in once that adapter exists.
-async function liveArming(prompt: string, verdict: TriageVerdict): Promise<ArmingVerdict> {
-  void prompt
-  void verdict
-  throw new Error("live mode not wired yet — TODO")
+// Live-triage seam: runs the real `runTurnTriage` extractor against the
+// gateway. Only reached from scoreScenario when RIG_LIVE=1.
+async function liveTriage(prompt: string): Promise<TriageVerdict> {
+  const verdict = await runTurnTriage({ userPrompt: prompt, complete: gatewayComplete })
+  if (!verdict) throw new Error("liveTriage: runTurnTriage returned null (timeout or parse failure)")
+  return verdict
+}
+
+// Live-arming seam: runs the real `judgeArming` judge against the gateway.
+// Only reached from scoreScenario when RIG_LIVE=1.
+async function liveArming(input: { userPrompt: string; verdict: TriageVerdict }): Promise<ArmingVerdict> {
+  const arming = await judgeArming({ userPrompt: input.userPrompt, verdict: input.verdict, complete: gatewayComplete })
+  if (!arming) throw new Error("liveArming: judgeArming returned null (timeout or parse failure)")
+  return arming
 }
 
 type CaseVerdict = "ok" | "over-fire" | "under-fire" | "error"
@@ -109,6 +149,8 @@ interface ScoreRow {
   seed: string
   verdict: CaseVerdict
   shapes: string
+  /** Live mode only: the arming judge's grounding string, printed per row so it can be eyeballed. */
+  evidence?: string
 }
 
 async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
@@ -118,16 +160,26 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
   let verdict: TriageVerdict
   let arming: ArmingVerdict
   try {
-    verdict = scenario.mockVerdict ?? (await liveTriage(scenario.prompt))
-    arming = scenario.mockVerdict ? heuristicArming(verdict) : await liveArming(scenario.prompt, verdict)
+    if (RIG_LIVE) {
+      // Live mode validates the REAL judge: triage still honors a mock verdict
+      // when the scenario pins one, but arming always runs the live gateway.
+      verdict = scenario.mockVerdict ?? (await liveTriage(scenario.prompt))
+      arming = await liveArming({ userPrompt: scenario.prompt, verdict })
+    } else {
+      if (!scenario.mockVerdict) {
+        throw new Error("deterministic mode requires scenario.mockVerdict — set RIG_LIVE=1 to hit the real gateway")
+      }
+      verdict = scenario.mockVerdict
+      arming = heuristicArming(verdict)
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return { id: scenario.id, note, expected, actual: `error: ${message}`, seed: "—", verdict: "error", shapes: "-" }
   }
 
-  // Arming judge decides (heuristicArming here, judgeArming once live is
-  // wired); the skeleton + autoTypeTodos net then materializes the
-  // localization pre-pass from that decision.
+  // Arming judge decides (heuristicArming deterministic / judgeArming live);
+  // the skeleton + autoTypeTodos net then materializes the localization
+  // pre-pass from that decision.
   const skeleton = buildTriageTodoSkeleton(verdict, arming)
   const typed = autoTypeTodos(scenario.todos ?? skeleton, arming.armLocalization)
   // A pre-pass of EITHER flavor engages the expensive reasoner/oracle tier, so
@@ -142,12 +194,26 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
   const shapes = verdict.goals.map((g) => g.shape).join(", ") || "-"
 
   const caseVerdict: CaseVerdict = actualArmed === expected ? "ok" : expected ? "under-fire" : "over-fire"
-  return { id: scenario.id, note, expected, actual: String(actualArmed), seed, verdict: caseVerdict, shapes }
+  return {
+    id: scenario.id,
+    note,
+    expected,
+    actual: String(actualArmed),
+    seed,
+    verdict: caseVerdict,
+    shapes,
+    evidence: RIG_LIVE ? arming.evidence : undefined,
+  }
 }
 
 const corpus = await loadCorpus()
 const rows: ScoreRow[] = []
-for (const scenario of corpus) rows.push(await scoreScenario(scenario))
+// Sequential (not Promise.all) — gentle on the gateway when RIG_LIVE=1.
+for (const scenario of corpus) {
+  const row = await scoreScenario(scenario)
+  rows.push(row)
+  if (RIG_LIVE) console.log(`[${row.id}] ${row.verdict} — evidence: ${row.evidence ?? "(none — scenario errored)"}`)
+}
 
 console.table(
   rows.map(({ id, note, expected, actual, seed, verdict, shapes }) => ({ id, note, expected, actual, seed, verdict, shapes })),
