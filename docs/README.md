@@ -66,6 +66,10 @@ seam table: [features/README.md](./features/README.md).
 - [TIER_FIRING_CHECKLIST.md](./testing/TIER_FIRING_CHECKLIST.md) — the acceptance-test playbook for
   econ's escalation machinery on real repos: five canonical cases (one per routing door) + the
   decode/debug discipline for a door that won't open.
+- [PROMPT_SLICING_CORPUS.md](./testing/PROMPT_SLICING_CORPUS.md) — the evidence-grounded golden spec
+  for arming decisions: prompt archetypes + expected shape/door/pre-pass/tier, the R1–R5 decision
+  rules (with research citations), and the labeled corpus encoded 1:1 in `test/arming-rig/corpus.ts`.
+  Re-run the rig (deterministic + `RIG_LIVE=1`) after every arming-judge or door change.
 - [SHELL_COMPRESSION_CHECKLIST.md](./testing/SHELL_COMPRESSION_CHECKLIST.md) — live-testing checklist
   verifying shell-output compression end-to-end (lossy path triggers only when appropriate, recovery
   intact, audit trails).

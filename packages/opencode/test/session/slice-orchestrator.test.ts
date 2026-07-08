@@ -304,18 +304,23 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
     })
   })
 
-  // Arming judge override (§1.1b): armLocalization, when passed, is the SOLE
-  // authority over the diagnosis pre-pass — it overrides the syntactic
-  // bug-shaped+no-file-target heuristic in both directions. Only when the
-  // caller passes no decision (undefined) does autoTypeTodos fall back to the
-  // old heuristic.
+  // Arming judge override, refined by corpus R4 (2026-07-09): armLocalization,
+  // when passed, is the SEMANTIC gate — but it never OVERRIDES the one syntactic
+  // refinement from the to-do list, which the judge never saw: the active to-dos
+  // must not already name a file target. `false` always suppresses (the gate
+  // short-circuits); `true` still requires no file target before injecting.
+  // R1 (non-diagnosis turns never arm) is gated upstream (the judge + Door-1),
+  // so it is deliberately NOT re-checked here — a vague diagnosis whose
+  // remediation to-dos aren't phrased "investigate/fix" must still arm. Only
+  // when the caller passes no decision (undefined) does the semantic gate
+  // itself fall back to the old DIAGNOSIS_START heuristic.
   describe("autoTypeTodos — arming judge override (armLocalization threaded in)", () => {
     const mechanicalTodos: OrchestrationTodo[] = [
       { content: "Fix the enum display bug so str() returns the raw value", status: "pending" },
       { content: "Verify the model field returns 'M'", status: "pending" },
     ]
 
-    it("armLocalization:true injects the localization pre-pass — the judge is the sole authority", () => {
+    it("armLocalization:true injects the localization pre-pass — the judge is the sole semantic authority", () => {
       const typed = autoTypeTodos(mechanicalTodos, true)
       expect(typed).toHaveLength(3)
       expect(typed[2]).toEqual({
@@ -334,6 +339,30 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
 
     it("armLocalization undefined falls back to the old bug-shaped+no-file heuristic", () => {
       const typed = autoTypeTodos(mechanicalTodos)
+      expect(typed).toHaveLength(3)
+      expect(typed[2]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
+    })
+
+    // R4 — the judge armed, but the to-dos already name a file target (new
+    // syntactic grounding the turn-open judge never saw): suppress.
+    it("R4: armLocalization:true is suppressed when the active to-dos already name a file target", () => {
+      const grounded: OrchestrationTodo[] = [
+        { content: "Fix the trailing commas in the schema import in database.ts", status: "pending" },
+        { content: "Verify the import parses cleanly", status: "pending" },
+      ]
+      expect(autoTypeTodos(grounded, true)).toEqual(grounded)
+    })
+
+    // Guard against over-suppression: a vague diagnosis whose remediation
+    // to-dos are phrased as ordinary build verbs ("add pagination…"), not
+    // "investigate/fix", must still arm — R1 lives upstream (judge + Door-1),
+    // not as a re-check here, so this must NOT be suppressed.
+    it("armLocalization:true still injects for vague-diagnosis to-dos phrased as build verbs, with no file target", () => {
+      const vagueDiagnosisTodos: OrchestrationTodo[] = [
+        { content: "Add pagination to the query to fix the timeout", status: "pending" },
+        { content: "Verify the query completes within budget", status: "pending" },
+      ]
+      const typed = autoTypeTodos(vagueDiagnosisTodos, true)
       expect(typed).toHaveLength(3)
       expect(typed[2]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
     })

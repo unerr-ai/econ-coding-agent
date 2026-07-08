@@ -53,6 +53,8 @@ const ARMING_SYSTEM_PROMPT = `${ARMING_PROMPT_MARKER}. Decide ONE thing: does th
 
 Ground every part of your decision in EVIDENCE from the task. Do not guess from the task's topic or difficulty in the abstract; cite what the text actually tells you.
 
+SCOPE — a localization pre-pass applies ONLY to a BUG DIAGNOSIS (finding where a described bug must be fixed). If the task is a feature / new-code build, a code review / audit / explanation, or a run / execute-and-report task (see the TRIAGE shapes: build, audit, run-only), localization does not apply — set armLocalization=false, localized=true, and pick hardness from the change's scope. Weigh the localization rules below ONLY for a diagnosis task.
+
 Decide "localized" (we already know WHERE to fix — do NOT arm):
 - the task names a concrete code location in THIS repo: a file path, a file name, or a module, OR
 - the exact edit site is otherwise unambiguous from the text.

@@ -1177,12 +1177,20 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * in_progress check-runs stay with the conductor.
  *
  * One structural exception on the build-turn branch — the diagnosis pre-pass
- * (SWE-bench django-11964/11885 decode): on a build/mechanical batch, the arming
- * judge's turn-open decision (`armLocalization`, threaded in) says whether the
- * conductor is about to guess an un-localized root cause. When it is set it is
- * the sole authority; absent a judge decision the door degrades to the old
- * syntactic heuristic (a repair-verb opener with NO active item naming a
- * concrete file). Either way the pre-pass appends one typed localization slice —
+ * (SWE-bench django-11964/11885 decode; hardened 2026-07-09 against the
+ * PROMPT_SLICING_CORPUS.md live-judge over-fires, rule R4): on a
+ * build/mechanical batch, the arming judge's turn-open decision
+ * (`armLocalization`, threaded in) is the SEMANTIC gate — true/false, or,
+ * absent a decision, the old DIAGNOSIS_START heuristic (R1 — never localizing
+ * a non-diagnosis turn — is gated upstream at the judge and at
+ * Door-1/buildTriageTodoSkeleton, so it is deliberately NOT re-imposed here: a
+ * vague diagnosis whose remediation to-dos aren't phrased "investigate/fix"
+ * must still arm when the judge said so). One syntactic refinement from the
+ * to-do list, which the judge never saw, ALWAYS applies on top and is never
+ * overridden by the judge — "string-matchers refine, never override": R4 —
+ * the active to-dos must not already name a file target, because a to-do
+ * naming its own file means Door-2 knows the site the judge could not. Only
+ * when both hold does the pre-pass append one typed localization slice —
  * `design` allocates to the oracle tier
  * (judge-verified when untestable) and the researcher persona is read+fetch
  * only on the tightest step budget — a lean decider front-loaded before the
@@ -1222,18 +1230,25 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
   const active = todos.filter((t) => !TERMINAL_TODO_STATUSES.has(t.status))
   const typed = ((): (T | InjectedSliceTodo)[] => {
     if (active.some((t) => MECHANICAL_START.test(t.content) || isDecidedChange(t))) {
-      // The arming judge (turn-open, evidence-grounded) owns the localization
-      // decision and is threaded in as `armLocalization`. When present it is the
-      // sole authority; the bug-shape / file-target regexes are only the degrade
-      // heuristic for a caller with no judge decision — they read syntax, never
-      // the semantic groundedness the judge reasoned about. The content check
-      // keeps injection one-shot now that a SETTLED seed no longer trips the top
-      // guard: a list already carrying the seed (any status) falls through to
-      // plan-first typing instead of paying twice.
-      const shouldArm =
-        armLocalization ??
-        (todos.some((t) => t.status === "pending" && DIAGNOSIS_START.test(t.content)) &&
-          !active.some((t) => FILE_TARGET_RE.test(t.content)))
+      // The arming judge (turn-open, evidence-grounded) owns the SEMANTIC
+      // localization call and is threaded in as `armLocalization`; absent a
+      // judge decision it degrades to the old DIAGNOSIS_START heuristic (R1 —
+      // build/audit/run-only never reach this as an armed decision — is now
+      // gated upstream, at the judge and at Door-1/buildTriageTodoSkeleton, so
+      // it must not be re-imposed here: a legitimate vague diagnosis whose
+      // remediation to-dos aren't phrased "investigate/diagnose" — e.g. "add
+      // pagination to the query" — must still arm when the judge said so). One
+      // syntactic refinement from the to-do list — which the judge never saw —
+      // ALWAYS applies on top of either path and is never overridden (corpus
+      // R4, "string-matchers refine, never override"): the active to-dos must
+      // NOT already name a file target, because a to-do naming its own file
+      // means Door-2 knows the site the judge could not. The content check
+      // keeps injection one-shot now that a SETTLED seed no longer trips the
+      // top guard: a list already carrying the seed (any status) falls through
+      // to plan-first typing instead of paying twice.
+      const armDecision =
+        armLocalization ?? todos.some((t) => t.status === "pending" && DIAGNOSIS_START.test(t.content))
+      const shouldArm = armDecision && !active.some((t) => FILE_TARGET_RE.test(t.content))
       if (shouldArm && !todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
         return [...todos, LOCALIZATION_PREPASS_TODO]
       }
