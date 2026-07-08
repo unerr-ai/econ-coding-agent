@@ -271,6 +271,17 @@ describe("createStuckSupervisor", () => {
     expect(signal).toEqual({ reason: "repeated-tool", signature: "read|foo.ts", count: 3 })
   })
 
+  it("an empty toolSignature never fires — a step with no distinguishable action is not a loop", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+    // three resultless steps the observer could not distinguish (empty signature):
+    // neither repeated-tool nor no-progress may fire on them (run-11885 regression)
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+  })
+
   it("a changing signature never fires — no premature stuck signal", () => {
     const sup = createStuckSupervisor(DEFAULT)
     for (let i = 0; i < 5; i++) {

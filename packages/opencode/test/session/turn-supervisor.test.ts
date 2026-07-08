@@ -15,6 +15,12 @@ function bash(command: string, output: string, status: "completed" | "error" = "
 function edit(filePath: string, status: "completed" | "error" = "completed") {
   return { type: "tool", tool: "edit", state: { status, input: { filePath, oldString: "a", newString: "b" } } }
 }
+function read(filePath: string) {
+  return { type: "tool", tool: "read", state: { status: "completed", input: { filePath }, output: "…file contents…" } }
+}
+function task(description: string) {
+  return { type: "tool", tool: "task", state: { status: "completed", input: { description }, output: "…subagent report…" } }
+}
 
 const RED = "test_large_delete ... FAIL\nAssertionError: 22 != 25 : 22 queries executed, 25 expected"
 const GREEN = "test_large_delete ... ok\nRan 1 test in 0.031s\nOK"
@@ -67,6 +73,19 @@ describe("observeStep", () => {
     const { failedCommands } = observeStep([bash(CMD, "", "error")])
     expect(failedCommands).toEqual([CMD])
   })
+
+  it("tracks a read-only tool by its target (not an empty signature) and stays resultless", () => {
+    const { observation } = observeStep([read("django/db/models/deletion.py")])
+    expect(observation.toolSignature).toBe("read:django/db/models/deletion.py")
+    expect(observation.resultSignature).toBeUndefined()
+  })
+
+  it("tracks a sub-agent spawn by its description so distinct explorations differ", () => {
+    const a = observeStep([task("explore the collector")]).observation.toolSignature
+    const b = observeStep([task("explore the query compiler")]).observation.toolSignature
+    expect(a).toBe("task:explore the collector")
+    expect(a).not.toBe(b)
+  })
 })
 
 // -- normalizeResult --------------------------------------------------------
@@ -107,6 +126,23 @@ describe("observeStep + createStuckSupervisor", () => {
     expect(sup.observe(observeStep([bash(CMD, RED)]).observation)).toBeUndefined()
     expect(sup.observe(observeStep([bash(CMD, "FAIL: different error entirely")]).observation)).toBeUndefined()
     expect(sup.observe(observeStep([bash(CMD, GREEN)]).observation)).toBeUndefined()
+  })
+
+  it("diverse read-only exploration never trips repeated-tool (the run-11885 false positive)", () => {
+    const sup = createStuckSupervisor()
+    // read a file, spawn an explorer, read two more — varied signatures, not a loop
+    expect(sup.observe(observeStep([read("a.py")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([task("explore the collector")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([read("b.py")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([read("c.py")]).observation)).toBeUndefined()
+  })
+
+  it("still catches a genuine read loop: the identical read re-issued 3x", () => {
+    const sup = createStuckSupervisor()
+    expect(sup.observe(observeStep([read("a.py")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([read("a.py")]).observation)).toBeUndefined()
+    const signal = sup.observe(observeStep([read("a.py")]).observation)
+    expect(signal?.reason).toBe("repeated-tool")
   })
 })
 

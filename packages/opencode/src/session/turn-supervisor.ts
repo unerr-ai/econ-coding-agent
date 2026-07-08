@@ -15,6 +15,22 @@ import { isTestFilePath } from "../tool/edit-governance"
 const FILE_EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
 const COMMAND_TOOLS = new Set(["shell", "bash"])
 
+// The most identifying string in a non-edit, non-command tool's input. Reads,
+// searches, and sub-agent spawns (read/grep/glob/list/task/webfetch/…) are
+// tracked by tool + this key so DIVERSE exploration yields DIVERSE signatures.
+// Without it every read-only step collapsed to the same empty signature and a
+// short burst of them falsely tripped the resultless repeated-tool detector
+// (run 11885: a conductor reading files and spawning an @explorer escalated to
+// the reasoner before running a single test — a 3× cost regression for no gain).
+const IDENTITY_KEYS = ["filePath", "path", "pattern", "query", "url", "description", "prompt"]
+function identifyingInput(input: Record<string, unknown>): string {
+  for (const key of IDENTITY_KEYS) {
+    const value = input[key]
+    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 200)
+  }
+  return ""
+}
+
 /** Minimal structural view of a completed tool part — mirrors slice-orchestrator's ToolPartLike, plus the result output. */
 interface ToolPartLike {
   type: string
@@ -98,6 +114,12 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
       toolTokens.push(`${part.tool}:${command}`)
       resultTokens.push(`${status}|${normalizeResult(output)}`)
       if (looksFailed(status, output)) failedCommands.push(command)
+    } else {
+      // Any other tool (read/grep/glob/list/task/webfetch/…) still distinguishes
+      // the step: track it by tool + its most identifying input so a burst of
+      // varied exploration reads as varied, not as a repeat. These run no command,
+      // so they stay resultless and never touch the red tally.
+      toolTokens.push(`${part.tool}:${identifyingInput(input)}`)
     }
   }
 

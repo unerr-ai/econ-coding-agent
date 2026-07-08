@@ -295,16 +295,25 @@ export function createStuckSupervisor(
       // command step's progress IS its result (judged by repeated-red above), so
       // re-running the same command while the result changes is healthy
       // iteration and must not fire here.
-      if (step.resultSignature === undefined) {
+      // An empty signature means the step ran nothing the observer distinguishes —
+      // no evidence of a loop — so it never counts. (Exploration that the observer
+      // now tracks yields varied non-empty signatures; a truly empty step is
+      // neutral, never a repeat: run 11885, where empty read/spawn steps escalated
+      // to the reasoner before a test ran.)
+      if (step.resultSignature === undefined && step.toolSignature !== "") {
         const t = tally(toolRun, step.toolSignature)
         if (t >= config.repeatThreshold) {
           return { reason: "repeated-tool", signature: step.toolSignature, count: t }
         }
       }
 
-      // 4. no-progress: the overall fingerprint hasn't changed for `noProgressThreshold` steps
+      // 4. no-progress: the overall fingerprint hasn't changed for `noProgressThreshold`
+      // steps. An entirely empty step ("#") carries no evidence either way — skip it
+      // so a run of them reads as neither progress nor stall.
       const fingerprint = `${step.toolSignature}#${step.resultSignature ?? ""}`
-      if (fingerprint === lastFingerprint) {
+      if (fingerprint === "#") {
+        // neutral — leave the stagnation tally untouched
+      } else if (fingerprint === lastFingerprint) {
         stagnant += 1
         if (stagnant >= config.noProgressThreshold) {
           return { reason: "no-progress", signature: fingerprint, count: stagnant }
