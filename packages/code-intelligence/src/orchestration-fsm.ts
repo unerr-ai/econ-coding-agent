@@ -212,8 +212,17 @@ export type TurnStep =
 
 // ─────────────────────────────── stuck supervisor ───────────────────────────────
 
-/** The kind of stuck the supervisor detected — each maps to a recovery rung. */
-export type StuckReason = "repeated-red" | "repeated-tool" | "test-edit" | "no-progress"
+/**
+ * The kind of stuck the supervisor detected — each maps to a recovery rung.
+ * Conservative by design: only genuinely pathological behaviour fires, never
+ * normal work (diverse exploration or progressive edits to one file).
+ *   - test-edit        the model edited a test (the fake-green cheat)
+ *   - repeated-red     the same failing command result, over and over
+ *   - repeated-tool    the EXACT same call (tool + args) re-issued verbatim
+ *   - no-op            steps that perform no operation at all
+ *   - excessive-reread the same file pulled up many times without acting on it
+ */
+export type StuckReason = "repeated-red" | "repeated-tool" | "test-edit" | "no-op" | "excessive-reread"
 
 export interface StuckSignal {
   reason: StuckReason
@@ -227,19 +236,23 @@ export interface StuckSignal {
  * the supervisor only compares them, so it stays deterministic and pure.
  */
 export interface StepObservation {
-  toolSignature: string // `${toolName}|${argsHash}` — identical repeats = re-issuing the same call
+  toolSignature: string // `${tool}:${target}#${hash(input)}` — a verbatim repeat = re-issuing the same call; "" = no operation
   resultSignature?: string // `${exitCode}|${stdoutDigest}` for a test/command step; undefined otherwise
   editedTestFile?: string // the model edited a test file this step (the fake-green tell), with its path
+  readFiles?: readonly string[] // file paths this step read — feeds the excessive-reread tally
+  progressed?: boolean // the step ran a command or landed an edit — a productive action that clears the reread tally
 }
 
 export interface StuckSupervisorConfig {
-  repeatThreshold: number // consecutive identical signatures that count as stuck
-  noProgressThreshold: number // steps with no fingerprint change that count as no-progress
+  repeatThreshold: number // consecutive identical signatures (a verbatim repeat, or an identical red result) that count as stuck
+  noopThreshold: number // consecutive no-operation steps that count as stalled
+  rereadThreshold: number // reads of one file, without an intervening productive action, that count as circling
 }
 
 export const DEFAULT_STUCK_CONFIG: StuckSupervisorConfig = {
   repeatThreshold: 3,
-  noProgressThreshold: 4,
+  noopThreshold: 3,
+  rereadThreshold: 5,
 }
 
 export interface StuckSupervisor {
@@ -249,12 +262,16 @@ export interface StuckSupervisor {
 }
 
 /**
- * Build a stateful stuck-detector for one turn's inner loop. Priority order:
- * a test-edit fires immediately (the fake-green tell), then an identical red
- * result repeated `repeatThreshold` times (the django-11885 12x-thrash caught at
- * the 3rd), then an identical repeated RESULTLESS tool call (a read/edit loop —
- * never a command whose result is changing, which is healthy iteration), then a
- * stagnant fingerprint.
+ * Build a stateful stuck-detector for one turn's inner loop. Conservative:
+ * it fires only on genuinely pathological behaviour, never on normal work
+ * (diverse exploration or several different edits to one file). Priority order:
+ *   1. test-edit        — editing a test file (the fake-green cheat), immediate.
+ *   2. excessive-reread — one file read `rereadThreshold` times without acting on it.
+ *   3. repeated-red     — the same failing command result `repeatThreshold` times.
+ *   4. no-op            — `noopThreshold` steps in a row that perform no operation.
+ *   5. repeated-tool    — the EXACT same call (tool + args) re-issued verbatim
+ *                         `repeatThreshold` times; the signature hashes the full
+ *                         input, so progressive edits and diverse reads never collide.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -262,9 +279,9 @@ export function createStuckSupervisor(
   config: StuckSupervisorConfig = DEFAULT_STUCK_CONFIG,
 ): StuckSupervisor {
   let redRun = { sig: "", count: 0 }
-  let toolRun = { sig: "", count: 0 }
-  let lastFingerprint: string | undefined
-  let stagnant = 0
+  let dupRun = { sig: "", count: 0 }
+  let noopRun = 0
+  const rereads = new Map<string, number>()
 
   function tally(run: { sig: string; count: number }, sig: string): number {
     if (sig === run.sig) run.count += 1
@@ -277,59 +294,67 @@ export function createStuckSupervisor(
 
   return {
     observe(step) {
-      // 1. test-edit — the fake-green tell; escalate before it can fake a pass
+      // 1. test-edit — the fake-green tell; fire before it can fake a pass.
       if (step.editedTestFile) {
         return { reason: "test-edit", signature: step.editedTestFile, count: 1 }
       }
 
-      // 2. the same red result seen `repeatThreshold` times (tolerates interleaved reads/edits)
+      // 2. excessive-reread — the same file pulled up `rereadThreshold` times without
+      // acting on it. A productive step (an edit or a command) is fresh progress and
+      // clears every file's tally: a read that follows an edit is re-verification, not
+      // circling. Only a run of pure reads returning to one file trips this.
+      if (step.progressed) {
+        rereads.clear()
+      } else if (step.readFiles) {
+        for (const file of step.readFiles) {
+          const n = (rereads.get(file) ?? 0) + 1
+          rereads.set(file, n)
+          if (n >= config.rereadThreshold) {
+            return { reason: "excessive-reread", signature: file, count: n }
+          }
+        }
+      }
+
+      // 3. repeated-red — the same failing command result `repeatThreshold` times.
+      // Its tally only advances on result steps, so it tolerates interleaved
+      // reads/edits (the django-11885 12x-thrash caught at the 3rd). A command step
+      // ends here: its progress IS its result, never the verbatim-repeat check below.
       if (step.resultSignature !== undefined) {
+        noopRun = 0
         const n = tally(redRun, step.resultSignature)
         if (n >= config.repeatThreshold) {
           return { reason: "repeated-red", signature: step.resultSignature, count: n }
         }
+        return undefined
       }
 
-      // 3. the same resultless tool call re-issued `repeatThreshold` times — a
-      // read/edit loop with nothing to show. Gated to steps with no result: a
-      // command step's progress IS its result (judged by repeated-red above), so
-      // re-running the same command while the result changes is healthy
-      // iteration and must not fire here.
-      // An empty signature means the step ran nothing the observer distinguishes —
-      // no evidence of a loop — so it never counts. (Exploration that the observer
-      // now tracks yields varied non-empty signatures; a truly empty step is
-      // neutral, never a repeat: run 11885, where empty read/spawn steps escalated
-      // to the reasoner before a test ran.)
-      if (step.resultSignature === undefined && step.toolSignature !== "") {
-        const t = tally(toolRun, step.toolSignature)
-        if (t >= config.repeatThreshold) {
-          return { reason: "repeated-tool", signature: step.toolSignature, count: t }
+      // 4. no-op — the step performed no operation at all (empty signature),
+      // `noopThreshold` times in a row: the model is stalling, producing nothing.
+      if (step.toolSignature === "") {
+        noopRun += 1
+        if (noopRun >= config.noopThreshold) {
+          return { reason: "no-op", signature: "", count: noopRun }
         }
+        return undefined
       }
 
-      // 4. no-progress: the overall fingerprint hasn't changed for `noProgressThreshold`
-      // steps. An entirely empty step ("#") carries no evidence either way — skip it
-      // so a run of them reads as neither progress nor stall.
-      const fingerprint = `${step.toolSignature}#${step.resultSignature ?? ""}`
-      if (fingerprint === "#") {
-        // neutral — leave the stagnation tally untouched
-      } else if (fingerprint === lastFingerprint) {
-        stagnant += 1
-        if (stagnant >= config.noProgressThreshold) {
-          return { reason: "no-progress", signature: fingerprint, count: stagnant }
-        }
-      } else {
-        lastFingerprint = fingerprint
-        stagnant = 0
+      // 5. repeated-tool — the EXACT same call (tool + args) re-issued
+      // `repeatThreshold` times. The signature hashes the full input, so progressive
+      // edits to one file and diverse reads yield distinct signatures and never
+      // collide — only a verbatim repeat does (run 11885 v1/v2 false positives).
+      noopRun = 0
+      const t = tally(dupRun, step.toolSignature)
+      if (t >= config.repeatThreshold) {
+        return { reason: "repeated-tool", signature: step.toolSignature, count: t }
       }
 
       return undefined
     },
     reset() {
       redRun = { sig: "", count: 0 }
-      toolRun = { sig: "", count: 0 }
-      lastFingerprint = undefined
-      stagnant = 0
+      dupRun = { sig: "", count: 0 }
+      noopRun = 0
+      rereads.clear()
     },
   }
 }

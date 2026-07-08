@@ -236,7 +236,7 @@ describe("sliceTransition", () => {
 // ---------------------------------------------------------------------------
 
 describe("createStuckSupervisor", () => {
-  const DEFAULT: StuckSupervisorConfig = { repeatThreshold: 3, noProgressThreshold: 4 }
+  const DEFAULT: StuckSupervisorConfig = { repeatThreshold: 3, noopThreshold: 3, rereadThreshold: 5 }
 
   it("a test-edit observation fires immediately — highest priority, overrides everything else", () => {
     const sup = createStuckSupervisor(DEFAULT)
@@ -271,15 +271,24 @@ describe("createStuckSupervisor", () => {
     expect(signal).toEqual({ reason: "repeated-tool", signature: "read|foo.ts", count: 3 })
   })
 
-  it("an empty toolSignature never fires — a step with no distinguishable action is not a loop", () => {
+  it("no-op fires after noopThreshold empty (no-operation) steps in a row", () => {
     const sup = createStuckSupervisor(DEFAULT)
-    // three resultless steps the observer could not distinguish (empty signature):
-    // neither repeated-tool nor no-progress may fire on them (run-11885 regression)
+    // an empty signature = the step performed no operation at all
     expect(sup.observe({ toolSignature: "" })).toBeUndefined()
     expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    const signal = sup.observe({ toolSignature: "" })
+    expect(signal).toEqual({ reason: "no-op", signature: "", count: 3 })
+  })
+
+  it("a real operation between empty steps resets the no-op run", () => {
+    const sup = createStuckSupervisor(DEFAULT)
     expect(sup.observe({ toolSignature: "" })).toBeUndefined()
     expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "read:a#h1" })).toBeUndefined() // a real op resets the no-op run
     expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "" })).toBeUndefined()
+    // only 2 consecutive empties since the reset → still no fire
+    expect(sup.observe({ toolSignature: "read:b#h2" })).toBeUndefined()
   })
 
   it("a changing signature never fires — no premature stuck signal", () => {
@@ -290,17 +299,35 @@ describe("createStuckSupervisor", () => {
     }
   })
 
-  it("no-progress fires after noProgressThreshold stagnant identical fingerprints", () => {
-    // repeatThreshold set high so repeated-tool cannot fire first — isolates the fingerprint check
-    const sup = createStuckSupervisor({ repeatThreshold: 10, noProgressThreshold: 4 })
+  it("excessive-reread fires when one file is read rereadThreshold times without progress", () => {
+    const sup = createStuckSupervisor(DEFAULT) // rereadThreshold 5
+    // distinct signatures (different offsets) so exact-duplicate cannot fire first —
+    // isolates the per-file reread tally
+    for (let i = 0; i < 4; i++) {
+      expect(sup.observe({ toolSignature: `read:foo.ts#h${i}`, readFiles: ["foo.ts"] })).toBeUndefined()
+    }
+    const signal = sup.observe({ toolSignature: "read:foo.ts#h5", readFiles: ["foo.ts"] })
+    expect(signal).toEqual({ reason: "excessive-reread", signature: "foo.ts", count: 5 })
+  })
 
-    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // baseline fingerprint
-    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 1
-    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 2
-    expect(sup.observe({ toolSignature: "same" })).toBeUndefined() // stagnant 3
+  it("a productive step (progressed) clears the reread tally — re-verifying reads never fire", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+    for (let i = 0; i < 4; i++) {
+      expect(sup.observe({ toolSignature: `read:foo.ts#h${i}`, readFiles: ["foo.ts"] })).toBeUndefined()
+    }
+    // an edit lands → the reread tally clears
+    expect(sup.observe({ toolSignature: "edit:foo.ts#e1", progressed: true })).toBeUndefined()
+    // reads resume from zero → four more do not fire
+    for (let i = 0; i < 4; i++) {
+      expect(sup.observe({ toolSignature: `read:foo.ts#g${i}`, readFiles: ["foo.ts"] })).toBeUndefined()
+    }
+  })
 
-    const signal = sup.observe({ toolSignature: "same" }) // stagnant 4 — fires
-    expect(signal).toEqual({ reason: "no-progress", signature: "same#", count: 4 })
+  it("reading DIFFERENT files never trips excessive-reread", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+    for (let i = 0; i < 8; i++) {
+      expect(sup.observe({ toolSignature: `read:f${i}.ts#h${i}`, readFiles: [`f${i}.ts`] })).toBeUndefined()
+    }
   })
 
   it("reset() clears all internal counters", () => {

@@ -12,11 +12,12 @@ import { createStuckSupervisor } from "../../../code-intelligence/src/orchestrat
 function bash(command: string, output: string, status: "completed" | "error" = "completed") {
   return { type: "tool", tool: "bash", state: { status, input: { command }, output } }
 }
-function edit(filePath: string, status: "completed" | "error" = "completed") {
-  return { type: "tool", tool: "edit", state: { status, input: { filePath, oldString: "a", newString: "b" } } }
+function edit(filePath: string, status: "completed" | "error" = "completed", oldString = "a", newString = "b") {
+  return { type: "tool", tool: "edit", state: { status, input: { filePath, oldString, newString } } }
 }
-function read(filePath: string) {
-  return { type: "tool", tool: "read", state: { status: "completed", input: { filePath }, output: "…file contents…" } }
+function read(filePath: string, offset?: number) {
+  const input = offset === undefined ? { filePath } : { filePath, offset }
+  return { type: "tool", tool: "read", state: { status: "completed", input, output: "…file contents…" } }
 }
 function task(description: string) {
   return { type: "tool", tool: "task", state: { status: "completed", input: { description }, output: "…subagent report…" } }
@@ -76,15 +77,25 @@ describe("observeStep", () => {
 
   it("tracks a read-only tool by its target (not an empty signature) and stays resultless", () => {
     const { observation } = observeStep([read("django/db/models/deletion.py")])
-    expect(observation.toolSignature).toBe("read:django/db/models/deletion.py")
+    expect(observation.toolSignature).toContain("read:django/db/models/deletion.py")
     expect(observation.resultSignature).toBeUndefined()
+    expect(observation.readFiles).toEqual(["django/db/models/deletion.py"])
+    expect(observation.progressed).toBe(false)
   })
 
   it("tracks a sub-agent spawn by its description so distinct explorations differ", () => {
     const a = observeStep([task("explore the collector")]).observation.toolSignature
     const b = observeStep([task("explore the query compiler")]).observation.toolSignature
-    expect(a).toBe("task:explore the collector")
+    expect(a).toContain("task:explore the collector")
     expect(a).not.toBe(b)
+  })
+
+  it("marks a landed edit and a run command as progress; a pure read is not", () => {
+    expect(observeStep([edit("src/foo.ts")]).observation.progressed).toBe(true)
+    expect(observeStep([bash(CMD, GREEN)]).observation.progressed).toBe(true)
+    expect(observeStep([read("src/foo.ts")]).observation.progressed).toBe(false)
+    // a denied edit never modified anything → not progress
+    expect(observeStep([edit("src/foo.ts", "error")]).observation.progressed).toBe(false)
   })
 })
 
@@ -143,6 +154,53 @@ describe("observeStep + createStuckSupervisor", () => {
     expect(sup.observe(observeStep([read("a.py")]).observation)).toBeUndefined()
     const signal = sup.observe(observeStep([read("a.py")]).observation)
     expect(signal?.reason).toBe("repeated-tool")
+  })
+
+  it("three progressive (different) edits to one file never trip repeated-tool (run-11885 v2 false positive)", () => {
+    const sup = createStuckSupervisor()
+    // import edit, then collect edit, then the delete-loop edit — the real 11885 fix shape
+    expect(sup.observe(observeStep([edit("d.py", "completed", "import a", "import a, b")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([edit("d.py", "completed", "x = []", "x = {}")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([edit("d.py", "completed", "for q in x", "for q in x.values()")]).observation)).toBeUndefined()
+  })
+
+  it("still catches the SAME edit re-applied to one file 3x", () => {
+    const sup = createStuckSupervisor()
+    expect(sup.observe(observeStep([edit("d.py", "completed", "a", "b")]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([edit("d.py", "completed", "a", "b")]).observation)).toBeUndefined()
+    const signal = sup.observe(observeStep([edit("d.py", "completed", "a", "b")]).observation)
+    expect(signal?.reason).toBe("repeated-tool")
+  })
+
+  it("three no-operation steps in a row fire no-op", () => {
+    const sup = createStuckSupervisor()
+    expect(sup.observe(observeStep([]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([]).observation)).toBeUndefined()
+    const signal = sup.observe(observeStep([]).observation)
+    expect(signal?.reason).toBe("no-op")
+  })
+
+  it("re-reading ONE file 5x (different offsets) fires excessive-reread, not exact-duplicate", () => {
+    const sup = createStuckSupervisor()
+    let signal
+    for (let i = 0; i < 5; i++) {
+      signal = sup.observe(observeStep([read("deletion.py", i)]).observation)
+    }
+    expect(signal?.reason).toBe("excessive-reread")
+    expect(signal?.signature).toBe("deletion.py")
+  })
+
+  it("an edit between rereads clears the tally — read, work, read again never fires", () => {
+    const sup = createStuckSupervisor()
+    for (let i = 0; i < 4; i++) {
+      expect(sup.observe(observeStep([read("deletion.py", i)]).observation)).toBeUndefined()
+    }
+    // a real edit lands → reread tally resets
+    expect(sup.observe(observeStep([edit("deletion.py", "completed", "old", "new")]).observation)).toBeUndefined()
+    // four more reads (re-verification) do not fire
+    for (let i = 10; i < 14; i++) {
+      expect(sup.observe(observeStep([read("deletion.py", i)]).observation)).toBeUndefined()
+    }
   })
 })
 
