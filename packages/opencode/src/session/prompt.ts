@@ -46,6 +46,8 @@ import {
   budgetExhaustedMarker,
   buildRepoPrimer,
   renderSliceDigestLedger,
+  deriveTurnProbe,
+  runTurnProbeGate,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
   type SliceDigestEntry,
@@ -1415,6 +1417,14 @@ export const layer = Layer.effect(
         // loop still terminates — but never as a silent success.
         const MAX_LENGTH_CONTINUATIONS = 2
         let lengthContinuations = 0
+        // M4 — turn-level prove-it gate state: the reproduction the prompt
+        // pinned at turn open (undefined ⇒ the gate no-ops) and its bounded
+        // retry count. The gate re-runs the repro at turn END so an INLINE fix
+        // that left it red cannot conclude — the slice-level probe rung only
+        // guards dispatched slices, which an inline fix never creates.
+        let turnPinnedProbe: ReturnType<typeof deriveTurnProbe>
+        let probeGateRetries = 0
+        const MAX_PROBE_GATE_RETRIES = 3
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1497,6 +1507,55 @@ export const layer = Layer.effect(
                 callID: orphan.callID,
               })
             }
+            // M4 — turn-level prove-it gate: a fix-shaped root turn that pinned
+            // a reproduction may not conclude while that repro is red (or a
+            // tracked test was edited on a no-test-edit turn). Catches INLINE
+            // fixes the slice-level probe rung never saw. Reuses the length-
+            // continuation re-entry primitive; bounded by MAX_PROBE_GATE_RETRIES,
+            // after which it exits LOUDLY (turn_probe_unresolved), never as a
+            // silent success.
+            if (turnPinnedProbe && !session.parentID) {
+              const gate = yield* Effect.promise(() =>
+                runTurnProbeGate({
+                  probe: turnPinnedProbe!,
+                  noTestEdit: testEditGateArmed(sessionID),
+                }),
+              )
+              if (gate.reject) {
+                if (probeGateRetries < MAX_PROBE_GATE_RETRIES) {
+                  probeGateRetries++
+                  yield* Effect.logInfo("turn_probe_gate", {
+                    "session.id": sessionID,
+                    rung: gate.rung ?? null,
+                    exit: gate.exitCode ?? null,
+                    retry: probeGateRetries,
+                  })
+                  const nudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(nudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: nudge.id,
+                    sessionID,
+                    type: "text",
+                    text: gate.reason!,
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+                yield* Effect.logWarning("turn_probe_unresolved", {
+                  "session.id": sessionID,
+                  probe: turnPinnedProbe.command,
+                  retries: probeGateRetries,
+                })
+              }
+            }
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
             break
           }
@@ -1538,6 +1597,18 @@ export const layer = Layer.effect(
               // triage_vs_heuristic evaluation telemetry either way).
               const shape = classifyTurnShape(userText)
               const regexDenyTestEdits = isFixShapedPrompt(userText) && !promptAuthorizesTestEdits(userText)
+
+              // M4 — pin the most-specific reproduction the prompt names on a
+              // fix-shaped root turn, so the turn-end gate can re-run it even
+              // when the fix lands inline (no dispatched slice → no probe rung).
+              if (isFixShapedPrompt(userText)) {
+                turnPinnedProbe = deriveTurnProbe(userText)
+                if (turnPinnedProbe)
+                  yield* Effect.logInfo("turn_probe_pinned", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.command,
+                  })
+              }
 
               // U1 — turn triage runs on every root turn open (always-on, no
               // feature flag). Any failure inside it degrades to the

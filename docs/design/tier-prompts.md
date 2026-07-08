@@ -271,7 +271,7 @@ All four set `parallel_tool_calls: true`. Pricing and provider facts: [models.md
 
 ## 5. Mutation surfaces — everything that rewrites a prompt or request at runtime
 
-Ordered by lifecycle stage. ~27 distinct surfaces.
+Ordered by lifecycle stage. ~28 distinct surfaces.
 
 ### 5.1 Per-request: the adaptive reasoning gate
 
@@ -527,6 +527,18 @@ is rebuilt as:
 - **RM verifier** (`rm-verifier.ts:104-138`) — **no local prompt**: external endpoint scores
   the trajectory 0–1 (accept ≥ 0.5); degrades to QE on error.
 
+### 5.9 Turn-close: pinned-reproduction gate (M4)
+
+`packages/opencode/src/session/prompt.ts` `runLoop` (root sessions only, always-on, no flag). A
+fix-shaped turn's pinned reproduction (`deriveTurnProbe`, `slice-orchestrator.ts:556-558`,
+pinned at turn-open) is re-run by `runTurnProbeGate` (`slice-orchestrator.ts:578-610`) just
+before the loop's exit `break`; a reject injects the gate's `reason` — a content-specific nudge
+— as a synthetic user message and re-enters the loop, bounded by `MAX_PROBE_GATE_RETRIES` (3,
+`prompt.ts:1427`). Closes the gap where an inline fix (no `todowrite`, zero dispatched slices)
+never touches the slice-level probe rung at all. Full mechanics — the bypass it closes, the
+test-tree-guard ordering, the loud-unresolved exit —
+[ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §4.6.
+
 ---
 
 ## 6. Quick index — every mutation surface
@@ -560,6 +572,7 @@ is rebuilt as:
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
 | 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2197 (`isProbeGrounded` :~155) |
 | 27 | Probe-rung reproduction gate | pinned `probeCommand` still red | rejects rung `probe` | verifier.ts:515-533 (`checkProbeRung`), slice-orchestrator.ts:1386-1393 (pin) |
+| 28 | Turn-close probe gate (M4) | pinned turn reproduction still red at turn-close | injects synthetic user nudge, re-enters loop | prompt.ts:1510-1558 (`runTurnProbeGate` call), slice-orchestrator.ts:578-610 |
 
 ---
 

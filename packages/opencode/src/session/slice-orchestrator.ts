@@ -541,6 +541,74 @@ export const TEST_TREE_GUARD_COMMAND: VerifyCommand = {
     'dirty=$(git diff --name-only --diff-filter=M HEAD -- 2>/dev/null | grep -E "(^|/)(tests?|__tests__|specs?)/|\\.(test|spec)\\.[a-zA-Z]+$|_test\\.[a-z]+$|(^|/)test_[^/]+\\.py$|(^|/)tests?\\.py$"); if [ -n "$dirty" ]; then echo "test files modified — a green suite over an edited oracle is invalid:"; echo "$dirty"; exit 1; fi',
 }
 
+// ---------------------------------------------------------------------------
+// Turn-level prove-it gate (M4) — the reproduction backstop for INLINE fixes
+// ---------------------------------------------------------------------------
+
+/**
+ * The most-specific reproduction a turn's prompt names, if any — the turn-level
+ * analogue of a slice's probeCommand. Lets the turn-end gate re-run the exact
+ * failing case even when the conductor fixed the bug inline and dispatched no
+ * slices, where the slice-level probe rung never engages.
+ *
+ * @sem domain=routing role=repro-pin
+ */
+export function deriveTurnProbe(promptText: string): VerifyCommand | undefined {
+  return mostSpecificRepro(extractVerifyCommands(promptText))
+}
+
+/** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */
+export interface TurnProbeGateResult {
+  reject: boolean
+  rung?: "probe" | "test-tree"
+  exitCode?: number
+  reason?: string
+}
+
+/**
+ * The turn-end backstop: a fix-shaped turn that pinned a reproduction may not
+ * conclude while a tracked test was edited on a no-test-edit turn, or while the
+ * pinned reproduction is still red. A reject carries the continue-message the
+ * caller re-injects; a clean test tree AND green repro returns accept. Runs in
+ * the session cwd via the same bounded shell runner the sound rung uses, so a
+ * hung command can never wedge the turn.
+ *
+ * @sem domain=routing role=repro-gate
+ */
+export async function runTurnProbeGate(opts: {
+  probe: VerifyCommand
+  noTestEdit: boolean
+  cwd?: string
+  timeoutMs?: number
+  runner?: CommandRunner
+}): Promise<TurnProbeGateResult> {
+  const runner = opts.runner ?? makeShellCommandRunner({ cwd: opts.cwd, timeoutMs: opts.timeoutMs })
+  if (opts.noTestEdit) {
+    const guard = await runner(TEST_TREE_GUARD_COMMAND)
+    if (guard.exitCode !== 0) {
+      return {
+        reject: true,
+        rung: "test-tree",
+        exitCode: guard.exitCode,
+        reason:
+          `You edited a test file on a task that forbids test edits:\n${guard.stdout.trim()}\n` +
+          `Revert every test change and fix the code the test checks — a green suite over an edited test proves nothing.`,
+      }
+    }
+  }
+  const result = await runner(opts.probe)
+  if (result.exitCode === 0) return { reject: false }
+  const detail = (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n")
+  return {
+    reject: true,
+    rung: "probe",
+    exitCode: result.exitCode,
+    reason:
+      `The pinned reproduction \`${opts.probe.command}\` is STILL FAILING (exit ${result.exitCode}):\n${detail}\n` +
+      `You have not fixed the root cause. Do not stop. Fix where the behavior is DEFINED (not where the error surfaces); do not edit the test to make it pass.`,
+  }
+}
+
 // OL-9.3f deterministic decomposition backstop: keyword→sliceType heuristic,
 // checked in this priority order (recon before verify before mechanical) so a
 // multi-keyword item (e.g. "investigate then fix") lands on the earlier,

@@ -256,6 +256,13 @@ climb becomes the second-to-last resort, not the first hop. A structurally criti
 unverified below the oracle (M3, the escalation floor, §4.2) — it forces the climb the cost
 cap would otherwise stop, settling loudly only once genuinely stuck at the ceiling.
 
+M1–M3 all fire inside the SLICE loop, which only runs when the conductor decomposes the turn
+into typed slices — an INLINE fix (no `todowrite`, zero slices dispatched) bypasses all three,
+and a bug-fix turn could report "done" without ever re-running its own reproduction. **M4, the
+turn-level pinned-reproduction gate** (§4.6), closes that gap: it pins the reproduction the
+prompt names at turn open and re-checks it at turn close, independent of whether any slice ever
+dispatched.
+
 ### 1.7 The cache rule: the owner stays put; only briefs travel
 
 Prompt caches are per-model. Move work between tiers and the new model starts cold — so a
@@ -297,7 +304,7 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 | execute | seat-scoped child sessions, personas, step budgets, lean briefs | `childSlicePermission`, dispatch site in `session/prompt.ts` |
 | verify | 8 rungs: behavior gate, sound (runs `verifyCommands`, case counts), shrink reject, skip flags, probe (task #7 pinned reproduction — gates sound-accept + untestable paths), extra rung, QE veto, flagged unverified-accept | `packages/code-intelligence/src/verifier.ts:515-533` (probe), `:568-662` (ladder) |
 | escalate | a genuine reject first squeezes the SAME tier while its failure signature keeps changing (M2, ≤2 retries), climbing only on stall — executor → conductor → reasoner → oracle with type ceilings; a CRITICAL slice (high coupling or risk>70) forces a climb at every exhaustion point instead of settling unverified below the oracle (M3, the escalation floor); each hop's escalation brief carries the rejected diff as REVERTED advice (verdict + ≤6k-char digest + files/commands lists, U3 containment); double-pay booked per rung | `slice-loop.ts:981-1102` (squeeze+climb chain), `:495-531` (brief), `:611-625` (booking into `double-pay.ts`) |
-| observe | `turn_shape` / `orchestration_engaged` events; `EconReceipt` per-tier drilldown | session logs, receipt |
+| observe | `turn_shape` / `orchestration_engaged` events; M4's `turn_probe_pinned` / `turn_probe_gate` / `turn_probe_unresolved` (§4.6); `EconReceipt` per-tier drilldown | session logs, receipt |
 
 Live-fire status: diagnosis-planner door FIRED with payoff (django gold-file fix, ~$0.15);
 mechanical-dispatch door FIRED (zod, ~$0.07); escalation ladder FIRED live with double-pay
@@ -591,6 +598,40 @@ sub-plan back to the conductor for re-dispatch. The single sanctioned exception:
 exploration inside a research child may fan out one more level — the one shape the
 evidence supports going deeper. The affinity rule (§4.2 rule 4) decides per item whether
 it becomes a child at all or stays inline on the thread that already holds the context.
+
+### 4.6 Turn-level pinned-reproduction gate (M4)
+
+The gap M1–M3 leave: all three fire inside the SLICE loop (`slice-loop.ts`), which only runs
+when the conductor decomposes the turn into typed slices via `todowrite`. When the conductor
+fixes a bug **inline** — no slices dispatched — the entire M1–M3 machinery (probe rung, squeeze,
+escalation floor) is bypassed, and a bug-fix turn could report "done" without ever having
+re-run the reproduction that proved the bug.
+
+**M4 closes it at the TURN level**, in `runLoop`
+(`packages/opencode/src/session/prompt.ts`) — always-on (no flag) and root-session-only
+(`!session.parentID`; child slice sessions already have M1's slice-level probe rung):
+
+- **Turn-open pin** (`step === 0`, on a fix-shaped prompt per `isFixShapedPrompt`, `prompt.ts:1601-1611`):
+  `deriveTurnProbe(userText)` (`slice-orchestrator.ts:556-558`) extracts the most-specific
+  pinned reproduction COMMAND straight from the prompt text — not from dispatched slices, which
+  are empty on the inline path. Logs `turn_probe_pinned`.
+- **Turn-end gate** (`prompt.ts:1510-1558`, just before the loop's exit `break`): if a probe was
+  pinned, `runTurnProbeGate` (`slice-orchestrator.ts:578-610`) runs it. When the turn forbids
+  test edits (`testEditGateArmed`), it first re-runs the test-tree guard
+  (`TEST_TREE_GUARD_COMMAND`, the same guard the sound rung uses) — a modified test file rejects
+  with rung `"test-tree"` before the probe is even tried. Then it runs the pinned probe; a
+  non-zero exit rejects with rung `"probe"`.
+- **Bounded retry**: a reject re-injects the gate's `reason` (a content-specific nudge, e.g.
+  "The pinned reproduction `…` is STILL FAILING (exit N): …") as a synthetic user message and
+  re-enters the loop — up to `MAX_PROBE_GATE_RETRIES` (3, `prompt.ts:1427`), reusing the same
+  length-continuation re-entry primitive as the output-truncation backstop (§7.4).
+- **Loud unresolved**: if retries exhaust and the probe is still red, the turn logs
+  `turn_probe_unresolved` (a WARNING) and exits anyway — it does not silently report success.
+
+This is a NUDGE_V2-style targeted nudge (event-triggered, silent unless there is a real failing
+signal, hard-gated, content-specific) — complementary to, not a replacement for, the
+no-test-edit hard gate (`setTestEditGate` / `edit-governance.ts`). Full mutation-surface
+bookkeeping: [tier-prompts.md](../design/tier-prompts.md) §5.9, §6.
 
 ---
 

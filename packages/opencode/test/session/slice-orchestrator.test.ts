@@ -13,7 +13,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { ECON_PERSONAS } from "@opencode-ai/code-intelligence"
+import { ECON_PERSONAS, type VerifyCommand, type CommandRunner, type CommandResult } from "@opencode-ai/code-intelligence"
 import { Permission } from "../../src/permission"
 import {
   extractTrajectory,
@@ -39,6 +39,8 @@ import {
   type TurnShapeCategory,
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
+  deriveTurnProbe,
+  runTurnProbeGate,
   childSlicePermission,
   isDeciderSeat,
   personaForSlice,
@@ -1146,6 +1148,106 @@ describe("extractVerifyCommands (F2)", () => {
   it("ignores prose backticks and dedupes repeated commands", () => {
     expect(extractVerifyCommands("check `col_str` and `IndexColumns` behavior")).toEqual([])
     expect(extractVerifyCommands("`pytest -x` first, then `pytest -x` again")).toHaveLength(1)
+  })
+})
+
+describe("deriveTurnProbe (M4)", () => {
+  it("extracts the most-specific pinned reproduction from a bug prompt", () => {
+    const prompt = `
+The enum's string conversion is wrong.
+
+Bug: ChoicesTests.test_str fails intermittently on model_enums.
+
+Repro:
+\`python tests/runtests.py model_enums.tests.ChoicesTests.test_str\`
+
+Expected: str() on a Choices member returns its human label, not the raw value.
+`
+    expect(deriveTurnProbe(prompt)).toEqual({
+      kind: "test",
+      command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str",
+    })
+  })
+
+  it("returns undefined when the prompt names no runnable reproduction", () => {
+    const prompt = `
+The app shows Suit.HEART instead of Hearts when rendering the enum.
+str() on the \`Suit\` member returns the raw value instead of the label.
+Please fix it — no need to run anything, it's obvious from the code.
+`
+    expect(deriveTurnProbe(prompt)).toBeUndefined()
+  })
+
+  it("prefers the more-specific file+filter command over a bare one in the same prompt", () => {
+    const prompt = `
+Two commands are relevant here.
+
+Sometimes people just sanity-check with \`bun test\`.
+
+But the actual repro is:
+\`bun test packages/foo/bar.test.ts -t "handles retry"\`
+`
+    expect(deriveTurnProbe(prompt)).toEqual({
+      kind: "test",
+      command: 'bun test packages/foo/bar.test.ts -t "handles retry"',
+    })
+  })
+})
+
+describe("runTurnProbeGate (M4)", () => {
+  const probe: VerifyCommand = { kind: "test", command: "bun test packages/foo/bar.test.ts" }
+
+  /** A fake CommandRunner keyed on the exact command string; throws on an unscripted command. */
+  function scriptedRunner(map: Record<string, CommandResult>): { runner: CommandRunner; calls: string[] } {
+    const calls: string[] = []
+    const runner: CommandRunner = async (cmd) => {
+      calls.push(cmd.command)
+      const result = map[cmd.command]
+      if (!result) throw new Error(`scriptedRunner: no response scripted for "${cmd.command}"`)
+      return result
+    }
+    return { runner, calls }
+  }
+
+  it("accepts when the probe passes", async () => {
+    const { runner } = scriptedRunner({
+      [probe.command]: { exitCode: 0, stdout: "", stderr: "" },
+    })
+    const result = await runTurnProbeGate({ probe, noTestEdit: false, runner })
+    expect(result).toEqual({ reject: false })
+  })
+
+  it("rejects at the probe rung when the probe still fails", async () => {
+    const { runner } = scriptedRunner({
+      [probe.command]: { exitCode: 1, stdout: "", stderr: "AssertionError: expected 'Hearts', got 'HEART'" },
+    })
+    const result = await runTurnProbeGate({ probe, noTestEdit: false, runner })
+    expect(result.reject).toBe(true)
+    expect(result.rung).toBe("probe")
+    expect(result.exitCode).toBe(1)
+    expect(result.reason).toContain("STILL FAILING")
+  })
+
+  it("rejects at the test-tree rung when noTestEdit and the guard fails — short-circuits before the probe", async () => {
+    const { runner, calls } = scriptedRunner({
+      [TEST_TREE_GUARD_COMMAND.command]: { exitCode: 1, stdout: "tests/foo.test.ts", stderr: "" },
+      [probe.command]: { exitCode: 0, stdout: "", stderr: "" },
+    })
+    const result = await runTurnProbeGate({ probe, noTestEdit: true, runner })
+    expect(result.reject).toBe(true)
+    expect(result.rung).toBe("test-tree")
+    expect(result.rung).not.toBe("probe")
+    expect(calls).toEqual([TEST_TREE_GUARD_COMMAND.command])
+  })
+
+  it("accepts when noTestEdit and both the guard and the probe pass", async () => {
+    const { runner, calls } = scriptedRunner({
+      [TEST_TREE_GUARD_COMMAND.command]: { exitCode: 0, stdout: "", stderr: "" },
+      [probe.command]: { exitCode: 0, stdout: "", stderr: "" },
+    })
+    const result = await runTurnProbeGate({ probe, noTestEdit: true, runner })
+    expect(result).toEqual({ reject: false })
+    expect(calls).toEqual([TEST_TREE_GUARD_COMMAND.command, probe.command])
   })
 })
 
