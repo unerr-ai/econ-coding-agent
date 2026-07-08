@@ -14,9 +14,11 @@ It is written to be read two ways. The **plain-language framing** at the top of 
 is for product, business, and everyday users — what the capability is and why it matters. The
 **Under the hood** subsections go technical for engineers building it.
 
-> Companion docs: [README.md](../../README.md) (the vision) and the per-feature build docs in
-> [../features/](../features/) (how each capability is built, with status). This doc is the
-> *system design* those point at.
+> Companion docs: [README.md](../../README.md) (the vision), the per-feature build docs in
+> [../features/](../features/) (how each capability is built, with status), and
+> [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) — the single home for the
+> orchestration mechanism (triage → decompose → allocate → verify → contain → escalate) that
+> §3–§4 summarize. This doc is the *system design* those point at.
 
 ---
 
@@ -61,11 +63,12 @@ escalations, tighter briefs, and capped output. Section 12 works the numbers.
 
 ---
 
-## 3. The model team — a conductor, an oracle, and executors
+## 3. The model team — a four-tier team of models
 
 This is the finalized topology. Instead of "one model per session," or even a naïve
-senior/worker/junior hand-off, econ uses **three roles**, and — critically — the *mid* tier
-holds the working context while the *large* tier is consulted only when needed.
+senior/worker/junior hand-off, econ runs a **four-tier team** — executor, conductor, reasoner,
+oracle — and, critically, the *conductor* (mid) tier holds the working context while the
+costlier reasoner and oracle are brought in only for the work that needs them.
 
 **In plain terms:**
 
@@ -75,6 +78,9 @@ holds the working context while the *large* tier is consulted only when needed.
 - An **Oracle** is the expert you call only for the genuinely hard question. It never reads the
   whole conversation; it gets a tight, prepared *brief* and returns a decision, a plan, or a
   patch. This is the most expensive model, used the least.
+- A **Reasoner** is the specialist for a genuinely hard *step* or a hard leaf task — deeper
+  thinking than the conductor, cheaper than the oracle. It owns the edit → run → verify on the
+  slices routed to it, and it is the first escalation rung above the conductor.
 - **Executors** do the high-volume manual work — fetch a file, run a command, apply an edit.
   They are small, cheap, fast, and stateless, and several can run at once.
 
@@ -102,6 +108,10 @@ holds the working context while the *large* tier is consulted only when needed.
    └──────────────────────────────────────────┘
 ```
 
+*(The **reasoner** is not drawn above because it shares the oracle's context posture —
+brief-fed, not context-holding — and on the escalation ladder sits between conductor and oracle.
+This diagram tracks who *holds* context, which is the caching story of §9 / §11.)*
+
 **Why this shape and not the obvious one.** The naïve design makes the *cheapest* model hold
 the context and drive the loop. That fails: a small model loses coherence over a long agentic
 context, and — because the context (the re-sent transcript) is the bulk of the tokens — it
@@ -119,7 +129,7 @@ consultant that never pays to carry context.
 | **Conductor** (mid) | Plan, decide next action, integrate results, build briefs | **Yes** (the canonical state lives in the engine; the conductor is the always-on reasoner over it) | a strong **non-thinking ~30B** (e.g. Qwen3-32B) | fast every-turn reasoning without per-turn chain-of-thought token tax |
 | **Oracle** (large) | Hard design, deep debugging, ambiguous judgement | No — stateless, brief-fed | strongest available frontier / OSS reasoner | used rarely; output capped to a decision/patch |
 | **Executor** (small) | Tool calls: read, search, run, edit | No — stateless | a tool-tuned **~9B** (e.g. Nemotron-class function-caller) | high tool-call reliability, cheap, parallelizable |
-| **Reasoner mode** (occasional) | A genuinely hard *step* mid-job that doesn't need the full oracle | borrows conductor's state | a *thinking* distilled model (e.g. an R1-distilled 32B) **or** escalate straight to the oracle | reserve chain-of-thought for steps that need it; don't pay it every turn |
+| **Reasoner** (specialist) | A genuinely hard *step*, or a hard leaf slice it owns edit→run→verify on — deeper reasoning than the conductor, short of the oracle | Per-slice session, brief-fed (sticky cache via `x-session-affinity`); not the raw transcript | a *thinking* model one grade below the oracle | the first escalation rung above the conductor — reserve chain-of-thought for the slices that need it, don't pay it every turn |
 
 **State ownership — the rule that keeps it robust.** The model's context window must not *be*
 the only memory. The **canonical state** (task ledger, scratchpad, history of attempts) lives
@@ -157,32 +167,47 @@ to reply "insufficient context, send me X" instead of guessing.
 
 ## 4. The router — deciding when to spend more
 
-**In plain terms:** the agent itself decides what's hard. It does the work cheaply by default
-and only "phones the expert" when the change is genuinely risky or the cheap attempt isn't
-confident. The user never has to pick a model.
+**In plain terms:** the agent itself decides what's hard. It splits the job into small pieces,
+does each cheaply by default, checks the result, and only "phones the expert" for the pieces
+that are genuinely risky or that the cheap attempt couldn't get right. The user never has to
+pick a model.
 
-**The key idea — escalate on *code risk*, not on the prompt.** Most cheap routers guess
-difficulty from the text of the request ("this prompt is long, use the big model"). That is
-commoditized and blind to the code. econ escalates based on what a change would actually *do to
-the codebase*.
+**The key idea — decompose first, then escalate on *code risk*, not on the prompt.** Most cheap
+routers pick one model for the whole request by guessing difficulty from its text ("this prompt
+is long, use the big model") — commoditized and blind to the code. econ instead breaks the turn
+into typed slices and allocates *each slice* to the cheapest tier that clears its need, judging
+by what a change would actually *do to the codebase*. Whole-turn routing survives only as the
+degenerate one-slice case — the lever is the decomposition, not the routing. The full
+triage → decompose → allocate → verify → contain → escalate loop lives in
+[ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) (its §7.1 is the proof that
+decomposition, not whole-turn routing, is what moves the bill).
 
 ### Under the hood
 
-This is econ's risk-escalation router (the moat — see also
+Per-slice allocation runs on econ's risk-escalation router (the moat — see also
 [../features/03-risk-router.md](../features/03-risk-router.md)):
 
 - **Signal = the graph, not the text.** Blast-radius / fan-in, call-graph centrality,
-  cyclomatic complexity → one **0–100 risk score**. (A model-routing proxy cannot compute this;
-  it can't see the code structure. That's why it's defensible.)
-- **Escalate to the oracle when:** the score is over the upper band, **or** the conductor's
-  verifier *abstains* (an explicit "I'm not sure" signal, not a confidence guess), **or**
-  per-repo triage says cheap doesn't pay here.
-- **Hysteresis (two bands, e.g. 70 / 40):** a score between the bands changes nothing, so one
-  noisy reading can't flap the tier turn-to-turn.
-- **Triage go/no-go (per repo):** only stay cheap if `cheapPassRate > 1 / interTierCostRatio`
-  **and** the risk signal actually discriminates; else force the oracle. Don't pretend to save
-  when the savings won't cover the rework.
-- **Charge the double-pay:** every escalation = a cheap attempt **plus** an oracle attempt;
+  cyclomatic complexity → one **0–100 risk score** per slice. (A model-routing proxy cannot
+  compute this; it can't see the code structure. That's why it's defensible.)
+- **Risk is one feature, not the whole decision.** A slice's tier comes from its shape ×
+  coupling × test-strength × need; risk is the **tiebreak** that pushes a borderline cell
+  upward. What makes "default cheap" safe is the per-slice **verification gate** — execute
+  cheap, verify, escalate only *actual* failures — which is cheaper than escalating on the
+  *fear* of failure.
+- **Climb the ladder, don't jump to the oracle.** A rejected slice first retries its own tier
+  while the failure signature keeps changing, then climbs one rung at a time
+  (executor → conductor → reasoner → oracle) — the oracle is the last resort, not the first
+  escalation. A structurally critical slice (high coupling / high risk) may never settle
+  unverified below the oracle.
+- **Abstention & per-repo triage.** The conductor's verifier can *abstain* (an explicit "I'm
+  not sure," not a confidence guess), and per-repo triage forces the strong tier where cheap
+  provably won't pay — only stay cheap if `cheapPassRate > 1 / interTierCostRatio` **and** the
+  risk signal actually discriminates. Don't pretend to save when the savings won't cover the
+  rework.
+- **Hysteresis (two bands, e.g. 70 / 40):** a borderline score changes nothing, so one noisy
+  reading can't flap the tier.
+- **Charge the double-pay:** every escalation = a cheap attempt **plus** a stronger attempt;
   subtract it from the savings math or the numbers lie.
 - **Degrade open:** any missing signal / failed lookup → cheap tier. Routing is an
   optimization; it must never crash a turn.
@@ -199,9 +224,14 @@ This is econ's risk-escalation router (the moat — see also
         OR verifier abstains ──┐
         OR triage: cheap won't pay ──┐
                                      ▼
-                          build brief ─▶ ORACLE ─▶ integrate ─▶ continue
+          reject / high-risk ─▶ climb one rung ─▶ integrate ─▶ continue
                           (record the double-pay in the receipt)
 ```
+
+*Read this per slice, not per turn: the score above is one input to each slice's tier choice,
+and "climb one rung" means executor ▶ conductor ▶ reasoner ▶ oracle, one step at a time — the
+oracle is the last resort, not the first escalation (full mechanism:
+[ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) §2, §4).*
 
 ---
 
@@ -889,10 +919,15 @@ Two things, held together, make econ defensible:
 - **Conductor** — the mid-tier model that drives the job and holds the working context.
 - **Oracle** — the large/frontier model, consulted rarely with a compiled brief.
 - **Executor** — a small, stateless, cheap model that runs individual tool calls.
+- **Reasoner** — the specialist tier between conductor and oracle: deeper reasoning than the
+  conductor, cheaper than the oracle; it owns edit → run → verify on the hard slices routed to
+  it and is the first escalation rung above the conductor.
 - **Compiled brief** — the distilled package (problem + slices + attempts + question + output
   shape) sent to the oracle in place of the raw transcript.
-- **Risk-escalation router** — escalates based on code-structural risk (blast-radius, fan-in,
-  centrality), with hysteresis, abstention, triage, and double-pay accounting.
+- **Risk-escalation router** — allocates each decomposed slice to the cheapest capable tier,
+  using code-structural risk (blast-radius, fan-in, centrality) as one feature/tiebreak, with
+  hysteresis, abstention, triage, and double-pay accounting; whole-turn routing is the
+  degenerate single-slice case.
 - **Code graph / context engine** — the live map of the codebase that delivers the right slice.
 - **Anchored memory** — typed, code-pinned notes (conventions, rules, warnings, decisions) that
   re-anchor as code moves and flag when they drift.

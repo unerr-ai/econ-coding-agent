@@ -72,6 +72,36 @@ model_list:
       output_cost_per_token: 0.0000006
       cache_read_input_token_cost: 0.00000001
 
+  # Catalog models (2026-07-08): available in the gateway, not bound to any econ tier yet
+  # (conductor stays deepseek-v4-flash). model_name entries mirror ECON_MODELS keys and the
+  # per-token rates mirror ECON_COST_MATRIX (econ-cost.ts) — both enforced by the OL-8.B2 drift
+  # test. service_tier "priority" per the provider payloads that introduced them.
+  - model_name: minimax/minimax-m3
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/minimax-m3
+      api_key: os.environ/FIREWORKS_API_KEY
+      service_tier: "priority"
+      input_cost_per_token: 0.0000003
+      output_cost_per_token: 0.0000012
+      cache_read_input_token_cost: 0.00000006
+    model_info:
+      input_cost_per_token: 0.0000003
+      output_cost_per_token: 0.0000012
+      cache_read_input_token_cost: 0.00000006
+
+  - model_name: moonshotai/kimi-k2p7-code
+    litellm_params:
+      model: fireworks_ai/accounts/fireworks/models/kimi-k2p7-code
+      api_key: os.environ/FIREWORKS_API_KEY
+      service_tier: "priority"
+      input_cost_per_token: 0.00000095
+      output_cost_per_token: 0.000004
+      cache_read_input_token_cost: 0.00000019
+    model_info:
+      input_cost_per_token: 0.00000095
+      output_cost_per_token: 0.000004
+      cache_read_input_token_cost: 0.00000019
+
 litellm_settings:
   # Pass request params through untouched — reasoning-effort pins ride the request from econ
   # (executor/oracle models must never see reasoning-off; registry wrn).

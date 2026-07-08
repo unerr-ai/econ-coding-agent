@@ -55,6 +55,10 @@ export const ECON_COST_MATRIX: Record<string, EconModelRate> = {
   "deepseek/deepseek-v4-pro": { input: 1.74, cachedInput: 0.15, cacheWrite: 1.74, output: 3.48 },
   // executor (OL-8.B4+, was gpt-oss-20b) — real Fireworks serverless rate, no longer $0 self-hosted
   "openai/gpt-oss-120b": { input: 0.15, cachedInput: 0.01, cacheWrite: 0.15, output: 0.60 },
+  // catalog (unbound, 2026-07-08) — available in the gateway/registry, not pointed at a tier yet;
+  // cache-write billed at the input rate on our BYOK path today
+  "minimax/minimax-m3": { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
+  "moonshotai/kimi-k2p7-code": { input: 0.95, cachedInput: 0.19, cacheWrite: 0.95, output: 4.0 },
 }
 
 const LABELS: Record<string, string> = {
@@ -62,6 +66,8 @@ const LABELS: Record<string, string> = {
   "z-ai/glm-5.2": "GLM 5.2 (oracle)",
   "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro (reasoner)",
   "openai/gpt-oss-120b": "gpt-oss-120b (executor)",
+  "minimax/minimax-m3": "MiniMax M3 (catalog)",
+  "moonshotai/kimi-k2p7-code": "Kimi K2.7 Code (catalog)",
 }
 
 const LITELLM_PREFIX = "litellm/"

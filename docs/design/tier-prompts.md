@@ -247,7 +247,7 @@ a strict NEVER block; the distinctive parts:
 All personas have `task`, `question`, and `todowrite` **removed from the tool set entirely**
 (no orchestration recursion) — `econ-defaults.ts:27-56`. Full verbatim persona texts:
 `prompts/personas.ts`. Persona list constant: `ECON_PERSONAS`
-(`packages/code-intelligence/src/model-registry.ts:154`). Notable prompt-embedded shell lore
+(`packages/code-intelligence/src/model-registry.ts:180`). Notable prompt-embedded shell lore
 (runner): "jest swallows console.log by default — add --silent=false"; "in zsh an unmatched
 glob aborts the whole && chain".
 
@@ -255,8 +255,8 @@ glob aborts the whole && chain".
 
 ## 4. Request-time parameters per tier
 
-Binding (`model-registry.ts:138-143`) + request options (`econ-defaults.ts:182-198`) + model
-limits (`model-registry.ts:79-128`):
+Binding (`model-registry.ts:164-169`) + request options (`econ-defaults.ts:182-197`) + model
+limits (`model-registry.ts:79-154`):
 
 | Tier | Model | reasoningEffort | Context / maxOutput | Notes |
 |---|---|---|---|---|
@@ -266,6 +266,9 @@ limits (`model-registry.ts:79-128`):
 | oracle | z-ai/glm-5.2 | "high" | 1.04M / 32,768 | sessionAffinity |
 
 All four set `parallel_tool_calls: true`. Pricing and provider facts: [models.md](./models.md).
+Two additional catalog models — `minimax/minimax-m3` and `moonshotai/kimi-k2p7-code` — now also
+live in `ECON_MODELS` (why the limits range widened to `79-154`), but neither is bound to a
+tier, so this four-row table is unchanged.
 
 ---
 
@@ -285,7 +288,7 @@ one request. Three triggers:
 |---|---|---|
 | Plan step | last message is a user message (turn open) | `plan` |
 | Recovery | trailing bash tool-result matches a failure signature (`reasoning-gate.ts:4-10`: `FAIL`, `suite failed to run`, `N failed`, `error TS\d+`, `npm ERR!/Command failed/non-zero exit`) | `recovery` |
-| Contradiction (F4) | trailing non-bash tool result is an error; OR a search-class tool (`search/grep/glob`) returned empty (`no files\|matches\|results\|entities`); OR **(F4b, 2026-07-08) scope-miss** — a scoped search that SUCCEEDED but referenced nothing under the scope its query named (`isScopeMissResult`, `:142-160`: recovers the query by `toolCallId`, requires an explicit path/glob/symbol scope token, parses the result defensively, biases to not-firing on any ambiguity) | `contradiction` |
+| Contradiction (F4) | trailing non-bash tool result is an error; OR a search-class tool (`search/grep/glob`) returned empty (`no files\|matches\|results\|entities`); OR **(F4b, 2026-07-08) scope-miss** — a scoped search that SUCCEEDED but referenced nothing under the scope its query named (`isScopeMissResult`, `:142-150`: recovers the query by `toolCallId`, requires an explicit path/glob/symbol scope token, parses the result defensively, biases to not-firing on any ambiguity) | `contradiction` |
 
 Recovery wins when both recovery and contradiction match. F4b (2026-07-08) extends contradiction
 beyond the purely-syntactic empty/error shapes to a *successful-but-off-scope* lookup — the gate
@@ -295,7 +298,7 @@ runs 12–18 → 19–21): un-muting at these forks cut step counts from 33–48
 
 ### 5.2 Turn-open: turn-shape preambles (system tail)
 
-`slice-orchestrator.ts:772-810` — one of five casting briefs appended to the system array by
+`slice-orchestrator.ts:872-900` — one of five casting briefs appended to the system array by
 turn category:
 
 ```
@@ -331,7 +334,7 @@ Prefer the smallest read that answers — an explorer child only for a genuinely
 ```
 
 When multi-goal triage produced a verdict, the **triage preamble replaces** the category one
-(`slice-orchestrator.ts:922-935`): `TURN SHAPE: triage (N goals extracted, confidence=…)`,
+(`slice-orchestrator.ts:1023-1036`): `TURN SHAPE: triage (N goals extracted, confidence=…)`,
 one line per goal (`[tags] "quote" — done when: deliverable`), one per constraint
 (`CONSTRAINT (kind): "quote"`), closing with "Track each goal against its own todo; verify
 each independently — never conflate or drop one for another."
@@ -340,12 +343,12 @@ each independently — never conflate or drop one for another."
 
 `buildTriageTodoSkeleton` / `autoTypeTodos` inject **prepass todos** (both
 `sliceType:"design", need:"reasoner", persona:"researcher"`), selected by
-`diagnosisPrepassSeed` (`slice-orchestrator.ts:849-851`) — planner for hard prompts
-(`isHardDiagnosisPrompt`, `:832-839`: ≥2 subsystem tokens, or ≥2 sentences + cross-layer
+`diagnosisPrepassSeed` (`slice-orchestrator.ts:950-952`) — planner for hard prompts
+(`isHardDiagnosisPrompt`, `:933-940`: ≥2 subsystem tokens, or ≥2 sentences + cross-layer
 markers like `intermittent|race|flaky|deadlock|under load`), localization otherwise. Seeds are
 deduped by content across goals (finding 1, commit `3f1b4ab46`).
 
-`LOCALIZATION_SLICE_CONTENT` (`:640`):
+`LOCALIZATION_SLICE_CONTENT` (`:707`):
 
 ```
 Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s)
@@ -361,7 +364,7 @@ pinned and re-run — never assert a single site as the cause without a probe re
 the others out.
 ```
 
-`PLANNER_SLICE_CONTENT` (`:670`):
+`PLANNER_SLICE_CONTENT` (`:737`):
 
 ```
 Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly:
@@ -383,8 +386,8 @@ Both blocks gained the same trailing clause in the same edit as the M1 probe run
 `todosToLoopSlices` (§5.5) later rank and pin it as `probeCommand` — so a localization/plan
 artifact's stated probe becomes the exact command the verify ladder re-runs, not just narrative.
 
-**Fold-back guard — narrative-only flag** (`prompt.ts` `prepassOnly` branch, `:~2197`;
-`isProbeGrounded`, `prompt.ts:~155`, 2026-07-08). When a localization/plan pre-pass is the only
+**Fold-back guard — narrative-only flag** (`prompt.ts` `prepassOnly` branch, `:~2265`;
+`isProbeGrounded`, `prompt.ts:~160`, 2026-07-08). When a localization/plan pre-pass is the only
 outcome of a turn, its result folds back to the conductor. Before it does, `isProbeGrounded`
 checks the output for a sign a discriminating probe was actually run — a backticked runner
 command, a "ruled out" / "eliminated" / "probe result" phrase, or an honest `OPEN:` / `MISSING:`
@@ -394,30 +397,30 @@ the alternatives. Before you edit, run the probe yourself…"* This is **flag-an
 design (§7.5, #7): no verify-ladder rung and no oracle escalation — the reasoning gate un-mutes
 the conductor on the next step, which runs the cheap probe itself.
 
-### 5.4 Typing-time: autoTypeTodos mutations (`slice-orchestrator.ts:1134-1200`)
+### 5.4 Typing-time: autoTypeTodos mutations (`slice-orchestrator.ts:1235-1301`)
 
 Applied to conductor-authored todos when no typed slice is already in flight:
 
-- **Tag stripping first** — `TODO_TAG_RE` (`:544`) `/^\s*\[[^\]\n]{1,24}\]\s*/` removes a
+- **Tag stripping first** — `TODO_TAG_RE` (`:644`) `/^\s*\[[^\]\n]{1,24}\]\s*/` removes a
   leading `[audit]`-style tag so the *body* classifies, not the presentation.
-- **Judgment items** → `{sliceType:"verify", need:"reasoner"}` — `JUDGMENT_KEYWORDS` (`:531`)
+- **Judgment items** → `{sliceType:"verify", need:"reasoner"}` — `JUDGMENT_KEYWORDS` (`:631`)
   `/\b(audit|verdict|soundness|residual risk|edge.?cases?|posture|coheren(?:t|ce)|sign.?off|is the fix (?:sound|correct))\b/i`
 - **Check-run items** → `{sliceType:"verify"}` (pending items only) — `VERIFY_RUN_KEYWORDS`
-  (`:534`) `/\b(run|re-?run|verify|check)\b.*\b(tests?|suites?|typecheck|lint|build|green|pass(?:es|ing)?)\b/i`
+  (`:634`) `/\b(run|re-?run|verify|check)\b.*\b(tests?|suites?|typecheck|lint|build|green|pass(?:es|ing)?)\b/i`
 - **Mechanical openers** → route the whole batch to `typeBuildPlan` — `MECHANICAL_START`
-  (`:539`) `/^\s*(implement|fix|apply|add|wire|rename|refactor|write|create|build|update|remove|delete)\b/i`
+  (`:639`) `/^\s*(implement|fix|apply|add|wire|rename|refactor|write|create|build|update|remove|delete)\b/i`
   (note: `typeBuildPlan` requires ≥2 decided changes on a fresh plan — single-item builds stay
   inline by design, the door-5 decision)
-- **Verdict-shaped dep injection** — a deps-less item matching `VERDICT_SHAPED_RE` (`:549`)
+- **Verdict-shaped dep injection** — a deps-less item matching `VERDICT_SHAPED_RE` (`:649`)
   `/\bverdict\b|\bship or do not ship\b|\bapprove or reject\b|\bfinal\s+sign.?off\b/i` gains
   `deps` on every other newly-typed sibling, so the verdict waits for the dimensions.
-- **Backstop** (`withDerivedTypes`, `:1216-1219`): a batch of ≥3 fully-untyped todos gets
-  keyword-inferred types (`inferSliceType`, `:520-525` — recon before verify before
+- **Backstop** (`withDerivedTypes`, `:1317-1320`): a batch of ≥3 fully-untyped todos gets
+  keyword-inferred types (`inferSliceType`, `:620-625` — recon before verify before
   mechanical; default mechanical).
 
-### 5.5 Conversion-time: todo → LoopSlice (`todosToLoopSlices`, `:1240-1368`)
+### 5.5 Conversion-time: todo → LoopSlice (`todosToLoopSlices`, `:1341-1495`)
 
-- **PATCH_CONTRACT** (`:1317`, guard `isPatchEmittingSlice` `:1338`) — appended to **every
+- **PATCH_CONTRACT** (`:1417`, guard `isPatchEmittingSlice` `:1444`) — appended to **every
   edit-emitting slice**: a design slice that feeds a mechanical dependent, or any `mechanical`
   or `author` slice itself (widened 2026-07-08, was design→mechanical only):
 
@@ -427,26 +430,27 @@ Applied to conductor-authored todos when no typed slice is already in flight:
   new code (or a unified diff). Prose without the exact code is an incomplete result.
   ```
 
-- **Verify-command derivation** (`:1341-1352`) — a `verify` slice (or testable mechanical)
+- **Verify-command derivation** (`:1467-1478`) — a `verify` slice (or testable mechanical)
   gets `verifyCommands`: backticked commands extracted from its own text
   (`extractVerifyCommands`, `:481` — only strings opening with a known runner token), else the
-  repo-script probe (`probeSliceVerifyCommands`, `graph-tools.ts:662` — package root's
-  `typecheck/test/lint` scripts, package manager from lockfile). Scripts carrying
-  `--write/--fix/--watch/-w` are **skipped** (`MUTATING_OR_NONTERMINATING_SCRIPT_RE`,
-  `graph-tools.ts:~650`, commit `7553842f4`): a sound check must be side-effect-free and
-  terminating.
+  repo-script probe (`probeSliceVerifyCommands`,
+  `packages/opencode/src/tool/graph-tools.ts:673` — package root's `typecheck/test/lint`
+  scripts, package manager from lockfile). Scripts carrying `--write/--fix/--watch/-w` are
+  **skipped** (`MUTATING_OR_NONTERMINATING_SCRIPT_RE`,
+  `packages/opencode/src/tool/graph-tools.ts:657`, commit `7553842f4`): a sound check must be
+  side-effect-free and terminating.
 - **Probe-command derivation (task #7, 2026-07-08)** — an edit-emitting slice
   (`isPatchEmittingSlice`) additionally gets `probeCommand`: the most-specific pinned
   reproduction among its own extracted commands (`mostSpecificRepro` ranks
   `extractVerifyCommands`'s own output — a `kind:"test"` command naming a test file or
   carrying a `-t/-k/--grep` filter scores highest, `:502-524`), falling back to a resolved
   upstream dependency's content (e.g. a diagnosis slice's) when the slice names nothing
-  itself, and left unset — never fabricated — when nothing identifiable exists (`:1386-1393`).
+  itself, and left unset — never fabricated — when nothing identifiable exists (`:1454-1461`).
   `probeCommand` rides on `VerifySpec.probeCommand` into the verifier's separate "probe" rung
   (`checkProbeRung`, `verifier.ts:515-533`): a red pinned reproduction rejects even when the
   generic `verifyCommands` list passed, gating both the sound-accept path and the untestable
   path (ORCHESTRATION_MECHANISM.md §1.5/§7.6).
-- **Test-tree guard** (`TEST_TREE_GUARD_COMMAND`, `:506-510`) — prepended to every
+- **Test-tree guard** (`TEST_TREE_GUARD_COMMAND`, `:538-542`) — prepended to every
   command-backed spec unless the batch authors tests: fails the sound rung when tracked test
   files have modifications (`git diff --diff-filter=M` against test-path patterns), because "a
   green suite over an edited oracle is invalid".
@@ -458,24 +462,24 @@ Applied to conductor-authored todos when no typed slice is already in flight:
 
 ### 5.6 Dispatch-time: child-prompt context injections
 
-- **Repo primer** (`slice-orchestrator.ts:1595-1608`, OL-9.4b) —
+- **Repo primer** (`slice-orchestrator.ts:1722-1735`, OL-9.4b) —
   `## Repo primer (already established — do NOT re-list directories or re-read package.json
   for orientation)` + two-level dir tree (≤60 entries, skips `node_modules/.git/dist`) +
   package.json summary.
-- **Established-slices ledger** (`:1630-1648`) —
+- **Established-slices ledger** (`:1757-1775`) —
   `## Established by earlier slices (trust these findings; do not re-derive them)` +
   `### <sliceId>` blocks; 1,500 chars per entry, 5,000 total.
-- **Upstream results** (`slice-loop.ts:935-951`) — for a slice with deps:
+- **Upstream results** (`slice-loop.ts:1111-1127`) — for a slice with deps:
   `## Upstream slice results (your inputs — build on these, do not redo them)` +
   `### <depId> (<state>)` sections, 6,000 chars per dep.
 
-### 5.7 Escalation-time: the rescue brief (`slice-loop.ts:469-505`)
+### 5.7 Escalation-time: the rescue brief (`slice-loop.ts:503-539`)
 
 When a verifier rejects a cheap attempt and the ladder climbs (mechanical slices only —
-read-only recon/verify slices never escalate, `slice-loop.ts:800-803`), the escalated prompt
+read-only recon/verify slices never escalate — `maxClimbs=0`, `slice-loop.ts:998`), the escalated prompt
 is rebuilt as:
 
-1. Core question mutation (`:479`):
+1. Core question mutation (`:513`):
    `The cheaper <tier> attempt was rejected at verification. Produce a correct result that
    passes the same checks. Your objective: <MISSING line from the rejecting verdict>`
    (fallback: "MISSING: the verifier ladder did not name specific missing evidence for this
@@ -548,31 +552,31 @@ test-tree-guard ordering, the loud-unresolved exit —
 | 1 | Reasoning gate: plan | turn-open user msg | deletes `reasoningEffort:"none"` | reasoning-gate.ts:174-216 |
 | 2 | Reasoning gate: recovery | bash failure signature | same | reasoning-gate.ts:174-216 |
 | 3 | Reasoning gate: contradiction (+F4b scope-miss) | empty/error, or off-scope successful search | same | reasoning-gate.ts:142-216 |
-| 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:772-810 |
-| 5 | Triage preamble | multi-goal verdict | replaces #4 | slice-orchestrator.ts:922-935 |
-| 6 | Localization seed | bug-shaped, not localized | injects todo | slice-orchestrator.ts:607,1147 |
-| 7 | Planner seed | hard-diagnosis prompt | injects todo | slice-orchestrator.ts:637,849 |
-| 8 | Judgment typing | JUDGMENT_KEYWORDS | sliceType+need | slice-orchestrator.ts:1172 |
-| 9 | Verify-run typing | VERIFY_RUN_KEYWORDS | sliceType | slice-orchestrator.ts:1171 |
-| 10 | Build-plan typing | MECHANICAL_START, ≥2 changes | typeBuildPlan | slice-orchestrator.ts:1141 |
-| 11 | Verdict dep injection | VERDICT_SHAPED_RE, no deps | deps | slice-orchestrator.ts:1185 |
-| 12 | Derived-type backstop | ≥3 untyped todos | sliceType | slice-orchestrator.ts:1216 |
-| 13 | PATCH_CONTRACT | design→mech dep, or any mechanical/author slice | prompt suffix | slice-orchestrator.ts:1317,1338 |
+| 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:872-900 |
+| 5 | Triage preamble | multi-goal verdict | replaces #4 | slice-orchestrator.ts:1023-1036 |
+| 6 | Localization seed | bug-shaped, not localized | injects todo | slice-orchestrator.ts:707,1249 |
+| 7 | Planner seed | hard-diagnosis prompt | injects todo | slice-orchestrator.ts:737,950 |
+| 8 | Judgment typing | JUDGMENT_KEYWORDS | sliceType+need | slice-orchestrator.ts:1273 |
+| 9 | Verify-run typing | VERIFY_RUN_KEYWORDS | sliceType | slice-orchestrator.ts:1271-1272 |
+| 10 | Build-plan typing | MECHANICAL_START, ≥2 changes | typeBuildPlan | slice-orchestrator.ts:1157-1182 |
+| 11 | Verdict dep injection | VERDICT_SHAPED_RE, no deps | deps | slice-orchestrator.ts:1283-1290 |
+| 12 | Derived-type backstop | ≥3 untyped todos | sliceType | slice-orchestrator.ts:1317-1320 |
+| 13 | PATCH_CONTRACT | design→mech dep, or any mechanical/author slice | prompt suffix | slice-orchestrator.ts:1417,1444 |
 | 14 | Verify-command extract | backticked runner cmd | verifyCommands | slice-orchestrator.ts:481 |
-| 15 | Verify-command probe | no text cmd | verifyCommands | graph-tools.ts:662 |
-| 16 | Mutating-script skip | `--write/--fix/--watch/-w` | drops script | graph-tools.ts:~650 |
-| 17 | Test-tree guard | command-backed spec | prepends guard | slice-orchestrator.ts:506 |
+| 15 | Verify-command probe | no text cmd | verifyCommands | packages/opencode/src/tool/graph-tools.ts:673 |
+| 16 | Mutating-script skip | `--write/--fix/--watch/-w` | drops script | packages/opencode/src/tool/graph-tools.ts:657 |
+| 17 | Test-tree guard | command-backed spec | prepends guard | slice-orchestrator.ts:538-542 |
 | 18 | Wiring facts | every slice | `## Wiring` section | slice-wiring.ts:228-270 |
-| 19 | Repo primer | child prompt | `## Repo primer` | slice-orchestrator.ts:1595 |
-| 20 | Slice ledger | later waves | `## Established by…` | slice-orchestrator.ts:1630 |
-| 21 | Upstream results | slice has deps | `## Upstream slice…` | slice-loop.ts:935-951 |
-| 22 | Escalation brief | verifier reject → climb | 4 sections + objective | slice-loop.ts:469-505 |
+| 19 | Repo primer | child prompt | `## Repo primer` | slice-orchestrator.ts:1722 |
+| 20 | Slice ledger | later waves | `## Established by…` | slice-orchestrator.ts:1757 |
+| 21 | Upstream results | slice has deps | `## Upstream slice…` | slice-loop.ts:1111-1127 |
+| 22 | Escalation brief | verifier reject → climb | 4 sections + objective | slice-loop.ts:503-539 |
 | 23 | Judge prompt | judge-cell verification | session-less call | judge.ts:60-74 |
 | 24 | System assembly order | every request | system[] composition | request.ts:64-72 |
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
-| 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2197 (`isProbeGrounded` :~155) |
-| 27 | Probe-rung reproduction gate | pinned `probeCommand` still red | rejects rung `probe` | verifier.ts:515-533 (`checkProbeRung`), slice-orchestrator.ts:1386-1393 (pin) |
-| 28 | Turn-close probe gate (M4) | pinned turn reproduction still red at turn-close | injects synthetic user nudge, re-enters loop | prompt.ts:1510-1558 (`runTurnProbeGate` call), slice-orchestrator.ts:578-610 |
+| 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2265 (`isProbeGrounded` :~160) |
+| 27 | Probe-rung reproduction gate | pinned `probeCommand` still red | rejects rung `probe` | verifier.ts:515-533 (`checkProbeRung`), slice-orchestrator.ts:1454-1461 (pin) |
+| 28 | Turn-close probe gate (M4) | pinned turn reproduction still red at turn-close | injects synthetic user nudge, re-enters loop | prompt.ts:1510-1560 (`runTurnProbeGate` call), slice-orchestrator.ts:578-610 |
 
 ---
 

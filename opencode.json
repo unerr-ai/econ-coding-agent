@@ -180,7 +180,13 @@
         "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "reasoningEffort": "none", "parallel_tool_calls": true } },
         "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle)", "reasoning": true, "limit": { "context": 1048576, "output": 32768 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },
         "deepseek/deepseek-v4-pro": { "name": "DeepSeek V4 Pro (econ reasoner)", "reasoning": true, "limit": { "context": 1048576, "output": 32768 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },
-        "openai/gpt-oss-120b": { "name": "gpt-oss-120b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "reasoningEffort": "low", "parallel_tool_calls": true } }
+        "openai/gpt-oss-120b": { "name": "gpt-oss-120b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "reasoningEffort": "low", "parallel_tool_calls": true } },
+
+        // Catalog models (2026-07-08) — available in the gateway/registry, NOT bound to any tier
+        // (conductor stays deepseek-v4-flash). Reasoning channel OFF at config level; enable an
+        // options.reasoningEffort when a tier binds one. minimax-m3: 512K floor (up to 1M). kimi: 256K.
+        "minimax/minimax-m3": { "name": "MiniMax M3 (catalog)", "limit": { "context": 524288, "output": 64000 }, "options": { "parallel_tool_calls": true } },
+        "moonshotai/kimi-k2p7-code": { "name": "Kimi K2.7 Code (catalog)", "limit": { "context": 262144, "output": 32768 }, "options": { "parallel_tool_calls": true } }
       }
     }
   }

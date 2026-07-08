@@ -125,6 +125,32 @@ export const ECON_MODELS: Record<string, EconModelProfile> = {
     cost: ECON_COST_MATRIX["openai/gpt-oss-120b"]!,
     notes: "econ executor (OL-8.B4+, was gpt-oss-20b — 20b carries no function-calling tag on Fireworks serverless, disqualifying it for the tool-executing tier). reasoning:true, options.reasoningEffort:low (the AI-SDK camelCase config key that lowers to the wire param reasoning_effort) — the gpt-oss family 400s with reasoning off, and it also 400s on the OpenRouter-era `reasoning` object shape (strict body validation at Fireworks). Real Fireworks serverless rate, no longer a $0 self-hosted row. Post-POC swap target: NVIDIA Nemotron 3 (OL-M.1) — add its entry and repoint the executor binding. W8 (2026-07-06): the client-side cached_tokens mapping gap is fixed, so cache is now measurable — upgraded from nonstream-only (the executor itself wasn't in the W8 probe's model set, but the fix is a generic client mapping, not per-model). Session affinity kept ON but UNVERIFIED — not covered by the W8 probe (flash/glm/deepseek-pro only); provisional default, revisit after run-20.",
   },
+  "minimax/minimax-m3": {
+    providerID: "litellm",
+    modelID: "minimax/minimax-m3",
+    name: "MiniMax M3",
+    contextWindow: 524_288,
+    maxOutput: 64_000,
+    reasoning: false,
+    cacheAccounting: "stream",
+    sessionAffinity: true,
+    cost: ECON_COST_MATRIX["minimax/minimax-m3"]!,
+    notes:
+      "CATALOG — available in the gateway/registry, NOT bound to any tier (added 2026-07-08; the conductor stays DeepSeek V4 Flash). MiniMax M3, 428B MoE (MiniMax Sparse Attention), served via the econ LiteLLM gateway on Fireworks (accounts/fireworks/models/minimax-m3) at the priority service tier. Context: the API serves up to 1M with a 512K guaranteed minimum — we pin the safe floor here (524_288); raise toward 1M when a tier binds it and the deployment confirms it. maxOutput 64_000 is the provider-payload capability, not a tuned tier cap. reasoning:false = the reasoning channel is OFF at the config level (M3 is a hybrid with toggleable thinking); enable it via options.reasoningEffort if/when a tier binds this model. cacheAccounting:\"stream\" and sessionAffinity:true are defaults, UNPROBED for this model. Costs $0.30/$1.20 per M in/out, $0.06/M cached (ECON_COST_MATRIX).",
+  },
+  "moonshotai/kimi-k2p7-code": {
+    providerID: "litellm",
+    modelID: "moonshotai/kimi-k2p7-code",
+    name: "Kimi K2.7 Code",
+    contextWindow: 262_144,
+    maxOutput: 32_768,
+    reasoning: false,
+    cacheAccounting: "stream",
+    sessionAffinity: true,
+    cost: ECON_COST_MATRIX["moonshotai/kimi-k2p7-code"]!,
+    notes:
+      "CATALOG — available in the gateway/registry, NOT bound to any tier (added 2026-07-08). Kimi K2.7 Code (Moonshot AI), ~1T-param MoE agentic coding model with function calling, 256K context (262_144); served via the econ LiteLLM gateway on Fireworks (accounts/fireworks/models/kimi-k2p7-code) at the priority service tier. maxOutput 32_768 from the provider payload. reasoning:false = the reasoning channel is OFF at the config level (K2.7 Code emits reasoning tokens natively — ~30% fewer than K2.6); enable it via options.reasoningEffort if/when a tier binds this model. cacheAccounting:\"stream\" and sessionAffinity:true are defaults, UNPROBED for this model. Costs $0.95/$4.00 per M in/out, $0.19/M cached (ECON_COST_MATRIX).",
+  },
 }
 
 /**

@@ -195,6 +195,14 @@ export function econDefaultConfig(): ConfigV1.Info {
             reasoningEffort: "low",
             parallel_tool_calls: true,
           }),
+          // Catalog models (2026-07-08): available in the gateway/registry, not bound to a tier yet
+          // (conductor stays DeepSeek V4 Flash). Reasoning channel OFF; no reasoningEffort until bound.
+          "minimax/minimax-m3": econModel("minimax/minimax-m3", "MiniMax M3 (catalog)", {
+            parallel_tool_calls: true,
+          }),
+          "moonshotai/kimi-k2p7-code": econModel("moonshotai/kimi-k2p7-code", "Kimi K2.7 Code (catalog)", {
+            parallel_tool_calls: true,
+          }),
         },
       },
     },
