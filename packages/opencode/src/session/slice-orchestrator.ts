@@ -15,6 +15,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
+import type { ArmingDecision } from "./arming-judge"
 import {
   runSliceLoop,
   tierModelRef,
@@ -935,46 +936,16 @@ export function categoryPreamble(category: TurnShapeCategory): string {
   return CATEGORY_PREAMBLE[category]
 }
 
-// §8 planner-seat hardness proxy — a deterministic stand-in for the turn-risk
-// probe, whose result lands in createUserMessage (the plan-time reasoning
-// raise) upstream of and invisible to the turn-open seed block. Two signals,
-// either one suffices:
-//   1. >=2 distinct subsystem tokens — dotted/camelCase/PascalCase/snake_case
-//      identifiers or backticked spans (a vague prompt names no file, so
-//      these are the only code anchors it can carry): the symptom already
-//      spans more than one place.
-//   2. a multi-sentence symptom carrying a cross-layer marker
-//      (intermittent/race/after-upgrade …) — §2's framework-magic smell.
-// Dotted segments require >=2 chars so "e.g"/"i.e" prose never counts.
-const SUBSYSTEM_TOKEN_RE =
-  /`[^`\n]{2,}`|\b[A-Za-z_$][\w$]+(?:\.[A-Za-z_$][\w$]+)+\b|\b[a-z][a-z0-9]*[A-Z]\w*\b|\b[A-Z][a-z0-9]+[A-Z]\w*\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g
-const CROSS_LAYER_MARKER_RE =
-  /\b(?:intermittent\w*|race|sometimes|occasionally|randomly|nondeterminis\w*|flak(?:y|ing|es)|deadlock|timing|under load|after (?:an? )?(?:upgrad|updat|migrat)\w*)\b/i
-
 /**
- * §8 — is this diagnosis-vague turn HARD enough to buy the planner seat?
+ * §8 casting, rule 2 (ambiguity rounds UP): the frame slice an armed diagnosis
+ * turn seeds at turn open — the reasoner planner when the arming judge rated the
+ * task hard (or a goal needs a plan), the localization slice otherwise. One
+ * selection rule, shared by the prompt loop's seed block and the tests.
  *
  * @sem domain=routing role=router
  */
-export function isHardDiagnosisPrompt(userPrompt: string): boolean {
-  if (!userPrompt) return false
-  const tokens = new Set<string>()
-  for (const m of userPrompt.matchAll(SUBSYSTEM_TOKEN_RE)) tokens.add(m[0].toLowerCase())
-  if (tokens.size >= 2) return true
-  const sentences = userPrompt.split(/[.!?\n]+/).filter((s) => s.trim().length > 0)
-  return sentences.length >= 2 && CROSS_LAYER_MARKER_RE.test(userPrompt)
-}
-
-/**
- * §8 casting, rule 2 (ambiguity rounds UP): the frame slice a diagnosis-vague
- * turn seeds at turn open — the reasoner planner for hard shapes, the
- * localization slice otherwise. One selection rule, shared by the prompt
- * loop's seed block and the tests.
- *
- * @sem domain=routing role=router
- */
-export function diagnosisPrepassSeed(userPrompt: string): InjectedSliceTodo {
-  return isHardDiagnosisPrompt(userPrompt) ? PLANNER_PREPASS_TODO : LOCALIZATION_PREPASS_TODO
+export function diagnosisPrepassSeed(hard: boolean): InjectedSliceTodo {
+  return hard ? PLANNER_PREPASS_TODO : LOCALIZATION_PREPASS_TODO
 }
 
 /** Engine-authored frame-seed contents (the localization/planner pre-pass) — typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
@@ -1111,7 +1082,7 @@ export interface TriageTodoRow extends OrchestrationTodo {
  *
  * @sem domain=routing role=router
  */
-export function buildTriageTodoSkeleton(verdict: TriageVerdict): TriageTodoRow[] {
+export function buildTriageTodoSkeleton(verdict: TriageVerdict, arming: ArmingDecision): TriageTodoRow[] {
   const order = orderTriageGoals(verdict.goals)
   const positionOf = new Map<number, number>()
   const todos: TriageTodoRow[] = []
@@ -1123,50 +1094,16 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict): TriageTodoRow[]
   const plantedSeedContent = new Set<string>()
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
-    if (goal.needsPlan || goal.shape === "diagnosis-vague") {
-      const seed = diagnosisPrepassSeed(goal.quote)
+    const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
+    if (goal.needsPlan || (arming.armLocalization && isDiagnosis)) {
+      const hard = goal.needsPlan === true || arming.hardness === "hard"
+      const seed = diagnosisPrepassSeed(hard)
       if (plantedSeedContent.has(seed.content)) continue
       plantedSeedContent.add(seed.content)
       todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
     }
   }
   return todos
-}
-
-/**
- * Structural round-up net over the triage verdict (case-1 tierfire3 decode):
- * the extractor reads any entity mention ("TextChoices") as grounding, but a
- * symptom prompt that names no concrete code-file location still needs
- * localization before a fix — so a "diagnosis-grounded" goal rounds up to
- * "diagnosis-vague", which re-arms the skeleton's frame seed. Two round-up
- * triggers: (a) no FILE_TARGET_RE match at all, or (b) the prompt is
- * cross-layer/multi-subsystem HARD (isHardDiagnosisPrompt) even though it names
- * a file — because on a hard bug, knowing the file is not knowing the function
- * + mechanism + minimal fix, so the conductor otherwise anchors on the wrong
- * site INSIDE the named file and grinds (the SWE-bench conductor-only thrash
- * shape). A file named on a SIMPLE bug still suppresses the pre-pass and keeps
- * the cheap conductor path the passing conductor-only cases prove out — the
- * gate is asymmetric on purpose so the round-up never over-fires on easy
- * grounded bugs. Casting policy: ambiguity rounds UP for decision-shaped stages
- * (docs/design/failure-taxonomy.md §8). Returns the verdict unchanged (same
- * reference) when nothing rounds, so callers can detect the flip by identity
- * for telemetry.
- *
- * @sem domain=routing role=router
- */
-export function roundUpTriageShapes(verdict: TriageVerdict, userPrompt: string): TriageVerdict {
-  // A grounded bug that names its file goes direct on the cheap conductor path —
-  // it already has its start point, so the reasoner localization pre-pass is pure
-  // waste. Only a grounded bug with NO file target rounds up to arm localization.
-  // (Text-hardness gating was removed: issue prose almost always links source
-  // paths, so a subsystem-token count false-positives on ordinary bugs and
-  // over-fires the reasoner path — 12039 blew up $0.31 this way.)
-  if (FILE_TARGET_RE.test(userPrompt)) return verdict
-  if (!verdict.goals.some((g) => g.shape === "diagnosis-grounded")) return verdict
-  return {
-    ...verdict,
-    goals: verdict.goals.map((g) => (g.shape === "diagnosis-grounded" ? { ...g, shape: "diagnosis-vague" } : g)),
-  }
 }
 
 /**
@@ -1240,11 +1177,13 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * in_progress check-runs stay with the conductor.
  *
  * One structural exception on the build-turn branch — the diagnosis pre-pass
- * (SWE-bench django-11964/11885 decode): when a build turn is bug-shaped (a
- * pending item opens with a repair verb) and NO active item names a concrete
- * file yet, the conductor is about to guess the root cause, and localization
- * is the decision that sets the whole turn's ceiling. The pre-pass appends one
- * typed localization slice — `design` allocates to the oracle tier
+ * (SWE-bench django-11964/11885 decode): on a build/mechanical batch, the arming
+ * judge's turn-open decision (`armLocalization`, threaded in) says whether the
+ * conductor is about to guess an un-localized root cause. When it is set it is
+ * the sole authority; absent a judge decision the door degrades to the old
+ * syntactic heuristic (a repair-verb opener with NO active item naming a
+ * concrete file). Either way the pre-pass appends one typed localization slice —
+ * `design` allocates to the oracle tier
  * (judge-verified when untestable) and the researcher persona is read+fetch
  * only on the tightest step budget — a lean decider front-loaded before the
  * conductor's own checklist, never a second workhorse. Existing items are
@@ -1272,7 +1211,10 @@ const VENUE_INLINE_MAX_ITEMS = 2
  *
  * @sem domain=routing role=router
  */
-export function autoTypeTodos<T extends OrchestrationTodo>(todos: readonly T[]): (T | InjectedSliceTodo)[] {
+export function autoTypeTodos<T extends OrchestrationTodo>(
+  todos: readonly T[],
+  armLocalization?: boolean,
+): (T | InjectedSliceTodo)[] {
   // Active-DAG guard: only a non-settled typed slice marks a conductor DAG in
   // flight. Settled typed slices are history reconcileSettledSlices re-stuck —
   // they must not disable typing for the turn's next phase.
@@ -1280,12 +1222,19 @@ export function autoTypeTodos<T extends OrchestrationTodo>(todos: readonly T[]):
   const active = todos.filter((t) => !TERMINAL_TODO_STATUSES.has(t.status))
   const typed = ((): (T | InjectedSliceTodo)[] => {
     if (active.some((t) => MECHANICAL_START.test(t.content) || isDecidedChange(t))) {
-      const bugShaped = todos.some((t) => t.status === "pending" && DIAGNOSIS_START.test(t.content))
-      const localized = active.some((t) => FILE_TARGET_RE.test(t.content))
-      // The content check keeps injection one-shot now that a SETTLED seed no
-      // longer trips the top guard: a list already carrying the seed (any
-      // status) falls through to plan-first typing instead of paying twice.
-      if (bugShaped && !localized && !todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
+      // The arming judge (turn-open, evidence-grounded) owns the localization
+      // decision and is threaded in as `armLocalization`. When present it is the
+      // sole authority; the bug-shape / file-target regexes are only the degrade
+      // heuristic for a caller with no judge decision — they read syntax, never
+      // the semantic groundedness the judge reasoned about. The content check
+      // keeps injection one-shot now that a SETTLED seed no longer trips the top
+      // guard: a list already carrying the seed (any status) falls through to
+      // plan-first typing instead of paying twice.
+      const shouldArm =
+        armLocalization ??
+        (todos.some((t) => t.status === "pending" && DIAGNOSIS_START.test(t.content)) &&
+          !active.some((t) => FILE_TARGET_RE.test(t.content)))
+      if (shouldArm && !todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
         return [...todos, LOCALIZATION_PREPASS_TODO]
       }
       return typeBuildPlan(todos)

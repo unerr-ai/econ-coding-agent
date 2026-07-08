@@ -4,6 +4,7 @@ import DESCRIPTION_WRITE from "./todowrite.txt"
 import { SessionTodo } from "@opencode-ai/core/session/todo"
 import { ECON_PERSONAS } from "../../../code-intelligence/src/model-registry"
 import { autoTypeTodos, reconcileSettledSlices } from "../session/slice-orchestrator"
+import { getArmingDecision } from "../session/arming-store"
 
 // Inline the field shape here rather than referencing SessionTodo.Info — the
 // three core fields plus the OL-7.3c LLM-fillable subset of the typed
@@ -87,7 +88,13 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, SessionTod
           // at the tool boundary so the OL-7.3b hook can dispatch them —
           // advisory typing rules alone never steer the conductor model.
           const existing = yield* todo.get(ctx.sessionID)
-          const todos = autoTypeTodos(reconcileSettledSlices(params.todos, existing))
+          // Door 2 (todowrite): the localization decision is the arming judge's,
+          // computed once at turn open and stored per-session; autoTypeTodos
+          // reads it here rather than re-deriving groundedness from a regex.
+          const todos = autoTypeTodos(
+            reconcileSettledSlices(params.todos, existing),
+            getArmingDecision(ctx.sessionID)?.armLocalization,
+          )
 
           yield* todo.update({
             sessionID: ctx.sessionID,

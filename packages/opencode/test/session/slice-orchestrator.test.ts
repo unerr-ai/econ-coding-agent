@@ -34,7 +34,6 @@ import {
   promptAuthorizesTestEdits,
   classifyTurnShape,
   categoryPreamble,
-  isHardDiagnosisPrompt,
   diagnosisPrepassSeed,
   type TurnShapeCategory,
   extractVerifyCommands,
@@ -54,7 +53,6 @@ import {
   triagePreamble,
   orderTriageGoals,
   buildTriageTodoSkeleton,
-  roundUpTriageShapes,
   type ConductorSliceDispatch,
   type SliceProbes,
   type OrchestrationTodo,
@@ -63,6 +61,7 @@ import {
   type TriageTodoRow,
 } from "../../src/session/slice-orchestrator"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
+import type { ArmingDecision } from "../../src/session/arming-judge"
 
 /** Probes that never touch a graph — fixed verdicts, with a call counter. */
 function fakeProbes(
@@ -302,6 +301,41 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
         { content: "Update the changelog entry", status: "pending" },
       ]
       expect(autoTypeTodos(settled)).toEqual(settled)
+    })
+  })
+
+  // Arming judge override (§1.1b): armLocalization, when passed, is the SOLE
+  // authority over the diagnosis pre-pass — it overrides the syntactic
+  // bug-shaped+no-file-target heuristic in both directions. Only when the
+  // caller passes no decision (undefined) does autoTypeTodos fall back to the
+  // old heuristic.
+  describe("autoTypeTodos — arming judge override (armLocalization threaded in)", () => {
+    const mechanicalTodos: OrchestrationTodo[] = [
+      { content: "Fix the enum display bug so str() returns the raw value", status: "pending" },
+      { content: "Verify the model field returns 'M'", status: "pending" },
+    ]
+
+    it("armLocalization:true injects the localization pre-pass — the judge is the sole authority", () => {
+      const typed = autoTypeTodos(mechanicalTodos, true)
+      expect(typed).toHaveLength(3)
+      expect(typed[2]).toEqual({
+        content: LOCALIZATION_SLICE_CONTENT,
+        status: "pending",
+        priority: "high",
+        sliceType: "design",
+        need: "reasoner",
+        persona: "researcher",
+      })
+    })
+
+    it("armLocalization:false suppresses injection even though the batch is bug-shaped with no file target", () => {
+      expect(autoTypeTodos(mechanicalTodos, false)).toEqual(mechanicalTodos)
+    })
+
+    it("armLocalization undefined falls back to the old bug-shaped+no-file heuristic", () => {
+      const typed = autoTypeTodos(mechanicalTodos)
+      expect(typed).toHaveLength(3)
+      expect(typed[2]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
     })
   })
 
@@ -554,7 +588,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: false, hardness: "trivial" })
     expect(todos).toHaveLength(2)
     expect(todos.map((t) => t.content)).toEqual(["add feature X", "add feature Y"])
     expect(todos.every((t) => t.parentID === undefined)).toBe(true)
@@ -566,11 +600,12 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos: TriageTodoRow[] = buildTriageTodoSkeleton(verdict)
+    const todos: TriageTodoRow[] = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
     expect(todos).toHaveLength(2)
     expect(todos[0]!.content).toBe("diagnose the flaky test")
     expect(todos[1]!.parentID).toBe(0)
-    expect(todos[1]!.content).toBe(diagnosisPrepassSeed("diagnose the flaky test").content)
+    // needsPlan is unconditionally hard, regardless of the passed arming.hardness
+    expect(todos[1]!.content).toBe(diagnosisPrepassSeed(true).content)
   })
 
   it("a diagnosis-vague shaped goal also gets a frame seed, even without needsPlan", () => {
@@ -579,7 +614,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
     expect(todos).toHaveLength(2)
     expect(todos[1]!.parentID).toBe(0)
   })
@@ -593,7 +628,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
     // write order: "first, needs a plan" (position 0), "second, depends on first" (position 1)
     expect(todos[0]!.content).toBe("first, needs a plan")
     expect(todos[1]!.content).toBe("second, depends on first")
@@ -610,11 +645,11 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
-    // both quotes are non-hard, so both resolve to the same LOCALIZATION seed content — cross-goal
-    // content dedup collapses them to ONE planted seed, parented to the first qualifying goal.
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
+    // needsPlan is unconditionally hard, so both goals resolve to the same PLANNER seed content —
+    // cross-goal content dedup collapses them to ONE planted seed, parented to the first qualifying goal.
     expect(todos).toHaveLength(3) // 2 root goals + 1 shared frame seed
-    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === PLANNER_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 0)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
@@ -628,99 +663,42 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
           deliverable: "root cause found",
         },
         { quote: "second goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
-        { quote: "third goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
       ],
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
-    // goal 0 is hard -> PLANNER seed; goals 1 and 2 are both non-hard -> both resolve to the SAME
-    // LOCALIZATION seed content. Total seeds planted = 2 (planner once, localization once), not 3.
-    expect(todos).toHaveLength(5) // 3 root goals + 2 distinct frame seeds
+    // goal 0 fires via the arming judge (diagnosis-vague + armLocalization, hardness:"hard") -> PLANNER.
+    // goal 1 fires via needsPlan, which is unconditionally hard -> PLANNER too. Same content from two
+    // different trigger mechanisms — dedup collapses them to ONE planted seed, parented to the first.
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "hard" })
+    expect(todos).toHaveLength(3) // 2 root goals + 1 shared frame seed
     expect(todos.filter((t) => t.content === PLANNER_SLICE_CONTENT)).toHaveLength(1)
-    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
-    const planterSeed = todos.find((t) => t.content === PLANNER_SLICE_CONTENT)!
-    expect(planterSeed.parentID).toBe(0)
-    // the localization seed is parented to the FIRST qualifying goal that resolved it (goal 1, write position 1) —
-    // goal 2's identical-content seed is skipped, not replanted or reparented.
-    const localizationSeed = todos.find((t) => t.content === LOCALIZATION_SLICE_CONTENT)!
-    expect(localizationSeed.parentID).toBe(1)
+    expect(todos.filter((t) => t.parentID === 0)).toHaveLength(1)
+    expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
 
   it("two goals whose seeds resolve to DIFFERENT content both plant — dedup is by content, not a one-seed-max cap", () => {
     const verdict: TriageVerdict = {
       goals: [
+        { quote: "first goal needs a plan", shape: "build", deliverable: "", needsPlan: true },
         {
-          quote: "the `SessionStore` cache and `flushQueue` worker disagree — writes during flush are dropped",
-          shape: "build",
+          quote: "second goal is diagnosis-vague and the judge reads it as moderate, not hard",
+          shape: "diagnosis-vague",
           deliverable: "",
-          needsPlan: true,
         },
-        { quote: "second goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
       ],
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict)
+    // goal 0 fires via needsPlan (unconditionally hard) -> PLANNER. goal 1 fires via the arming judge
+    // (diagnosis-vague + armLocalization) with hardness:"moderate" -> LOCALIZATION. Different content,
+    // both plant.
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
     expect(todos).toHaveLength(4) // 2 root goals + 2 distinct frame seeds (planner + localization)
     expect(todos.filter((t) => t.content === PLANNER_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.find((t) => t.content === PLANNER_SLICE_CONTENT)!.parentID).toBe(0)
     expect(todos.find((t) => t.content === LOCALIZATION_SLICE_CONTENT)!.parentID).toBe(1)
-  })
-})
-
-describe("roundUpTriageShapes — grounded-without-file-target rounds up (case-1 net)", () => {
-  const grounded = (quote: string): TriageVerdict => ({
-    goals: [{ quote, shape: "diagnosis-grounded", deliverable: "bug fixed" }],
-    constraints: [],
-    confidence: "high",
-  })
-
-  it("an entity-name-only symptom prompt rounds diagnosis-grounded up to diagnosis-vague", () => {
-    const prompt =
-      "TextChoices/IntegerChoices value returned by the getter is the enum member, not the raw value — fix it. Don't touch any tests."
-    const verdict = grounded("TextChoices value returned by the getter is the enum member")
-    const rounded = roundUpTriageShapes(verdict, prompt)
-    expect(rounded).not.toBe(verdict)
-    expect(rounded.goals[0]!.shape).toBe("diagnosis-vague")
-    // and the rounded verdict now re-arms the skeleton's frame seed
-    const todos = buildTriageTodoSkeleton(rounded)
-    expect(todos).toHaveLength(2)
-    expect(todos[1]!.parentID).toBe(0)
-  })
-
-  it("a prompt naming a concrete code file stays grounded (identity return)", () => {
-    const prompt = "the getter in django/db/models/enums.py returns the member — fix it"
-    const verdict = grounded("the getter in enums.py returns the member")
-    expect(roundUpTriageShapes(verdict, prompt)).toBe(verdict)
-  })
-
-  it("non-diagnosis shapes are untouched and the verdict returns by identity", () => {
-    const verdict: TriageVerdict = {
-      goals: [
-        { quote: "add feature X", shape: "build", deliverable: "X works" },
-        { quote: "is the fix sound?", shape: "audit", deliverable: "verdict" },
-      ],
-      constraints: [],
-      confidence: "high",
-    }
-    expect(roundUpTriageShapes(verdict, "add feature X and audit the fix")).toBe(verdict)
-  })
-
-  it("only the grounded goal flips in a mixed verdict; others are preserved verbatim", () => {
-    const verdict: TriageVerdict = {
-      goals: [
-        { quote: "the parser drops trailing commas", shape: "diagnosis-grounded", deliverable: "fixed" },
-        { quote: "add a regression test", shape: "build", deliverable: "test added", needsPlan: false },
-      ],
-      constraints: [{ quote: "don't touch any tests", kind: "no-test-edit" }],
-      confidence: "high",
-    }
-    const rounded = roundUpTriageShapes(verdict, "the parser drops trailing commas; add a regression test")
-    expect(rounded.goals[0]!.shape).toBe("diagnosis-vague")
-    expect(rounded.goals[1]).toEqual(verdict.goals[1])
-    expect(rounded.constraints).toBe(verdict.constraints)
   })
 })
 
@@ -1092,44 +1070,9 @@ describe("planner seat (§8 — a bounded reasoner plan slice for the hardest sh
     expect(shouldOrchestrate(slices)).toBe(true)
   })
 
-  it("isHardDiagnosisPrompt: an ordinary single-site symptom is NOT hard", () => {
-    expect(
-      isHardDiagnosisPrompt(
-        "The app shows Suit.HEART instead of Hearts when rendering the enum — str() on members returns the wrong value. Please fix it.",
-      ),
-    ).toBe(false)
-    expect(isHardDiagnosisPrompt("")).toBe(false)
-  })
-
-  it("hard on >=2 distinct subsystem tokens (backticked / camelCase / snake_case anchors)", () => {
-    expect(
-      isHardDiagnosisPrompt(
-        "the `SessionStore` cache and `flushQueue` worker disagree — writes during flush are dropped",
-      ),
-    ).toBe(true)
-    expect(isHardDiagnosisPrompt("syncQueue drops items whenever retry_backoff is active")).toBe(true)
-  })
-
-  it("hard on a multi-sentence symptom carrying a cross-layer marker; a lone marker sentence is not", () => {
-    expect(
-      isHardDiagnosisPrompt(
-        "Logins fail intermittently after we upgraded the driver. It only happens under load, roughly one request in fifty.",
-      ),
-    ).toBe(true)
-    expect(isHardDiagnosisPrompt("Logins fail intermittently")).toBe(false)
-  })
-
   it("diagnosisPrepassSeed: the planner for hard shapes, the localization slice otherwise", () => {
-    expect(
-      diagnosisPrepassSeed(
-        "Logins fail intermittently after we upgraded the driver. It only happens under load, roughly one request in fifty.",
-      ),
-    ).toBe(PLANNER_PREPASS_TODO)
-    expect(
-      diagnosisPrepassSeed(
-        "The app shows Suit.HEART instead of Hearts when rendering the enum. Please fix it.",
-      ),
-    ).toBe(LOCALIZATION_PREPASS_TODO)
+    expect(diagnosisPrepassSeed(true)).toBe(PLANNER_PREPASS_TODO)
+    expect(diagnosisPrepassSeed(false)).toBe(LOCALIZATION_PREPASS_TODO)
   })
 })
 

@@ -37,7 +37,6 @@ import {
   promptAuthorizesTestEdits,
   triagePreamble,
   buildTriageTodoSkeleton,
-  roundUpTriageShapes,
   LOCALIZATION_SLICE_CONTENT,
   PLANNER_SLICE_CONTENT,
   childSlicePermission,
@@ -56,6 +55,8 @@ import {
   type SliceDigestEntry,
 } from "./slice-orchestrator"
 import { runTurnTriage, triageTelemetry, type TriageComplete, type TriageVerdict, type TriageGoalShape } from "./turn-triage"
+import { judgeArming, heuristicArming, type ArmingVerdict } from "./arming-judge"
+import { setArmingDecision } from "./arming-store"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
@@ -437,6 +438,54 @@ export const layer = Layer.effect(
       // formerly-silent extraction flake decodable from the run log.
       if (parseRetried) yield* Effect.logInfo("turn_triage_retry", { reason: "parse" })
       return verdict
+    })
+
+    /**
+     * §1.1b — the conductor-tier `TriageComplete` port for `judgeArming`, built
+     * exactly like `triageDispatch`'s conductor branch (the turn's own bound
+     * model, the "summary" hidden agent, all tools denied). Returns `null` on any
+     * failure so the caller degrades to `heuristicArming`.
+     *
+     * @sem domain=routing role=extractor
+     */
+    const armingDispatch = Effect.fn("SessionPrompt.armingDispatch")(function* (input: {
+      sessionID: SessionID
+      lastUser: SessionV1.User
+      userPrompt: string
+      verdict: TriageVerdict
+    }) {
+      const { sessionID, lastUser, userPrompt, verdict } = input
+      const mdl = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+      const ag = yield* agents.get("summary")
+      if (!ag) return null
+      const bridge = yield* EffectBridge.make()
+      const complete: TriageComplete = ({ system, user }) =>
+        bridge.promise(
+          llm
+            .stream({
+              agent: ag,
+              user: lastUser,
+              system: [system],
+              small: true,
+              tools: {},
+              model: mdl,
+              sessionID,
+              retries: 0,
+              messages: [{ role: "user", content: user }],
+            })
+            .pipe(
+              Stream.filter(LLMEvent.is.textDelta),
+              Stream.map((e) => e.text),
+              Stream.mkString,
+              Effect.orDie,
+            ),
+        )
+      let parseRetried = false
+      const decision = yield* Effect.promise(() =>
+        judgeArming({ userPrompt, verdict, complete, onParseRetry: () => (parseRetried = true) }),
+      )
+      if (parseRetried) yield* Effect.logInfo("arming_judge_retry", { reason: "parse" })
+      return decision
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1712,6 +1761,7 @@ export const layer = Layer.effect(
               // before triage existed; TurnOpenCalls is the test-only off
               // switch so mock harnesses keep their scripted choreography.
               let verdict: TriageVerdict | null = null
+              let arming: ArmingVerdict | undefined
               if (turnOpen.triage) {
                 verdict = yield* triageDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
                 if (verdict && verdict.confidence === "low") {
@@ -1732,20 +1782,23 @@ export const layer = Layer.effect(
                   agree: dominantShape === shape.category,
                 })
 
-                // Round-up net (case-1 decode): a "diagnosis-grounded" goal in
-                // a prompt naming no concrete code-file location rounds up to
-                // "diagnosis-vague", re-arming the skeleton's frame seed.
-                // Runs AFTER triage_vs_heuristic so that telemetry keeps
-                // scoring the raw extractor.
+                // Arming judge (§1.1b): one evidence-grounded LLM call decides
+                // whether this turn needs a localization pre-pass, replacing the
+                // file-target regex that over-fired the reasoner path. Runs AFTER
+                // triage_vs_heuristic so telemetry keeps scoring the raw
+                // extractor; degrades to the triage-shape heuristic when the
+                // judge is unavailable. Stored per-session so the todowrite door
+                // (autoTypeTodos) reads the same decision.
                 if (verdict) {
-                  const rounded = roundUpTriageShapes(verdict, userText)
-                  if (rounded !== verdict) {
-                    yield* Effect.logInfo("triage_rounded_up", {
-                      "session.id": sessionID,
-                      shapes: rounded.goals.map((g) => g.shape),
-                    })
-                    verdict = rounded
-                  }
+                  arming = (yield* armingDispatch({ sessionID, lastUser, userPrompt: userText, verdict })) ?? heuristicArming(verdict)
+                  setArmingDecision(sessionID, arming)
+                  yield* Effect.logInfo("arming_judged", {
+                    "session.id": sessionID,
+                    armLocalization: arming.armLocalization,
+                    hardness: arming.hardness,
+                    ambiguity: arming.ambiguity,
+                    evidence: arming.evidence,
+                  })
                 }
               }
 
@@ -1766,7 +1819,7 @@ export const layer = Layer.effect(
 
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0) {
-                  const skeleton = buildTriageTodoSkeleton(verdict)
+                  const skeleton = buildTriageTodoSkeleton(verdict, arming ?? heuristicArming(verdict))
                   // Owner-decision trace: which goals seeded a reasoner pre-pass
                   // (localization/planner) and the shapes that drove it — the
                   // stage-1 routing decision, logged with mechanism:"orchestrator"
@@ -1795,7 +1848,7 @@ export const layer = Layer.effect(
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0 && shape.category === "diagnosis-vague") {
-                  const seed = diagnosisPrepassSeed(userText)
+                  const seed = diagnosisPrepassSeed(false)
                   yield* todoStore.update({ sessionID, todos: [seed] }).pipe(Effect.ignore)
                   yield* Effect.logInfo("diagnosis_prepass_armed", {
                     "session.id": sessionID,
