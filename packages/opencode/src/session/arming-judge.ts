@@ -57,11 +57,12 @@ SCOPE — a localization pre-pass applies ONLY to a BUG DIAGNOSIS (finding where
 
 Decide "localized" (we already know WHERE to fix — do NOT arm):
 - the task names a concrete code location in THIS repo: a file path, a file name, or a module, OR
-- the exact edit site is otherwise unambiguous from the text.
+- the exact edit site is otherwise unambiguous from the text, OR
+- the task already specifies the EXACT FIX to apply — not merely the symptom — AND names a greppable code symbol (e.g. "change request.args.get() to request.form.get()"). The diagnosis is already done: the executor greps the named symbol and applies the handed change, so no localization pre-pass is needed even when no file path is given.
 
 Decide NOT localized (arm the pre-pass):
 - only a symptom or behaviour is described ("crashes on startup", "returns the wrong value"), OR
-- only a class, API, feature, or symbol NAME is given — naming "QuerySet.delete" or "the enum getter" is NOT knowing the file or method to edit.
+- only a class, API, feature, or symbol NAME is given ALONGSIDE A SYMPTOM (no fix specified) — naming "QuerySet.delete" with "it deletes the wrong rows" is NOT knowing the file or method to edit, and the mechanism still has to be diagnosed. (A named symbol PLUS a handed fix is localized — see above.)
 
 Also rate "hardness":
 - "trivial": one obvious edit site, mechanical.
@@ -71,6 +72,7 @@ Also rate "hardness":
 Rules:
 - A named file path (or file name / module) ⇒ localized ⇒ armLocalization=false, UNLESS hardness is "hard" — on a hard bug, knowing the file is not knowing the function + mechanism + minimal fix, so arm anyway.
 - No code-location evidence at all ⇒ not localized ⇒ armLocalization=true.
+- A fully specified fix (the task states WHAT to change, e.g. "use X instead of Y") ⇒ the diagnosis is already done ⇒ armLocalization=false even with no file path — applying a handed change to a named symbol is an executor grep, not a diagnosis. This does NOT apply when only the symptom is described.
 - When the location evidence is genuinely balanced, prefer armLocalization=true — a cheap pre-pass beats an expensive wrong guess.
 - "ambiguity" is "ambiguous" when the task could be read more than one way, else "clear".
 - "evidence" quotes or paraphrases the exact span of the task that decided "localized" — never invent one.

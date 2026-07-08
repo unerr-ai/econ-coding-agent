@@ -40,12 +40,15 @@ localization is "the hard separator" between diagnosis and everything else.)*
 | Grounding in the prompt | Arm? |
 |---|---|
 | **STRONG** — file path, file+line, stack trace *with* file+line, or symbol **+** file | `NONE` (site is known; file-level grounding is a 15–17× localization win) |
-| **WEAK** — symbol/function name *without* a file, module/component/layer ("the auth layer"), error-message-only | `LOCALIZATION` (a bare symbol is a *deferred start*, not a shortcut — must resolve file first) |
+| **SPECIFIED-FIX** — the exact change is stated (not just the symptom) *and* a greppable code symbol is named, e.g. "change `request.args.get()` to `request.form.get()`" | `NONE` (diagnosis is already done — the executor greps the named symbol and applies the handed change; no file path needed) |
+| **WEAK** — symbol/function name *without* a file *and only a symptom*, module/component/layer ("the auth layer"), error-message-only | `LOCALIZATION` (a bare symbol is a *deferred start*, not a shortcut — must resolve file first) |
 | **NONE** — pure symptom ("crashes", "slow", "wrong output"), repro-steps only | `LOCALIZATION` |
 | **ASYMMETRIC** — one side file-grounded, the other a vague layer | `LOCALIZATION` on the vague side |
 *(Agentless hierarchical file→function→line; "On the Role of Fault Localization Context";
 Bug-Report-Driven FL. A symbol like `QuerySet.delete()` with no file is WEAK: it can be
-defined/overridden in many files.)*
+defined/overridden in many files. But that same bare symbol paired with the **specified
+fix** — not just a symptom — is SPECIFIED-FIX, not WEAK: no diagnosis remains, only a
+grep-and-apply, so it does **not** arm.)*
 
 **R3 — Planner is for *hardness*, orthogonal to grounding.** Arm `PLANNER` (→ stronger
 tier) when the task is cross-layer / multi-file (empirical breakeven ≈ **5 files or 3+
@@ -86,7 +89,7 @@ have bitten us — keep them.
 | `grounded-simple` | "in `src/parser.ts` around line 40 the loop should start at 1" | NONE | R2 STRONG (file+line) |
 | `grounded-stacktrace` | "TypeError at `auth.py:42` 'NoneType' not subscriptable; full trace: …" | NONE | R2 STRONG (stack trace w/ file+line) |
 | `grounded-test-output` | pytest: "expected `DID NOT RAISE` but got `AttributeError` [code shown]" | NONE | R2 STRONG (test output + visible code) |
-| `grounded-diagnosis-and-fix` | "uses `request.args.get()` for a POST; should be `request.form.get()`" | NONE | R2 STRONG (fix + site both stated) |
+| `grounded-diagnosis-and-fix` | "uses `request.args.get()` for a POST; should be `request.form.get()`" | NONE | R2 SPECIFIED-FIX — exact change + greppable symbol stated, no file needed (grep-and-apply, not diagnosis); live judge over-fired here until the SPECIFIED-FIX signal was added |
 | `grounded-symbol-plus-file` | "`QuerySet.delete()` in `django/db/models/deletion.py` crashes on…" | NONE | R2 STRONG (symbol **+** file) |
 
 ### diagnosis-vague → LOCALIZATION (site unknown; find it first) — unless hard (R3)
