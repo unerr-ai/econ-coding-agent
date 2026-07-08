@@ -696,6 +696,21 @@ describe("roundUpTriageShapes — grounded-without-file-target rounds up (case-1
     expect(roundUpTriageShapes(verdict, prompt)).toBe(verdict)
   })
 
+  it("a HARD cross-layer symptom rounds up EVEN with a file named (asymmetric gate)", () => {
+    // Names a concrete file (the old gate suppressed the round-up outright) but
+    // is multi-subsystem hard — knowing the file is not knowing the function +
+    // mechanism, so it still buys a reasoner localization pre-pass. This is the
+    // SWE-bench conductor-only thrash shape the asymmetric gate rescues.
+    const prompt =
+      "the `SessionStore` cache and `flushQueue` worker in src/session/store.ts disagree — writes during flush are dropped; fix it"
+    const verdict = grounded("writes during flush are dropped")
+    const rounded = roundUpTriageShapes(verdict, prompt)
+    expect(rounded).not.toBe(verdict)
+    expect(rounded.goals[0]!.shape).toBe("diagnosis-vague")
+    // and the rounded verdict re-arms the skeleton's frame seed
+    expect(buildTriageTodoSkeleton(rounded)).toHaveLength(2)
+  })
+
   it("non-diagnosis shapes are untouched and the verdict returns by identity", () => {
     const verdict: TriageVerdict = {
       goals: [

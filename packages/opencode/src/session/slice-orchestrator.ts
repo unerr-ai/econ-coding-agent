@@ -1137,17 +1137,27 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict): TriageTodoRow[]
  * Structural round-up net over the triage verdict (case-1 tierfire3 decode):
  * the extractor reads any entity mention ("TextChoices") as grounding, but a
  * symptom prompt that names no concrete code-file location still needs
- * localization before a fix — so a "diagnosis-grounded" goal in a prompt with
- * no FILE_TARGET_RE match rounds up to "diagnosis-vague", which re-arms the
- * skeleton's frame seed. Casting policy: ambiguity rounds UP for
- * decision-shaped stages (docs/design/failure-taxonomy.md §8). Returns the
- * verdict unchanged (same reference) when nothing rounds, so callers can
- * detect the flip by identity for telemetry.
+ * localization before a fix — so a "diagnosis-grounded" goal rounds up to
+ * "diagnosis-vague", which re-arms the skeleton's frame seed. Two round-up
+ * triggers: (a) no FILE_TARGET_RE match at all, or (b) the prompt is
+ * cross-layer/multi-subsystem HARD (isHardDiagnosisPrompt) even though it names
+ * a file — because on a hard bug, knowing the file is not knowing the function
+ * + mechanism + minimal fix, so the conductor otherwise anchors on the wrong
+ * site INSIDE the named file and grinds (the SWE-bench conductor-only thrash
+ * shape). A file named on a SIMPLE bug still suppresses the pre-pass and keeps
+ * the cheap conductor path the passing conductor-only cases prove out — the
+ * gate is asymmetric on purpose so the round-up never over-fires on easy
+ * grounded bugs. Casting policy: ambiguity rounds UP for decision-shaped stages
+ * (docs/design/failure-taxonomy.md §8). Returns the verdict unchanged (same
+ * reference) when nothing rounds, so callers can detect the flip by identity
+ * for telemetry.
  *
  * @sem domain=routing role=router
  */
 export function roundUpTriageShapes(verdict: TriageVerdict, userPrompt: string): TriageVerdict {
-  if (FILE_TARGET_RE.test(userPrompt)) return verdict
+  // Suppress the round-up (cheap conductor goes direct) only for a SIMPLE bug
+  // that names its file; a hard cross-layer bug rounds up even with a file named.
+  if (FILE_TARGET_RE.test(userPrompt) && !isHardDiagnosisPrompt(userPrompt)) return verdict
   if (!verdict.goals.some((g) => g.shape === "diagnosis-grounded")) return verdict
   return {
     ...verdict,

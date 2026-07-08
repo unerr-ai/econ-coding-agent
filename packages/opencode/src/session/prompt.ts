@@ -1512,6 +1512,7 @@ export const layer = Layer.effect(
                 escalatedModelRef = resolveSliceModel("reasoner")
                 yield* Effect.logWarning("stuck_escalate", {
                   "session.id": sessionID,
+                  mechanism: "sm-backstop",
                   reason: stuckSignal.reason,
                   count: stuckSignal.count,
                   tier: "reasoner",
@@ -1519,6 +1520,7 @@ export const layer = Layer.effect(
               } else {
                 yield* Effect.logInfo("stuck_rethink", {
                   "session.id": sessionID,
+                  mechanism: "sm-backstop",
                   reason: stuckSignal.reason,
                   count: stuckSignal.count,
                 })
@@ -1765,6 +1767,20 @@ export const layer = Layer.effect(
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0) {
                   const skeleton = buildTriageTodoSkeleton(verdict)
+                  // Owner-decision trace: which goals seeded a reasoner pre-pass
+                  // (localization/planner) and the shapes that drove it — the
+                  // stage-1 routing decision, logged with mechanism:"orchestrator"
+                  // so a trace separates a reasoner cast UP FRONT here from one
+                  // cast as RECOVERY by the SM backstop (stuck_escalate below).
+                  const seeds = skeleton
+                    .filter((t) => (t as { sliceType?: string }).sliceType === "design")
+                    .map((t) => (t.content === PLANNER_SLICE_CONTENT ? "planner" : "localization"))
+                  yield* Effect.logInfo("frame_seed_planted", {
+                    "session.id": sessionID,
+                    mechanism: "orchestrator",
+                    seeds,
+                    shapes: verdict.goals.map((g) => g.shape),
+                  })
                   yield* todoStore.update({ sessionID, todos: skeleton }).pipe(Effect.ignore)
                 }
               } else {
