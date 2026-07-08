@@ -10,6 +10,7 @@
  * @sem domain=eval role=entrypoint
  */
 
+import { tierModelRef } from "@opencode-ai/code-intelligence"
 import { FIXTURES } from "./fixtures.js"
 import { mockTierConfig, runHarness, type TierConfig } from "./harness.js"
 import { renderReport } from "./scorer.js"
@@ -20,20 +21,19 @@ const dryRun = args.includes("--dry-run")
 
 /**
  * Builds a live TierConfig from environment variables.
- * Each tier reads ECON_<TIER>_BASE_URL, ECON_<TIER>_MODEL, and LITELLM_API_KEY.
- * Falls back to mock if no key is set.
+ * Each tier reads ECON_<TIER>_BASE_URL and LITELLM_API_KEY; the model itself
+ * resolves through ECON_TIER_BINDING (tierModelRef) — no per-run model override.
  */
 function buildLiveConfig(): TierConfig {
   const apiKey = process.env["LITELLM_API_KEY"] ?? process.env["OPENAI_API_KEY"]
 
-  function endpointForTier(tier: Tier, defaultModel: string, defaultPrice: { inputPer1M: number; outputPer1M: number }) {
+  function endpointForTier(tier: Tier, defaultPrice: { inputPer1M: number; outputPer1M: number }) {
     const tierUpper = tier.toUpperCase()
     const baseURL =
       process.env[`ECON_${tierUpper}_BASE_URL`] ??
       process.env["ECON_BASE_URL"] ??
       "https://econ-litellm.fly.dev/v1"
-    const model =
-      process.env[`ECON_${tierUpper}_MODEL`] ?? defaultModel
+    const model = tierModelRef(tier)
 
     return {
       name: model,
@@ -47,13 +47,13 @@ function buildLiveConfig(): TierConfig {
 
   return {
     conductor: [
-      endpointForTier("conductor", "qwen/qwen3-32b", { inputPer1M: 0.9, outputPer1M: 0.9 }),
+      endpointForTier("conductor", { inputPer1M: 0.9, outputPer1M: 0.9 }),
     ],
     executor: [
-      endpointForTier("executor", "qwen/qwen2.5-coder-32b-instruct", { inputPer1M: 0.2, outputPer1M: 0.2 }),
+      endpointForTier("executor", { inputPer1M: 0.2, outputPer1M: 0.2 }),
     ],
     oracle: [
-      endpointForTier("oracle", "qwen/qwen3-8b", { inputPer1M: 0.1, outputPer1M: 0.1 }),
+      endpointForTier("oracle", { inputPer1M: 0.1, outputPer1M: 0.1 }),
     ],
   }
 }
