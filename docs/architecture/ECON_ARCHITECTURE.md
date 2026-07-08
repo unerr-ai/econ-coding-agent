@@ -33,6 +33,40 @@ each model only the slice of code that matters — found through a live map of t
 rather than by reading whole files. The result is a coding agent comparable to Claude Code /
 Cursor at a fraction of the running cost, hosted in India, on open-source models.
 
+### The technique, in one line — *decomposition-first routing*
+
+**Decomposition-first routing:** split each turn into typed slices and route each slice to the
+cheapest tier that can *actually* solve it — escalating **up front on ambiguity and
+code-structural hardness**, and on **verified failure** only as the backstop — so small open
+models do the boring ~90% and the frontier-grade model only ever sees the irreducible-hard core.
+(Named to contrast with commodity "model routers" that pick one model per prompt; the lever is
+the *decomposition*, not the routing.)
+
+**Escalate before failure, not just on it.** You can't know a slice will fail until the fix has
+already landed in the tree — and by then you've paid for the cheap attempt *and* touched the
+codebase. So the router is built to predict what the least-capable tier *can't* solve — reading
+ambiguity and code structure (blast-radius, fan-in, coupling), not the prompt's wording — and
+send those slices straight to a stronger tier. Verify-then-escalate is the safety net for the
+hardness that slips through, not the primary trigger. That predictive step is what a
+text-only "model router" structurally cannot do — it can't see the code.
+
+**The three insights that drove us to build it:**
+
+1. **Most coding work isn't frontier work.** Reads, edits, renames, running tests, propagating
+   a change across call sites — the bulk of a coding turn is mechanical. Paying the strongest,
+   priciest model for it is the waste, and it's where the bill actually goes.
+2. **The discipline lives in the harness, not the model.** "Plan → act → verify → don't fake a
+   green test → don't thrash" are guarantees we engineer *into the loop* (decompose, verify,
+   contain, escalate), and they transfer to a cheap model. A well-built harness makes a small
+   open model behave like an expensive one — *that* is the lever, not a bigger model.
+3. **Hand it the right slice, not the whole repo.** Fewer, higher-signal tokens — pulled from a
+   live code graph, not by reading whole files — are what keep the cheap tiers accurate, which
+   is what makes "default cheap" *safe* instead of cheap-but-wrong.
+
+Put together, the expensive model becomes a rarely-consulted specialist and the boring share of
+the work moves onto cheap, self-hostable tiers — precisely the bill enterprises are now capping
+(the savings identity in §2, the worked numbers in §12, the market in §14).
+
 ---
 
 ## 2. The two beliefs everything is built on
@@ -190,11 +224,14 @@ Per-slice allocation runs on econ's risk-escalation router (the moat — see als
 - **Signal = the graph, not the text.** Blast-radius / fan-in, call-graph centrality,
   cyclomatic complexity → one **0–100 risk score** per slice. (A model-routing proxy cannot
   compute this; it can't see the code structure. That's why it's defensible.)
-- **Risk is one feature, not the whole decision.** A slice's tier comes from its shape ×
-  coupling × test-strength × need; risk is the **tiebreak** that pushes a borderline cell
-  upward. What makes "default cheap" safe is the per-slice **verification gate** — execute
-  cheap, verify, escalate only *actual* failures — which is cheaper than escalating on the
-  *fear* of failure.
+- **Predict un-solvability up front — don't just wait for failure.** A slice's tier comes from
+  its shape × coupling × test-strength × need, so an ambiguous, decision-shaped, or
+  high-blast-radius slice is routed to a stronger tier *before* the cheap tier ever touches it
+  (you can't un-know a failure once the fix has landed, and it already cost you the attempt).
+  Risk is the **tiebreak** that pushes a borderline cell upward — one feature, never the whole
+  decision. For everything else, the per-slice **verification gate** — execute cheap, verify,
+  escalate only *actual* failures — is the backstop, and it's cheaper than escalating every
+  slice on the *fear* of failure.
 - **Climb the ladder, don't jump to the oracle.** A rejected slice first retries its own tier
   while the failure signature keeps changing, then climbs one rung at a time
   (executor → conductor → reasoner → oracle) — the oracle is the last resort, not the first
@@ -924,6 +961,12 @@ Two things, held together, make econ defensible:
   it and is the first escalation rung above the conductor.
 - **Compiled brief** — the distilled package (problem + slices + attempts + question + output
   shape) sent to the oracle in place of the raw transcript.
+- **Decomposition-first routing** — econ's core technique (§1): split each turn into typed
+  slices and route each to the cheapest tier that can actually solve it — escalating up front on
+  ambiguity and code-structural hardness, and on verified failure as the backstop — so small
+  models do the bulk and the oracle sees only the irreducible-hard core. Named to contrast with
+  commodity model-routers that pick one model per prompt — the lever is the decomposition (it
+  raises the cheap-tier share), not the routing.
 - **Risk-escalation router** — allocates each decomposed slice to the cheapest capable tier,
   using code-structural risk (blast-radius, fan-in, centrality) as one feature/tiebreak, with
   hysteresis, abstention, triage, and double-pay accounting; whole-turn routing is the
