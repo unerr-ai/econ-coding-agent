@@ -42,6 +42,11 @@ export type StreamInput = {
   system: string[]
   messages: ModelMessage[]
   small?: boolean
+  /** Small calls skip the adaptive reasoning gate. Set this to still un-mute the
+   *  conductor's muted `reasoningEffort:"none"` for one small one-shot — the arming
+   *  judge needs the conductor to reason (muted, minimax over-fires STRONG-grounded
+   *  diagnoses; see arming-judge.ts / PROMPT_SLICING_CORPUS.md). */
+  unmuteReasoning?: boolean
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"

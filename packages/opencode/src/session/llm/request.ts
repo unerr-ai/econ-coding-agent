@@ -29,6 +29,8 @@ type PrepareInput = {
   readonly system: string[]
   readonly messages: ModelMessage[]
   readonly small?: boolean
+  /** Explicit un-mute for a small call whose conductor still needs to reason (the arming judge). */
+  readonly unmuteReasoning?: boolean
   readonly tools: Record<string, Tool>
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
@@ -130,6 +132,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // turn triage ends in a user message and would always read as a "plan" step —
   // un-muted thinking then starves/slows its JSON output (live-fire: triage null
   // on every real turn until this guard).
+  // Small (housekeeping) calls skip the adaptive gate — EXCEPT an explicit
+  // unmuteReasoning request: the arming judge is a small one-shot that STILL needs
+  // the conductor to reason through grounding strength (muted, minimax over-fires
+  // STRONG-grounded diagnoses — see arming-judge.ts / PROMPT_SLICING_CORPUS.md R2).
+  if (input.unmuteReasoning && options.reasoningEffort === "none") {
+    delete options.reasoningEffort
+    yield* Effect.logInfo("reasoning un-muted (explicit)", { sessionID: input.sessionID, reason: "unmuteReasoning" })
+  }
   const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(input.messages, options)
   if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID, reason: reasoningGate })
 

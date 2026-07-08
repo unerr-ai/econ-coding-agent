@@ -107,6 +107,11 @@ const gatewayComplete: TriageComplete = async (request: TriageCompleteRequest): 
       },
       body: JSON.stringify({
         model: GATEWAY_MODEL,
+        // Reasoning left ON (no reasoning_effort:"none") to MIRROR production: the arming
+        // dispatch un-mutes the conductor (prompt.ts armingDispatch `unmuteReasoning:true`)
+        // so minimax can reason through grounding strength — muted, it over-fires
+        // STRONG-grounded diagnoses (grounded-stacktrace / grounded-symbol-plus-file;
+        // PROMPT_SLICING_CORPUS.md R2). 12s ARMING_TIMEOUT_MS covers the ~3s thinking cost.
         messages: [
           { role: "system", content: request.system },
           { role: "user", content: request.user },

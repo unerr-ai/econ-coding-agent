@@ -135,16 +135,12 @@ describe("judgeArming", () => {
     expect(verdict!.hardness).toBe("moderate")
   })
 
-  test(
-    "a complete callback slower than ARMING_TIMEOUT_MS resolves to null",
-    async () => {
-      const complete: TriageComplete = () => new Promise(() => {}) // never resolves
-      const verdict = await judgeArming({ userPrompt: "the app crashes on startup", complete })
-      expect(verdict).toBeNull()
-    },
-    // waits out the full ARMING_TIMEOUT_MS (8s) race — needs more than bun's 5s default
-    12_000,
-  )
+  test("a complete callback slower than the arming timeout resolves to null", async () => {
+    const complete: TriageComplete = () => new Promise(() => {}) // never resolves
+    // Inject a tiny cap so the race resolves instantly instead of waiting the real ARMING_TIMEOUT_MS.
+    const verdict = await judgeArming({ userPrompt: "the app crashes on startup", complete, timeoutMs: 50 })
+    expect(verdict).toBeNull()
+  })
 
   test("a rejected complete callback resolves to null", async () => {
     const complete: TriageComplete = async () => {

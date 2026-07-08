@@ -43,8 +43,16 @@ export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness">
 const ARMING_HARDNESS: ReadonlySet<ArmingHardness> = new Set(["trivial", "moderate", "hard"])
 const ARMING_AMBIGUITY: ReadonlySet<ArmingAmbiguity> = new Set(["clear", "ambiguous"])
 
-/** Blocking cap on the arming call — same budget as turn-triage's live-gateway measurement (§4.1). */
-export const ARMING_TIMEOUT_MS = 8000
+/**
+ * Blocking cap on the arming call. The conductor tier runs muted
+ * (reasoning_effort:"none"), so the no-think path is ~1.3s median / ~2.4s max
+ * (2026-07-09 minimax probe). 12s leaves headroom for cold-start + provider
+ * jitter before degrading to heuristicArming, while still capping the user's
+ * turn-open wait on a true hang. Raised from 8s after the minimax conductor swap:
+ * unthrottled, minimax emits a ~510-token chain-of-thought (3.2s median) that
+ * clipped the old cap — the real fix is keeping it muted, this is defense-in-depth.
+ */
+export const ARMING_TIMEOUT_MS = 12000
 
 /** Stable single-line prefix of the system prompt — lets a scripted LLM stub recognize an arming request without duplicating the full text. */
 export const ARMING_PROMPT_MARKER = "You are the localization-arming judge"
@@ -95,6 +103,8 @@ export interface JudgeArmingInput {
   readonly complete: TriageComplete
   /** Fired when a completed attempt fails parse validation and the one retry launches — the caller's telemetry hook. */
   readonly onParseRetry?: () => void
+  /** Override the blocking cap (defaults to ARMING_TIMEOUT_MS) — tests pass a small value to avoid a real wall-clock wait. */
+  readonly timeoutMs?: number
 }
 
 /**
@@ -190,13 +200,14 @@ async function raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
  */
 export async function judgeArming(input: JudgeArmingInput): Promise<ArmingVerdict | null> {
   const { userPrompt, verdict, todos, complete } = input
+  const timeoutMs = input.timeoutMs ?? ARMING_TIMEOUT_MS
   const user = buildArmingUser({ userPrompt, verdict, todos })
   for (let attempt = 0; attempt < 2; attempt++) {
     let raw: string
     try {
       raw = await raceTimeout(
-        complete({ system: ARMING_SYSTEM_PROMPT, user, timeoutMs: ARMING_TIMEOUT_MS }),
-        ARMING_TIMEOUT_MS,
+        complete({ system: ARMING_SYSTEM_PROMPT, user, timeoutMs }),
+        timeoutMs,
       )
     } catch {
       return null
