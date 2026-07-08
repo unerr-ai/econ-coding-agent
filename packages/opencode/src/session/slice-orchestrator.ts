@@ -1155,9 +1155,13 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict): TriageTodoRow[]
  * @sem domain=routing role=router
  */
 export function roundUpTriageShapes(verdict: TriageVerdict, userPrompt: string): TriageVerdict {
-  // Suppress the round-up (cheap conductor goes direct) only for a SIMPLE bug
-  // that names its file; a hard cross-layer bug rounds up even with a file named.
-  if (FILE_TARGET_RE.test(userPrompt) && !isHardDiagnosisPrompt(userPrompt)) return verdict
+  // A grounded bug that names its file goes direct on the cheap conductor path —
+  // it already has its start point, so the reasoner localization pre-pass is pure
+  // waste. Only a grounded bug with NO file target rounds up to arm localization.
+  // (Text-hardness gating was removed: issue prose almost always links source
+  // paths, so a subsystem-token count false-positives on ordinary bugs and
+  // over-fires the reasoner path — 12039 blew up $0.31 this way.)
+  if (FILE_TARGET_RE.test(userPrompt)) return verdict
   if (!verdict.goals.some((g) => g.shape === "diagnosis-grounded")) return verdict
   return {
     ...verdict,
