@@ -5,7 +5,11 @@
  * injected runner (pure — no shell-out in unit tests), flags skip signatures
  * in otherwise-passing output ("OK (skipped=10)" is suspicion, not success),
  * and extracts a case count so the ladder can reject a green attempt whose
- * suite shrank since the previous one (dropped-case integrity); `monitorTrajectory`
+ * suite shrank since the previous one (dropped-case integrity); `runRegressionGate`
+ * re-runs a set of previously-green neighbor tests through the same injected
+ * runner and reports any that turned red, catching a fix that regresses an
+ * untouched neighbor while the slice's own sound check still passes;
+ * `monitorTrajectory`
  * flags reward-hacking patterns (test-file edits outside a test slice,
  * weakened assertions, skip markers added, check-disabling config changes)
  * that a green outcome alone would miss (F15), and — for a read-only
@@ -145,6 +149,31 @@ export async function runSoundCheck(spec: VerifySpec, runner: CommandRunner): Pr
     flags,
     ...(caseCount !== undefined ? { caseCount } : {}),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Regression gate — previously-green neighbor tests, checked for regressions
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a set of previously-green (PASS_TO_PASS) neighbor tests through the
+ * injected runner and reports any that now fail. The sound rung alone only
+ * checks the slice's own spec — a fix that turns the target test green while
+ * regressing an untouched neighbor still passes it unnoticed; this hands the
+ * caller a factual report to gate against instead.
+ *
+ * @sem domain=routing role=regression-gate
+ */
+export async function runRegressionGate(opts: {
+  neighbors: readonly VerifyCommand[]
+  runner: CommandRunner
+}): Promise<{ regressed: boolean; failures: VerifyCommand[] }> {
+  const failures: VerifyCommand[] = []
+  for (const neighbor of opts.neighbors) {
+    const result = await opts.runner(neighbor)
+    if (result.exitCode !== 0) failures.push(neighbor)
+  }
+  return { regressed: failures.length > 0, failures }
 }
 
 // ---------------------------------------------------------------------------

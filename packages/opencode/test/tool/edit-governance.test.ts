@@ -9,7 +9,9 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { execSync } from "node:child_process"
 import { BunSqliteGraph } from "@opencode-ai/code-intelligence"
 import type { EditImpactGraph } from "@opencode-ai/code-intelligence"
 import { callersAtRiskWarning } from "../../src/tool/edit-governance"
@@ -169,5 +171,133 @@ describe("B3 — testEditDenialMessage", () => {
     expect(msg).toContain("no-test-edit gate")
     expect(msg).toContain("NEW test file")
     expect(msg).toContain("do not edit it")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// OL-7.9 — the always-on structural test-edit gate: snapshotTestTree,
+// detectTestEdit, and the single evaluateTestEditGate decision point.
+// ---------------------------------------------------------------------------
+
+import {
+  snapshotTestTree,
+  detectTestEdit,
+  evaluateTestEditGate,
+  type TestTreeSnapshot,
+} from "../../src/tool/edit-governance"
+
+function withTmpGitRepo(fn: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "eg-structural-"))
+  try {
+    execSync("git init -q", { cwd: dir })
+    fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe("OL-7.9 — snapshotTestTree", () => {
+  it("resolves to an empty snapshot outside a git repo", () => {
+    const dir = mkdtempSync(join(tmpdir(), "eg-nogit-"))
+    try {
+      expect(snapshotTestTree(dir).hashes).toEqual({})
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("hashes tracked test files and ignores tracked source files", () => {
+    withTmpGitRepo((dir) => {
+      writeFileSync(join(dir, "app.ts"), "export const a = 1\n")
+      writeFileSync(join(dir, "app.test.ts"), "test('a', () => {})\n")
+      execSync("git add -A", { cwd: dir })
+      const snap = snapshotTestTree(dir)
+      expect(Object.keys(snap.hashes)).toEqual(["app.test.ts"])
+    })
+  })
+})
+
+describe("OL-7.9 — detectTestEdit", () => {
+  it("reports a MODIFIED tracked test file, not a brand-new one (matches --diff-filter=M)", () => {
+    withTmpGitRepo((dir) => {
+      writeFileSync(join(dir, "app.test.ts"), "test('a', () => {})\n")
+      execSync("git add -A", { cwd: dir })
+      const before = snapshotTestTree(dir)
+
+      writeFileSync(join(dir, "app.test.ts"), "test('a', () => { /* changed */ })\n")
+      writeFileSync(join(dir, "repro.test.ts"), "test('new', () => {})\n")
+      execSync("git add -A", { cwd: dir })
+      const after = snapshotTestTree(dir)
+
+      expect(detectTestEdit(before, after)).toEqual(["app.test.ts"])
+    })
+  })
+
+  it("reports nothing when no tracked test file's content changed", () => {
+    const before: TestTreeSnapshot = { hashes: { "a.test.ts": "h1" } }
+    const after: TestTreeSnapshot = { hashes: { "a.test.ts": "h1" } }
+    expect(detectTestEdit(before, after)).toEqual([])
+  })
+
+  it("ignores a file only present in `before` (a deletion, not a modification)", () => {
+    const before: TestTreeSnapshot = { hashes: { "a.test.ts": "h1" } }
+    const after: TestTreeSnapshot = { hashes: {} }
+    expect(detectTestEdit(before, after)).toEqual([])
+  })
+})
+
+describe("OL-7.9 — evaluateTestEditGate (the single gate: structural + policy)", () => {
+  const unchanged: TestTreeSnapshot = { hashes: { "a.test.ts": "h1" } }
+  const changed: TestTreeSnapshot = { hashes: { "a.test.ts": "h2" } }
+
+  it("no structural test edit → allow, regardless of armed or redToGreen", () => {
+    setTestEditGate("ses_gate_a", true)
+    const result = evaluateTestEditGate({
+      sessionID: "ses_gate_a",
+      before: unchanged,
+      after: unchanged,
+      redToGreen: true,
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("structural test edit on an armed (fix-shaped) session → hard deny", () => {
+    setTestEditGate("ses_gate_b", true)
+    const result = evaluateTestEditGate({
+      sessionID: "ses_gate_b",
+      before: unchanged,
+      after: changed,
+      redToGreen: false,
+    })
+    expect(result.action).toBe("deny")
+    if (result.action === "deny") {
+      expect(result.file).toBe("a.test.ts")
+      expect(result.message).toContain("a.test.ts")
+    }
+  })
+
+  it("structural test edit + red→green on an unarmed session → StuckSignal, not a block", () => {
+    setTestEditGate("ses_gate_c", false)
+    const result = evaluateTestEditGate({
+      sessionID: "ses_gate_c",
+      before: unchanged,
+      after: changed,
+      redToGreen: true,
+    })
+    expect(result).toEqual({
+      action: "stuck",
+      signal: { reason: "test-edit", signature: "a.test.ts", count: 1 },
+    })
+  })
+
+  it("structural test edit without red→green on an unarmed session → allow (not a blanket ban)", () => {
+    setTestEditGate("ses_gate_d", false)
+    const result = evaluateTestEditGate({
+      sessionID: "ses_gate_d",
+      before: unchanged,
+      after: changed,
+      redToGreen: false,
+    })
+    expect(result).toEqual({ action: "allow" })
   })
 })

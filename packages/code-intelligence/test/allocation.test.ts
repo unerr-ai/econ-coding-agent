@@ -5,7 +5,11 @@
  * The load-bearing assertion is the CORE INVARIANT of the decomposition-first
  * reframe: a high-coupling *testable* slice does NOT escalate to oracle — the
  * sound check is the safety net. Everything else (risk, the conductor need hint)
- * is only an in-cell tiebreaker and can never break that invariant.
+ * is only an in-cell tiebreaker and can never break that invariant. A second
+ * load-bearing assertion (SM5): `design` routes to the reasoner regardless of
+ * which coupling/test-strength cell it lands in — coupling and difficulty are
+ * different axes, so a testable/high-coupling design slice must not be demoted
+ * to the executor. `reasonCode` pins the machine-readable factor behind each tier.
  */
 
 import { describe, it, expect } from "bun:test"
@@ -74,9 +78,22 @@ describe("allocateSlice — core invariant: testable never escalates to oracle",
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — slice type", () => {
-  it("design → oracle even when low-coupling and testable", () => {
+  it("design → reasoner even when low-coupling and testable", () => {
     const a = allocateSlice({ sliceType: "design", coupling: "low", testStrength: "testable" })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("reasoner")
+    expect(a.reasonCode).toBe("design-insight")
+  })
+
+  // SM5 regression: coupling and difficulty are different axes. An atomic
+  // insight bug (django-11885: combine fast-delete queries with
+  // defaultdict(list) + reduce(operator.or_, …)) can sit in the
+  // high-coupling·testable cell and still exceed executor capability — the
+  // matrix must not demote it there because a sound check exists.
+  it("design → reasoner even with HIGH coupling and testable (the SM5 fix — insight-heavy work routes up regardless of coupling)", () => {
+    const a = allocateSlice({ sliceType: "design", coupling: "high", testStrength: "testable" })
+    expect(a.tier).toBe("reasoner")
+    expect(a.tier).not.toBe("executor")
+    expect(a.reasonCode).toBe("design-insight")
   })
 
   it("design keeps a sound verifier when the slice is testable", () => {
@@ -84,16 +101,17 @@ describe("allocateSlice — slice type", () => {
     expect(a.verification).toBe("sound")
   })
 
-  it("design → judge verifier when untestable", () => {
+  it("design → judge verifier when untestable, tier stays reasoner (not oracle)", () => {
     const a = allocateSlice({ sliceType: "design", coupling: "high", testStrength: "untestable" })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("reasoner")
     expect(a.verification).toBe("judge")
   })
 
-  it("mechanical / recon / verify flow through the matrix (testable → executor)", () => {
+  it("mechanical / recon / verify flow through the matrix (testable → executor), unaffected by the design fix", () => {
     for (const sliceType of ["mechanical", "recon", "verify"] as const) {
       const a = allocateSlice({ sliceType, coupling: "high", testStrength: "testable" })
       expect(a.tier).toBe("executor")
+      expect(a.reasonCode).toBe("testable-invariant")
     }
   })
 })
@@ -132,9 +150,15 @@ describe("allocateSlice — need hint", () => {
     expect(a.tier).toBe("oracle")
   })
 
-  it("need cannot lower a design slice below its oracle floor (matrix decides the floor)", () => {
+  it("need cannot lower a design slice below its reasoner floor (matrix decides the floor)", () => {
     const a = allocateSlice({ sliceType: "design", need: "executor" })
+    expect(a.tier).toBe("reasoner")
+  })
+
+  it("need CAN raise a design slice above its reasoner floor to oracle", () => {
+    const a = allocateSlice({ sliceType: "design", need: "oracle" })
     expect(a.tier).toBe("oracle")
+    expect(a.reasonCode).toBe("need-hint")
   })
 
   it("need cannot lower the high-coupling·untestable residual below oracle", () => {
@@ -210,5 +234,31 @@ describe("allocateSlice — defensive defaults", () => {
 
   it("always returns a non-empty reason trace", () => {
     expect(allocateSlice({ coupling: "high", testStrength: "testable" }).reason.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// reasonCode — machine-readable telemetry for the deciding factor (SM5)
+// ---------------------------------------------------------------------------
+
+describe("allocateSlice — reasonCode telemetry", () => {
+  it("tags the high-coupling·untestable residual", () => {
+    const a = allocateSlice({ coupling: "high", testStrength: "untestable" })
+    expect(a.reasonCode).toBe("high-coupling-untestable-residual")
+  })
+
+  it("tags the low-coupling·untestable default", () => {
+    const a = allocateSlice({ coupling: "low", testStrength: "untestable" })
+    expect(a.reasonCode).toBe("untestable-default")
+  })
+
+  it("tags an unbacked mechanical/untestable slice", () => {
+    const a = allocateSlice({ sliceType: "mechanical", coupling: "low", testStrength: "untestable" })
+    expect(a.reasonCode).toBe("mechanical-unbacked")
+  })
+
+  it("tags a risk-tiebreak override", () => {
+    const a = allocateSlice({ coupling: "low", testStrength: "untestable", risk: 90 })
+    expect(a.reasonCode).toBe("risk-tiebreak")
   })
 })

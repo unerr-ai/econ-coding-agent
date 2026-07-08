@@ -17,6 +17,8 @@ import { SystemPrompt } from "./system"
 import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
 import { setTestEditGate, testEditGateArmed } from "../tool/edit-governance"
+import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
+import { observeStep, stuckNudgeText } from "./turn-supervisor"
 import {
   createRmVerifierRung,
   resolveVerifierTier,
@@ -48,6 +50,7 @@ import {
   renderSliceDigestLedger,
   deriveTurnProbe,
   runTurnProbeGate,
+  makeShellCommandRunner,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
   type SliceDigestEntry,
@@ -1422,10 +1425,26 @@ export const layer = Layer.effect(
         // retry count. The gate re-runs the repro at turn END so an INLINE fix
         // that left it red cannot conclude — the slice-level probe rung only
         // guards dispatched slices, which an inline fix never creates.
-        let turnPinnedProbe: ReturnType<typeof deriveTurnProbe>
+        let turnPinnedProbe: Awaited<ReturnType<typeof deriveTurnProbe>>
         let probeGateRetries = 0
         const MAX_PROBE_GATE_RETRIES = 3
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+
+        // SM4 — root-loop stuck supervisor. The inline path (this loop) had no
+        // per-step supervisor: django-11885 thrashed 12x on the same red test
+        // and then fake-green-edited it, all before the M4 exit gate below ever
+        // ran (every thrash step carried tool calls, so the turn never took the
+        // exit path). The supervisor distils each completed step and, on a stuck
+        // signal, climbs a capped two-rung ladder: rung 1 injects a rethink
+        // nudge (a USER message, which the adaptive reasoning gate reads as a
+        // plan step and un-mutes the conductor's thinking); rung 2 also bumps
+        // the driving model to the reasoner as edit-and-run owner. Root sessions
+        // only — child slices already run the slice-loop FSM.
+        const stuckSupervisor = session.parentID ? undefined : createStuckSupervisor()
+        let escalatedModelRef: { providerID: string; modelID: string } | undefined
+        let stuckEscalations = 0
+        const MAX_STUCK_ESCALATIONS = 2
+        let lastObservedAssistantID: string | undefined
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1449,6 +1468,81 @@ export const layer = Layer.effect(
             lastAssistantMsg?.parts.some(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
+
+          // SM4 — observe the step that just completed. Pin a reproduction from
+          // the most-specific test the model ran RED (probe-from-red, so a
+          // narrative prompt that named no repro still arms the turn-end gate),
+          // then, if the supervisor flags a stuck loop, climb the escalation
+          // ladder before the next model call is issued.
+          if (stuckSupervisor && hasToolCalls && lastAssistant && lastAssistant.id !== lastObservedAssistantID) {
+            lastObservedAssistantID = lastAssistant.id
+            const stepObs = observeStep(lastAssistantMsg?.parts ?? [], {
+              isTestSlice: !testEditGateArmed(sessionID),
+            })
+            // probe-from-red: pin while the test is still red — re-running it at
+            // turn end (deriveTurnProbe's runner) confirms redness and picks the
+            // most-specific case; a fake-green test edit is caught separately by
+            // the edit-time deny and the turn-end test-tree guard.
+            if (!turnPinnedProbe && !session.parentID && stepObs.failedCommands.length > 0) {
+              const candidateTests = [...new Set(stepObs.failedCommands)].map((command) => ({
+                kind: "test" as const,
+                command,
+              }))
+              turnPinnedProbe = yield* Effect.promise(() =>
+                deriveTurnProbe({
+                  promptText: "",
+                  candidateTests,
+                  runner: makeShellCommandRunner({ cwd: ctx.directory }),
+                }),
+              )
+              if (turnPinnedProbe)
+                yield* Effect.logInfo("turn_probe_pinned_from_red", {
+                  "session.id": sessionID,
+                  probe: turnPinnedProbe.command,
+                })
+            }
+            const stuckSignal = stuckSupervisor.observe(stepObs.observation)
+            if (stuckSignal && stuckEscalations < MAX_STUCK_ESCALATIONS) {
+              stuckEscalations++
+              // A test-edit tell jumps straight to the reasoner (code-wrong vs
+              // test-stale is a reasoning call); otherwise rung 1 rethinks on the
+              // conductor, rung 2 bumps to the reasoner as edit-and-run owner.
+              const toReasoner = stuckSignal.reason === "test-edit" || stuckEscalations >= 2
+              if (toReasoner) {
+                escalatedModelRef = resolveSliceModel("reasoner")
+                yield* Effect.logWarning("stuck_escalate", {
+                  "session.id": sessionID,
+                  reason: stuckSignal.reason,
+                  count: stuckSignal.count,
+                  tier: "reasoner",
+                })
+              } else {
+                yield* Effect.logInfo("stuck_rethink", {
+                  "session.id": sessionID,
+                  reason: stuckSignal.reason,
+                  count: stuckSignal.count,
+                })
+              }
+              const rethink: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(rethink)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: rethink.id,
+                sessionID,
+                type: "text",
+                text: stuckNudgeText(stuckSignal, stuckEscalations),
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
+          }
 
           // OL-9.6b: an output-cap truncation with no surviving tool calls means
           // the step produced nothing actionable — continue the turn instead of
@@ -1602,7 +1696,7 @@ export const layer = Layer.effect(
               // fix-shaped root turn, so the turn-end gate can re-run it even
               // when the fix lands inline (no dispatched slice → no probe rung).
               if (isFixShapedPrompt(userText)) {
-                turnPinnedProbe = deriveTurnProbe(userText)
+                turnPinnedProbe = yield* Effect.promise(() => deriveTurnProbe({ promptText: userText }))
                 if (turnPinnedProbe)
                   yield* Effect.logInfo("turn_probe_pinned", {
                     "session.id": sessionID,
@@ -1709,7 +1803,16 @@ export const layer = Layer.effect(
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          // SM4 — once the supervisor has escalated, the reasoner drives the
+          // remaining steps of this turn (edit-and-run owner); otherwise the
+          // turn's own bound model.
+          const model = escalatedModelRef
+            ? yield* getModel(
+                ProviderV2.ID.make(escalatedModelRef.providerID),
+                ModelV2.ID.make(escalatedModelRef.modelID),
+                sessionID,
+              )
+            : yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {

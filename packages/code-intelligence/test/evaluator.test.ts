@@ -81,7 +81,7 @@ describe("evaluate — rule 2: decision-shaped ambiguity blocks the round-down",
     const v = evaluate(
       ctx({ sliceType: "design", verifyStrength: strongVerify, containmentAvailable: true }),
     )
-    expect(v.tier).toBe("oracle")
+    expect(v.tier).toBe("reasoner")
     expect(v.reasons.some((r) => r.startsWith("round-down:"))).toBe(false)
   })
 })
@@ -233,7 +233,7 @@ describe("evaluate — rule 5: cache-switch guard", () => {
         hysteresis: { lastTier: "executor", signalDelta: true },
       }),
     )
-    expect(v.tier).toBe("oracle")
+    expect(v.tier).toBe("reasoner")
     expect(v.reasons.some((r) => r.startsWith("cache:"))).toBe(false)
   })
 

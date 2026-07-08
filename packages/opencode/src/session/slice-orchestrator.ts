@@ -546,15 +546,41 @@ export const TEST_TREE_GUARD_COMMAND: VerifyCommand = {
 // ---------------------------------------------------------------------------
 
 /**
- * The most-specific reproduction a turn's prompt names, if any — the turn-level
- * analogue of a slice's probeCommand. Lets the turn-end gate re-run the exact
- * failing case even when the conductor fixed the bug inline and dispatched no
- * slices, where the slice-level probe rung never engages.
+ * The pinned reproduction for the turn-end prove-it gate, from the best
+ * available source: a command the turn's prompt names wins when present
+ * (the turn-level analogue of a slice's probeCommand); otherwise, given
+ * candidate tests and a runner, falls back to the most-specific candidate
+ * that is currently RED, so a narrative issue naming no command still gets
+ * a pinned probe the turn-end gate can require go green. Lets the turn-end
+ * gate re-run the exact failing case even when the conductor fixed the bug
+ * inline and dispatched no slices, where the slice-level probe rung never
+ * engages.
  *
  * @sem domain=routing role=repro-pin
  */
-export function deriveTurnProbe(promptText: string): VerifyCommand | undefined {
-  return mostSpecificRepro(extractVerifyCommands(promptText))
+export async function deriveTurnProbe(opts: {
+  promptText: string
+  /** Candidate tests to probe for red-state when the prompt names no command. */
+  candidateTests?: readonly VerifyCommand[]
+  /** Injected runner for the red-state fallback; omit to skip it (prompt-text-only, as before). */
+  runner?: CommandRunner
+}): Promise<VerifyCommand | undefined> {
+  const named = mostSpecificRepro(extractVerifyCommands(opts.promptText))
+  if (named) return named
+  if (!opts.runner || !opts.candidateTests?.length) return undefined
+
+  let best: VerifyCommand | undefined
+  let bestScore = 0
+  for (const candidate of opts.candidateTests) {
+    const score = reproSpecificity(candidate)
+    if (score === 0 || score <= bestScore) continue // can't beat the current pin — skip the run
+    const result = await opts.runner(candidate)
+    if (result.exitCode !== 0) {
+      bestScore = score
+      best = candidate
+    }
+  }
+  return best
 }
 
 /** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */

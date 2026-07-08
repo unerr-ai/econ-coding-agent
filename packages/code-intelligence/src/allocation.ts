@@ -4,11 +4,14 @@
  * which verifier rung must gate it. The decomposition-first reframe's core rule
  * lives here: a high-coupling *testable* slice stays on the cheap executor because
  * a sound check (compile / tests / types) is the safety net — so coupling never
- * escalates a checkable slice. Only design slices and the untestable+high-coupling
- * residual reach the oracle. Coupling and test-strength are the primary allocator;
- * risk and the conductor's `need` hint are tiebreakers within a cell, never the
- * primary lever. Pure: no I/O — tiers resolve to concrete models downstream through
- * model-registry (tierModelRef), so nothing here hard-codes a model id.
+ * escalates a checkable slice. Design slices route to the reasoner regardless of
+ * coupling (SM5: coupling and difficulty are different axes, so an insight-heavy
+ * slice must not be demoted by a testable/high-coupling cell); the untestable +
+ * high-coupling residual is the only cell that floors at the oracle. Coupling and
+ * test-strength are the primary allocator; risk and the conductor's `need` hint
+ * are tiebreakers within a cell, never the primary lever. Pure: no I/O — tiers
+ * resolve to concrete models downstream through model-registry (tierModelRef), so
+ * nothing here hard-codes a model id.
  *
  * @sem domain=routing role=allocator
  */
@@ -17,8 +20,8 @@ import type { EconTier } from "./region"
 
 /**
  * Decomposition slice type (OL-7.1). Only `design` is treated specially by the
- * allocator (it is the irreducible-reasoning type → oracle); the rest flow
- * through the coupling × test-strength matrix.
+ * allocator (it is the insight-heavy type → reasoner, regardless of coupling); the
+ * rest flow through the coupling × test-strength matrix.
  *
  * @sem domain=routing role=type
  */
@@ -44,6 +47,22 @@ export type TestStrength = "testable" | "untestable"
  * @sem domain=routing role=type
  */
 export type VerifierRung = "sound" | "qe" | "judge"
+
+/**
+ * Machine-readable code for the factor that decided a slice's tier — the matrix
+ * cell that set the floor, or the tiebreaker/hint that overrode it (SM5 routing
+ * telemetry). Callers log it; nothing here parses it back into a decision.
+ *
+ * @sem domain=routing role=type
+ */
+export type AllocationReasonCode =
+  | "design-insight"
+  | "testable-invariant"
+  | "high-coupling-untestable-residual"
+  | "mechanical-unbacked"
+  | "untestable-default"
+  | "risk-tiebreak"
+  | "need-hint"
 
 /**
  * One slice's structural features. `coupling`/`testStrength` come from the OL-7.9
@@ -78,8 +97,9 @@ export interface SliceAllocationInput {
 }
 
 /**
- * The resolved allocation for one slice: the executing tier and the gating
- * verifier rung, plus a human-readable trace of the cell + tiebreakers applied.
+ * The resolved allocation for one slice: the executing tier, the gating verifier
+ * rung, a machine-readable code for the deciding factor, and a human-readable
+ * trace of the cell + tiebreakers applied.
  *
  * @sem domain=routing role=type
  */
@@ -88,6 +108,12 @@ export interface SliceAllocation {
   tier: EconTier
   /** Verifier rung that must gate the slice before acceptance. */
   verification: VerifierRung
+  /**
+   * Machine-readable code for the factor that decided `tier` (routing telemetry).
+   * Optional so a hand-built `SliceAllocation` (e.g. a re-derived post-evaluate
+   * allocation, or a test fixture) doesn't need one — `allocateSlice` always sets it.
+   */
+  reasonCode?: AllocationReasonCode
   /** Explanation of the matrix cell chosen and any tiebreakers applied. */
   reason: string
 }
@@ -137,10 +163,12 @@ export function lowerTier(tier: EconTier): EconTier {
 
 /**
  * Allocate one decomposed slice to a model tier + verifier rung using the
- * (coupling × test-strength) matrix (OL-7.2). Coupling and test-strength are the
- * primary allocator; the `design` slice type forces the oracle floor; `risk` and
- * the conductor's `need` hint act only as in-cell tiebreakers. Never escalates a
- * testable slice off the cheap executor — that invariant is the whole reframe.
+ * (coupling × test-strength) matrix (OL-7.2); `design` routes to the reasoner
+ * regardless of coupling because coupling and difficulty are different axes
+ * (SM5), while `risk` and the conductor's `need` hint remain in-cell tiebreakers
+ * and a testable non-design slice never escalates off the executor. Returns a
+ * machine-readable `reasonCode` alongside the prose `reason` trace so callers can
+ * log which factor decided the tier.
  *
  * @sem domain=routing role=allocator
  */
@@ -172,14 +200,20 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
 
   // --- Matrix tier (the primary allocator).
   let tier: EconTier
+  let reasonCode: AllocationReasonCode
   if (sliceType === "design") {
-    tier = "oracle"
-    notes.push("design slice → oracle (irreducible reasoning)")
+    // SM5: coupling and difficulty are different axes — an atomic insight bug can
+    // sit in ANY coupling/test-strength cell and still exceed executor capability,
+    // so design routes to the reasoner unconditionally instead of by matrix cell.
+    tier = "reasoner"
+    reasonCode = "design-insight"
+    notes.push("design slice → reasoner (insight-heavy; coupling never demotes it)")
   } else if (testable) {
     // CORE INVARIANT: a testable slice stays on the cheap executor regardless of
     // coupling — the sound check is the safety net, so coupling never escalates a
     // checkable slice. This is the decomposition-first reframe's whole point.
     tier = "executor"
+    reasonCode = "testable-invariant"
     notes.push(
       highCoupling
         ? "high-coupling · testable → executor (deterministic wiring + sound verify hold the coupling — the core invariant, NOT oracle)"
@@ -189,6 +223,7 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
     // The residual: tightly-coupled AND uncheckable — the only structural cell
     // that reaches the oracle.
     tier = "oracle"
+    reasonCode = "high-coupling-untestable-residual"
     notes.push("high-coupling · untestable → oracle (the residual)")
   } else if (sliceType === "mechanical" && input.specBacked !== true) {
     // An UNBACKED mechanical edit in the untestable cell: the executor would be
@@ -196,9 +231,11 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
     // to catch it — the plausible-but-wrong cell. The reasoner authors it instead
     // (spec-backed edits stay executor: transcription + QE is safe and cheap).
     tier = "reasoner"
+    reasonCode = "mechanical-unbacked"
     notes.push("low-coupling · untestable · mechanical without a design patch → reasoner authors the edit")
   } else {
     tier = "executor"
+    reasonCode = "untestable-default"
     notes.push("low-coupling · untestable → executor")
   }
 
@@ -207,21 +244,23 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
   //     testable cell (invariant) or the already-oracle cells.
   if (!testable && !highCoupling && riskHigh) {
     tier = higherTier(tier, "oracle")
+    reasonCode = "risk-tiebreak"
     notes.push(`risk=${input.risk} > ${ALLOCATION_RISK_TIEBREAK}: borderline broken toward oracle`)
   }
 
   // --- Conductor `need` hint: can RAISE the tier above the matrix floor, but can
   //     never lift a testable slice above executor — the safety-net invariant
-  //     overrides an over-eager hint (design keeps its oracle floor and is exempt).
+  //     overrides an over-eager hint (design keeps its reasoner floor and is exempt).
   const needTier = parseTier(input.need)
   if (needTier !== undefined && TIER_RANK[needTier] > TIER_RANK[tier]) {
     if (testable && sliceType !== "design") {
       notes.push(`need="${input.need}" ignored: testable slice is clamped to executor (safety-net invariant)`)
     } else {
       tier = needTier
+      reasonCode = "need-hint"
       notes.push(`need="${input.need}" raised the tier`)
     }
   }
 
-  return { tier, verification, reason: notes.join("; ") }
+  return { tier, verification, reasonCode, reason: notes.join("; ") }
 }

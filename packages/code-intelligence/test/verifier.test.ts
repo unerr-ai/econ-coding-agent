@@ -1,6 +1,7 @@
 /**
  * Unit tests for verifier.ts: runSoundCheck (injected command runner, no
- * shell-out, skip-count suspicion), extractCaseCount/compareCaseCounts
+ * shell-out, skip-count suspicion), runRegressionGate (previously-green
+ * neighbor tests checked for regressions), extractCaseCount/compareCaseCounts
  * (dropped-case integrity), monitorTrajectory (F15 behavior-monitor pattern
  * detection), and runVerifierLadder (sound -> behavior gate -> extension/QE
  * composition).
@@ -9,6 +10,7 @@
 import { describe, it, expect } from "bun:test"
 import {
   runSoundCheck,
+  runRegressionGate,
   extractCaseCount,
   compareCaseCounts,
   monitorTrajectory,
@@ -115,6 +117,45 @@ describe("runSoundCheck — skip-count suspicion", () => {
     const verdict = await runSoundCheck({ commands }, runner)
     expect(verdict.pass).toBe(false)
     expect(verdict.flags).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runRegressionGate — previously-green neighbor tests, checked for regressions
+// ---------------------------------------------------------------------------
+
+describe("runRegressionGate", () => {
+  it("reports regressed:false with no failures when every neighbor stays green", async () => {
+    const neighbors: VerifyCommand[] = [
+      { kind: "test", command: "bun test packages/a.test.ts" },
+      { kind: "test", command: "bun test packages/b.test.ts" },
+    ]
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({ exitCode: 0, stdout: "", stderr: "" })
+    const result = await runRegressionGate({ neighbors, runner })
+    expect(result).toEqual({ regressed: false, failures: [] })
+  })
+
+  it("collects every neighbor that turned red, not just the first", async () => {
+    const neighbors: VerifyCommand[] = [
+      { kind: "test", command: "bun test packages/a.test.ts" },
+      { kind: "test", command: "bun test packages/b.test.ts" },
+      { kind: "test", command: "bun test packages/c.test.ts" },
+    ]
+    const runner: CommandRunner = async (cmd): Promise<CommandResult> =>
+      cmd.command === "bun test packages/b.test.ts"
+        ? { exitCode: 0, stdout: "", stderr: "" }
+        : { exitCode: 1, stdout: "", stderr: "regressed" }
+    const result = await runRegressionGate({ neighbors, runner })
+    expect(result.regressed).toBe(true)
+    expect(result.failures.map((f) => f.command)).toEqual(["bun test packages/a.test.ts", "bun test packages/c.test.ts"])
+  })
+
+  it("is vacuously regressed:false on an empty neighbor set", async () => {
+    const runner: CommandRunner = async () => {
+      throw new Error("should never be called")
+    }
+    const result = await runRegressionGate({ neighbors: [], runner })
+    expect(result).toEqual({ regressed: false, failures: [] })
   })
 })
 

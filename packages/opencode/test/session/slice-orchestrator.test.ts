@@ -1152,7 +1152,7 @@ describe("extractVerifyCommands (F2)", () => {
 })
 
 describe("deriveTurnProbe (M4)", () => {
-  it("extracts the most-specific pinned reproduction from a bug prompt", () => {
+  it("extracts the most-specific pinned reproduction from a bug prompt", async () => {
     const prompt = `
 The enum's string conversion is wrong.
 
@@ -1163,22 +1163,22 @@ Repro:
 
 Expected: str() on a Choices member returns its human label, not the raw value.
 `
-    expect(deriveTurnProbe(prompt)).toEqual({
+    expect(await deriveTurnProbe({ promptText: prompt })).toEqual({
       kind: "test",
       command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str",
     })
   })
 
-  it("returns undefined when the prompt names no runnable reproduction", () => {
+  it("returns undefined when the prompt names no runnable reproduction and no candidates are given", async () => {
     const prompt = `
 The app shows Suit.HEART instead of Hearts when rendering the enum.
 str() on the \`Suit\` member returns the raw value instead of the label.
 Please fix it — no need to run anything, it's obvious from the code.
 `
-    expect(deriveTurnProbe(prompt)).toBeUndefined()
+    expect(await deriveTurnProbe({ promptText: prompt })).toBeUndefined()
   })
 
-  it("prefers the more-specific file+filter command over a bare one in the same prompt", () => {
+  it("prefers the more-specific file+filter command over a bare one in the same prompt", async () => {
     const prompt = `
 Two commands are relevant here.
 
@@ -1187,10 +1187,57 @@ Sometimes people just sanity-check with \`bun test\`.
 But the actual repro is:
 \`bun test packages/foo/bar.test.ts -t "handles retry"\`
 `
-    expect(deriveTurnProbe(prompt)).toEqual({
+    expect(await deriveTurnProbe({ promptText: prompt })).toEqual({
       kind: "test",
       command: 'bun test packages/foo/bar.test.ts -t "handles retry"',
     })
+  })
+
+  it("prefers a command named in the prompt over the red-state fallback, and never runs the candidates", async () => {
+    const prompt = "Repro: `python tests/runtests.py model_enums.tests.ChoicesTests.test_str`"
+    const runner: CommandRunner = async () => {
+      throw new Error("should never be called — the prompt already named a repro")
+    }
+    const result = await deriveTurnProbe({
+      promptText: prompt,
+      candidateTests: [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }],
+      runner,
+    })
+    expect(result).toEqual({
+      kind: "test",
+      command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str",
+    })
+  })
+
+  it("falls back to the most-specific currently-RED candidate when the prompt names no command", async () => {
+    const prompt = "The app shows the wrong label. Please fix it."
+    const candidates: VerifyCommand[] = [
+      { kind: "test", command: "bun test packages/foo" },
+      { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
+    ]
+    const results: Record<string, CommandResult> = {
+      "bun test packages/foo": { exitCode: 1, stdout: "", stderr: "" },
+      'bun test packages/foo/bar.test.ts -t "handles retry"': { exitCode: 1, stdout: "", stderr: "" },
+    }
+    const runner: CommandRunner = async (cmd) => results[cmd.command]!
+    const result = await deriveTurnProbe({ promptText: prompt, candidateTests: candidates, runner })
+    expect(result).toEqual({
+      kind: "test",
+      command: 'bun test packages/foo/bar.test.ts -t "handles retry"',
+    })
+  })
+
+  it("returns undefined when every candidate is currently green (nothing to pin)", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }]
+    const runner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" })
+    const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates, runner })
+    expect(result).toBeUndefined()
+  })
+
+  it("returns undefined when candidates are given but no runner is injected", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }]
+    const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates })
+    expect(result).toBeUndefined()
   })
 })
 

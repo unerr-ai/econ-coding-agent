@@ -129,7 +129,7 @@ export function evaluate(ctx: EvalContext): EvalVerdict {
   const floorTier = tier
 
   // (2) Decision-shaped ambiguity rounds up — allocateSlice already forces the
-  //     oracle floor for sliceType "design"; this rule's job here is only to
+  //     reasoner floor for sliceType "design"; this rule's job here is only to
   //     make sure step (3) never undercuts an ambiguous, decision-shaped goal.
   const decisionShaped =
     ctx.sliceType === "design" ||

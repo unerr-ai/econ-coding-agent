@@ -77,6 +77,14 @@ import { compileBrief, type FailureEvidence, type OracleBrief } from "./brief.js
 import { recordEscalation, DoublePayLedger, type EscalationCost, type TurnTokens, type LedgerSnapshot } from "./double-pay.js"
 import { tierModelRef } from "./model-registry.js"
 import type { EconTier } from "./region.js"
+import {
+  sliceTransition,
+  initialSliceState,
+  isSliceTerminal,
+  type SliceMachineState,
+  type SliceTransitionCtx,
+  type SliceVerdictLike,
+} from "./orchestration-fsm.js"
 
 // ---------------------------------------------------------------------------
 // Slice + dispatch types
@@ -978,23 +986,15 @@ async function runSlice(
   // flagged unverified — UNLESS the slice isCritical (M3), which instead
   // forces one more climb per exhaustion point, settling loudly only once
   // it's genuinely stuck at the oracle ceiling.
-  let atTier = allocation.tier
-  let attempt = cheap
-  let attemptVerdict = verdict
-  let escalation: SliceOutcome["escalation"]
-  let attempts = 1
-  let sameTierRetries = 0
-  let lastSignatureAtTier: string | undefined
-  let climbs = 0
-
   // Non-critical climb depth (the cost cap): a non-critical slice climbs at
   // most once beyond the cheap tier (to the conductor for an executor-first
-  // slice) before it may settle unverified — `forceFloorClimb` below bypasses
-  // this for a critical slice, up to the oracle ceiling. Zero for a read-only
-  // (recon/verify) slice: it never climbs at all, matching `defaultMaxAttempts`
-  // — the `ceiling` backstop alone (below) does not block a first climb (a
-  // recon's ceiling IS the conductor, and verify's ceiling is the oracle), so
-  // this must be the real gate now that the attempt count no longer is.
+  // slice) before it may settle unverified — the M3 floor (ctx.isCritical in
+  // the reducer below) bypasses this for a critical slice, up to the oracle
+  // ceiling. Zero for a read-only (recon/verify) slice: it never climbs at
+  // all, matching `defaultMaxAttempts` — the `ceiling` backstop alone (below)
+  // does not block a first climb (a recon's ceiling IS the conductor, and
+  // verify's ceiling is the oracle), so this must be the real gate now that
+  // the attempt count no longer is.
   const maxClimbs = isReadOnlySlice(slice.sliceType) ? 0 : 1
 
   // Ladder ceiling: recon is read-only investigation — it never deserves an
@@ -1002,8 +1002,18 @@ async function runSlice(
   // above is what actually stops it at 0 climbs). This stays as the tier-side
   // backstop for a caller-overridden maxClimbs/maxAttempts.
   const ceiling: EconTier = slice.sliceType === "recon" ? "conductor" : "oracle"
+  const readOnly = isReadOnlySlice(slice.sliceType)
+  const critical = isCritical(slice)
 
-  const settleUnverified = async (): Promise<SliceOutcome> => {
+  /** `sliceTransition`'s `escalate`: the next tier up, or `undefined` once climbing would pass this slice's ceiling. */
+  const escalate = (tier: EconTier): EconTier | undefined => {
+    const higher = escalateTier(tier)
+    return higher === tier || LADDER_RANK[higher] > LADDER_RANK[ceiling] ? undefined : higher
+  }
+  /** `sliceTransition`'s `atCeiling`: true once a tier is at (or past) this slice's ceiling. */
+  const atCeiling = (tier: EconTier): boolean => LADDER_RANK[tier] >= LADDER_RANK[ceiling]
+
+  const settleUnverified = async (atAttempts: number): Promise<SliceOutcome> => {
     // Ladder exhaustion: no further hop is coming, so the reverted diff (if
     // this attempt was bracketed) travels in the failure result itself
     // instead of a next brief — the turn owner decides from here (U3).
@@ -1016,89 +1026,74 @@ async function runSlice(
       allocation,
       verdict: attemptVerdict,
       output: attempt.text,
-      attempts,
+      attempts: atAttempts,
       ...(escalation ? { escalation } : {}),
       ...(revertedDiff !== undefined ? { revertedDiff } : {}),
     }
   }
 
+  // The explicit slice FSM (orchestration-fsm.ts) is the single source of
+  // truth for the squeeze-vs-climb-vs-settle decision that used to live in an
+  // implicit local tuple (attempts/sameTierRetries/climbs/atTier/
+  // lastSignatureAtTier) — `isSliceTerminal` gates every iteration below, so
+  // a settled slice is never re-dispatched (the run-8 "never marks slices
+  // settled" blocker). `attempt`/`attemptVerdict`/`escalation` still track
+  // the latest dispatch's output; everything the loop used to thread by hand
+  // now lives in `state`.
+  let attempt = cheap
+  let attemptVerdict = verdict
+  let escalation: SliceOutcome["escalation"]
+  let state: SliceMachineState = initialSliceState(allocation.tier)
+
   for (;;) {
-    // Only reachable via the M3 floor above (or a later pass on the same
-    // forced chain, since an untestable-critical verdict stays unverified at
-    // every tier) — a genuine reject never sets `accepted`. There is nothing
-    // to squeeze-retry for an accept, only a tier to raise.
-    const forcedFloorAccept = attemptVerdict.accepted
-
-    if (!forcedFloorAccept) {
-      // Genuine reject: squeeze the tier before climbing (M2) — a same-tier
-      // retry re-dispatches through the EXISTING buildEscalationBrief path
-      // (the rejected diff as advice), exactly like a climb does.
-      const signature = verdictSignature(attemptVerdict)
-      const canSqueeze =
-        !isReadOnlySlice(slice.sliceType) &&
-        attempts < maxAttempts &&
-        sameTierRetries < SAME_TIER_RETRY_BUDGET &&
-        signature !== lastSignatureAtTier
-
-      if (canSqueeze) {
-        const hop = await dispatchRescueHop({
-          slice, deps, ledger, allocation, atTier, targetTier: atTier,
-          attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts,
-        })
-        attempts += 1
-        sameTierRetries += 1
-        lastSignatureAtTier = signature
-        currentHash = hop.currentHash
-        escalation = hop.escalation
-        attempt = hop.result
-        attemptVerdict = hop.verdict
-
-        if (attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, atTier)) {
-          return settleAccepted(attemptVerdict, attempt, attempts, escalation)
-        }
-        continue
-      }
+    const fromTier = state.atTier
+    const preAttempts = state.attempts
+    // An untestable-critical vacuous accept (criticalFloorBlocksAccept) is
+    // not a genuine reject — there is nothing to squeeze-retry for it, only
+    // a tier to raise (M3) — so its same-tier squeeze budget is zeroed for
+    // this transition only, sending the reducer straight to the climb branch,
+    // exactly like the pre-reducer code's `if (!forcedFloorAccept)` guard did.
+    const ctx: SliceTransitionCtx = {
+      sameTierRetryBudget: attemptVerdict.accepted ? 0 : SAME_TIER_RETRY_BUDGET,
+      maxClimbs,
+      maxAttempts,
+      isReadOnly: readOnly,
+      isCritical: critical,
+      escalate,
+      atCeiling,
     }
+    const fsmVerdict: SliceVerdictLike = {
+      accepted: attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, fromTier),
+      signature: verdictSignature(attemptVerdict),
+    }
+    state = sliceTransition(state, { type: "verdict", verdict: fsmVerdict }, ctx)
 
-    // Stall (signature repeated, squeeze budget spent, or an M3 forced-floor
-    // carry-over that always climbs directly) → climb, or give up if there's
-    // nowhere left to climb / the attempt cap is spent (the cap is bypassed
-    // for a forced-floor carry-over, which never settles below the oracle).
-    const higher = escalateTier(atTier)
-    const exhausted =
-      higher === atTier || LADDER_RANK[higher] > LADDER_RANK[ceiling] || (!forcedFloorAccept && climbs >= maxClimbs)
-
-    if (exhausted) {
-      const forceFloorClimb =
-        !forcedFloorAccept && !isReadOnlySlice(slice.sliceType) && isCritical(slice) && LADDER_RANK[atTier] < LADDER_RANK.oracle
-      if (!forceFloorClimb) {
+    if (isSliceTerminal(state)) {
+      const { outcome, attempts: settledAttempts } = state.terminal
+      if (outcome === "accepted" || outcome === "escalated") {
+        return settleAccepted(attemptVerdict, attempt, settledAttempts, escalation)
+      }
+      // "unverified" (ladder exhausted) or "abandoned" (unreachable from this
+      // per-slice ladder — no budget-exhausted event is ever raised here;
+      // kept only for exhaustiveness with the shared FSM's outcome union).
+      if (critical && !readOnly) {
         // A critical slice genuinely stuck at its ceiling (the oracle, or
         // recon's conductor cap) settles loudly (M3) instead of a silent accept.
-        if (isCritical(slice) && !isReadOnlySlice(slice.sliceType)) {
-          deps.onProvenance?.({ sliceId: slice.id, fromTier: atTier, toTier: atTier, rungReason: "critical-unverified-at-ceiling" })
-        }
-        return await settleUnverified()
+        deps.onProvenance?.({ sliceId: slice.id, fromTier, toTier: fromTier, rungReason: "critical-unverified-at-ceiling" })
       }
-      // else: the floor (M3) forces this climb past the exhausted ceiling/budget.
+      return await settleUnverified(settledAttempts)
     }
 
+    // Not terminal — the reducer already decided squeeze (same tier) vs climb
+    // (state.atTier raised); dispatch that hop through the existing rescue path.
     const hop = await dispatchRescueHop({
-      slice, deps, ledger, allocation, atTier, targetTier: higher,
-      attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts,
+      slice, deps, ledger, allocation, atTier: fromTier, targetTier: state.atTier,
+      attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts: preAttempts,
     })
-    attempts += 1
-    climbs += 1
     currentHash = hop.currentHash
     escalation = hop.escalation
-    atTier = higher
     attempt = hop.result
     attemptVerdict = hop.verdict
-    sameTierRetries = 0
-    lastSignatureAtTier = undefined
-
-    if (attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, atTier)) {
-      return settleAccepted(attemptVerdict, attempt, attempts, escalation)
-    }
   }
 }
 

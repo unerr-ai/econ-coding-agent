@@ -37,6 +37,7 @@ import {
 } from "../src/slice-loop.js"
 import type { CommandResult, VerifyCommand } from "../src/verifier.js"
 import { ECON_TIER_BINDING } from "../src/model-registry.js"
+import type { EconTier } from "../src/region.js"
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -530,18 +531,18 @@ describe("runSliceLoop — escalation brief carries the prior attempt's context"
 })
 
 // ---------------------------------------------------------------------------
-// Design slice → oracle direct
+// Design slice → reasoner direct
 // ---------------------------------------------------------------------------
 
-describe("runSliceLoop — design slice routes to the oracle directly", () => {
-  it("dispatches a design slice on the oracle (no cheap-first hop for the irreducible-reasoning type)", async () => {
+describe("runSliceLoop — design slice routes to the reasoner directly", () => {
+  it("dispatches a design slice on the reasoner (no cheap-first hop for the irreducible-reasoning type)", async () => {
     const { dispatch, calls } = recordingDispatch()
     const slice: LoopSlice = { id: "design", prompt: "design the token-refresh interface", sliceType: "design" }
     // QE sampler agrees with the cheap output so the untestable design slice is accepted.
     const result = await runSliceLoop([slice], { dispatch, qeGenerate: async () => "cheap:design" })
 
-    expect(calls[0].tier).toBe("oracle")
-    expect(result.outcomes[0].allocation.tier).toBe("oracle")
+    expect(calls[0].tier).toBe("reasoner")
+    expect(result.outcomes[0].allocation.tier).toBe("reasoner")
     expect(result.outcomes[0].state).toBe("accepted")
   })
 })
@@ -1209,5 +1210,124 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
     expect(result.ledger.escalations).toBe(1)
     expect(result.ledger.totalWastedCost).toBeCloseTo(0.001, 6)
     expect(outcome.escalation?.record.totalCost).toBeCloseTo(0.021, 6)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FSM table — orchestration-fsm.ts's `sliceTransition` reducer now owns the
+// squeeze-vs-climb-vs-settle decision (replacing the old implicit local
+// tuple: attempts/sameTierRetries/climbs/atTier/lastSignatureAtTier). This
+// table proves the swap kept every dispatch sequence above byte-identical,
+// plus the run-8 fix: `isSliceTerminal` is the only thing that stops
+// dispatching, so a settled slice's dispatch count always equals its
+// `attempts` — never re-dispatched once terminal.
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — FSM table (sliceTransition drives squeeze/climb/settle, behavior preserved)", () => {
+  const fsmSlice = (coupling: "low" | "high"): LoopSlice => ({
+    id: "s",
+    prompt: "p",
+    sliceType: "mechanical",
+    coupling,
+    testStrength: "testable",
+    verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+  })
+
+  type FsmCase = {
+    name: string
+    slice: LoopSlice
+    runCommand: (c: VerifyCommand) => Promise<CommandResult>
+    expectTiers: EconTier[]
+    expectState: "accepted" | "escalated" | "unverified"
+    expectAttempts: number
+  }
+
+  const cases: FsmCase[] = [
+    {
+      name: "accept-first — the cheap attempt passes, no rescue hop",
+      slice: fsmSlice("low"),
+      runCommand: passRunner,
+      expectTiers: ["executor"],
+      expectState: "accepted",
+      expectAttempts: 1,
+    },
+    {
+      name: "squeeze→accept — a same-tier retry converges and passes",
+      slice: fsmSlice("low"),
+      runCommand: (() => {
+        let call = 0
+        return async (): Promise<CommandResult> =>
+          call++ === 0 ? { exitCode: 1, stdout: "", stderr: "boom" } : { exitCode: 0, stdout: "ok", stderr: "" }
+      })(),
+      expectTiers: ["executor", "executor"],
+      expectState: "escalated",
+      expectAttempts: 2,
+    },
+    {
+      name: "squeeze-stall→climb — a repeated signature stops the squeeze after one retry, then the climb passes",
+      slice: fsmSlice("low"),
+      runCommand: (() => {
+        let call = 0
+        return async (c: VerifyCommand): Promise<CommandResult> => {
+          call += 1
+          return call <= 2
+            ? { exitCode: 1, stdout: "", stderr: `${c.kind} failed: TS2322 type mismatch` }
+            : { exitCode: 0, stdout: "ok", stderr: "" }
+        }
+      })(),
+      expectTiers: ["executor", "executor", "conductor"],
+      expectState: "escalated",
+      expectAttempts: 3,
+    },
+    {
+      name: "critical forced-floor→oracle — a critical slice never soft-settles below the oracle",
+      slice: fsmSlice("high"),
+      runCommand: failRunner,
+      expectTiers: ["executor", "executor", "conductor", "conductor", "reasoner", "reasoner", "oracle", "oracle"],
+      expectState: "unverified",
+      expectAttempts: 8,
+    },
+    {
+      name: "exhaustion→unverified — a non-critical slice settles at its one-climb budget",
+      slice: fsmSlice("low"),
+      runCommand: failRunner,
+      expectTiers: ["executor", "executor", "conductor", "conductor"],
+      expectState: "unverified",
+      expectAttempts: 4,
+    },
+  ]
+
+  for (const c of cases) {
+    it(c.name, async () => {
+      const { dispatch, calls } = recordingDispatch({
+        onEscalated: (req) => ({ text: `rescue:${req.tier}`, trajectory: { events: [] } }),
+      })
+      const result = await runSliceLoop([c.slice], { dispatch, runCommand: c.runCommand })
+      const outcome = result.outcomes[0]
+
+      expect(calls.map((call) => call.tier)).toEqual(c.expectTiers)
+      expect(outcome.state).toBe(c.expectState)
+      expect(outcome.attempts).toBe(c.expectAttempts)
+      // The run-8 invariant: dispatch count must exactly equal attempts —
+      // no extra hop after the reducer's terminal state settles the slice.
+      expect(calls.length).toBe(c.expectAttempts)
+    })
+  }
+
+  it("dispatches each slice in a dependency chain exactly once — a settled slice is never re-dispatched by a later wave", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const verifyCommands = [{ kind: "typecheck" as const, command: "tsc" }]
+    const chain: LoopSlice[] = [
+      { id: "a", prompt: "a", sliceType: "mechanical", coupling: "low", testStrength: "testable", verifyCommands },
+      { id: "b", prompt: "b", sliceType: "mechanical", coupling: "low", testStrength: "testable", verifyCommands, deps: ["a"] },
+      { id: "c", prompt: "c", sliceType: "mechanical", coupling: "low", testStrength: "testable", verifyCommands, deps: ["b"] },
+    ]
+    const result = await runSliceLoop(chain, { dispatch, runCommand: passRunner })
+
+    expect(result.waves).toEqual([["a"], ["b"], ["c"]])
+    expect(calls.filter((call) => call.sliceId === "a").length).toBe(1)
+    expect(calls.filter((call) => call.sliceId === "b").length).toBe(1)
+    expect(calls.filter((call) => call.sliceId === "c").length).toBe(1)
+    expect(result.outcomes.every((o) => o.state === "accepted")).toBe(true)
   })
 })

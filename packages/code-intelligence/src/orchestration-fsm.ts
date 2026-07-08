@@ -252,7 +252,9 @@ export interface StuckSupervisor {
  * Build a stateful stuck-detector for one turn's inner loop. Priority order:
  * a test-edit fires immediately (the fake-green tell), then an identical red
  * result repeated `repeatThreshold` times (the django-11885 12x-thrash caught at
- * the 3rd), then an identical repeated tool call, then a stagnant fingerprint.
+ * the 3rd), then an identical repeated RESULTLESS tool call (a read/edit loop —
+ * never a command whose result is changing, which is healthy iteration), then a
+ * stagnant fingerprint.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -288,10 +290,16 @@ export function createStuckSupervisor(
         }
       }
 
-      // 3. the same tool call re-issued `repeatThreshold` times
-      const t = tally(toolRun, step.toolSignature)
-      if (t >= config.repeatThreshold) {
-        return { reason: "repeated-tool", signature: step.toolSignature, count: t }
+      // 3. the same resultless tool call re-issued `repeatThreshold` times — a
+      // read/edit loop with nothing to show. Gated to steps with no result: a
+      // command step's progress IS its result (judged by repeated-red above), so
+      // re-running the same command while the result changes is healthy
+      // iteration and must not fire here.
+      if (step.resultSignature === undefined) {
+        const t = tally(toolRun, step.toolSignature)
+        if (t >= config.repeatThreshold) {
+          return { reason: "repeated-tool", signature: step.toolSignature, count: t }
+        }
       }
 
       // 4. no-progress: the overall fingerprint hasn't changed for `noProgressThreshold` steps
