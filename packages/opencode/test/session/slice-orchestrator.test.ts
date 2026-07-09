@@ -13,7 +13,19 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { ECON_PERSONAS, type VerifyCommand, type CommandRunner, type CommandResult } from "@opencode-ai/code-intelligence"
+import {
+  ECON_PERSONAS,
+  redecompositionCheck,
+  PERPLEXITY_HIGH_THRESHOLD,
+  type VerifyCommand,
+  type CommandRunner,
+  type CommandResult,
+  type EconTier,
+  type LogprobToken,
+  type UncertaintySignal,
+  type SliceOutcome,
+  type RedecompositionSignals,
+} from "@opencode-ai/code-intelligence"
 import { Permission } from "../../src/permission"
 import {
   extractTrajectory,
@@ -53,6 +65,9 @@ import {
   triagePreamble,
   orderTriageGoals,
   buildTriageTodoSkeleton,
+  logprobTokensFromParts,
+  uncertaintyFromParts,
+  redecompositionSignalsFromOutcomes,
   type ConductorSliceDispatch,
   type SliceProbes,
   type OrchestrationTodo,
@@ -2618,5 +2633,150 @@ describe("reconcileSettledSlices — settled-slice memory + frame-seed preservat
     const typed = autoTypeTodos(list)
     const seedCount = typed.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT).length
     expect(seedCount).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #56 Part B / #55 — logprobTokensFromParts, uncertaintyFromParts,
+// redecompositionSignalsFromOutcomes (pure helpers re-exported for the
+// posterior-uncertainty gate and the §4.2 re-decomposition signals)
+// ---------------------------------------------------------------------------
+
+describe("logprobTokensFromParts", () => {
+  it("reads { token, logprob }[] off the last text part's provider-keyed metadata", () => {
+    const parts = [
+      {
+        type: "text",
+        text: "ab",
+        metadata: { openai: { logprobs: [{ token: "a", logprob: -0.1 }, { token: "b", logprob: -0.2 }] } },
+      },
+    ]
+    expect(logprobTokensFromParts(parts)).toEqual([
+      { token: "a", logprob: -0.1 },
+      { token: "b", logprob: -0.2 },
+    ])
+  })
+
+  it("no text part in parts → undefined", () => {
+    expect(logprobTokensFromParts([{ type: "tool", tool: "bash" }])).toBeUndefined()
+  })
+
+  it("text part but no metadata → undefined", () => {
+    expect(logprobTokensFromParts([{ type: "text", text: "hi" }])).toBeUndefined()
+  })
+
+  it("metadata present but no provider bucket carries logprobs → undefined", () => {
+    expect(logprobTokensFromParts([{ type: "text", text: "hi", metadata: { openai: {} } }])).toBeUndefined()
+  })
+
+  it("logprobs is not an array → undefined", () => {
+    expect(
+      logprobTokensFromParts([{ type: "text", text: "hi", metadata: { openai: { logprobs: "not-an-array" } } }]),
+    ).toBeUndefined()
+  })
+
+  it("logprobs items missing token/logprob are filtered out, leaving nothing → undefined", () => {
+    const parts = [
+      {
+        type: "text",
+        text: "hi",
+        metadata: {
+          openai: {
+            logprobs: [{ token: "a" }, { logprob: -0.1 }, { token: 5, logprob: -0.1 }],
+          },
+        },
+      },
+    ]
+    expect(logprobTokensFromParts(parts)).toBeUndefined()
+  })
+
+  it("two text parts, only the LAST has logprobs → returns the last one's tokens", () => {
+    const parts = [
+      { type: "text", text: "first" },
+      { type: "text", text: "second", metadata: { openai: { logprobs: [{ token: "y", logprob: -1 }] } } },
+    ]
+    expect(logprobTokensFromParts(parts)).toEqual([{ token: "y", logprob: -1 }])
+  })
+})
+
+describe("uncertaintyFromParts", () => {
+  it("executor tier: strips reasoning up to the <|channel|>final boundary, computes perplexity over the answer tokens only", () => {
+    const tokens: LogprobToken[] = [
+      { token: "reasoning stuff ", logprob: -5 },
+      { token: "more reasoning ", logprob: -5 },
+      { token: "<|channel|>final", logprob: -0.01 },
+      { token: "answer1", logprob: 0 },
+      { token: "answer2", logprob: 0 },
+    ]
+    const parts = [{ type: "text", text: "combined", metadata: { openai: { logprobs: tokens } } }]
+    const signal = uncertaintyFromParts(parts, "executor" as EconTier)
+    expect(signal).toBeDefined()
+    expect(signal!.kind).toBe("perplexity")
+    expect(signal!.value).toBeCloseTo(1, 6)
+    expect(signal!.high).toBe(false)
+  })
+
+  it("conductor tier: strips an <mm:think>…</mm:think> span, high perplexity on the remaining answer tokens flips high to true", () => {
+    const tokens: LogprobToken[] = [
+      { token: "<mm:think>", logprob: -0.01 },
+      { token: "deep reasoning here", logprob: -20 },
+      { token: "</mm:think>", logprob: -0.01 },
+      { token: "answer", logprob: -2 },
+      { token: " tokens", logprob: -2 },
+    ]
+    const parts = [{ type: "text", text: "combined", metadata: { openai: { logprobs: tokens } } }]
+    const signal = uncertaintyFromParts(parts, "conductor" as EconTier)
+    expect(signal).toBeDefined()
+    expect(signal!.kind).toBe("perplexity")
+    expect(signal!.value).toBeCloseTo(Math.exp(2), 6)
+    expect(PERPLEXITY_HIGH_THRESHOLD).toBe(3)
+    expect(signal!.high).toBe(true)
+  })
+
+  it("no logprobs on the dispatch (absent metadata) → undefined", () => {
+    const parts = [{ type: "text", text: "hi" }]
+    expect(uncertaintyFromParts(parts, "executor" as EconTier)).toBeUndefined()
+  })
+
+  it("executor tier: every token is inside/before the reasoning channel, so the answer channel is empty after strip → undefined", () => {
+    const tokens: LogprobToken[] = [
+      { token: "reasoning stuff", logprob: -5 },
+      { token: "<|channel|>final", logprob: -1 },
+    ]
+    const parts = [{ type: "text", text: "combined", metadata: { openai: { logprobs: tokens } } }]
+    expect(uncertaintyFromParts(parts, "executor" as EconTier)).toBeUndefined()
+  })
+})
+
+describe("redecompositionSignalsFromOutcomes", () => {
+  const oc = (state: SliceOutcome["state"]): SliceOutcome => ({ state }) as SliceOutcome
+
+  it("one unverified among accepted → coverageGaps 1, budgetOverrunPct 0", () => {
+    const signals = redecompositionSignalsFromOutcomes([oc("accepted"), oc("unverified")])
+    expect(signals).toEqual({ coverageGaps: 1, budgetOverrunPct: 0 })
+  })
+
+  it("all accepted → coverageGaps 0, budgetOverrunPct 0", () => {
+    const signals = redecompositionSignalsFromOutcomes([oc("accepted"), oc("accepted"), oc("accepted")])
+    expect(signals).toEqual({ coverageGaps: 0, budgetOverrunPct: 0 })
+  })
+
+  it("2 of 3 escalated (>50%) → budgetOverrunPct 100", () => {
+    const signals = redecompositionSignalsFromOutcomes([oc("escalated"), oc("escalated"), oc("accepted")])
+    expect(signals.budgetOverrunPct).toBe(100)
+  })
+
+  it("1 of 3 escalated (not >50%) → budgetOverrunPct 0", () => {
+    const signals = redecompositionSignalsFromOutcomes([oc("escalated"), oc("accepted"), oc("accepted")])
+    expect(signals.budgetOverrunPct).toBe(0)
+  })
+
+  it("empty array → { coverageGaps: 0, budgetOverrunPct: 0 }", () => {
+    expect(redecompositionSignalsFromOutcomes([])).toEqual({ coverageGaps: 0, budgetOverrunPct: 0 })
+  })
+
+  it("composes with redecompositionCheck: a coverage gap fires the new-items trigger", () => {
+    const signals: RedecompositionSignals = redecompositionSignalsFromOutcomes([oc("unverified"), oc("accepted")])
+    expect(redecompositionCheck(signals)).toContain("new-items")
   })
 })

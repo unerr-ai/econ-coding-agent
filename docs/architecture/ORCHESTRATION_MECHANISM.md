@@ -1,6 +1,6 @@
 # The econ Orchestration Mechanism
 
-**Status: v1.5 (2026-07-08) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), and the M2/M3/M4 gates; live-fire smoked. Open work: U5 (cache-aware casting — helper + tests written, not yet wired into dispatch) and the §6 SM-series hardening.**
+**Status: v1.6 (2026-07-09) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, and the uncertainty-management engine (§8 — arming judge, prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition); live-fire smoked. Wave 4b (#55/#56B/#59/#61) is verified in the working tree. Open work: U5 (cache-aware casting — helper + tests written, not yet wired into dispatch), the §6 SM-series hardening, and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5).**
 This doc also absorbed the still-relevant content of the three retired plan docs
 (DECOMPOSITION_ORCHESTRATION_PLAN, PERSONA_ORCHESTRATION_PLAN, SELF_ORCHESTRATION_PLAN —
 deleted 2026-07-07) into §7 "Inherited foundations".
@@ -80,6 +80,14 @@ everything else already runs in production today (§2 has the as-built detail).
                           │     (double-pay) → back to [3]       │
                           └──────────────────────────────────────┘
 ```
+
+**The uncertainty-management overlay (§8).** The pipeline above is the mechanical spine; §8
+adds one orthogonal principle on top of it — route by the *type* of uncertainty. Before [3]
+EVALUATE, a **prior-resolution** gate (§8.2) settles an ambiguous approach *before* decomposing;
+the allocator itself is reframed onto **two axes** (§8.3 — generator ← difficulty, verifier ←
+consequence); and at [5] VERIFY, a **posterior-uncertainty** gate (§8.4) can escalate a slice
+that passed but that we were unsure about. Those overlays are documented together in §8; the
+stage descriptions below are unchanged.
 
 ### 1.1 Understand: one cheap model reads the prompt properly
 
@@ -559,7 +567,10 @@ the code.
 escalate that slice's tier, don't widen the fan-out; a sibling conflict detected at
 fold-back → stop and re-plan with less parallelism; coverage gaps at synthesis → the
 missing work becomes new tracked items, never silent scope loss; wall-clock ≥2× estimate →
-suspect a hidden sequential dependency and re-order.
+suspect a hidden sequential dependency and re-order. **(Wired 2026-07-09, #55 — §8.6:**
+`redecompositionCheck` now derives these triggers from a settled run's outcomes and reseeds a
+reasoner-pinned re-decomposition pre-pass on a coverage gap, bounded by the *same* recursion
+counter as the prior-resolution gate.)
 
 Mid-flight: the convergence-budget and contradiction triggers become evaluator re-entry
 points — a stalled slice is re-classified, not just un-muted.
@@ -870,7 +881,10 @@ and difficulty are different axes: a bug can touch few files (low coupling) yet 
 reasoning to find, or touch many (high coupling) yet be pure propagation. SM5 routes
 insight-heavy work up regardless of which coupling cell it lands in; the matrix's coupling
 axis governs *wiring strategy* for mechanical work, not whether the executor's reasoning is
-enough.
+enough. **This is now formalized as the *difficulty axis* of the two-axis allocator (§8.3):**
+the arming judge's `hardness` floors the *generator* independently of the coupling cell, while
+coupling/consequence governs the *verifier* rung — the SM5 fix expressed as a standing axis,
+not a per-cell patch.
 
 ### 7.3 Execution substrate — shipped invariants
 
@@ -928,3 +942,151 @@ enough.
 | Frontier escape-hatch: stay all-OSS or reach a true frontier model for the residual | OL-7.10 / §9 | open decision; hatch resolver ships, no product env read |
 | Everyday-capability eval on test-poor repos: define the harness's case set | OL-7.12 | harness exists, case set thin |
 | Gateway region move sin → bom when capacity returns | infra | tracked in feature 08 |
+
+---
+
+## 8. The uncertainty-management engine (prior ⟂ posterior)
+
+**Status: implemented 2026-07-09.** Wave 3 + Wave 4a are committed (`a89c59d15`, `c52facdd0`);
+Wave 4b (#55 re-decomposition, #56B logprob extraction, #59 verbalized confidence, #61
+resolution-contract fix) is verified in the working tree. This section is the single home for
+the engine; §1, §4.2 and §7.2 carry forward-pointers to it.
+
+The evaluator (§4.2) asks *how hard* and *how consequential* a piece of work is. The
+uncertainty engine asks the orthogonal question — *how sure are we, and **when** did we find
+out?* — and routes on the answer, because the two kinds of doubt are fixed by opposite means:
+
+- **Prior uncertainty** lives BEFORE execution: an unclear request, or an unsettled approach.
+  It is **RESOLVABLE** — burn the ambiguity down with a resolution pass, *then* decompose into
+  cheap slices. "Default cheap" is only safe here because the doubt was removed first.
+- **Posterior uncertainty** appears only AFTER execution: verification is green, but did the
+  work solve the *right* problem? Planning cannot fix this; it is only **TRUSTABLE** through a
+  confidence signal. A pass on a slice we were unsure about earns one more look.
+
+Between them sits the allocator, reframed onto **two orthogonal axes** so "how hard" and "how
+consequential" never collapse into one dial (§8.3).
+
+```
+                     ┌──────────────── ARMING JUDGE (§8.1) ────────────────┐
+                     │  one conductor-tier call at turn open →             │
+                     │  {armLocalization, hardness, ambiguity, evidence}   │
+                     └──────────────────────┬──────────────────────────────┘
+     PRIOR (pre-exec)                       │                    POSTERIOR (post-exec)
+     ambiguity → RESOLVABLE                 ▼                    green-but-wrong → TRUSTABLE
+ ┌── §8.2 resolve approach ──┐   §8.3 allocate on TWO axes  ┌── §8.4 gate on green ──┐
+ │ resolutionDecision →      │   generator ← difficulty     │ prior-flagged slice +  │
+ │ resolve, THEN decompose   │   verifier  ← consequence    │ high uncertainty →     │
+ │ (recursive, bounded)      │                              │ ONE more generator hop │
+ └───────────────────────────┘                              └──────────┬─────────────┘
+                                                                        │ signal (§8.5)
+                                        §8.6 re-decompose on            perplexity (dormant)
+                                        coverage gaps, bounded          ?? verbalized (live)
+```
+
+### 8.1 The arming judge — one evidence-grounded call, not a wall of regex
+
+The turn's difficulty/ambiguity read is made by **one conductor-tier LLM call at turn open**
+(`judgeArming`, `arming-judge.ts`; dispatched at the `prompt.ts` step-0 block, root session
+only). It returns an `ArmingVerdict` — `armLocalization` (does this turn need a localization
+pre-pass?), `localized`, `hardness`, `ambiguity`, and the `evidence` spans behind the call —
+stored per-session (`setArmingDecision`) so every downstream door reads the *same* decision. It
+replaces the file-target regex that used to arm the localization pre-pass and over-fired the
+reasoner. When the call is unavailable it degrades to `heuristicArming` (the triage-shape
+heuristic), never back to the old regex. An offline arming-rig (`corpus.ts` + `run.ts`)
+regression-guards the judge so a prompt change is validated without live-fire spend. The two
+signals it produces — `hardness` and `ambiguity` — are the inputs the rest of this engine reads.
+
+### 8.2 Prior uncertainty — resolve the approach, then decompose (#53/#54/#61)
+
+Before a turn decomposes, a **resolution gate** decides whether the approach is settled enough
+to slice. `resolutionDecision` (`resolution-phase.ts`) runs in `slice-orchestrator.ts`
+immediately before `todosToLoopSlices`, and returns a mode:
+
+- **approach not settled** (prior uncertainty is high) → **resolve first**: a design/recon pass
+  fixes an approach, or — interactively only (#54, guarded on `OPENCODE_HEADLESS !== "1"`, never
+  in `opencode run`/benchmarks) — a non-blocking **clarify-and-yield** asks the user one
+  question and returns `{engaged:false}` rather than guessing.
+- **approach settled / plan valid** → **decompose now**.
+
+Resolution is **recursive but bounded**: a per-session counter (`resolution-store.ts`,
+`MAX_RESOLVE_ATTEMPTS`) caps how many times a turn may re-enter resolve→decompose, and #55's
+re-decomposition (§8.6) shares that *same* counter — one unified recursion budget.
+
+**#61 — the resolution contract.** `validatePlan` (`evaluator.ts`) gained a `requireNodeFields`
+structural-only mode so a free-text, todo-derived plan (no per-node objective/outputShape/
+successCriterion) can still satisfy the valid-plan short-circuit. Before the fix,
+`resolutionDecision` validated todo plans with the full-field requirement, so its "already valid
+→ decompose-now" branch could never fire for todo callers and the gate had to work around it.
+#61 threads `requireNodeFields:false` through `resolutionDecision` and removes the workaround —
+the decision is now made in one place.
+
+### 8.3 Two-axis allocation — generator ← difficulty, verifier ← consequence (#45–#47)
+
+The allocator is reframed onto **two orthogonal axes** (`allocateSlice`, `allocation.ts`):
+
+| axis | driven by | what it moves | rule |
+|---|---|---|---|
+| **generator tier** | **difficulty** (arming `hardness`) | which tier *authors* the slice | `hard` floors the author at the reasoner |
+| **verifier rung** | **consequence** (coupling / blast-radius / risk) | which rung *gates* the slice | risk raises the verifier toward the judge |
+
+The invariant: **neither axis crosses.** Difficulty raises the *author*, never the verifier;
+consequence raises the *verifier*, never the author. This supersedes the old single-dial "risk
+breaks one borderline cell toward oracle" tiebreak and formalizes the SM5 correction (§7.2): an
+atomic-insight bug is *hard* (author floors up) but may be *low-coupling* (verifier stays
+cheap), and a sprawling-but-mechanical change is the reverse. #46 threads arming
+`hardness`/`ambiguity` onto every `LoopSlice` `todosToLoopSlices` builds, so the generator axis
+has its signal; #47 redirects the M3 critical-floor to force the *verifier*, not the generator,
+when consequence is high.
+
+### 8.4 Posterior uncertainty — escalate on green (#48)
+
+Even a **green** sound verdict is not automatically trusted. On a slice the arming judge flagged
+as ambiguous or hard, the verify ladder's accept-on-green passes through a
+**posterior-uncertainty gate** (`posterior-uncertainty.ts`, wired into the accept path of
+`slice-loop.ts`): if the slice's confidence signal (§8.5) is high-uncertainty, it earns **one**
+extra generator escalation *despite verification having passed*, reported via `onProvenance` as
+`"posterior-uncertain-review"`. The gate reuses `dispatchRescueHop`, settles after exactly one
+hop, and never re-enters the squeeze/climb FSM. An **unflagged or confident** slice accepts on
+green unchanged — the extra look is spent only where prior evidence said to be suspicious.
+
+### 8.5 The confidence signal — perplexity primary (dormant), verbalized fallback (live) (#56B/#59/#62)
+
+The posterior gate reads `cheap.uncertainty ?? confidenceGenerate(...)` — perplexity first,
+verbalized confidence as the fallback:
+
+- **Perplexity** `= exp(−mean(token logprob))` over the dispatch's *own* generation, computed
+  host-side (`logprobTokensFromParts` → `answerChannelTokens` — a per-family strip: the executor
+  family strips up to/including the `<|channel|>final` boundary, the conductor family strips
+  `<mm:think>…</mm:think>` — → `perplexityFromLogprobs` → `signalFromPerplexity`). It needs **no
+  extra inference**: it rides logprobs the generator already produced. It is **dormant** — #62
+  (probed 2026-07-09) found the LiteLLM gateway returns logprobs in *non-streaming* mode on both
+  tiers but **drops them in streaming**, and every dispatch streams. The extraction is verified
+  correct against real non-streaming output, and the clean injection seam exists (the central
+  per-provider fetch wrapper, `provider.ts:1692`); both light up automatically the day the
+  gateway emits streaming logprobs. That is an infra precondition, not app work.
+- **Verbalized confidence** (#59, `confidenceGenerate` in `prompt.ts`) is therefore the **live
+  primary** signal, not a compromise: a cheap conductor-tier probe that rates 0–1 how confident
+  the model is that the slice solved the *intended* problem (`parseVerbalizedConfidence`,
+  defaults 1.0 on empty/error). For a streaming agent this is the correct primary — obtainable
+  from one cheap dedicated call without abandoning streaming or paying for a redundant
+  non-streaming re-generation.
+
+### 8.6 Re-decomposition — the §4.2 triggers, now wired (#55)
+
+The §4.2 re-decomposition triggers are now live. After a run settles,
+`redecompositionSignalsFromOutcomes` (`slice-orchestrator.ts`) derives the signals from the
+outcome set (`coverageGaps` = count of `unverified` slices; `budgetOverrunPct` from the
+escalated fraction), `redecompositionCheck` maps them to triggers, and the post-settle block in
+`runConductorOrchestration` acts on them:
+
+| trigger | condition | action |
+|---|---|---|
+| `new-items` | coverage gap at synthesis | reseed a **reasoner-pinned** re-decomposition pre-pass todo |
+| `escalate-tier` | child >50% over budget | escalate that slice's tier (not a wider fan-out) |
+| `replan-less-parallel` | sibling conflict at fold-back | re-plan with less parallelism |
+| `reorder` | wall-clock ≥2× estimate | suspect a hidden sequential dependency, re-order |
+
+Only `new-items` currently reseeds work, and it does so through the **same recursion counter**
+as the prior-resolution gate (§8.2) — a re-decomposition and a re-resolution draw on one shared
+budget, so the turn cannot loop unboundedly. An `onRedecomposition` telemetry sink reports the
+triggers and the signals behind them on every settled run, whether or not any was acted on.

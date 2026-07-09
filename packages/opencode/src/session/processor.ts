@@ -836,6 +836,11 @@ export const layer = Layer.effect(
                   text: ctx.currentText.text,
                   timestamp: DateTime.makeUnsafe(Date.now()),
                   textID: value.id,
+                  // #56A live-path fix: forward the provider metadata (logprobs
+                  // ride here) onto the V2 event so AssistantText.providerMetadata
+                  // actually populates from a real turn — the V1 part already
+                  // stores it (line below), the V2 dual-write was dropping it.
+                  ...(value.providerMetadata ? { providerMetadata: value.providerMetadata } : {}),
                 })
               }
             }

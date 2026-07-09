@@ -96,6 +96,48 @@ describe("resolutionDecision — branch 2: valid candidatePlan short-circuit", (
 })
 
 // ---------------------------------------------------------------------------
+// Branch 2b — structural-only short-circuit (requireNodeFields: false)
+// ---------------------------------------------------------------------------
+
+describe("resolutionDecision — branch 2: structural-only short-circuit (requireNodeFields:false)", () => {
+  it("decomposes now on a flagged task when candidatePlan passes structural-only validation (requireNodeFields:false)", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        candidatePlan: [{ id: "0" }, { id: "1", dependsOn: ["0"] }] as PlanNode[],
+        requireNodeFields: false,
+      }),
+    )
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach fixed, plan valid")
+  })
+
+  it("does not short-circuit when requireNodeFields defaults to true (full validation), rejecting fields-less plan", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        candidatePlan: [{ id: "0" }, { id: "1", dependsOn: ["0"] }] as PlanNode[],
+      }),
+    )
+    expect(result.mode).not.toBe("decompose-now")
+  })
+
+  it("still rejects plans that violate structural constraints even in structural-only mode (e.g., 6 children under one parent)", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        candidatePlan: [
+          { id: "p" },
+          ...Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, parentId: "p" })),
+        ] as PlanNode[],
+        requireNodeFields: false,
+      }),
+    )
+    expect(result.mode).not.toBe("decompose-now")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Branch 3 — ask-user, interactive only
 // ---------------------------------------------------------------------------
 

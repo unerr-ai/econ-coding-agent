@@ -24,12 +24,18 @@ import {
   planWaves,
   validatePlan,
   resolutionDecision,
+  redecompositionCheck,
+  MAX_RESOLVE_ATTEMPTS,
+  answerChannelTokens,
+  perplexityFromLogprobs,
+  signalFromPerplexity,
   type EconPersona,
   type LoopSlice,
   type SliceLoopDeps,
   type SliceDispatchRequest,
   type SliceDispatchResult,
   type SliceLoopResult,
+  type SliceOutcome,
   type SliceTrajectory,
   type TrajectoryEvent,
   type CommandRunner,
@@ -41,6 +47,11 @@ import {
   type SliceAmbiguity,
   type PlanNode,
   type ResolutionMode,
+  type RedecompositionSignals,
+  type RedecompositionTrigger,
+  type ModelFamily,
+  type LogprobToken,
+  type UncertaintySignal,
 } from "@opencode-ai/code-intelligence"
 
 // ---------------------------------------------------------------------------
@@ -338,6 +349,8 @@ export interface ConductorSliceDispatch {
 export interface ConductorLoopOptions {
   judgeGenerate?: (prompt: string) => Promise<string>
   qeGenerate?: (sliceId: string) => Promise<string>
+  /** #59 — verbalized self-confidence fallback for the posterior-uncertainty gate (task #48): a 0-1 confidence that a slice solved the RIGHT problem, consulted ONLY when a prior-flagged slice's dispatch produced no logprob perplexity. Absent ⇒ the gate stays perplexity-only. */
+  confidenceGenerate?: SliceLoopDeps["confidenceGenerate"]
   runCommand?: CommandRunner
   onEscalation?: SliceLoopDeps["onEscalation"]
   cwd?: string
@@ -347,6 +360,79 @@ export interface ConductorLoopOptions {
   snapshot?: SliceLoopDeps["snapshot"]
   /** U3 — escalation provenance sink (fromTier/toTier/rungReason), fired once per escalation hop. */
   onProvenance?: SliceLoopDeps["onProvenance"]
+}
+
+/**
+ * #56 Part B — best-effort read of `{ token, logprob }[]` off the last text
+ * part's provider metadata. The child session's stream processor stores the
+ * gateway's per-token logprobs on the V1 text part's `metadata` (keyed by
+ * provider, OpenAI-compatible `{ logprobs: [{ token, logprob }] }`). Any shape
+ * mismatch or absent field ⇒ undefined — this runs on the hot dispatch path
+ * and must never throw.
+ */
+export function logprobTokensFromParts(parts: readonly unknown[]): LogprobToken[] | undefined {
+  try {
+    const textParts = parts.filter(
+      (p): p is { type: string; metadata?: Record<string, unknown> } =>
+        typeof p === "object" && p !== null && (p as { type?: unknown }).type === "text",
+    )
+    const meta = textParts.at(-1)?.metadata as Record<string, { logprobs?: unknown }> | undefined
+    if (meta === undefined) return undefined
+    for (const bucket of Object.values(meta)) {
+      const raw = bucket?.logprobs
+      if (!Array.isArray(raw)) continue
+      const tokens = raw.filter((t): t is LogprobToken => {
+        const o = t as { token?: unknown; logprob?: unknown }
+        return typeof o?.token === "string" && typeof o?.logprob === "number"
+      })
+      if (tokens.length > 0) return tokens
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * #56 Part B — derive the posterior-uncertainty signal (task #48) from a
+ * dispatch's committed answer: strip the reasoning channel for the tier's model
+ * family (`conductor` = inline `<mm:think>`; every other tier = the
+ * `<|channel|>final` executor family, a no-op passthrough for the
+ * separate-`reasoning_content` tiers), then take the answer tokens' geometric-
+ * mean perplexity. Absent or unusable logprobs — the common case today: the
+ * litellm provider path does not yet request them — ⇒ undefined, and the
+ * accept-on-green gate falls back to the verbalized-confidence probe (#59).
+ *
+ * @sem domain=routing role=converter
+ */
+export function uncertaintyFromParts(parts: readonly unknown[], tier: EconTier): UncertaintySignal | undefined {
+  const tokens = logprobTokensFromParts(parts)
+  if (tokens === undefined || tokens.length === 0) return undefined
+  const family: ModelFamily = tier === "conductor" ? "conductor" : "executor"
+  const perplexity = perplexityFromLogprobs(answerChannelTokens(tokens, family))
+  if (perplexity === undefined) return undefined
+  return signalFromPerplexity(perplexity)
+}
+
+/**
+ * #55 — derive the §4.2 re-decomposition signals from a settled run's
+ * outcomes. An `unverified` slice (rejected but already at the top tier —
+ * accepted-with-warning) is a coverage gap: real work we could not confirm,
+ * surfaced as a `new-items` trigger rather than lost silently. A run that
+ * escalated more than half its slices tracked well over its cheap-tier budget
+ * (`escalate-tier`, informational — the per-slice escalation already happened
+ * inside the loop). Pure so the wiring and its tests share one derivation.
+ *
+ * @sem domain=routing role=converter
+ */
+export function redecompositionSignalsFromOutcomes(outcomes: readonly SliceOutcome[]): RedecompositionSignals {
+  const total = outcomes.length
+  const coverageGaps = outcomes.filter((o) => o.state === "unverified").length
+  const escalated = outcomes.filter((o) => o.state === "escalated").length
+  return {
+    coverageGaps,
+    budgetOverrunPct: total > 0 && escalated / total > 0.5 ? 100 : 0,
+  }
 }
 
 /**
@@ -369,6 +455,10 @@ export async function runConductorSliceLoop(
       text: out.text,
       trajectory: extractTrajectory(out.parts, out.isTestSlice ?? slice?.isTestSlice),
       usage: out.usage,
+      // #56 Part B — populate the posterior-uncertainty signal from the
+      // dispatch's own logprobs when the gateway returned them; undefined
+      // (today's common case) leaves the #48 gate on its #59 fallback.
+      uncertainty: uncertaintyFromParts(out.parts, req.tier),
     }
   }
 
@@ -377,6 +467,7 @@ export async function runConductorSliceLoop(
     runCommand: options?.runCommand ?? makeShellCommandRunner({ cwd: options?.cwd }),
     judgeGenerate: options?.judgeGenerate,
     qeGenerate: options?.qeGenerate,
+    confidenceGenerate: options?.confidenceGenerate,
     onEscalation: options?.onEscalation,
     rmRung: options?.rmRung,
     snapshot: options?.snapshot,
@@ -774,6 +865,26 @@ export const PLANNER_SLICE_CONTENT =
 /** The planner seat's seed (§8): the localization pre-pass's frame-slice shape pinned `need:"reasoner"` — a hard diagnosis turn buys one bounded plan up front, and the pin is what carries a lone frame slice through the shouldOrchestrate benefit gate. */
 export const PLANNER_PREPASS_TODO: InjectedSliceTodo = {
   content: PLANNER_SLICE_CONTENT,
+  status: "pending",
+  priority: "high",
+  sliceType: "design",
+  need: "reasoner",
+  persona: "researcher",
+}
+
+/**
+ * #55 — content of the re-plan seed the mid-flight re-decomposition trigger
+ * (`new-items`, §4.2) plants after a run leaves unverifiable coverage gaps.
+ * DELIBERATELY distinct from PLANNER_SLICE_CONTENT so appendTodos' dedup-by-
+ * content never collides with a resolve-first planner seed already on the list
+ * — this must be able to land even when a planner pre-pass ran this session.
+ */
+export const REDECOMPOSITION_SLICE_CONTENT =
+  "Re-plan the unfinished work from the previous pass. Some slices were accepted but could NOT be verified — coverage gaps, surfaced here rather than lost silently. Produce a bounded re-decomposition, not code: (1) list the unverified/uncovered items and why each stayed unconfirmed; (2) break each into smaller, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the re-plan and DAG only."
+
+/** #55 — the re-plan seed (§4.2 `new-items`): reasoner-pinned like PLANNER_PREPASS_TODO so a lone re-plan seed still clears the shouldOrchestrate benefit gate on the hook re-fire. */
+export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
+  content: REDECOMPOSITION_SLICE_CONTENT,
   status: "pending",
   priority: "high",
   sliceType: "design",
@@ -1655,6 +1766,14 @@ export interface ConductorOrchestrationDeps {
     candidatePlanValid?: boolean
     resolveAttempts: number
   }) => void
+  /** #55 — mid-flight re-decomposition telemetry sink: fires after every settled run with the §4.2 triggers `redecompositionCheck` returned and the signals behind them, whether or not any trigger was acted on. Same callback-to-caller pattern as `onResolutionGate`. */
+  onRedecomposition?: (info: {
+    triggers: RedecompositionTrigger[]
+    coverageGaps: number
+    escalated: number
+    reseeded: boolean
+    redecompAttempts: number
+  }) => void
 }
 
 /** What the hook reports back to the turn: whether it took over, and whether it fell back on error. */
@@ -1735,6 +1854,10 @@ export async function runConductorOrchestration(
       if (flagged) {
         const sessionID = deps.sessionID
         const candidatePlan = todosToPlanNodes(todos)
+        // Structural-only validity (todo-derived plans carry no node fields).
+        // Kept for the onResolutionGate telemetry callback; resolutionDecision
+        // recomputes the same structural check internally now that
+        // `requireNodeFields` is threaded (see below).
         const candidatePlanValid = validatePlan(candidatePlan, RESOLUTION_GATE_BUDGET, {
           requireNodeFields: false,
         }).ok
@@ -1742,27 +1865,24 @@ export async function runConductorOrchestration(
         // OL-9.0b's own headless marker (run.ts:263) — the same "is a real
         // user present" signal permission/index.ts's ask() backstop reads.
         const interactive = process.env["OPENCODE_HEADLESS"] !== "1"
-        // resolutionDecision's OWN step-2 short-circuit re-validates
-        // candidatePlan via `validatePlan(candidatePlan, budget)` with NO
-        // third arg — i.e. `requireNodeFields:true` — which a todo-derived
-        // plan (no objective/outputShape/successCriterion; see
-        // todosToPlanNodes) can never satisfy. A valid structural-only check
-        // is therefore handled here, directly, instead of round-tripping
-        // through resolutionDecision — resolutionDecision is still the
-        // single source of truth for every OTHER branch (ask-user vs
-        // resolve-first vs the attempts-cap termination), none of which
-        // re-run validatePlan.
-        const mode: ResolutionMode = candidatePlanValid
-          ? "decompose-now"
-          : resolutionDecision({
-              ambiguity: deps.arming?.ambiguity,
-              hardness: deps.arming?.hardness,
-              candidatePlan,
-              budget: RESOLUTION_GATE_BUDGET,
-              interactive,
-              needsUserInput: resolveAttempts >= 1,
-              resolveAttempts,
-            }).mode
+        // #61: resolutionDecision is the single source of truth for EVERY
+        // branch, including the step-2 valid-plan short-circuit. Threading
+        // `requireNodeFields: false` makes its internal validatePlan check
+        // structural-only, so a todo-derived plan (no objective/outputShape/
+        // successCriterion; see todosToPlanNodes) can actually satisfy it.
+        // Before this, resolutionDecision re-validated with the default
+        // requireNodeFields:true and that short-circuit could never fire for a
+        // todo plan, forcing the gate to bypass it with a hand-rolled check.
+        const mode: ResolutionMode = resolutionDecision({
+          ambiguity: deps.arming?.ambiguity,
+          hardness: deps.arming?.hardness,
+          candidatePlan,
+          budget: RESOLUTION_GATE_BUDGET,
+          requireNodeFields: false,
+          interactive,
+          needsUserInput: resolveAttempts >= 1,
+          resolveAttempts,
+        }).mode
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
           incResolveAttempts(sessionID)
@@ -1803,6 +1923,36 @@ export async function runConductorOrchestration(
       if (idx !== undefined) await settle(idx, "completed")
     }
     await chain
+
+    // #55 mid-flight re-decomposition (§4.2): once a run has settled, evaluate
+    // the re-decomposition triggers against its outcomes. A slice that settled
+    // "unverified" (rejected at the top tier, accepted-with-warning) is a
+    // coverage gap — real work we could not confirm. `new-items` re-enters the
+    // resolve→decompose loop by planting a DISTINCT re-plan seed: the todo-list
+    // change re-fires this hook, which passes the resolution gate again and
+    // re-decomposes the uncovered work into smaller checkable slices. Bounded
+    // by the SAME resolution-store counter as the prior-resolution loop (one
+    // unified per-session recursion-depth budget), so it always terminates.
+    // Needs a real session + append port; a legacy/test double skips it. Every
+    // trigger is telemetered even when only `new-items` is acted on.
+    if (deps.sessionID !== undefined && deps.appendTodos !== undefined) {
+      const signals = redecompositionSignalsFromOutcomes(result.outcomes)
+      const triggers = redecompositionCheck(signals)
+      const redecompAttempts = getResolveAttempts(deps.sessionID)
+      const reseeded = triggers.includes("new-items") && redecompAttempts < MAX_RESOLVE_ATTEMPTS
+      if (reseeded) {
+        incResolveAttempts(deps.sessionID)
+        await deps.appendTodos(REDECOMPOSITION_PREPASS_TODO)
+      }
+      deps.onRedecomposition?.({
+        triggers,
+        coverageGaps: signals.coverageGaps ?? 0,
+        escalated: result.outcomes.filter((o) => o.state === "escalated").length,
+        reseeded,
+        redecompAttempts,
+      })
+    }
+
     return { engaged: result.engaged, result }
   } catch (err) {
     deps.meterFallback?.(err)

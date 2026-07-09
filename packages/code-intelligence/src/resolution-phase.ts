@@ -42,6 +42,8 @@ export interface ResolutionInput {
   interactive: boolean
   /** The resolution pass concluded the approach needs product intent it can't derive from code. */
   needsUserInput?: boolean
+  /** When false, the step-2 valid-plan short-circuit validates `candidatePlan` STRUCTURALLY ONLY — cycles/depth/branching/deps/budget — skipping the per-node objective/outputShape/successCriterion check. Required for todo-derived plans (which carry no node fields). Defaults to true (full validation). */
+  requireNodeFields?: boolean
   /** How many resolution passes already ran on this task — the recursion/termination guard. */
   resolveAttempts: number
 }
@@ -84,8 +86,13 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
 
   // 2. Short-circuit: a prior resolution pass already produced a plan, and it
   //    validates — the approach is fixed, so proceed even though the task was
-  //    flagged. Re-resolving a settled, valid plan would waste the budget.
-  if (input.candidatePlan !== undefined && validatePlan(input.candidatePlan, input.budget).ok) {
+  //    flagged. Re-resolving a settled, valid plan would waste the budget. The
+  //    check honors `requireNodeFields`: structural-only (cycles/depth/branching/deps/budget)
+  //    when false, full validation when true (default).
+  if (
+    input.candidatePlan !== undefined &&
+    validatePlan(input.candidatePlan, input.budget, { requireNodeFields: input.requireNodeFields ?? true }).ok
+  ) {
     return { mode: "decompose-now", reason: "approach fixed, plan valid" }
   }
 

@@ -2403,6 +2403,57 @@ export const layer = Layer.effect(
                   }),
                 )
 
+              // #59 verbalized-confidence fallback for the posterior-uncertainty
+              // gate (task #48): when a prior-flagged slice's dispatch produced
+              // no logprob perplexity (the primary signal), the gate asks the
+              // slice's own output to self-rate 0-1 how confident it solved the
+              // INTENDED problem (not merely that it runs). A one-shot, tool-free
+              // completion on the conductor tier (the neutral decider, not the
+              // slice's own generator) reading the slice's completed digest. An
+              // empty output or parse failure returns 1.0 (fully confident ⇒ no
+              // escalation) so a flaky rater never eats the cost thesis, and logs
+              // so the degrade stays traceable.
+              const parseVerbalizedConfidence = (text: string): number => {
+                const jsonMatch = /"confidence"\s*:\s*(-?\d+(?:\.\d+)?)/i.exec(text)
+                const raw = jsonMatch?.[1] ?? /-?\d+(?:\.\d+)?/.exec(text)?.[0]
+                if (raw === undefined) return 1
+                let n = Number(raw)
+                if (!Number.isFinite(n)) return 1
+                if (n > 1 && n <= 100) n = n / 100 // tolerate a 0-100 percentage
+                return Math.min(1, Math.max(0, n))
+              }
+              const confidenceGenerate = (sliceId: string): Promise<number> =>
+                bridge.promise(
+                  Effect.gen(function* () {
+                    const output = completedSliceDigests.find((d) => d.id === sliceId)?.text ?? ""
+                    if (output.trim().length === 0) return 1
+                    const m = resolveSliceModel("conductor")
+                    const resolved = yield* provider.getModel(
+                      ProviderV2.ID.make(m.providerID),
+                      ModelV2.ID.make(m.modelID),
+                    )
+                    const language = yield* provider.getLanguage(resolved)
+                    const probe =
+                      'You reviewed one slice of a larger coding task. On a 0.0-1.0 scale, how confident are you that the work below solved the INTENDED problem correctly (not merely that it runs)? Reply with ONLY a JSON object: {"confidence": <number between 0 and 1>}.\n\n## Slice output\n' +
+                      output.slice(0, 4000)
+                    const out = yield* Effect.tryPromise({
+                      try: () =>
+                        generateText({ model: language, prompt: probe, maxOutputTokens: 64, temperature: 0 }),
+                      catch: (err) => err,
+                    }).pipe(
+                      Effect.tapError((err) =>
+                        Effect.logInfo("confidence_probe_failed", {
+                          "session.id": sessionID,
+                          sliceId,
+                          error: String(err).slice(0, 200),
+                        }),
+                      ),
+                      Effect.orElseSucceed(() => ({ text: "" }) as { text: string }),
+                    )
+                    return parseVerbalizedConfidence(out.text)
+                  }),
+                )
+
               const orch = yield* Effect.promise(() =>
                 runConductorOrchestration({
                   getTodos: () => bridge.promise(todoStore.get(sessionID)),
@@ -2473,6 +2524,7 @@ export const layer = Layer.effect(
                     cwd: ctx.directory,
                     rmRung,
                     judgeGenerate,
+                    confidenceGenerate,
                     // U3 — the opencode-side snapshot adapter (opencode's
                     // git-based snapshot subsystem) bracketing each attempt;
                     // absent snapshot ⇒ today's dirty-tree behavior.
