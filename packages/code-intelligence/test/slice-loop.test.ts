@@ -8,10 +8,13 @@
  * (stops at the conductor, never the oracle), the escalation brief's prior-
  * attempt context digest (+ its truncation), design → oracle direct,
  * judge rung on the untestable cell, DAG ordering, the planWaves
- * scheduler (cycle / unknown-dep), and the U3 failure-containment bracket
+ * scheduler (cycle / unknown-dep), the U3 failure-containment bracket
  * (track/restore around editable attempts, read-only slices never
  * bracketed, the REVERTED diff on the escalation brief and on ladder
- * exhaustion, escalation provenance, and a zero-behavior-change absent dep).
+ * exhaustion, escalation provenance, and a zero-behavior-change absent dep),
+ * and the P6 relation derivations: dep-failure blocking with cascade (P6a),
+ * scope-overlap serialization to a fixpoint (P6b), and the un-starved venue
+ * inputs requestingTier/sameFilesInScope (P6c).
  */
 
 import { describe, it, expect } from "bun:test"
@@ -38,6 +41,7 @@ import {
 import type { CommandResult, VerifyCommand } from "../src/verifier.js"
 import { ECON_TIER_BINDING } from "../src/model-registry.js"
 import type { EconTier } from "../src/region.js"
+import { redecompositionCheck } from "../src/evaluator.js"
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -998,6 +1002,8 @@ describe("runSliceLoop — OL-9.4c first-pass/attempts telemetry", () => {
       totalAttempts: 1,
       attemptsPerSlice: 1,
       firstPassRate: 1,
+      blocked: 0,
+      implicitDeps: [],
     })
   })
 
@@ -1026,6 +1032,8 @@ describe("runSliceLoop — OL-9.4c first-pass/attempts telemetry", () => {
       totalAttempts: 2,
       attemptsPerSlice: 2,
       firstPassRate: 0,
+      blocked: 0,
+      implicitDeps: [],
     })
   })
 
@@ -1075,6 +1083,8 @@ describe("runSliceLoop — OL-9.4c first-pass/attempts telemetry", () => {
       totalAttempts: 3,
       attemptsPerSlice: 1.5,
       firstPassRate: 0.5,
+      blocked: 0,
+      implicitDeps: [],
     })
   })
 })
@@ -1497,5 +1507,283 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     expect(calls.length).toBe(1)
     expect(result.outcomes[0].attempts).toBe(1)
     expect(result.outcomes[0].state).toBe("accepted")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6a — dep-failure blocking: a dependency that settles terminal-failed
+// (ladder exhausted, verdict NOT accepted) blocks its dependents before any
+// spend; the block cascades; blocked outcomes stay in the trace (stable
+// input order) and feed re-decomposition as coverage-gap input (Q-J).
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — P6a dep-failure blocking", () => {
+  const mech = (id: string, deps?: string[]): LoopSlice => ({
+    id,
+    prompt: id,
+    sliceType: "mechanical",
+    coupling: "low",
+    testStrength: "testable",
+    verifyCommands: [{ kind: "test", command: `${id}-check` }],
+    ...(deps ? { deps } : {}),
+  })
+
+  it("blocks the dependent chain of a terminal-failed dep — cascade, zero dispatches, stable outcome order, re-decomposition sees them", async () => {
+    // "a" is read-only (recon): 1 attempt, no ladder — its reject settles
+    // unverified with a REJECTING verdict, the terminal-failed shape.
+    const a: LoopSlice = {
+      id: "a",
+      prompt: "map callers",
+      sliceType: "recon",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "test", command: "a-check" }],
+    }
+    const slices: LoopSlice[] = [a, mech("b", ["a"]), mech("c", ["b"])]
+    const runner = async (c: VerifyCommand): Promise<CommandResult> =>
+      c.command === "a-check" ? { exitCode: 1, stdout: "", stderr: "boom" } : { exitCode: 0, stdout: "ok", stderr: "" }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop(slices, { dispatch, runCommand: runner })
+
+    expect(calls.map((c) => c.sliceId)).toEqual(["a"]) // b and c never cost a dispatch
+    expect(result.outcomes.map((o) => o.id)).toEqual(["a", "b", "c"]) // input order preserved
+    expect(result.outcomes.map((o) => o.state)).toEqual(["unverified", "blocked", "blocked"])
+    expect(result.outcomes[1].blockedBy).toEqual(["a"])
+    expect(result.outcomes[2].blockedBy).toEqual(["b"]) // cascade: blocked by the blocked dep
+    expect(result.outcomes[1].attempts).toBe(0)
+    expect(result.outcomes[1].output).toBe("")
+    expect(result.outcomes[1].verdict.accepted).toBe(false)
+    expect(result.outcomes[1].verdict.rung).toBe("blocked")
+    expect(result.telemetry.blocked).toBe(2)
+    expect(result.telemetry.slicesDispatched).toBe(1)
+    expect(result.telemetry.totalAttempts).toBe(1)
+    // Q-J: blocked feeds re-decomposition as coverage-gap input — the #55
+    // machinery fires "new-items" on the blocked count, never silent loss.
+    expect(redecompositionCheck({ coverageGaps: result.telemetry.blocked })).toContain("new-items")
+  })
+
+  it("never blocks on an accepted-flagged-unverified dep (OL-9.5d: absence of a check is not evidence of failure)", async () => {
+    // No runner / judge / QE: "a" accepts with verdict.unverified=true but an
+    // ACCEPTING verdict — its dependent must still dispatch.
+    const a: LoopSlice = { id: "a", prompt: "a", sliceType: "mechanical", testStrength: "untestable" }
+    const b: LoopSlice = { id: "b", prompt: "b", sliceType: "mechanical", testStrength: "untestable", deps: ["a"] }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([a, b], { dispatch })
+
+    expect(result.outcomes.map((o) => o.state)).toEqual(["unverified", "unverified"])
+    expect(result.outcomes[0].verdict.accepted).toBe(true)
+    expect(calls.map((c) => c.sliceId)).toEqual(["a", "b"])
+    expect(result.telemetry.blocked).toBe(0)
+    expect(result.outcomes[1].blockedBy).toBeUndefined()
+  })
+
+  it("blocks through a P6b implicit dep too — the serialized later slice never dispatches after the earlier one terminal-fails", async () => {
+    const slices: LoopSlice[] = [mech("a"), mech("b")] // no declared deps
+    const runner = async (c: VerifyCommand): Promise<CommandResult> =>
+      c.command === "a-check" ? { exitCode: 1, stdout: "", stderr: "a is broken" } : { exitCode: 0, stdout: "ok", stderr: "" }
+    const { dispatch, calls } = recordingDispatch({
+      onCheap: () => ({ text: "bad patch", trajectory: { events: [] } }),
+      onEscalated: (req) => ({ text: `rescue:${req.tier}`, trajectory: { events: [] } }),
+    })
+    const result = await runSliceLoop(slices, {
+      dispatch,
+      runCommand: runner,
+      editScopeOf: () => new Set(["src/shared.ts"]),
+    })
+
+    expect(result.waves).toEqual([["a"], ["b"]]) // serialized by scope overlap
+    expect(calls.every((c) => c.sliceId === "a")).toBe(true) // "a" works its ladder; "b" never runs
+    expect(result.outcomes.map((o) => o.state)).toEqual(["unverified", "blocked"])
+    expect(result.outcomes[1].blockedBy).toEqual(["a"])
+    expect(result.telemetry.blocked).toBe(1)
+    expect(result.telemetry.implicitDeps).toEqual([{ sliceId: "b", dependsOn: "a", overlap: ["src/shared.ts"] }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6b — scope-overlap serialization: same-wave editing slices with
+// intersecting predicted scopes gain an implicit later→earlier dep; disjoint
+// scopes stay parallel; declared deps are never dropped; read-only slices
+// are never probed; an absent probe leaves the wave plan byte-identical.
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — P6b scope-overlap serialization", () => {
+  const edit = (id: string, deps?: string[]): LoopSlice => ({
+    id,
+    prompt: id,
+    sliceType: "mechanical",
+    coupling: "low",
+    testStrength: "testable",
+    verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    ...(deps ? { deps } : {}),
+  })
+
+  it("serializes two overlapping same-wave editing slices and records the implicit dep with its overlap", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([edit("a"), edit("b")], {
+      dispatch,
+      runCommand: passRunner,
+      editScopeOf: async () => new Set(["src/x.ts"]),
+    })
+
+    expect(result.waves).toEqual([["a"], ["b"]])
+    expect(result.telemetry.implicitDeps).toEqual([{ sliceId: "b", dependsOn: "a", overlap: ["src/x.ts"] }])
+    expect(calls.map((c) => c.sliceId)).toEqual(["a", "b"]) // strictly in series
+    // The implicit dep carries information flow like a declared one: the
+    // serialized slice sees what was already done to its files.
+    expect(calls[1].prompt).toContain("## Upstream slice results")
+    expect(calls[1].prompt).toContain("### a (accepted)")
+    expect(result.outcomes.every((o) => o.state === "accepted")).toBe(true)
+  })
+
+  it("leaves disjoint scopes parallel and never drops a declared dep on disjoint scope", async () => {
+    const scopes: Record<string, string[]> = { a: ["src/a.ts"], b: ["src/b.ts"], c: ["src/c.ts"] }
+    const { dispatch } = recordingDispatch()
+    const slices = [edit("a"), edit("b"), edit("c", ["a"])] // c deps a, all scopes disjoint
+    const result = await runSliceLoop(slices, {
+      dispatch,
+      runCommand: passRunner,
+      editScopeOf: (s) => new Set(scopes[s.id]),
+    })
+
+    expect(result.waves).toEqual([["a", "b"], ["c"]]) // a‖b parallel; a→c ordering kept
+    expect(result.telemetry.implicitDeps).toEqual([])
+    expect(result.outcomes.every((o) => o.state === "accepted")).toBe(true)
+  })
+
+  it("never probes a read-only slice — recon stays parallel even against an overlapping editor", async () => {
+    const probed: string[] = []
+    const recon: LoopSlice = {
+      id: "r",
+      prompt: "map callers",
+      sliceType: "recon",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "test", command: "bun test" }],
+    }
+    const { dispatch } = recordingDispatch()
+    const result = await runSliceLoop([recon, edit("m")], {
+      dispatch,
+      runCommand: passRunner,
+      editScopeOf: (s) => {
+        probed.push(s.id)
+        return new Set(["src/x.ts"])
+      },
+    })
+
+    expect(probed).toEqual(["m"]) // isReadOnlySlice exempts recon/verify from the probe
+    expect(result.waves).toEqual([["r", "m"]])
+    expect(result.telemetry.implicitDeps).toEqual([])
+  })
+
+  it("keeps the wave plan byte-identical when no editScopeOf probe is injected", async () => {
+    const slices = [edit("a"), edit("b"), edit("c", ["a"])]
+    const { dispatch } = recordingDispatch()
+    const result = await runSliceLoop(slices, { dispatch, runCommand: passRunner })
+
+    expect(result.waves).toEqual(planWaves(slices))
+    expect(result.telemetry.implicitDeps).toEqual([])
+  })
+
+  it("re-plans to a fixpoint: a serialization that re-waves a third overlapping slice serializes that pair too", async () => {
+    // Input [a, b, c]; c declared-deps a. Scopes: a{x}, b{x,y}, c{y}.
+    // Declared plan: [a,b], [c]. Pass 1: a∩b={x} → b deps a → [a], [b,c].
+    // Pass 2: b∩c={y} → c deps b → [a], [b], [c].
+    const scopes: Record<string, string[]> = { a: ["x"], b: ["x", "y"], c: ["y"] }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([edit("a"), edit("b"), edit("c", ["a"])], {
+      dispatch,
+      runCommand: passRunner,
+      editScopeOf: (s) => new Set(scopes[s.id]),
+    })
+
+    expect(result.waves).toEqual([["a"], ["b"], ["c"]])
+    expect(result.telemetry.implicitDeps).toEqual([
+      { sliceId: "b", dependsOn: "a", overlap: ["x"] },
+      { sliceId: "c", dependsOn: "b", overlap: ["y"] },
+    ])
+    expect(calls.map((c) => c.sliceId)).toEqual(["a", "b", "c"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6c — un-starved venue inputs: requestingTier comes from the deps seam
+// (default "conductor"), sameFilesInScope from the scope probe ∩ parentScope.
+// The verdict stays telemetry-only via onEvaluation (P7 option b).
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — P6c venue inputs (requestingTier + sameFilesInScope)", () => {
+  const slice: LoopSlice = {
+    id: "s",
+    prompt: "edit the handler",
+    sliceType: "mechanical",
+    coupling: "low",
+    testStrength: "testable",
+    verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+  }
+
+  const evalRuns = () => {
+    const events: Array<{ sliceId: string; tier: string; venue: string; reasons: string[] }> = []
+    return { events, onEvaluation: (e: { sliceId: string; tier: string; venue: string; reasons: string[] }) => events.push(e) }
+  }
+
+  it("evaluates venue inline when the predicted scope intersects parentScope and the tiers match", async () => {
+    const { dispatch } = recordingDispatch()
+    const { events, onEvaluation } = evalRuns()
+    await runSliceLoop([slice], {
+      dispatch,
+      runCommand: passRunner,
+      onEvaluation,
+      editScopeOf: () => new Set(["src/handler.ts"]),
+      parentScope: new Set(["src/handler.ts", "src/other.ts"]),
+      requestingTier: "executor", // matches the mechanical slice's decided tier
+    })
+
+    expect(events.length).toBe(1)
+    expect(events[0].tier).toBe("executor")
+    expect(events[0].venue).toBe("inline")
+    expect(events[0].reasons.some((r) => r.includes("same files/entities in scope → inline"))).toBe(true)
+  })
+
+  it("evaluates sameFilesInScope false when the scope and parentScope are disjoint", async () => {
+    const { dispatch } = recordingDispatch()
+    const { events, onEvaluation } = evalRuns()
+    await runSliceLoop([slice], {
+      dispatch,
+      runCommand: passRunner,
+      onEvaluation,
+      editScopeOf: () => new Set(["src/handler.ts"]),
+      parentScope: new Set(["src/unrelated.ts"]),
+      requestingTier: "executor",
+    })
+
+    expect(events[0].venue).toBe("child")
+    expect(events[0].reasons.some((r) => r.includes("context diverges"))).toBe(true)
+  })
+
+  it("defaults requestingTier to \"conductor\" and sameFilesInScope to false without the seams — and the reasons name the requesting tier", async () => {
+    const { dispatch } = recordingDispatch()
+    const { events, onEvaluation } = evalRuns()
+    await runSliceLoop([slice], {
+      dispatch,
+      runCommand: passRunner,
+      onEvaluation,
+      editScopeOf: () => new Set(["src/handler.ts"]), // probe present, but no parentScope
+    })
+
+    expect(events[0].venue).toBe("child")
+    expect(events[0].reasons).toContain("venue: tier differs (requesting conductor, decided executor) → child")
+  })
+
+  it("threads a caller-supplied requestingTier into the venue reasons", async () => {
+    const { dispatch } = recordingDispatch()
+    const { events, onEvaluation } = evalRuns()
+    await runSliceLoop([slice], {
+      dispatch,
+      runCommand: passRunner,
+      onEvaluation,
+      requestingTier: "reasoner",
+    })
+
+    expect(events[0].venue).toBe("child")
+    expect(events[0].reasons).toContain("venue: tier differs (requesting reasoner, decided executor) → child")
   })
 })

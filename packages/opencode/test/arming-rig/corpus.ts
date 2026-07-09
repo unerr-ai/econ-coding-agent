@@ -6,8 +6,10 @@ import type { ArmingScenario, TriageVerdict, TriageGoalShape, OrchestrationTodo 
  * both failure modes of the localization-arming decision (OVER-FIRE vs
  * UNDER-FIRE) plus the PLANNER escalation (R3) and the Door-2 net (R4).
  *
- * Each scenario encodes the CORRECT/desired outcome in expect.localizationArmed,
- * not current behavior. The rig runs the arming pipeline and scores against this
+ * Each scenario encodes the CORRECT/desired outcome in expect.localizationArmed
+ * plus (P12) the expected seed KIND in expect.seedKind — diagnosis rows arm the
+ * localization writer, hard-build (needsPlan) rows arm the plan seed — not
+ * current behavior. The rig runs the arming pipeline and scores against this
  * baseline; violations show where the decision logic needs tuning. `expect.reason`
  * cites the corpus rule (R1-R4) that decides the case — see the doc for the
  * full rule text.
@@ -163,6 +165,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 NONE-grounding — symptom described structurally but no file named; needs localization to find the code",
     },
     note: "django-11885: performance bug described without file path",
@@ -184,6 +187,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 NONE-grounding — pure symptom (crash), no file or symbol named; needs localization",
     },
     note: "real crash: no file mentioned, requires structural search",
@@ -205,6 +209,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 WEAK — bare symbol (QuerySet.delete) with no file is a deferred start, not a shortcut; needs localization",
     },
     note: "Django ORM API mentioned by symbol, not by file location",
@@ -226,6 +231,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 WEAK — names a component (session handler), not a file; needs localization",
     },
     note: "component/layer named, no file",
@@ -247,6 +253,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 NONE-grounding — phrased as a question, no file or symbol named; needs localization",
     },
     note: "question-phrased symptom report",
@@ -268,6 +275,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2 NONE-grounding — symptom only, no file named; needs localization",
     },
     note: "no file named",
@@ -290,9 +298,11 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
-      reason: "R3 — a hard vague bug (concurrency, cross-cutting) arms PLANNER, not just localization",
+      seedKind: "localization",
+      reason:
+        "R2/R3 — a hard vague bug arms the LOCALIZATION writer (hardness floors its tier); on a DIAGNOSIS goal needsPlan never plants the plan seed — the single-seed collapse (12050)",
     },
-    note: "hard vague bug — R3 overrides plain localization with a plan-first pass",
+    note: "hard vague diagnosis — localization writer, hardness-floored; the P12 plan seed is build-only",
   },
 
   // -------------------------------------------------------------------------
@@ -320,6 +330,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason:
         "R2 ASYMMETRIC — the API side is file-grounded but the DB side is a vague layer; the vague side still needs localization (a planner would over-escalate at only 2 layers per R3)",
     },
@@ -451,6 +462,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "plan",
       reason: "R3 — cross-cutting refactor touching many call sites arms PLANNER over plain execution",
     },
     note: "cross-cutting refactor",
@@ -473,6 +485,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "plan",
       reason: "R3 — multi-component feature (toggle + persistence + every panel) arms PLANNER",
     },
     note: "multi-component build",
@@ -495,6 +508,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "plan",
       reason: "R3 — multi-file coordination plus debugging clears the breakeven for PLANNER",
     },
     note: "multi-file coordination + debug",
@@ -517,6 +531,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "plan",
       reason: "R3 — multi-step UI-to-backend-to-test build arms PLANNER",
     },
     note: "multi-step UI→backend→test",
@@ -683,6 +698,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R2/R3 — the vague goal in a mixed turn is unlocated and arms localization for the whole turn",
     },
     note: "one grounded + one vague goal in the same turn",
@@ -748,6 +764,7 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "R4 — mechanical todos exist but name no file; arming still stands (Door-2 backstop)",
     },
     note: "todos alone don't ground vague diagnosis if no file is named",

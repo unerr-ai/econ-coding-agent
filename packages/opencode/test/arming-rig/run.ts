@@ -5,7 +5,7 @@
 // from packages/opencode. `bun test` does not pick this file up (its name
 // doesn't match the *.test.ts/*.spec.ts patterns bun test scans for).
 import { autoTypeTodos, buildTriageTodoSkeleton } from "../../src/session/slice-orchestrator"
-import { LOCALIZATION_SLICE_CONTENT } from "../../src/session/prompts/seeds"
+import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "../../src/session/prompts/seeds"
 import { heuristicArming, judgeArming, type ArmingVerdict } from "../../src/session/arming-judge"
 import { runTurnTriage, type TriageComplete, type TriageCompleteRequest } from "../../src/session/turn-triage"
 import { ECON_TIER_BINDING } from "../../../code-intelligence/src/model-registry"
@@ -51,6 +51,7 @@ const STUB_CORPUS: readonly ArmingScenario[] = [
     },
     expect: {
       localizationArmed: true,
+      seedKind: "localization",
       reason: "grounded bug with no file target should round up to diagnosis-vague and arm localization",
     },
     note: "stub fallback: grounded, no file target",
@@ -140,7 +141,7 @@ async function liveArming(input: { userPrompt: string; verdict: TriageVerdict })
   return arming
 }
 
-type CaseVerdict = "ok" | "over-fire" | "under-fire" | "error"
+type CaseVerdict = "ok" | "over-fire" | "under-fire" | "wrong-seed" | "error"
 
 interface ScoreRow {
   id: string
@@ -179,18 +180,33 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
   }
 
   // Arming judge decides (heuristicArming deterministic / judgeArming live);
-  // the skeleton + autoTypeTodos net then materializes the writer pre-pass
+  // the skeleton + autoTypeTodos net then materializes the frame pre-pass
   // from that decision.
   const skeleton = buildTriageTodoSkeleton(verdict, arming)
   const typed = autoTypeTodos(scenario.todos ?? skeleton, arming.armLocalization)
   // The pre-pass engages the expensive reasoner tier, so over/under-fire is
-  // measured on "any pre-pass armed"; the `seed` column shows whether the
-  // single writer pre-pass was planted.
-  const seed = typed.some((t) => t.content === LOCALIZATION_SLICE_CONTENT) ? "localization" : "—"
-  const actualArmed = seed !== "—"
+  // measured on "any pre-pass armed"; the `seed` column reports WHICH kind
+  // was planted (P12): the diagnosis localization writer, the hard-build plan
+  // seed, or none.
+  const seedKinds = [
+    ...(typed.some((t) => t.content === LOCALIZATION_SLICE_CONTENT) ? ["localization"] : []),
+    ...(typed.some((t) => t.content === PLAN_SLICE_CONTENT) ? ["plan"] : []),
+  ]
+  const seed = seedKinds.length > 0 ? seedKinds.join("+") : "—"
+  const actualArmed = seedKinds.length > 0
   const shapes = verdict.goals.map((g) => g.shape).join(", ") || "-"
 
-  const caseVerdict: CaseVerdict = actualArmed === expected ? "ok" : expected ? "under-fire" : "over-fire"
+  // Armed rows must also plant the EXPECTED seed kind (planner-vs-localizer is
+  // no longer invisible): kind mismatch — or a corpus row missing its seedKind
+  // label — scores wrong-seed even though "any pre-pass" armed correctly.
+  const caseVerdict: CaseVerdict =
+    actualArmed !== expected
+      ? expected
+        ? "under-fire"
+        : "over-fire"
+      : expected && seed !== scenario.expect.seedKind
+        ? "wrong-seed"
+        : "ok"
   return {
     id: scenario.id,
     note,
@@ -219,8 +235,11 @@ console.table(
 const ok = rows.filter((r) => r.verdict === "ok").length
 const overFire = rows.filter((r) => r.verdict === "over-fire").length
 const underFire = rows.filter((r) => r.verdict === "under-fire").length
+const wrongSeed = rows.filter((r) => r.verdict === "wrong-seed").length
 const errored = rows.filter((r) => r.verdict === "error").length
 
-console.log(`${ok} ok, ${overFire} over-fire, ${underFire} under-fire${errored > 0 ? `, ${errored} error` : ""}`)
+console.log(
+  `${ok} ok, ${overFire} over-fire, ${underFire} under-fire, ${wrongSeed} wrong-seed${errored > 0 ? `, ${errored} error` : ""}`,
+)
 
 process.exit(rows.every((r) => r.verdict === "ok") ? 0 : 1)

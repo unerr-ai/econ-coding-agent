@@ -16,7 +16,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
-import { LOCALIZATION_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT } from "./prompts/seeds"
+import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
   runSliceLoop,
@@ -272,10 +272,26 @@ export const PERSONA_STEP_BUDGET: Record<EconPersona, number> = {
  */
 export const FRAME_SLICE_STEP_BUDGET = 45
 
-/** Step budget for a slice: the diagnosis pre-pass writer gets its own allowance, everything else the persona's. */
-export function sliceStepBudget(persona: EconPersona, sliceId?: string): number {
-  if (sliceId === LOCALIZATION_SLICE_CONTENT) return FRAME_SLICE_STEP_BUDGET
-  return PERSONA_STEP_BUDGET[persona]
+/** P8 — the difficulty/escalation signals that lift a slice's step budget, all already present at the dispatch seam (req.sliceType, req.escalated, the arming store's hardness). */
+export interface SliceStepBudgetOpts {
+  /** The slice's DAG node type — `design` is difficulty by construction (allocation's design-insight floor). */
+  readonly sliceType?: string
+  /** Arming-judge difficulty: true when the turn's hardness is `hard`. */
+  readonly hard?: boolean
+  /** True on an escalated rescue dispatch. */
+  readonly escalated?: boolean
+}
+
+/**
+ * Step budget for a slice: the diagnosis pre-pass writer gets its own
+ * allowance, everything else the persona's. P8 — a design/hard slice or an
+ * escalated rescue gets ×1.5: exhaustion is not graceful (the `[BUDGET
+ * EXHAUSTED]` digest fails verification and the ladder double-pays a full
+ * retry), so +50% steps up front on the hard tail is cheaper than a rescue.
+ */
+export function sliceStepBudget(persona: EconPersona, sliceId?: string, opts?: SliceStepBudgetOpts): number {
+  const base = sliceId === LOCALIZATION_SLICE_CONTENT ? FRAME_SLICE_STEP_BUDGET : PERSONA_STEP_BUDGET[persona]
+  return opts?.sliceType === "design" || opts?.hard || opts?.escalated ? Math.ceil(base * 1.5) : base
 }
 
 /** Fail-loud marker prepended to a slice's output when its step budget is exhausted (OL-9.3a). */
@@ -869,6 +885,16 @@ export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
   persona: "researcher",
 }
 
+/** P12 — the plan seed a non-diagnosis `needsPlan` goal plants at turn open: same edit-free `design` shape as the re-plan seed (reasoner-floored by allocation, clears the benefit gate alone), but a forward-looking decomposition brief for fresh build work instead of the diagnosis writer's bug-hunt. */
+export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
+  content: PLAN_SLICE_CONTENT,
+  status: "pending",
+  priority: "high",
+  sliceType: "design",
+  need: "reasoner",
+  persona: "researcher",
+}
+
 // F1 — turn-open prompt-shape detection. Defect evidence in the USER prompt:
 // repair verbs or symptom language. Deliberately requires defect words — a
 // build prompt's "should return X" spec language must not match.
@@ -989,23 +1015,8 @@ export function classifyTurnShape(userPrompt: string): TurnShape {
   return { category: QUESTION_SHAPE_RE.test(prompt) ? "qa" : "build", confidence: "low" }
 }
 
-/**
- * The single frame seed an armed diagnosis turn plants at turn open: one
- * WRITER pre-pass (localize → fix → verify in one session), difficulty-allocated
- * (executor for an already-located fix, floored to the reasoner only when the
- * judge rates the bug hard/ambiguous). Collapsed
- * to a single seed — a diagnosis turn never plants both a planner and a
- * localization seed (the 12050 double-seed regression). Shared by the prompt
- * loop's seed block, the triage skeleton, and the tests.
- *
- * @sem domain=routing role=router
- */
-export function diagnosisPrepassSeed(): InjectedSliceTodo {
-  return LOCALIZATION_PREPASS_TODO
-}
-
-/** Engine-authored frame-seed content (the diagnosis pre-pass writer) — the typed slice the turn-open skeleton plants, which a conductor rewrite must never drop. */
-const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT])
+/** Engine-authored frame-seed contents (the diagnosis pre-pass writer and the P12 build plan seed) — the typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
+const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT])
 
 /**
  * Todowrite-boundary reconcile net (case-2 tierfire3 double-wave decode): slice
@@ -1102,22 +1113,22 @@ export interface TriageTodoRow extends OrchestrationTodo {
 /**
  * §1.2/U2 — materialize the turn-open todo skeleton from a non-null triage
  * verdict: one root todo per goal (dependency order, `orderTriageGoals`), and
- * for any goal that needs a frame pre-pass, one frame-seed child
- * (`diagnosisPrepassSeed`, the single writer pre-pass) linked by the goal-tree's
- * `parentID` position index (goal -> task, one level — well inside the tracker's
- * depth-3 cap). The seed decision is a clean DOMAIN SPLIT: for a DIAGNOSIS goal
- * the arming judge OWNS localization arming (`armLocalization` — an LLM call, the
- * semantic authority on whether a bug needs a localization pre-pass), so
- * `needsPlan` cannot override it; `needsPlan` is a conductor triage flag set
- * blind (the field is undefined in the triage prompt) and its old OR would else
- * force a reasoner pre-pass onto an already-located bug the judge correctly
- * declined (the django-12039 regression). For a NON-diagnosis/build goal,
- * `needsPlan` owns the planning pre-pass (the judge answers armLocalization=false
- * for build work, so `needsPlan` is the right signal there). Every qualifying
- * goal resolves to the SAME writer seed, so cross-goal content dedup plants
- * EXACTLY ONE pre-pass, parented to the first qualifying goal in dependency
- * order — never a planner AND a localization seed (the 12050 double-seed
- * regression).
+ * for any goal that needs a frame pre-pass, one frame-seed child linked by the
+ * goal-tree's `parentID` position index (goal -> task, one level — well inside
+ * the tracker's depth-3 cap). The seed decision is a clean DOMAIN SPLIT: for a
+ * DIAGNOSIS goal the arming judge OWNS localization arming (`armLocalization`
+ * — an LLM call, the semantic authority on whether a bug needs a localization
+ * pre-pass), so `needsPlan` cannot override it; `needsPlan` is a conductor
+ * triage flag set blind (the field is undefined in the triage prompt) and its
+ * old OR would else force a reasoner pre-pass onto an already-located bug the
+ * judge correctly declined (the django-12039 regression). For a
+ * NON-diagnosis/build goal, `needsPlan` owns the planning pre-pass and plants
+ * the P12 PLAN seed — fresh work with no bug must not receive the diagnosis
+ * writer's bug-hunt brief. Same-kind goals resolve to the same seed content, so
+ * cross-goal content dedup plants at most ONE pre-pass per kind, parented to
+ * the first qualifying goal in dependency order; a single diagnosis goal never
+ * plants both (needsPlan is ignored on the diagnosis branch — the 12050
+ * double-seed regression).
  *
  * @sem domain=routing role=router
  */
@@ -1134,12 +1145,16 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict, arming: ArmingDe
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
     const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
-    if (isDiagnosis ? arming.armLocalization : (goal.needsPlan ?? false)) {
-      const seed = diagnosisPrepassSeed()
-      if (plantedSeedContent.has(seed.content)) continue
-      plantedSeedContent.add(seed.content)
-      todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
-    }
+    const seed = isDiagnosis
+      ? arming.armLocalization
+        ? LOCALIZATION_PREPASS_TODO
+        : undefined
+      : (goal.needsPlan ?? false)
+        ? PLAN_PREPASS_TODO
+        : undefined
+    if (!seed || plantedSeedContent.has(seed.content)) continue
+    plantedSeedContent.add(seed.content)
+    todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
   }
   return todos
 }
@@ -1679,7 +1694,7 @@ export interface ConductorOrchestrationDeps {
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }
   /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
   sessionID?: string
-  /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constant (`LOCALIZATION_PREPASS_TODO`, via `diagnosisPrepassSeed`) carries. */
+  /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLAN_PREPASS_TODO`) carry. */
   appendTodos?: (seed: InjectedSliceTodo) => Promise<void>
   /** #53/#54 — register one clarifying question and return without waiting for the answer; the caller wires this to `Question.Service.ask` via a non-blocking Effect fork so the turn yields instead of parking on the Deferred. Absent (headless/test double) → `"ask-user"` can never be acted on (it is also gated off by `interactive` below). */
   askUser?: (question: string) => void
@@ -1810,7 +1825,7 @@ export async function runConductorOrchestration(
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
           incResolveAttempts(sessionID)
-          if (deps.appendTodos) await deps.appendTodos(diagnosisPrepassSeed())
+          if (deps.appendTodos) await deps.appendTodos(LOCALIZATION_PREPASS_TODO)
           return { engaged: false }
         }
         if (mode === "ask-user") {

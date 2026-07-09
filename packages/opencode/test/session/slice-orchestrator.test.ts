@@ -43,7 +43,7 @@ import {
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   classifyTurnShape,
-  diagnosisPrepassSeed,
+  PLAN_PREPASS_TODO,
   type TurnShapeCategory,
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
@@ -72,10 +72,14 @@ import {
   type TriageTodoRow,
 } from "../../src/session/slice-orchestrator"
 import { categoryPreamble, triagePreamble } from "../../src/session/prompts/preambles"
-import { LOCALIZATION_SLICE_CONTENT } from "../../src/session/prompts/seeds"
+import {
+  LOCALIZATION_SLICE_CONTENT,
+  PLAN_SLICE_CONTENT,
+  REDECOMPOSITION_SLICE_CONTENT,
+} from "../../src/session/prompts/seeds"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 import type { ArmingDecision } from "../../src/session/arming-judge"
-import { getResolveAttempts, incResolveAttempts } from "../../src/session/resolution-store"
+import { getResolveAttempts, incResolveAttempts, resetResolveAttempts } from "../../src/session/resolution-store"
 
 /** Probes that never touch a graph — fixed verdicts, with a call counter. */
 function fakeProbes(
@@ -670,18 +674,19 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.every((t) => t.parentID === undefined)).toBe(true)
   })
 
-  it("a needsPlan goal gets exactly one frame-seed child linked by parentID", () => {
+  it("a needsPlan BUILD goal gets exactly one PLAN-seed child linked by parentID (P12 — never the bug-hunt brief)", () => {
     const verdict: TriageVerdict = {
-      goals: [{ quote: "diagnose the flaky test", shape: "build", deliverable: "root cause found", needsPlan: true }],
+      goals: [{ quote: "add dark mode across all panels", shape: "build", deliverable: "dark mode works", needsPlan: true }],
       constraints: [],
       confidence: "high",
     }
-    const todos: TriageTodoRow[] = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
+    const todos: TriageTodoRow[] = buildTriageTodoSkeleton(verdict, { armLocalization: false, hardness: "hard" })
     expect(todos).toHaveLength(2)
-    expect(todos[0]!.content).toBe("diagnose the flaky test")
+    expect(todos[0]!.content).toBe("add dark mode across all panels")
     expect(todos[1]!.parentID).toBe(0)
-    // A qualifying goal seeds the single writer pre-pass, regardless of arming.hardness.
-    expect(todos[1]!.content).toBe(diagnosisPrepassSeed().content)
+    // A hard build gets the forward-looking plan seed, regardless of arming.hardness.
+    expect(todos[1]!.content).toBe(PLAN_SLICE_CONTENT)
+    expect(todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toBe(false)
   })
 
   it("a diagnosis-vague shaped goal also gets a frame seed, even without needsPlan", () => {
@@ -712,7 +717,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos[2]!.parentID).toBe(0)
   })
 
-  it("at most one frame seed per goal — the per-goal check never plants two seeds for one goal", () => {
+  it("at most one frame seed per kind — two needsPlan build goals collapse to ONE plan seed, parented to the first", () => {
     const verdict: TriageVerdict = {
       goals: [
         { quote: "goal one, needs plan", shape: "build", deliverable: "", needsPlan: true },
@@ -721,11 +726,11 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
       constraints: [],
       confidence: "high",
     }
-    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
-    // Both goals resolve to the same single writer seed — cross-goal content
-    // dedup collapses them to ONE planted seed, parented to the first goal.
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: false, hardness: "moderate" })
+    // Both goals resolve to the same plan seed — cross-goal content dedup
+    // collapses them to ONE planted seed, parented to the first goal.
     expect(todos).toHaveLength(3) // 2 root goals + 1 shared frame seed
-    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === PLAN_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 0)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
@@ -738,14 +743,13 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
           shape: "diagnosis-vague",
           deliverable: "root cause found",
         },
-        { quote: "second goal also needs a plan", shape: "build", deliverable: "", needsPlan: true },
+        { quote: "the retry path also drops writes somewhere", shape: "diagnosis-vague", deliverable: "" },
       ],
       constraints: [],
       confidence: "high",
     }
-    // goal 0 fires via the arming judge (diagnosis-vague + armLocalization).
-    // goal 1 fires via needsPlan. Both resolve to the same single writer seed
-    // — dedup collapses them to ONE planted seed, parented to the first.
+    // Both diagnosis goals fire via the arming judge and resolve to the same
+    // writer seed — dedup collapses them to ONE planted seed, parented to the first.
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "hard" })
     expect(todos).toHaveLength(3) // 2 root goals + 1 shared frame seed
     expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
@@ -753,26 +757,40 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
 
-  it("single-seed collapse (django-12050 fix): a needsPlan goal and a diagnosis-vague goal plant ONE writer seed, never two", () => {
+  it("single-seed collapse (django-12050 fix): ONE diagnosis goal flagged needsPlan plants the localization seed only — needsPlan is ignored on the diagnosis branch", () => {
     const verdict: TriageVerdict = {
       goals: [
-        { quote: "first goal needs a plan", shape: "build", deliverable: "", needsPlan: true },
         {
-          quote: "second goal is diagnosis-vague",
+          quote: "fix the race condition in cache invalidation",
           shape: "diagnosis-vague",
-          deliverable: "",
+          deliverable: "race fixed",
+          needsPlan: true,
         },
       ],
       constraints: [],
       confidence: "high",
     }
-    // Both qualifying goals resolve to the SAME single writer pre-pass now
-    // (no planner/localization split), so cross-goal content dedup plants
-    // exactly ONE seed — the 12050 double-seed regression can't recur.
-    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
-    expect(todos).toHaveLength(3) // 2 root goals + 1 shared writer seed
+    // The vague-hard-race shape: a hard diagnosis goal never plants a planner
+    // AND a localization seed — the judge owns the diagnosis branch outright.
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "hard" })
+    expect(todos).toHaveLength(2) // 1 root goal + 1 localization seed
     expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.some((t) => t.content === PLAN_SLICE_CONTENT)).toBe(false)
+  })
+
+  it("mixed-kind turn (P12): a diagnosis-vague goal and a needsPlan build goal each get their OWN seed kind, parented per goal", () => {
+    const verdict: TriageVerdict = {
+      goals: [
+        { quote: "the export sometimes truncates rows", shape: "diagnosis-vague", deliverable: "" },
+        { quote: "then add streaming export across all report types", shape: "build", deliverable: "", needsPlan: true },
+      ],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "hard" })
+    expect(todos).toHaveLength(4) // 2 root goals + 1 seed per kind
     expect(todos.find((t) => t.content === LOCALIZATION_SLICE_CONTENT)!.parentID).toBe(0)
+    expect(todos.find((t) => t.content === PLAN_SLICE_CONTENT)!.parentID).toBe(1)
   })
 
   it("django-12039 regression: a diagnosis-grounded goal with needsPlan:true but armLocalization:false plants NO seed — the judge, not needsPlan, owns diagnosis arming", () => {
@@ -1181,8 +1199,25 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(shouldOrchestrate(hard)).toBe(true)
   })
 
-  it("diagnosisPrepassSeed: the single writer pre-pass, collapsed to one seed", () => {
-    expect(diagnosisPrepassSeed()).toBe(LOCALIZATION_PREPASS_TODO)
+  it("P12 — the plan seed mirrors the re-plan seed's decider shape (design/reasoner/researcher) with a forward-looking, edit-free brief", () => {
+    expect(PLAN_PREPASS_TODO).toMatchObject({
+      content: PLAN_SLICE_CONTENT,
+      status: "pending",
+      priority: "high",
+      sliceType: "design",
+      need: "reasoner",
+      persona: "researcher",
+    })
+    expect(PLAN_SLICE_CONTENT).toMatch(/DAG of typed slices/i)
+    expect(PLAN_SLICE_CONTENT).toMatch(/Writing code or diffs is forbidden/i)
+    // Forward-looking, not a bug hunt and not a residue re-plan.
+    expect(PLAN_SLICE_CONTENT).not.toMatch(/LOCALIZE|failing\/pinned test/)
+    expect(PLAN_SLICE_CONTENT).not.toMatch(/unverified|previous pass/i)
+  })
+
+  it("P12 — all three engine seeds are pairwise distinct (the dedup-by-content rule)", () => {
+    const contents = [LOCALIZATION_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT, PLAN_SLICE_CONTENT]
+    expect(new Set(contents).size).toBe(3)
   })
 })
 
@@ -1694,6 +1729,32 @@ describe("personaForSlice", () => {
 })
 
 describe("sliceStepBudget — the diagnosis pre-pass writer gets its own allowance", () => {
+  it("P8 table — design/hard/escalated each lift the budget ×1.5 (ceil); plain slices keep the persona base", () => {
+    const rows: Array<{
+      persona: Parameters<typeof sliceStepBudget>[0]
+      sliceId?: string
+      opts?: Parameters<typeof sliceStepBudget>[2]
+      expected: number
+    }> = [
+      // no opts / empty opts → persona base
+      { persona: "applier", expected: PERSONA_STEP_BUDGET.applier },
+      { persona: "runner", opts: {}, expected: PERSONA_STEP_BUDGET.runner },
+      // mechanical, not hard, first attempt → base even with opts present
+      { persona: "applier", opts: { sliceType: "mechanical", hard: false, escalated: false }, expected: PERSONA_STEP_BUDGET.applier },
+      // design slice → ×1.5
+      { persona: "researcher", opts: { sliceType: "design" }, expected: Math.ceil(PERSONA_STEP_BUDGET.researcher * 1.5) },
+      // judge-rated-hard turn → ×1.5
+      { persona: "explorer", opts: { hard: true }, expected: Math.ceil(PERSONA_STEP_BUDGET.explorer * 1.5) },
+      // escalated rescue → ×1.5
+      { persona: "applier", opts: { escalated: true }, expected: Math.ceil(PERSONA_STEP_BUDGET.applier * 1.5) },
+      // stacked signals never compound — still ×1.5
+      { persona: "author", opts: { sliceType: "design", hard: true, escalated: true }, expected: Math.ceil(PERSONA_STEP_BUDGET.author * 1.5) },
+      // the frame writer's own allowance also rides the hard-tail bump
+      { persona: "applier", sliceId: LOCALIZATION_SLICE_CONTENT, opts: { hard: true }, expected: Math.ceil(FRAME_SLICE_STEP_BUDGET * 1.5) },
+    ]
+    for (const row of rows) expect(sliceStepBudget(row.persona, row.sliceId, row.opts)).toBe(row.expected)
+  })
+
   it("the writer pre-pass gets FRAME_SLICE_STEP_BUDGET regardless of persona", () => {
     expect(sliceStepBudget("researcher", LOCALIZATION_SLICE_CONTENT)).toBe(FRAME_SLICE_STEP_BUDGET)
     // The writer must localize AND fix AND iterate, so its budget clears the read-only floor.
@@ -2131,6 +2192,38 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
     })
     expect(captured?.mode).toBe("decompose-now")
     expect(dispatched).toBeGreaterThan(0)
+  })
+
+  it("P10 — two resolution passes exhaust the per-turn budget; resetResolveAttempts (the turn-open reset) restores it", async () => {
+    process.env["OPENCODE_HEADLESS"] = "1"
+    const sessionID = nextSessionID()
+    const modes: string[] = []
+    const run = () =>
+      runConductorOrchestration({
+        getTodos: async () => cyclicTodos,
+        probes: fakeProbes(),
+        dispatch: async () => ({ text: "ok", parts: [] }),
+        setTodoStatus: async () => {},
+        sessionID,
+        arming: { hardness: "hard", ambiguity: "ambiguous" },
+        appendTodos: async () => {},
+        onResolutionGate: (info) => {
+          modes.push(info.mode)
+        },
+      })
+    // Two passes spend the budget (MAX_RESOLVE_ATTEMPTS = 2)…
+    await run()
+    await run()
+    expect(modes).toEqual(["resolve-first", "resolve-first"])
+    expect(getResolveAttempts(sessionID)).toBe(2)
+    // …a third pass in the SAME turn is bounded to best-effort decomposition…
+    await run()
+    expect(modes.at(-1)).toBe("decompose-now")
+    // …and the next user turn's reset hands the new task its own budget.
+    resetResolveAttempts(sessionID)
+    expect(getResolveAttempts(sessionID)).toBe(0)
+    await run()
+    expect(modes.at(-1)).toBe("resolve-first")
   })
 })
 

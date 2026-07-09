@@ -22,8 +22,10 @@ export interface ArmingScenario {
   readonly expect: {
     /** Expected final shape after arming (optional — assert only when it matters). */
     readonly shape?: TriageGoalShape
-    /** THE signal: did a localization pre-pass get armed (skeleton seed OR autoTypeTodos injection)? */
+    /** THE signal: did a frame pre-pass get armed (skeleton seed OR autoTypeTodos injection)? */
     readonly localizationArmed: boolean
+    /** P12 — the seed KIND an armed row must plant: the diagnosis localization writer or the hard-build plan seed. Required whenever localizationArmed is true; the rig scores a kind mismatch as wrong-seed. */
+    readonly seedKind?: "localization" | "plan"
     /** One-line human reason this is the correct outcome (over-fire vs under-fire rationale). */
     readonly reason: string
   }

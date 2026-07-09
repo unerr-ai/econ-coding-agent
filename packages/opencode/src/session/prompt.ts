@@ -21,7 +21,7 @@ import { createStuckSupervisor } from "../../../code-intelligence/src/orchestrat
 import { observeStep } from "./turn-supervisor"
 import { stuckNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
 import { categoryPreamble, triagePreamble } from "./prompts/preambles"
-import { LOCALIZATION_SLICE_CONTENT } from "./prompts/seeds"
+import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
   STRUCTURED_OUTPUT_SYSTEM_PROMPT,
@@ -39,7 +39,7 @@ import {
   resolveSliceModel,
   hasPendingTypedSlices,
   classifyTurnShape,
-  diagnosisPrepassSeed,
+  LOCALIZATION_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   buildTriageTodoSkeleton,
@@ -61,6 +61,7 @@ import {
 import { runTurnTriage, triageTelemetry, type TriageComplete, type TriageVerdict, type TriageGoalShape } from "./turn-triage"
 import { judgeArming, heuristicArming, type ArmingVerdict } from "./arming-judge"
 import { setArmingDecision, getArmingDecision } from "./arming-store"
+import { resetResolveAttempts } from "./resolution-store"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
@@ -1748,7 +1749,7 @@ export const layer = Layer.effect(
           // store BEFORE the conductor's first step, so the OL-7.3b hook
           // dispatches it on the first step boundary — the higher tier frames
           // the turn instead of rescuing it (casting policy: proactive
-          // escalation). The seed (diagnosisPrepassSeed) is a single reasoner
+          // escalation). The seed (LOCALIZATION_PREPASS_TODO) is a single reasoner
           // WRITER slice that localizes, fixes, and verifies in one session.
           // The old trigger sat at todowrite time, downstream of the conductor's
           // explore-first localization, and never fired on diagnosis turns
@@ -1769,6 +1770,12 @@ export const layer = Layer.effect(
             if (session.parentID) {
               setTestEditGate(sessionID, testEditGateArmed(session.parentID) && !promptAuthorizesTestEdits(userText))
             } else {
+              // P10 — the resolution budget is per TURN, not per session: a new
+              // user turn is a new task, so the resolve-attempts counter resets
+              // here with the other turn-open stores. A later turn-open rewrite
+              // must preserve this reset or one ambiguous turn disables the
+              // resolution gate for the rest of the session.
+              resetResolveAttempts(sessionID)
               // U1 — triage reads the prompt BEFORE classifyTurnShape decides
               // anything; classifyTurnShape itself still runs unconditionally
               // (it feeds the regex fallback signal below AND the
@@ -1859,8 +1866,14 @@ export const layer = Layer.effect(
                   // so a trace separates a reasoner cast UP FRONT here from one
                   // cast as RECOVERY by the SM backstop (stuck_escalate below).
                   const seeds = skeleton
-                    .filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)
-                    .map(() => "localization")
+                    .map((t) =>
+                      t.content === LOCALIZATION_SLICE_CONTENT
+                        ? "localization"
+                        : t.content === PLAN_SLICE_CONTENT
+                          ? "plan"
+                          : undefined,
+                    )
+                    .filter((s) => s !== undefined)
                   yield* Effect.logInfo("frame_seed_planted", {
                     "session.id": sessionID,
                     mechanism: "orchestrator",
@@ -1881,8 +1894,7 @@ export const layer = Layer.effect(
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0 && shape.category === "diagnosis-vague") {
-                  const seed = diagnosisPrepassSeed()
-                  yield* todoStore.update({ sessionID, todos: [seed] }).pipe(Effect.ignore)
+                  yield* todoStore.update({ sessionID, todos: [LOCALIZATION_PREPASS_TODO] }).pipe(Effect.ignore)
                   yield* Effect.logInfo("diagnosis_prepass_armed", {
                     "session.id": sessionID,
                     seed: "localization",
@@ -2346,7 +2358,15 @@ export const layer = Layer.effect(
                     // and becomes the digest, fail-loud-marked for the verifier rather
                     // than silently truncated.
                     let budgetExhausted = false
-                    const budget = sliceStepBudget(persona, req.sliceId)
+                    // P8 — the hard tail (design slices, judge-rated-hard turns,
+                    // escalated rescues) gets ×1.5 steps so exhaustion doesn't
+                    // double-pay a rescue; all three signals already live at
+                    // this seam (req + the arming store).
+                    const budget = sliceStepBudget(persona, req.sliceId, {
+                      sliceType: req.sliceType,
+                      hard: getArmingDecision(sessionID)?.hardness === "hard",
+                      escalated: req.escalated,
+                    })
                     const watchdog: Effect.Effect<void> = Effect.gen(function* () {
                       while (true) {
                         yield* Effect.sleep("2 seconds")
@@ -2540,11 +2560,12 @@ export const layer = Layer.effect(
                 })
 
               // Synthesis-as-a-hop: the final user-facing answer is a crucial output,
-              // so it is authored by a tier allocated to the turn's weight — the
-              // reasoner for any decomposed turn, the oracle when oracle-grade work
-              // (or an unverified residue) is being narrated — from compiled slice
-              // digests, never the raw transcript. The conductor then RELAYS it: the
-              // cheap tier keeps the session, the capable tier writes the artifact.
+              // so it is authored by a tier allocated to the SYNTHESIS job (P9) — the
+              // reasoner for any decomposed turn, the oracle only when mixed outcomes
+              // (an unverified failure among the done slices) need arbitration — from
+              // compiled slice digests, never the raw transcript. The conductor then
+              // RELAYS it: the cheap tier keeps the session, the capable tier writes
+              // the artifact.
               const outcomes = orch.engaged ? (orch.result?.outcomes ?? []) : []
               // OL-7.8 observability: one line per settled slice — the verifier
               // rung that decided it is otherwise only visible by replaying the
@@ -2614,10 +2635,19 @@ export const layer = Layer.effect(
                   synthetic: true,
                 } satisfies SessionV1.TextPart)
               } else if (outcomes.length > 0) {
-                const oracleTouched = outcomes.some(
-                  (o) => o.allocation.tier === "oracle" || o.escalation?.tier === "oracle" || o.state === "unverified",
-                )
-                const synthesisTier = oracleTouched ? ("oracle" as const) : ("reasoner" as const)
+                // P9 — synthesis is faithful assembly (a writing job), so it
+                // runs on the reasoner regardless of which tiers the slices
+                // touched; only MIXED outcomes — an "unverified" terminal
+                // failure among the settled slices (the SliceState union's one
+                // failure state; accepted/escalated both mean verified work) —
+                // are judgment work worth the oracle's arbitration.
+                const mixedOutcomes = outcomes.some((o) => o.state === "unverified")
+                const synthesisTier = mixedOutcomes ? ("oracle" as const) : ("reasoner" as const)
+                yield* Effect.logInfo("synthesis_dispatched", {
+                  "session.id": sessionID,
+                  synthesisTier,
+                  mixedOutcomes,
+                })
                 const digests = outcomes
                   .map((o) => {
                     const body = o.output.length > 1500 ? `${o.output.slice(0, 1500)}\n…[truncated]` : o.output

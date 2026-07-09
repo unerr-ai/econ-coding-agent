@@ -21,3 +21,16 @@ export const LOCALIZATION_SLICE_CONTENT =
  */
 export const REDECOMPOSITION_SLICE_CONTENT =
   "Re-plan the unfinished work from the previous pass. Some slices were accepted but could NOT be verified — coverage gaps, surfaced here rather than lost silently. Produce a bounded re-decomposition, not code: (1) list the unverified/uncovered items and why each stayed unconfirmed; (2) break each into smaller, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the re-plan and DAG only."
+
+/**
+ * P12 — content of the plan pre-pass a hard BUILD goal (`needsPlan`, non-diagnosis)
+ * plants at turn open. Forward-looking and edit-free: fresh work with no bug and no
+ * failing test must not receive the diagnosis writer's bug-hunt brief (the
+ * build-dark-mode corpus hole — it burned budget "localizing" a defect that does not
+ * exist). Same deliverable shape as the re-plan seed (a DAG of typed slices) but for
+ * a DECIDED build, not unverified residue. DELIBERATELY distinct from BOTH seeds
+ * above so appendTodos'/the skeleton's dedup-by-content keeps each kind plantable
+ * alongside the others.
+ */
+export const PLAN_SLICE_CONTENT =
+  "Plan this build before any code is written. The work is decided but too large to execute blind — your job is decomposition, not implementation: (1) read just enough of the codebase (graph search, callers, targeted file reads) to anchor the plan in the REAL structure — name the files/modules each change touches and the seams it must respect; (2) break the work into small, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) deliver the implementation plan as an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the plan and DAG only."

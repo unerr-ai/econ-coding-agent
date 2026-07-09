@@ -49,7 +49,20 @@
  * own logprobs, or the optional `confidenceGenerate` fallback) earns ONE
  * extra generator escalation even though verification already passed,
  * reported via `onProvenance` as `"posterior-uncertain-review"` — every
- * unflagged or confident slice accepts on green unchanged.
+ * unflagged or confident slice accepts on green unchanged. Slice relations
+ * are derived, never extracted (P6): before waves, an optional `editScopeOf`
+ * probe predicts each editing slice's file scope — two same-wave slices with
+ * overlapping scopes serialize via an implicit dep (P6b; overlap only ever
+ * ADDS ordering, a declared dep is never dropped, and the edge is recorded
+ * in `telemetry.implicitDeps` so a trace shows why they serialized), and the
+ * same scope intersected with `deps.parentScope` feeds the venue rule's
+ * `sameFilesInScope` (P6c — the venue verdict stays telemetry-only via
+ * `onEvaluation`; dispatch still always spawns a child). A dependency
+ * (declared or implicit) that settles terminal-failed — ladder exhausted
+ * with a rejecting verdict, never the OL-9.5d accepted-unverified — blocks
+ * its dependents instead of dispatching them (P6a): they settle `"blocked"`
+ * with `blockedBy`, the block cascades transitively, and the count feeds
+ * re-decomposition as coverage-gap input rather than vanishing silently.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -280,6 +293,19 @@ export interface SliceLoopDeps {
    * them. A no-op when absent.
    */
   onEvaluation?: (e: { sliceId: string; tier: string; venue: string; reasons: string[] }) => void
+  /**
+   * Graph-predicted file scope of an EDITING slice (P6b/P6c) — read-only
+   * recon/verify slices are never probed (`isReadOnlySlice`). Two consumers:
+   * same-wave editing slices with intersecting scopes gain an implicit
+   * serializing dep (P6b), and the scope's intersection with `parentScope`
+   * feeds the venue rule's `sameFilesInScope` (P6c). Absent ⇒ both stay off —
+   * the wave plan is byte-identical and `sameFilesInScope` stays false.
+   */
+  editScopeOf?: (slice: LoopSlice) => Promise<ReadonlySet<string>> | ReadonlySet<string>
+  /** The tier of the thread requesting this loop — the venue rule's `requestingTier` (P6c). Defaults to "conductor", the production caller. */
+  requestingTier?: EconTier
+  /** Files the parent thread already has in scope (P6c): a slice whose predicted scope (`editScopeOf`) intersects it evaluates `sameFilesInScope: true`. Absent — or no probe — ⇒ false. */
+  parentScope?: ReadonlySet<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +317,7 @@ export type SliceState =
   | "accepted" // cheap attempt passed verification
   | "escalated" // cheap attempt rejected → climbed the ladder; a higher tier's re-verified output accepted
   | "unverified" // rejected but already at the top tier (no higher tier / hatch off) — accepted with a warning
+  | "blocked" // never dispatched (P6a): a dependency settled terminal-failed, or was itself blocked — see `blockedBy`
 
 export interface SliceOutcome {
   id: string
@@ -320,6 +347,15 @@ export interface SliceOutcome {
    * inspect since no further escalation will see it.
    */
   revertedDiff?: string
+  /** Present only when state is "blocked" (P6a): the dependency ids — declared or P6b-implicit — that settled terminal-failed (or were themselves blocked) and stopped this slice from dispatching. */
+  blockedBy?: string[]
+}
+
+/** One P6b serialization edge: `sliceId` gained an implicit dep on `dependsOn` because their predicted edit scopes shared `overlap` — the trace record for why two would-be-parallel slices ran in series. */
+export interface ImplicitScopeDep {
+  sliceId: string
+  dependsOn: string
+  overlap: readonly string[]
 }
 
 /** Per-run first-pass/attempts telemetry (OL-9.4c) — how often the cheap tier's own first attempt already passed, attached data-only next to the double-pay ledger for a future receipt to render escalation rate. */
@@ -334,6 +370,10 @@ export interface SliceLoopTelemetry {
   attemptsPerSlice: number
   /** firstAttemptPasses / slicesDispatched — the escalation-rarity signal OL-9.4c surfaces. */
   firstPassRate: number
+  /** Slices never dispatched because a dependency settled terminal-failed (P6a) — each appears in outcomes as state "blocked"; re-decomposition counts them as coverage gaps. */
+  blocked: number
+  /** P6b implicit serialization edges added by the scope-overlap check. Always empty without an `editScopeOf` probe. */
+  implicitDeps: readonly ImplicitScopeDep[]
 }
 
 export interface SliceLoopResult {
@@ -602,13 +642,14 @@ async function dispatchRescueHop(args: {
   dispatchTimeout: NonNullable<SliceLoopDeps["dispatchTimeout"]>
   tierModel: (tier: EconTier) => string
   attempts: number
+  sameFilesInScope: boolean
 }): Promise<{
   result: SliceDispatchResult
   verdict: VerifierVerdict
   escalation: NonNullable<SliceOutcome["escalation"]>
   currentHash: string | undefined
 }> {
-  const { slice, deps, ledger, allocation, atTier, targetTier, attempt, attemptVerdict, baseTimeoutMs, dispatchTimeout, tierModel, attempts } = args
+  const { slice, deps, ledger, allocation, atTier, targetTier, attempt, attemptVerdict, baseTimeoutMs, dispatchTimeout, tierModel, attempts, sameFilesInScope } = args
   const squeeze = targetTier === atTier
 
   // Escalation provenance (U3): one line per hop naming why it moved — closes
@@ -627,7 +668,7 @@ async function dispatchRescueHop(args: {
   // governs the actual dispatch tier; this call reports what the evaluator
   // would decide, for the receipt's evaluator drilldown (U6).
   const reEvalVerdict = evaluate(
-    buildEvalContext(slice, deps, { attempts, lastRejectReason: attemptVerdict.reason }, { lastTier: atTier, signalDelta: true }),
+    buildEvalContext(slice, deps, { attempts, lastRejectReason: attemptVerdict.reason }, { lastTier: atTier, signalDelta: true }, sameFilesInScope),
   )
   deps.onEvaluation?.({ sliceId: slice.id, tier: reEvalVerdict.tier, venue: reEvalVerdict.venue, reasons: reEvalVerdict.reasons })
 
@@ -753,6 +794,116 @@ export function planWaves(slices: readonly LoopSlice[]): string[][] {
   }
 
   return waves
+}
+
+/**
+ * P6b — scope-overlap serialization: two slices that would run in the same
+ * wave with intersecting predicted edit scopes gain an implicit dep from the
+ * later slice (input order) to the earlier one, turning "no concurrent
+ * same-file edits" from prompt discipline into a computed fact. Overlap only
+ * ever ADDS ordering — declared deps are merged, never dropped (they carry
+ * information flow via `withUpstreamContext`, not just file ordering). Two
+ * same-wave slices can never have a dependency path between them (a
+ * topological-wave invariant), so the added later→earlier edges cannot form
+ * a cycle: within a wave they are monotone in input order, and any
+ * cross-wave path strictly increases the wave number — `planWaves`' cycle
+ * detection stays as the backstop regardless. Iterates to a fixpoint because
+ * re-planning after one serialization can push a third overlapping slice
+ * into a shared wave it wasn't checked against. Read-only slices carry no
+ * scope (never probed) and are exempt; an empty scope map returns the
+ * declared-deps plan byte-identical.
+ */
+function serializeOverlappingScopes(
+  slices: readonly LoopSlice[],
+  scopes: ReadonlyMap<string, ReadonlySet<string>>,
+): { planned: readonly LoopSlice[]; waves: string[][]; implicitDeps: ImplicitScopeDep[] } {
+  const inputIndex = new Map(slices.map((s, i) => [s.id, i]))
+  const implicit = new Map<string, Set<string>>()
+  const implicitDeps: ImplicitScopeDep[] = []
+
+  const withImplicit = (): LoopSlice[] =>
+    slices.map((s) => {
+      const extra = implicit.get(s.id)
+      return extra?.size ? { ...s, deps: [...(s.deps ?? []), ...extra] } : s
+    })
+
+  let planned: readonly LoopSlice[] = withImplicit()
+  let waves = planWaves(planned)
+  if (scopes.size === 0) return { planned, waves, implicitDeps }
+
+  for (;;) {
+    let added = false
+    for (const wave of waves) {
+      const scoped = wave.filter((id) => scopes.has(id)).sort((a, b) => inputIndex.get(a)! - inputIndex.get(b)!)
+      for (let i = 0; i < scoped.length; i++) {
+        for (let j = i + 1; j < scoped.length; j++) {
+          const earlier = scoped[i]!
+          const later = scoped[j]!
+          if (implicit.get(later)?.has(earlier)) continue
+          const overlap = [...scopes.get(later)!].filter((f) => scopes.get(earlier)!.has(f))
+          if (overlap.length === 0) continue
+          let edges = implicit.get(later)
+          if (!edges) implicit.set(later, (edges = new Set()))
+          edges.add(earlier)
+          implicitDeps.push({ sliceId: later, dependsOn: earlier, overlap })
+          added = true
+        }
+      }
+    }
+    if (!added) break
+    planned = withImplicit()
+    waves = planWaves(planned)
+  }
+
+  return { planned, waves, implicitDeps }
+}
+
+/**
+ * P6a — does a settled dependency block its dependents? Terminal-failed means
+ * the ladder exhausted with a rejecting verdict: state "unverified" AND
+ * `verdict.accepted === false` (the FSM's exhaustion settle). The OL-9.5d
+ * accepted-flagged-unverified path shares the "unverified" state but carries
+ * an ACCEPTING verdict — absence of a check is not evidence of failure, so it
+ * never blocks. A blocked dep cascades.
+ */
+function blocksDependents(outcome: SliceOutcome): boolean {
+  return outcome.state === "blocked" || (outcome.state === "unverified" && !outcome.verdict.accepted)
+}
+
+/**
+ * The outcome of a slice that was never dispatched (P6a): a synthetic reject
+ * verdict on rung "blocked" (the timeout-verdict precedent) naming the
+ * blocking deps, zero attempts, and the base allocation it WOULD have run
+ * on — `evaluate()`/`onEvaluation` never fire because nothing dispatches.
+ */
+function blockedOutcome(slice: LoopSlice, blockedBy: string[], deps: SliceLoopDeps): SliceOutcome {
+  const allocation = (deps.allocate ?? allocateSlice)({
+    sliceType: slice.sliceType,
+    coupling: slice.coupling,
+    testStrength: slice.testStrength,
+    need: slice.need,
+    risk: slice.risk,
+    specBacked: slice.specBacked,
+  })
+  const depNoun = blockedBy.length === 1 ? "dependency" : "dependencies"
+  return {
+    id: slice.id,
+    state: "blocked",
+    tier: allocation.tier,
+    verification: allocation.verification,
+    allocation,
+    verdict: {
+      accepted: false,
+      rung: "blocked",
+      reason: `slice "${slice.id}" was not dispatched — ${depNoun} [${blockedBy.join(", ")}] settled terminal-failed or blocked`,
+      sound: { rung: "sound", pass: false, failures: [], applicable: false },
+      behavior: { suspicious: false, flags: [] },
+      missing: `MISSING: a completed, non-failed result for ${depNoun} [${blockedBy.join(", ")}] — this slice never ran; re-decomposition owns it now.`,
+    },
+    output: "",
+    attempts: 0,
+    blockedBy,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -885,13 +1036,17 @@ async function dispatchWithBudget(
  * notes threaded in yet, verify strength from the slice's own testStrength +
  * verifyCommands, containment availability from whether a snapshot dep was
  * injected, and the affinity/hysteresis fields the caller supplies per call
- * site (first dispatch vs. escalation re-entry).
+ * site (first dispatch vs. escalation re-entry). The venue inputs are real
+ * (P6c): `requestingTier` from `deps.requestingTier` (defaulting to the
+ * production caller, the conductor) and `sameFilesInScope` computed once per
+ * slice in `runSliceLoop` from the `editScopeOf` scope ∩ `deps.parentScope`.
  */
 function buildEvalContext(
   slice: LoopSlice,
   deps: SliceLoopDeps,
   history: EvalContext["history"],
   hysteresis: EvalContext["hysteresis"],
+  sameFilesInScope: boolean,
 ): EvalContext {
   return {
     sliceType: slice.sliceType,
@@ -911,19 +1066,20 @@ function buildEvalContext(
     },
     containmentAvailable: !!deps.snapshot,
     venue: {
-      requestingTier: "conductor",
-      sameFilesInScope: false,
+      requestingTier: deps.requestingTier ?? "conductor",
+      sameFilesInScope,
       readOnlyParallel: isReadOnlySlice(slice.sliceType),
     },
     hysteresis,
   }
 }
 
-/** Run one slice: evaluate (allocate → tier/venue) → cheap dispatch → verify → (accept | climb the ladder, re-evaluating + re-verifying each hop). Each dispatch is wall-clock capped per the slice's type (OL-9.3e). */
+/** Run one slice: evaluate (allocate → tier/venue) → cheap dispatch → verify → (accept | climb the ladder, re-evaluating + re-verifying each hop). Each dispatch is wall-clock capped per the slice's type (OL-9.3e). `sameFilesInScope` is the P6c venue input, precomputed per slice by `runSliceLoop`. */
 async function runSlice(
   slice: LoopSlice,
   deps: SliceLoopDeps,
   ledger: DoublePayLedger,
+  sameFilesInScope: boolean,
 ): Promise<SliceOutcome> {
   const allocate = deps.allocate ?? allocateSlice
   const tierModel = deps.tierModel ?? tierModelRef
@@ -943,7 +1099,7 @@ async function runSlice(
     risk: slice.risk,
     specBacked: slice.specBacked,
   })
-  const firstVerdict = evaluate(buildEvalContext(slice, deps, { attempts: 0 }, { signalDelta: false }))
+  const firstVerdict = evaluate(buildEvalContext(slice, deps, { attempts: 0 }, { signalDelta: false }, sameFilesInScope))
   deps.onEvaluation?.({ sliceId: slice.id, tier: firstVerdict.tier, venue: firstVerdict.venue, reasons: firstVerdict.reasons })
   const allocation: SliceAllocation = { tier: firstVerdict.tier, verification: base.verification, reason: firstVerdict.reasons.join("; ") }
 
@@ -1026,6 +1182,7 @@ async function runSlice(
           dispatchTimeout,
           tierModel,
           attempts: 1,
+          sameFilesInScope,
         })
         if (posteriorHop.verdict.accepted) {
           return settleAccepted(posteriorHop.verdict, posteriorHop.result, 2, posteriorHop.escalation)
@@ -1156,7 +1313,7 @@ async function runSlice(
     // (state.atTier raised); dispatch that hop through the existing rescue path.
     const hop = await dispatchRescueHop({
       slice, deps, ledger, allocation, atTier: fromTier, targetTier: state.atTier,
-      attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts: preAttempts,
+      attempt, attemptVerdict, currentHash, baseTimeoutMs, dispatchTimeout, tierModel, attempts: preAttempts, sameFilesInScope,
     })
     currentHash = hop.currentHash
     escalation = hop.escalation
@@ -1215,16 +1372,55 @@ export async function runSliceLoop(
 ): Promise<SliceLoopResult> {
   const ledger = new DoublePayLedger()
 
-  const waves = planWaves(slices)
-  const byId = new Map(slices.map((s) => [s.id, s]))
+  // P6b/P6c — predicted edit scopes, probed once per editing slice (read-only
+  // recon/verify slices are exempt). No probe ⇒ empty map ⇒ the declared-deps
+  // wave plan byte-identical and every sameFilesInScope false.
+  const scopes = new Map<string, ReadonlySet<string>>()
+  if (deps.editScopeOf) {
+    const probe = deps.editScopeOf
+    await Promise.all(
+      slices
+        .filter((s) => !isReadOnlySlice(s.sliceType))
+        .map(async (s) => {
+          scopes.set(s.id, await probe(s))
+        }),
+    )
+  }
+  const { planned, waves, implicitDeps } = serializeOverlappingScopes(slices, scopes)
+
+  // P6c — sameFilesInScope per slice: predicted scope ∩ the parent thread's
+  // open files. Either seam absent ⇒ false (an honest default, not a hardcode).
+  const parentScope = deps.parentScope
+  const sameFilesInScope = (id: string): boolean => {
+    const scope = scopes.get(id)
+    if (!scope || !parentScope) return false
+    for (const file of scope) if (parentScope.has(file)) return true
+    return false
+  }
+
+  const byId = new Map(planned.map((s) => [s.id, s]))
   const outcomes = new Map<string, SliceOutcome>()
   const loopTimeout = deps.loopTimeout ?? raceTimeout
   const loopBudgetMs = overallLoopBudgetMs(slices)
 
   const runWaves = async (): Promise<void> => {
     for (const wave of waves) {
+      // P6a — a dependency (declared or P6b-implicit) that settled
+      // terminal-failed blocks this slice BEFORE any spend; a blocked dep
+      // cascades. Dependents always sit in later waves, so every dep's
+      // outcome is already settled here.
+      const dispatchable: string[] = []
+      for (const id of wave) {
+        const slice = byId.get(id)!
+        const blockedBy = (slice.deps ?? []).filter((d) => {
+          const dep = outcomes.get(d)
+          return dep !== undefined && blocksDependents(dep)
+        })
+        if (blockedBy.length > 0) outcomes.set(id, blockedOutcome(slice, blockedBy, deps))
+        else dispatchable.push(id)
+      }
       const settled = await Promise.all(
-        wave.map((id) => runSlice(withUpstreamContext(byId.get(id)!, outcomes), deps, ledger)),
+        dispatchable.map((id) => runSlice(withUpstreamContext(byId.get(id)!, outcomes), deps, ledger, sameFilesInScope(id))),
       )
       for (const outcome of settled) outcomes.set(outcome.id, outcome)
     }
@@ -1243,8 +1439,9 @@ export async function runSliceLoop(
 
   // Preserve input order in the flat outcome list for a stable trace.
   const outcomeList = slices.map((s) => outcomes.get(s.id)!)
-  const slicesDispatched = outcomeList.length
-  const firstAttemptPasses = outcomeList.filter((o) => o.attempts === 1).length
+  const blocked = outcomeList.filter((o) => o.state === "blocked").length
+  const slicesDispatched = outcomeList.length - blocked
+  const firstAttemptPasses = outcomeList.filter((o) => o.state !== "blocked" && o.attempts === 1).length
   const totalAttempts = outcomeList.reduce((sum, o) => sum + o.attempts, 0)
   const telemetry: SliceLoopTelemetry = {
     slicesDispatched,
@@ -1252,6 +1449,8 @@ export async function runSliceLoop(
     totalAttempts,
     attemptsPerSlice: slicesDispatched > 0 ? totalAttempts / slicesDispatched : 0,
     firstPassRate: slicesDispatched > 0 ? firstAttemptPasses / slicesDispatched : 0,
+    blocked,
+    implicitDeps,
   }
 
   return {
