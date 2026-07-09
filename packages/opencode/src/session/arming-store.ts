@@ -1,10 +1,13 @@
 /**
  * Per-session arming-decision store — the bridge from the turn-open arming judge
- * (`prompt.ts`, which computes the `ArmingVerdict` once per turn) to the
- * todowrite door (`autoTypeTodos`, reached via `tool/todo.ts`). Same per-session
- * module-state pattern as the test-edit gate (`tool/edit-governance.ts`): set at
- * turn open, consulted mid-turn, overwritten every turn so a later turn on the
- * same session never reads a stale decision.
+ * (`prompt.ts`, which computes the `ArmingVerdict` once per turn, scoped to the
+ * step-0 setup block) to its mid-turn readers: the todowrite door
+ * (`autoTypeTodos`, reached via `tool/todo.ts`) and the §1.1b per-slice
+ * difficulty floor (`todosToLoopSlices`, reached via the `sliceHook` loop that
+ * runs every step). Same per-session module-state pattern as the test-edit gate
+ * (`tool/edit-governance.ts`): set at turn open, consulted mid-turn,
+ * overwritten every turn so a later turn on the same session never reads a
+ * stale decision.
  *
  * @sem domain=routing role=config
  */

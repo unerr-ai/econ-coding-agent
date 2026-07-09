@@ -40,7 +40,7 @@ export interface SliceTerminal {
   outcome: SliceOutcome
   atTier: EconTier
   attempts: number
-  reason?: string // e.g. "critical-unverified-at-ceiling", "budget-exhausted"
+  reason?: string // e.g. "critical-unverified-review", "ladder-exhausted", "budget-exhausted"
 }
 
 /**
@@ -76,17 +76,18 @@ export type SliceEvent =
 /**
  * Caps and ladder operations, injected so the reducer never hardcodes the tier
  * order or the budgets. `escalate` returns the next tier up or `undefined` once
- * `atTier` is at the slice's allowed ceiling; `atCeiling` bounds the M3 forced
- * climb at the oracle.
+ * `atTier` is at the slice's allowed ceiling. Every slice — critical or not — is
+ * bounded by `maxClimbs`: consequence (isCritical) no longer buys extra generator
+ * climbs (blast-radius routes the judge verifier instead, allocation.ts), it only
+ * marks an unverifiable settle as loud-for-review.
  */
 export interface SliceTransitionCtx {
   sameTierRetryBudget: number // SAME_TIER_RETRY_BUDGET (2)
   maxClimbs: number // per slice: 1 for a normal slice, 0 for a read-only recon/verify slice
   maxAttempts: number // MAX_SLICE_ATTEMPTS backstop on total dispatches (8)
   isReadOnly: boolean // recon/verify slices never squeeze or climb
-  isCritical: boolean // high coupling or risk over the tiebreak → forced-floor climbs (M3)
+  isCritical: boolean // high coupling/risk (consequence): marks an unverifiable settle loud-for-review — NOT extra generator climbs
   escalate: (tier: EconTier) => EconTier | undefined
-  atCeiling: (tier: EconTier) => boolean
 }
 
 /** The state a slice starts in, already dispatched once on `startTier`. */
@@ -153,13 +154,13 @@ export function sliceTransition(
     }
   }
 
-  // stalled → climb one tier (M3 forces the climb for a critical slice below the ceiling)
+  // stalled → climb one tier. Consequence (isCritical) no longer buys extra
+  // generator climbs: blast-radius routes the judge VERIFIER (allocation.ts), not
+  // the author. Every slice — critical or not — is bounded by maxClimbs on the
+  // difficulty axis (a genuine reject earns one climb; predicted difficulty was
+  // already priced up-front by allocateSlice's difficulty floor).
   const higher = ctx.escalate(state.atTier)
-  const forcedFloor = ctx.isCritical && !ctx.isReadOnly && !ctx.atCeiling(state.atTier)
-  const canClimb =
-    higher !== undefined &&
-    state.attempts < ctx.maxAttempts &&
-    (state.climbs < ctx.maxClimbs || forcedFloor)
+  const canClimb = higher !== undefined && state.attempts < ctx.maxAttempts && state.climbs < ctx.maxClimbs
 
   if (canClimb && higher) {
     return {
@@ -173,12 +174,15 @@ export function sliceTransition(
     }
   }
 
-  // exhausted → soft-settle unverified (loud at the ceiling for a critical slice)
+  // exhausted → soft-settle unverified. A critical slice we could not verify settles
+  // LOUDLY (flag for review) rather than force-authoring at the oracle — the
+  // consequence response is a stricter verifier + review, never more generator spend.
+  const criticalUnverified = ctx.isCritical && !ctx.isReadOnly
   return settle(state, {
     outcome: "unverified",
     atTier: state.atTier,
     attempts: state.attempts,
-    reason: forcedFloor ? "critical-unverified-at-ceiling" : "ladder-exhausted",
+    reason: criticalUnverified ? "critical-unverified-review" : "ladder-exhausted",
   })
 }
 

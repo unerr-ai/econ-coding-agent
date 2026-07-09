@@ -330,14 +330,16 @@ describe("runSliceLoop — M2 same-tier squeeze retry", () => {
 })
 
 // ---------------------------------------------------------------------------
-// M3 — escalation floor: a critical slice (high coupling, or risk over the
-// allocator's tiebreak) may never soft-settle unverified below the oracle. It
-// forces one more climb per exhaustion point instead of settling, and settles
-// loudly (a distinct provenance marker) only once truly stuck at the oracle.
+// M3 — consequence (high coupling, or risk over the allocator's tiebreak) no
+// longer buys the generator extra climbs: every slice, critical or not, is
+// bounded by the same maxClimbs. A critical slice that stays unverified once
+// its climb budget is spent settles LOUDLY (a distinct provenance marker,
+// critical-unverified-review) instead of force-climbing toward the oracle —
+// the turn owner reviews it; the generator is never paid more for it.
 // ---------------------------------------------------------------------------
 
-describe("runSliceLoop — M3 escalation floor (critical slices never soft-settle below the oracle)", () => {
-  it("forces a climb past the exhausted attempt budget instead of settling unverified below the oracle", async () => {
+describe("runSliceLoop — M3 loud-for-review (critical slices bounded by maxClimbs, never force-climbed)", () => {
+  it("does not force a climb past maxClimbs even when a further climb would have passed — settles unverified, loud", async () => {
     const { dispatch, calls } = recordingDispatch()
     let call = 0
     const passFromReasonerOn = async (): Promise<CommandResult> => {
@@ -352,21 +354,25 @@ describe("runSliceLoop — M3 escalation floor (critical slices never soft-settl
       testStrength: "testable",
       verifyCommands: [{ kind: "typecheck", command: "tsc" }],
     }
-    const result = await runSliceLoop([slice], { dispatch, runCommand: passFromReasonerOn })
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([slice], { dispatch, runCommand: passFromReasonerOn, onProvenance: (e) => provenance.push(e) })
 
     const outcome = result.outcomes[0]
     // executor(fail) → squeeze exec stalls immediately (identical "boom"
-    // signature) → climb conductor(fail) → squeeze conductor (fresh
-    // signature there) stalls too → the slice is critical (coupling:
-    // "high"), so M3's floor forces one more climb instead of settling at
-    // the conductor — reaching (and passing at) the reasoner.
-    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor", "reasoner"])
-    expect(outcome.state).toBe("escalated")
-    expect(outcome.escalation?.tier).toBe("reasoner")
-    expect(outcome.attempts).toBe(5) // the floor overrides the non-critical climb depth
+    // signature) → climb conductor(fail) → squeeze conductor stalls too —
+    // maxClimbs (1) is now spent, so the slice settles unverified AT the
+    // conductor even though a 5th dispatch (reasoner) would have passed:
+    // criticality no longer buys the extra climb to find out.
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
+    expect(outcome.state).toBe("unverified")
+    expect(outcome.escalation?.tier).toBe("conductor")
+    expect(outcome.attempts).toBe(4)
+    const loud = provenance.find((p) => p.rungReason === "critical-unverified-review")
+    expect(loud).toBeDefined()
+    expect(loud).toMatchObject({ fromTier: "conductor", toTier: "conductor" })
   })
 
-  it("settles unverified at the oracle ceiling with a loud critical-unverified-at-ceiling marker — never a silent accept", async () => {
+  it("settles unverified at its maxClimbs bound with a loud critical-unverified-review marker — never a silent accept", async () => {
     const { dispatch, calls } = recordingDispatch()
     const slice: LoopSlice = {
       id: "s",
@@ -381,21 +387,19 @@ describe("runSliceLoop — M3 escalation floor (critical slices never soft-settl
 
     const outcome = result.outcomes[0]
     // failRunner never passes and always repeats the same signature: one
-    // squeeze stalls immediately at every tier, so the floor keeps forcing
-    // climbs — executor, conductor, reasoner, oracle, squeezing once more at
-    // each — until there's nowhere left to climb, where it finally settles
-    // unverified — LOUDLY.
-    expect(calls.map((c) => c.tier)).toEqual([
-      "executor", "executor", "conductor", "conductor", "reasoner", "reasoner", "oracle", "oracle",
-    ])
+    // squeeze stalls immediately at the executor, one climb to the
+    // conductor, one more squeeze stalls there too — maxClimbs (1) is
+    // spent, so it settles unverified AT the conductor, never climbing
+    // toward the oracle — LOUDLY (a distinct provenance marker).
+    expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
     expect(outcome.state).toBe("unverified")
-    expect(outcome.escalation?.tier).toBe("oracle")
-    const loud = provenance.find((p) => p.rungReason === "critical-unverified-at-ceiling")
+    expect(outcome.escalation?.tier).toBe("conductor")
+    const loud = provenance.find((p) => p.rungReason === "critical-unverified-review")
     expect(loud).toBeDefined()
-    expect(loud).toMatchObject({ fromTier: "oracle", toTier: "oracle" })
+    expect(loud).toMatchObject({ fromTier: "conductor", toTier: "conductor" })
   })
 
-  it("leaves a non-critical slice unaffected — settles unverified at the default budget's ceiling, same as before", async () => {
+  it("leaves a non-critical slice unaffected — settles unverified at the same budget's ceiling, same as before", async () => {
     const { dispatch, calls } = recordingDispatch()
     const slice: LoopSlice = {
       id: "s",
@@ -409,11 +413,11 @@ describe("runSliceLoop — M3 escalation floor (critical slices never soft-settl
     const result = await runSliceLoop([slice], { dispatch, runCommand: failRunner, onProvenance: (e) => provenance.push(e) })
 
     // Squeeze stalls at the executor (climb early), squeezes once more at the
-    // conductor, stalls again — non-critical climb depth = 1, so it settles
-    // AT the conductor with no floor override.
+    // conductor, stalls again — climb depth = 1 for every slice alike, so it
+    // settles AT the conductor with no loud marker (that's critical-only).
     expect(calls.map((c) => c.tier)).toEqual(["executor", "executor", "conductor", "conductor"])
     expect(result.outcomes[0].state).toBe("unverified")
-    expect(provenance.some((p) => p.rungReason === "critical-unverified-at-ceiling")).toBe(false)
+    expect(provenance.some((p) => p.rungReason === "critical-unverified-review")).toBe(false)
   })
 })
 
@@ -1280,12 +1284,12 @@ describe("runSliceLoop — FSM table (sliceTransition drives squeeze/climb/settl
       expectAttempts: 3,
     },
     {
-      name: "critical forced-floor→oracle — a critical slice never soft-settles below the oracle",
+      name: "critical exhaustion→unverified — bounded by the same maxClimbs as non-critical, settles loud not deep",
       slice: fsmSlice("high"),
       runCommand: failRunner,
-      expectTiers: ["executor", "executor", "conductor", "conductor", "reasoner", "reasoner", "oracle", "oracle"],
+      expectTiers: ["executor", "executor", "conductor", "conductor"],
       expectState: "unverified",
-      expectAttempts: 8,
+      expectAttempts: 4,
     },
     {
       name: "exhaustion→unverified — a non-critical slice settles at its one-climb budget",

@@ -1,17 +1,18 @@
 /**
- * Per-slice tier + verifier allocation (OL-7.2) — the (coupling × test-strength)
- * matrix that decides, for one decomposed slice, which model tier executes it and
- * which verifier rung must gate it. The decomposition-first reframe's core rule
- * lives here: a high-coupling *testable* slice stays on the cheap executor because
- * a sound check (compile / tests / types) is the safety net — so coupling never
- * escalates a checkable slice. Design slices route to the reasoner regardless of
- * coupling (SM5: coupling and difficulty are different axes, so an insight-heavy
- * slice must not be demoted by a testable/high-coupling cell); the untestable +
- * high-coupling residual is the only cell that floors at the oracle. Coupling and
- * test-strength are the primary allocator; risk and the conductor's `need` hint
- * are tiebreakers within a cell, never the primary lever. Pure: no I/O — tiers
- * resolve to concrete models downstream through model-registry (tierModelRef), so
- * nothing here hard-codes a model id.
+ * Per-slice tier + verifier allocation (OL-7.2) on TWO orthogonal axes
+ * (consequence ⟂ difficulty — corpus R5, extended from arming to routing):
+ *  - the GENERATOR tier follows DIFFICULTY (the arming judge's hardness/ambiguity,
+ *    plus design and unbacked-authoring) — a hard or ambiguous slice floors at the
+ *    reasoner, and ambiguity overrides the testable clamp because a sound check
+ *    proves the code RUNS, never that it solved the RIGHT problem (green-but-wrong);
+ *  - the VERIFIER rung follows CONSEQUENCE (coupling / risk / blast-radius) — a
+ *    tightly-coupled or high-risk slice earns the cross-model judge, regardless of
+ *    which tier authored it.
+ * Coupling/risk therefore NEVER escalate the author (a rename across 50 files is
+ * cheap to do, costly to get wrong — that asymmetry belongs to the verifier); a
+ * testable slice stays on the cheap executor unless DIFFICULTY lifts it. Pure: no
+ * I/O — tiers resolve to concrete models downstream through model-registry
+ * (tierModelRef), so nothing here hard-codes a model id.
  *
  * @sem domain=routing role=allocator
  */
@@ -32,6 +33,24 @@ export type Coupling = "low" | "high"
 
 /** Whether a sound check exists for the slice (OL-7.9 probeSliceTestStrength). */
 export type TestStrength = "testable" | "untestable"
+
+/**
+ * Task difficulty (mirrors the arming judge's `hardness`) — a GENERATOR-tier
+ * signal, orthogonal to coupling/consequence. `hard` floors the author at the reasoner.
+ *
+ * @sem domain=routing role=type
+ */
+export type SliceHardness = "trivial" | "moderate" | "hard"
+
+/**
+ * Task ambiguity (mirrors the arming judge's `ambiguity`) — a GENERATOR-tier
+ * signal that also OVERRIDES the testable clamp: a sound check proves code runs,
+ * never that it solved the right problem, so ambiguity is the one failure a green
+ * suite cannot catch.
+ *
+ * @sem domain=routing role=type
+ */
+export type SliceAmbiguity = "clear" | "ambiguous"
 
 /**
  * Verifier rung that must gate a slice before acceptance, listed weakest-last:
@@ -58,10 +77,9 @@ export type VerifierRung = "sound" | "qe" | "judge"
 export type AllocationReasonCode =
   | "design-insight"
   | "testable-invariant"
-  | "high-coupling-untestable-residual"
+  | "difficulty-floor"
   | "mechanical-unbacked"
   | "untestable-default"
-  | "risk-tiebreak"
   | "need-hint"
 
 /**
@@ -94,6 +112,16 @@ export interface SliceAllocationInput {
    * with no spec and no safety net — it allocates to the reasoner, not the executor.
    */
   specBacked?: boolean
+  /**
+   * Task difficulty from the arming judge — a GENERATOR-tier lever (never the
+   * verifier). `hard` floors the author at the reasoner. Absent → no difficulty signal.
+   */
+  hardness?: SliceHardness
+  /**
+   * Task ambiguity from the arming judge — a GENERATOR-tier lever that also
+   * overrides the testable clamp (tests can't catch a misinterpretation). Absent → clear.
+   */
+  ambiguity?: SliceAmbiguity
 }
 
 /**
@@ -162,13 +190,14 @@ export function lowerTier(tier: EconTier): EconTier {
 }
 
 /**
- * Allocate one decomposed slice to a model tier + verifier rung using the
- * (coupling × test-strength) matrix (OL-7.2); `design` routes to the reasoner
- * regardless of coupling because coupling and difficulty are different axes
- * (SM5), while `risk` and the conductor's `need` hint remain in-cell tiebreakers
- * and a testable non-design slice never escalates off the executor. Returns a
- * machine-readable `reasonCode` alongside the prose `reason` trace so callers can
- * log which factor decided the tier.
+ * Allocate one decomposed slice: the GENERATOR tier from DIFFICULTY (hardness/
+ * ambiguity + design/unbacked-authoring) and the VERIFIER rung from CONSEQUENCE
+ * (coupling/risk). Coupling/risk raise the verifier (→ judge), never the author;
+ * a testable slice stays on the executor unless ambiguity/hardness lifts it (the
+ * sound net can't catch a misinterpretation). `need` is the conductor's hint and
+ * can raise the tier but not past the testable clamp — unless difficulty already
+ * broke it. Returns a machine-readable `reasonCode` alongside the prose `reason`
+ * trace so callers can log which factor decided the tier.
  *
  * @sem domain=routing role=allocator
  */
@@ -198,63 +227,71 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
     verification = riskHigh ? "judge" : "qe"
   }
 
-  // --- Matrix tier (the primary allocator).
+  // --- Generator tier. STRUCTURE (coupling/risk) sets only a cheap default here;
+  //     it no longer escalates the AUTHOR — consequence already routed the VERIFIER
+  //     above (high coupling / high risk → judge). DIFFICULTY (hardness/ambiguity)
+  //     is the sole structural→generator lever, applied as a floor just below.
+  //     (Consequence ⟂ difficulty — corpus R5, extended from arming to routing.)
   let tier: EconTier
   let reasonCode: AllocationReasonCode
   if (sliceType === "design") {
-    // SM5: coupling and difficulty are different axes — an atomic insight bug can
-    // sit in ANY coupling/test-strength cell and still exceed executor capability,
-    // so design routes to the reasoner unconditionally instead of by matrix cell.
+    // SM5: design is insight-heavy — it exceeds the executor by construction and
+    // coupling never demotes it.
     tier = "reasoner"
     reasonCode = "design-insight"
-    notes.push("design slice → reasoner (insight-heavy; coupling never demotes it)")
-  } else if (testable) {
-    // CORE INVARIANT: a testable slice stays on the cheap executor regardless of
-    // coupling — the sound check is the safety net, so coupling never escalates a
-    // checkable slice. This is the decomposition-first reframe's whole point.
-    tier = "executor"
-    reasonCode = "testable-invariant"
-    notes.push(
-      highCoupling
-        ? "high-coupling · testable → executor (deterministic wiring + sound verify hold the coupling — the core invariant, NOT oracle)"
-        : "low-coupling · testable → executor",
-    )
-  } else if (highCoupling) {
-    // The residual: tightly-coupled AND uncheckable — the only structural cell
-    // that reaches the oracle.
-    tier = "oracle"
-    reasonCode = "high-coupling-untestable-residual"
-    notes.push("high-coupling · untestable → oracle (the residual)")
-  } else if (sliceType === "mechanical" && input.specBacked !== true) {
-    // An UNBACKED mechanical edit in the untestable cell: the executor would be
-    // inventing code with neither a design patch to transcribe nor a sound check
-    // to catch it — the plausible-but-wrong cell. The reasoner authors it instead
-    // (spec-backed edits stay executor: transcription + QE is safe and cheap).
+    notes.push("design slice → reasoner (insight-heavy)")
+  } else if (!testable && sliceType === "mechanical" && input.specBacked !== true) {
+    // An UNBACKED mechanical edit with no sound check: authoring code with neither a
+    // design patch to transcribe nor a check to catch it — a capability (difficulty)
+    // need, not a consequence one. The reasoner authors it (spec-backed edits stay
+    // executor: transcription + QE is safe and cheap).
     tier = "reasoner"
     reasonCode = "mechanical-unbacked"
-    notes.push("low-coupling · untestable · mechanical without a design patch → reasoner authors the edit")
+    notes.push("untestable mechanical without a design patch → reasoner authors the edit")
   } else {
+    // Every remaining cell — INCLUDING high-coupling·untestable — starts on the cheap
+    // executor. Coupling is CONSEQUENCE: it already raised the verifier to `judge`
+    // above; it must NOT raise the author. A rename across 50 files is cheap to DO and
+    // costly to get WRONG — that asymmetry belongs to the verifier, never the tier.
     tier = "executor"
-    reasonCode = "untestable-default"
-    notes.push("low-coupling · untestable → executor")
+    reasonCode = testable ? "testable-invariant" : "untestable-default"
+    notes.push(
+      testable
+        ? highCoupling
+          ? "high-coupling · testable → executor (the sound check holds the coupling)"
+          : "low-coupling · testable → executor"
+        : highCoupling
+          ? "high-coupling · untestable → executor (coupling routes the judge verifier, not the author)"
+          : "low-coupling · untestable → executor",
+    )
   }
 
-  // --- Risk tiebreaker: only breaks the low-coupling·untestable borderline
-  //     (the doc's "executor/oracle" cell) toward oracle. Never touches a
-  //     testable cell (invariant) or the already-oracle cells.
-  if (!testable && !highCoupling && riskHigh) {
-    tier = higherTier(tier, "oracle")
-    reasonCode = "risk-tiebreak"
-    notes.push(`risk=${input.risk} > ${ALLOCATION_RISK_TIEBREAK}: borderline broken toward oracle`)
+  // --- Difficulty floor: the GENERATOR axis. Only ambiguity/hardness — never
+  //     coupling/risk — raise the AUTHOR. Ambiguity OVERRIDES the testable clamp: a
+  //     sound check proves the code RUNS, never that it solved the RIGHT problem, so
+  //     an ambiguous spec is the one failure a green suite cannot catch
+  //     (confident-wrong). `hard` needs reasoning depth the executor lacks.
+  if (input.hardness === "hard" || input.ambiguity === "ambiguous") {
+    const floored = higherTier(tier, "reasoner")
+    if (floored !== tier) {
+      tier = floored
+      reasonCode = "difficulty-floor"
+      notes.push(
+        input.ambiguity === "ambiguous"
+          ? "ambiguous spec → reasoner floor (a sound check can't catch a misinterpretation)"
+          : "hard task → reasoner floor (reasoning depth beyond the executor)",
+      )
+    }
   }
 
-  // --- Conductor `need` hint: can RAISE the tier above the matrix floor, but can
-  //     never lift a testable slice above executor — the safety-net invariant
-  //     overrides an over-eager hint (design keeps its reasoner floor and is exempt).
+  // --- Conductor `need` hint: can RAISE the tier above the floor, but never lifts a
+  //     testable slice above executor — the sound-net invariant overrides an over-eager
+  //     hint. Exempt: design, and a testable slice already lifted by the difficulty
+  //     floor (once ambiguity broke the sound-net invariant, a need hint may raise too).
   const needTier = parseTier(input.need)
   if (needTier !== undefined && TIER_RANK[needTier] > TIER_RANK[tier]) {
-    if (testable && sliceType !== "design") {
-      notes.push(`need="${input.need}" ignored: testable slice is clamped to executor (safety-net invariant)`)
+    if (testable && sliceType !== "design" && reasonCode !== "difficulty-floor") {
+      notes.push(`need="${input.need}" ignored: testable slice is clamped to executor (sound-net invariant)`)
     } else {
       tier = needTier
       reasonCode = "need-hint"

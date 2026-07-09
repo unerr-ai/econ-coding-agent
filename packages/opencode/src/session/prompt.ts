@@ -56,7 +56,7 @@ import {
 } from "./slice-orchestrator"
 import { runTurnTriage, triageTelemetry, type TriageComplete, type TriageVerdict, type TriageGoalShape } from "./turn-triage"
 import { judgeArming, heuristicArming, type ArmingVerdict } from "./arming-judge"
-import { setArmingDecision } from "./arming-store"
+import { setArmingDecision, getArmingDecision } from "./arming-store"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
@@ -2391,6 +2391,12 @@ export const layer = Layer.effect(
                       }),
                     ),
                   goalCount: turnGoalCount,
+                  // §1.1b two-axis allocator floor: the turn-open arming
+                  // decision (`arming`/`verdict` above are step-0-scoped and
+                  // out of reach here — the store is the bridge) threaded onto
+                  // every slice todosToLoopSlices builds, so a hard/ambiguous
+                  // slice floors its generator tier at the reasoner.
+                  arming: getArmingDecision(sessionID),
                   options: {
                     cwd: ctx.directory,
                     rmRung,

@@ -37,8 +37,13 @@ export interface ArmingVerdict {
   readonly evidence: string
 }
 
-/** The narrow slice the orchestration doors consume (skeleton seed gate + autoTypeTodos net). */
-export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness">
+/**
+ * The narrow slice the orchestration doors consume (skeleton seed gate,
+ * autoTypeTodos net, and — via the arming store — the per-slice difficulty
+ * floor `todosToLoopSlices` reads). `ambiguity` is optional so an older
+ * caller/test double built before it existed still type-checks.
+ */
+export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness"> & { ambiguity?: ArmingAmbiguity }
 
 const ARMING_HARDNESS: ReadonlySet<ArmingHardness> = new Set(["trivial", "moderate", "hard"])
 const ARMING_AMBIGUITY: ReadonlySet<ArmingAmbiguity> = new Set(["clear", "ambiguous"])

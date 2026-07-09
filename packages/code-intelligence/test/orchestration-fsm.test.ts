@@ -7,10 +7,11 @@
  *
  * Covers `sliceTransition`: accept-first, reject→squeeze→accept (escalated),
  * unchanged-signature stall skips the squeeze, the same-tier retry budget,
- * a read-only slice never squeezing/climbing, a critical slice's
- * forced-floor climb past its normal cap up to the slice's ceiling, plain
- * ladder exhaustion, budget-exhausted → abandoned, and the terminal-is-
- * absorbing re-dispatch guard (run-8).
+ * a read-only slice never squeezing/climbing, a critical slice bounded by
+ * the same maxClimbs as any other slice (no extra forced climbs) that
+ * settles unverified LOUD for review on exhaustion, plain ladder
+ * exhaustion, budget-exhausted → abandoned, and the terminal-is-absorbing
+ * re-dispatch guard (run-8).
  *
  * Covers `createStuckSupervisor`: test-edit priority, repeated-red
  * (tolerating interleaved non-command steps), repeated-tool, a changing
@@ -40,9 +41,7 @@ const LADDER: EconTier[] = ["executor", "conductor", "reasoner", "oracle"]
 /**
  * Builds a `SliceTransitionCtx` over `LADDER`. `sliceCeiling` is the tier at
  * which `escalate` stops returning a next tier (the slice's own allowed cap,
- * which may sit below the global ladder top). `atCeiling` always checks the
- * global top ("oracle") per the source doc — distinct from `sliceCeiling` so
- * the forced-floor/ladder-exhausted split is exercisable in tests.
+ * which may sit below the global ladder top).
  */
 function makeCtx(opts: {
   sliceCeiling?: EconTier
@@ -65,7 +64,6 @@ function makeCtx(opts: {
       if (i >= ceilingIdx) return undefined
       return LADDER[i + 1]
     },
-    atCeiling: (tier: EconTier) => tier === "oracle",
   }
 }
 
@@ -152,12 +150,13 @@ describe("sliceTransition", () => {
     expect(next.terminal?.attempts).toBe(1)
   })
 
-  it("a critical slice forced-floor climbs past maxClimbs up to the slice's ceiling, then settles unverified/critical-unverified-at-ceiling", () => {
-    // ceiling below the global top ("reasoner") so forcedFloor stays true throughout
-    // (atCeiling only trips at "oracle" per the source contract).
+  it("a critical slice is bounded by maxClimbs like any other slice — climbs once then settles unverified/critical-unverified-review", () => {
+    // sliceCeiling ("reasoner") sits well above maxClimbs' bound (1), so this
+    // proves the cap is maxClimbs, not the slice's own escalate() ceiling —
+    // criticality buys no extra climb over a non-critical slice.
     const ctx = makeCtx({
       sliceCeiling: "reasoner",
-      maxClimbs: 0,
+      maxClimbs: 1,
       sameTierRetryBudget: 0, // never squeeze — isolate the climb behavior
       isCritical: true,
     })
@@ -166,19 +165,16 @@ describe("sliceTransition", () => {
     state = sliceTransition(state, reject("s"), ctx)
     expect(state.phase).toBe("climbing")
     expect(state.atTier).toBe("conductor")
-    expect(state.climbs).toBe(1) // past maxClimbs:0 — forced floor
+    expect(state.climbs).toBe(1)
 
-    state = sliceTransition(state, reject("s"), ctx)
-    expect(state.phase).toBe("climbing")
-    expect(state.atTier).toBe("reasoner")
-    expect(state.climbs).toBe(2)
-
-    // at the slice's ceiling now — escalate() returns undefined, no further climb
+    // climbs (1) now equals maxClimbs (1) — no further climb allowed, even
+    // though the slice's own ceiling ("reasoner") is still above it.
     state = sliceTransition(state, reject("s"), ctx)
     expect(state.phase).toBe("settled")
+    expect(state.climbs).toBe(1) // never exceeds maxClimbs
     expect(state.terminal?.outcome).toBe("unverified")
-    expect(state.terminal?.atTier).toBe("reasoner")
-    expect(state.terminal?.reason).toBe("critical-unverified-at-ceiling")
+    expect(state.terminal?.atTier).toBe("conductor")
+    expect(state.terminal?.reason).toBe("critical-unverified-review")
   })
 
   it("non-critical exhaustion settles unverified with reason ladder-exhausted", () => {

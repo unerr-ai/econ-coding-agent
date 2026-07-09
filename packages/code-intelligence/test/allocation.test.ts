@@ -1,22 +1,29 @@
 /**
- * Unit tests for allocation.ts: allocateSlice — the (coupling × test-strength)
- * matrix (OL-7.2). Pure function tests: no I/O, all inputs inline fixtures.
+ * Unit tests for allocation.ts: allocateSlice — the TWO-AXIS reframe (OL-7.2,
+ * corpus R5). Pure function tests: no I/O, all inputs inline fixtures.
  *
- * The load-bearing assertion is the CORE INVARIANT of the decomposition-first
- * reframe: a high-coupling *testable* slice does NOT escalate to oracle — the
- * sound check is the safety net. Everything else (risk, the conductor need hint)
- * is only an in-cell tiebreaker and can never break that invariant. A second
- * load-bearing assertion (SM5): `design` routes to the reasoner regardless of
- * which coupling/test-strength cell it lands in — coupling and difficulty are
- * different axes, so a testable/high-coupling design slice must not be demoted
- * to the executor. `reasonCode` pins the machine-readable factor behind each tier.
+ * The load-bearing assertion is the CORE INVARIANT of the two-axis reframe:
+ * the GENERATOR tier follows DIFFICULTY (hardness/ambiguity + design +
+ * unbacked-authoring) — CONSEQUENCE (coupling/risk) never escalates it, it
+ * only escalates the VERIFIER rung (→ judge). A high-coupling *testable*
+ * slice therefore still does NOT escalate to oracle — the sound check is the
+ * safety net — but now neither does a high-coupling *untestable* slice: it
+ * stays on the executor while the verifier alone absorbs the coupling/risk.
+ * A second load-bearing assertion (SM5): `design` routes to the reasoner
+ * regardless of coupling/test-strength. A third (the difficulty floor):
+ * `hardness==="hard"` or `ambiguity==="ambiguous"` floors the generator at
+ * the reasoner — and ambiguity is the one case that overrides the testable
+ * clamp, because a sound check proves the code runs, never that it solved
+ * the right problem. `reasonCode` pins the machine-readable factor behind
+ * each tier.
  */
 
 import { describe, it, expect } from "bun:test"
 import { allocateSlice, ALLOCATION_RISK_TIEBREAK, type SliceAllocationInput } from "../src/allocation.js"
 
 // ---------------------------------------------------------------------------
-// The four matrix cells (coupling × test-strength), no type / hint / risk
+// The four matrix cells (coupling × test-strength) — verifier rung only;
+// the generator tier no longer follows coupling (see the two-axis block below).
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — the four matrix cells", () => {
@@ -39,9 +46,10 @@ describe("allocateSlice — the four matrix cells", () => {
     expect(a.verification).toBe("qe")
   })
 
-  it("high-coupling · untestable → oracle + judge (the residual)", () => {
+  it("high-coupling · untestable → executor + judge (coupling routes the verifier, never the tier)", () => {
     const a = allocateSlice({ coupling: "high", testStrength: "untestable" })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("executor")
+    expect(a.tier).not.toBe("oracle")
     expect(a.verification).toBe("judge")
   })
 })
@@ -74,7 +82,7 @@ describe("allocateSlice — core invariant: testable never escalates to oracle",
 })
 
 // ---------------------------------------------------------------------------
-// Slice type — only `design` forces the oracle floor
+// Slice type — only `design` forces the reasoner floor
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — slice type", () => {
@@ -117,13 +125,14 @@ describe("allocateSlice — slice type", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Risk tiebreaker — only the low-coupling·untestable borderline moves
+// Risk tiebreaker — verifier only (low-coupling·untestable borderline moves
+// to `judge`, the generator tier never moves)
 // ---------------------------------------------------------------------------
 
-describe("allocateSlice — risk is an in-cell tiebreaker", () => {
-  it("high risk breaks the low-coupling·untestable borderline to oracle + judge", () => {
+describe("allocateSlice — risk is an in-cell verifier tiebreaker, never a generator escalator", () => {
+  it("high risk breaks the low-coupling·untestable borderline to judge (verifier only — tier stays executor)", () => {
     const a = allocateSlice({ coupling: "low", testStrength: "untestable", risk: 90 })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("executor")
     expect(a.verification).toBe("judge")
   })
 
@@ -141,13 +150,84 @@ describe("allocateSlice — risk is an in-cell tiebreaker", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Conductor `need` hint — raises, never lowers, never breaks the invariant
+// The two-axis reframe — consequence (coupling/risk) never escalates the
+// generator; only difficulty (hardness/ambiguity) does.
+// ---------------------------------------------------------------------------
+
+describe("allocateSlice — consequence (coupling/risk) never escalates the generator", () => {
+  it("coupling never escalates the generator: high-coupling·untestable stays executor, only the verifier moves to judge", () => {
+    const a = allocateSlice({ coupling: "high", testStrength: "untestable" })
+    expect(a.tier).toBe("executor")
+    expect(a.verification).toBe("judge")
+    expect(a.reasonCode).toBe("untestable-default")
+  })
+
+  it("risk never escalates the generator: a high risk score stays executor, only the verifier moves to judge", () => {
+    const a = allocateSlice({ coupling: "low", testStrength: "untestable", risk: 90 })
+    expect(a.tier).toBe("executor")
+    expect(a.verification).toBe("judge")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Difficulty floor — the sole structural→generator lever (hardness/ambiguity)
+// ---------------------------------------------------------------------------
+
+describe("allocateSlice — difficulty floor (the generator axis)", () => {
+  it("hardness=\"hard\" floors a testable slice at reasoner (overriding the executor default)", () => {
+    const a = allocateSlice({ testStrength: "testable", hardness: "hard" })
+    expect(a.tier).toBe("reasoner")
+    expect(a.verification).toBe("sound")
+    expect(a.reasonCode).toBe("difficulty-floor")
+  })
+
+  it("ambiguity=\"ambiguous\" overrides the testable clamp and floors at reasoner", () => {
+    const a = allocateSlice({ testStrength: "testable", ambiguity: "ambiguous" })
+    expect(a.tier).toBe("reasoner")
+    expect(a.verification).toBe("sound")
+    expect(a.reasonCode).toBe("difficulty-floor")
+  })
+
+  it("the floor never demotes: a trivial-hardness design slice stays reasoner (floor is a no-op)", () => {
+    const a = allocateSlice({ sliceType: "design", hardness: "trivial" })
+    expect(a.tier).toBe("reasoner")
+    expect(a.reasonCode).toBe("design-insight")
+  })
+
+  it("the floor never demotes: a hard design slice is already ≥reasoner, so reasonCode stays design-insight", () => {
+    const a = allocateSlice({ sliceType: "design", hardness: "hard" })
+    expect(a.tier).toBe("reasoner")
+    expect(a.reasonCode).toBe("design-insight")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Conductor `need` hint — raises, never lowers, never breaks the invariant —
+// except once ambiguity/hardness already broke the testable clamp.
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — need hint", () => {
   it("need raises a low-coupling·untestable slice from executor to oracle", () => {
     const a = allocateSlice({ coupling: "low", testStrength: "untestable", need: "oracle" })
     expect(a.tier).toBe("oracle")
+  })
+
+  it("need still raises a plain untestable slice to oracle, reasonCode need-hint", () => {
+    const a = allocateSlice({ testStrength: "untestable", need: "oracle" })
+    expect(a.tier).toBe("oracle")
+    expect(a.reasonCode).toBe("need-hint")
+  })
+
+  it("need is ignored on a plain testable slice (sound-net invariant holds, reasonCode stays testable-invariant)", () => {
+    const a = allocateSlice({ testStrength: "testable", need: "oracle" })
+    expect(a.tier).toBe("executor")
+    expect(a.reasonCode).toBe("testable-invariant")
+  })
+
+  it("need IS allowed on a testable slice once ambiguity already broke the clamp", () => {
+    const a = allocateSlice({ testStrength: "testable", ambiguity: "ambiguous", need: "oracle" })
+    expect(a.tier).toBe("oracle")
+    expect(a.reasonCode).toBe("need-hint")
   })
 
   it("need cannot lower a design slice below its reasoner floor (matrix decides the floor)", () => {
@@ -161,9 +241,10 @@ describe("allocateSlice — need hint", () => {
     expect(a.reasonCode).toBe("need-hint")
   })
 
-  it("need cannot lower the high-coupling·untestable residual below oracle", () => {
+  it("a low-ranked need (conductor) cannot lower a high-coupling·untestable slice below its executor default", () => {
     const a = allocateSlice({ coupling: "high", testStrength: "untestable", need: "conductor" })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("executor")
+    expect(a.verification).toBe("judge")
   })
 
   it("an unknown need string is ignored (falls back to the matrix)", () => {
@@ -188,12 +269,14 @@ describe("allocateSlice — specBacked (mechanical + untestable)", () => {
     const a = allocateSlice({ sliceType: "mechanical", coupling: "low", testStrength: "untestable" })
     expect(a.tier).toBe("reasoner")
     expect(a.verification).toBe("qe")
+    expect(a.reasonCode).toBe("mechanical-unbacked")
   })
 
   it("mechanical · untestable · low-coupling · specBacked → stays executor (design patch to transcribe)", () => {
     const a = allocateSlice({ sliceType: "mechanical", coupling: "low", testStrength: "untestable", specBacked: true })
     expect(a.tier).toBe("executor")
     expect(a.verification).toBe("qe")
+    expect(a.reasonCode).toBe("untestable-default")
   })
 
   it("mechanical · testable · low-coupling · unbacked → still executor (core invariant untouched)", () => {
@@ -226,9 +309,9 @@ describe("allocateSlice — defensive defaults", () => {
     expect(a.verification).toBe("sound")
   })
 
-  it("missing testStrength is treated as untestable (no assumed safety net)", () => {
+  it("missing testStrength is treated as untestable — routes the verifier to judge via coupling, but the generator still defaults to executor", () => {
     const a = allocateSlice({ coupling: "high" })
-    expect(a.tier).toBe("oracle")
+    expect(a.tier).toBe("executor")
     expect(a.verification).toBe("judge")
   })
 
@@ -242,9 +325,9 @@ describe("allocateSlice — defensive defaults", () => {
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — reasonCode telemetry", () => {
-  it("tags the high-coupling·untestable residual", () => {
+  it("tags the high-coupling·untestable cell untestable-default (coupling no longer produces a distinct residual code)", () => {
     const a = allocateSlice({ coupling: "high", testStrength: "untestable" })
-    expect(a.reasonCode).toBe("high-coupling-untestable-residual")
+    expect(a.reasonCode).toBe("untestable-default")
   })
 
   it("tags the low-coupling·untestable default", () => {
@@ -257,8 +340,8 @@ describe("allocateSlice — reasonCode telemetry", () => {
     expect(a.reasonCode).toBe("mechanical-unbacked")
   })
 
-  it("tags a risk-tiebreak override", () => {
+  it("a risk-driven verifier tiebreak does not get its own reasonCode — it still tags untestable-default (risk-tiebreak was removed; risk only moves the verifier)", () => {
     const a = allocateSlice({ coupling: "low", testStrength: "untestable", risk: 90 })
-    expect(a.reasonCode).toBe("risk-tiebreak")
+    expect(a.reasonCode).toBe("untestable-default")
   })
 })

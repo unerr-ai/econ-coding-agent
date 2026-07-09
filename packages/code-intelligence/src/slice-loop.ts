@@ -16,11 +16,11 @@
  * per hop (brief.ts), re-verifying each rescue and recording every discarded
  * attempt as double-pay (double-pay.ts). A rejected attempt first squeezes
  * the SAME tier while its failure signature keeps changing (M2,
- * SAME_TIER_RETRY_BUDGET) and climbs only once it stalls; a critical slice
- * (high coupling or risk over the allocator's tiebreak) may never soft-settle
- * unverified below the oracle (M3, the escalation floor) — it forces one more
- * climb per exhaustion point instead, settling loudly only at the oracle
- * ceiling. Slices run
+ * SAME_TIER_RETRY_BUDGET) and climbs only once it stalls, bounded by `maxClimbs`
+ * for every slice alike; consequence (high coupling or risk — the allocator's
+ * tiebreak) no longer buys extra generator climbs (it routes the judge verifier
+ * instead, allocation.ts) — a critical slice we still cannot verify soft-settles
+ * LOUDLY for review (M3) rather than force-authoring at the oracle. Slices run
  * in dependency (topological) order; independent slices in a wave run in
  * parallel. Every dispatch is wall-clock capped per its slice type, and the
  * whole run is capped by a budget derived from the plan (OL-9.3e) — exhaustion
@@ -56,6 +56,8 @@ import {
   type SliceType,
   type Coupling,
   type TestStrength,
+  type SliceHardness,
+  type SliceAmbiguity,
   type VerifierRung,
 } from "./allocation.js"
 import { evaluate, type EvalContext } from "./evaluator.js"
@@ -118,6 +120,10 @@ export interface LoopSlice {
   risk?: number
   /** True when this slice depends on a design slice whose output carries the concrete patch (design-emits-the-patch). */
   specBacked?: boolean
+  /** Arming-judge task difficulty (hardness); a GENERATOR-tier lever — `hard` floors this slice's author at the reasoner (allocation.ts difficulty floor). */
+  hardness?: SliceHardness
+  /** Arming-judge task ambiguity; a GENERATOR-tier lever that overrides the testable clamp (a sound check can't catch a misinterpretation). */
+  ambiguity?: SliceAmbiguity
   /** Sound-rung commands (typecheck / test / lint) for a testable slice. */
   verifyCommands?: readonly VerifyCommand[]
   /** A pinned reproduction that must transition red→green (verifier.ts's separate probe rung) — threaded into the ladder's spec alongside `verifyCommands`. */
@@ -353,11 +359,11 @@ export function escalateTier(tier: EconTier): EconTier {
 }
 
 /**
- * A slice whose blast radius or structural risk means it may never soft-settle
- * unverified below the oracle (M3, the escalation floor): high coupling, or
- * risk above the same tiebreak the allocator uses to break toward the oracle
- * (`ALLOCATION_RISK_TIEBREAK`). Callers must also exclude a read-only
- * (recon/verify) slice — the floor never overrides its no-retry/no-escalate rule.
+ * A high-consequence slice — high coupling, or risk above the allocator's
+ * tiebreak (`ALLOCATION_RISK_TIEBREAK`). Consequence NEVER buys generator climbs
+ * (blast-radius routes the judge verifier in allocation.ts, not the author); this
+ * flag's only job is to mark an unverifiable settle as LOUD-for-review (M3) rather
+ * than a silent accept. Read-only (recon/verify) slices are excluded by the caller.
  *
  * @sem domain=routing role=allocator
  */
@@ -870,6 +876,8 @@ function buildEvalContext(
     need: slice.need,
     risk: slice.risk,
     specBacked: slice.specBacked,
+    hardness: slice.hardness,
+    ambiguity: slice.ambiguity,
     triage: {},
     history,
     riskNotes: [],
@@ -935,14 +943,11 @@ async function runSlice(
   const verdict =
     cheapAttempt.verdict ?? (await runVerifierLadder(buildLadderInput(slice, allocation, { ...cheap, trajectory }, deps)))
 
-  // M3 escalation floor: a critical slice (isCritical) may never soft-settle
-  // unverified below the oracle. An untestable-slice vacuous accept
-  // (verdict.unverified) is NOT settled here when the slice isCritical and
-  // still has tier headroom — it falls through into the ladder below, which
-  // forces a climb instead of a silent accept. Read-only (recon/verify)
-  // slices are excluded — the floor never overrides their no-escalate rule.
-  const criticalFloorBlocksAccept = (v: VerifierVerdict, tier: EconTier): boolean =>
-    Boolean(v.unverified) && !isReadOnlySlice(slice.sliceType) && isCritical(slice) && LADDER_RANK[tier] < LADDER_RANK.oracle
+  // Consequence (isCritical) no longer blocks a vacuous accept to force a generator
+  // climb — that was the 12039 double-pay (pay the oracle to re-author something
+  // still unverifiable). A judge-verified critical slice accepts at any tier; a
+  // slice we cannot verify soft-settles LOUDLY for review below (deps.onProvenance),
+  // never by force-authoring at the oracle.
 
   const settleAccepted = (v: VerifierVerdict, out: SliceDispatchResult, atAttempts: number, esc?: SliceOutcome["escalation"]): SliceOutcome => ({
     id: slice.id,
@@ -958,7 +963,7 @@ async function runSlice(
     ...(esc ? { escalation: esc } : {}),
   })
 
-  if (verdict.accepted && !criticalFloorBlocksAccept(verdict, allocation.tier)) {
+  if (verdict.accepted) {
     return settleAccepted(verdict, cheap, 1)
   }
 
@@ -982,19 +987,16 @@ async function runSlice(
   // -> 62 runner sessions) since a squeeze only fires while NEW evidence
   // keeps surfacing. Read-only (recon/verify) slices never squeeze or climb
   // (maxClimbs=0), matching their 1-dispatch `defaultMaxAttempts` cap.
-  // Exhausting the climb depth or the tier ceiling settles the last attempt
-  // flagged unverified — UNLESS the slice isCritical (M3), which instead
-  // forces one more climb per exhaustion point, settling loudly only once
-  // it's genuinely stuck at the oracle ceiling.
-  // Non-critical climb depth (the cost cap): a non-critical slice climbs at
-  // most once beyond the cheap tier (to the conductor for an executor-first
-  // slice) before it may settle unverified — the M3 floor (ctx.isCritical in
-  // the reducer below) bypasses this for a critical slice, up to the oracle
-  // ceiling. Zero for a read-only (recon/verify) slice: it never climbs at
-  // all, matching `defaultMaxAttempts` — the `ceiling` backstop alone (below)
-  // does not block a first climb (a recon's ceiling IS the conductor, and
-  // verify's ceiling is the oracle), so this must be the real gate now that
-  // the attempt count no longer is.
+  // Climb depth (the cost cap), uniform across consequence: every slice — critical
+  // or not — climbs at most once beyond the cheap tier (to the conductor for an
+  // executor-first slice) before it may settle unverified. Consequence no longer
+  // buys extra climbs (the reframe: blast-radius routes the judge verifier, not the
+  // author); predicted difficulty was already priced up-front by allocateSlice's
+  // difficulty floor. Zero for a read-only (recon/verify) slice: it never climbs at
+  // all, matching `defaultMaxAttempts` — the `ceiling` backstop alone (below) does
+  // not block a first climb (a recon's ceiling IS the conductor, and verify's
+  // ceiling is the oracle), so this must be the real gate now that the attempt
+  // count no longer is.
   const maxClimbs = isReadOnlySlice(slice.sliceType) ? 0 : 1
 
   // Ladder ceiling: recon is read-only investigation — it never deserves an
@@ -1010,8 +1012,6 @@ async function runSlice(
     const higher = escalateTier(tier)
     return higher === tier || LADDER_RANK[higher] > LADDER_RANK[ceiling] ? undefined : higher
   }
-  /** `sliceTransition`'s `atCeiling`: true once a tier is at (or past) this slice's ceiling. */
-  const atCeiling = (tier: EconTier): boolean => LADDER_RANK[tier] >= LADDER_RANK[ceiling]
 
   const settleUnverified = async (atAttempts: number): Promise<SliceOutcome> => {
     // Ladder exhaustion: no further hop is coming, so the reverted diff (if
@@ -1048,11 +1048,6 @@ async function runSlice(
   for (;;) {
     const fromTier = state.atTier
     const preAttempts = state.attempts
-    // An untestable-critical vacuous accept (criticalFloorBlocksAccept) is
-    // not a genuine reject — there is nothing to squeeze-retry for it, only
-    // a tier to raise (M3) — so its same-tier squeeze budget is zeroed for
-    // this transition only, sending the reducer straight to the climb branch,
-    // exactly like the pre-reducer code's `if (!forcedFloorAccept)` guard did.
     const ctx: SliceTransitionCtx = {
       sameTierRetryBudget: attemptVerdict.accepted ? 0 : SAME_TIER_RETRY_BUDGET,
       maxClimbs,
@@ -1060,10 +1055,9 @@ async function runSlice(
       isReadOnly: readOnly,
       isCritical: critical,
       escalate,
-      atCeiling,
     }
     const fsmVerdict: SliceVerdictLike = {
-      accepted: attemptVerdict.accepted && !criticalFloorBlocksAccept(attemptVerdict, fromTier),
+      accepted: attemptVerdict.accepted,
       signature: verdictSignature(attemptVerdict),
     }
     state = sliceTransition(state, { type: "verdict", verdict: fsmVerdict }, ctx)
@@ -1077,9 +1071,10 @@ async function runSlice(
       // per-slice ladder — no budget-exhausted event is ever raised here;
       // kept only for exhaustiveness with the shared FSM's outcome union).
       if (critical && !readOnly) {
-        // A critical slice genuinely stuck at its ceiling (the oracle, or
-        // recon's conductor cap) settles loudly (M3) instead of a silent accept.
-        deps.onProvenance?.({ sliceId: slice.id, fromTier, toTier: fromTier, rungReason: "critical-unverified-at-ceiling" })
+        // A critical slice we could not verify settles LOUDLY for review (M3) —
+        // consequence flags it for the turn owner instead of force-authoring at
+        // the oracle (blast-radius routes the judge verifier, never the author).
+        deps.onProvenance?.({ sliceId: slice.id, fromTier, toTier: fromTier, rungReason: "critical-unverified-review" })
       }
       return await settleUnverified(settledAttempts)
     }

@@ -35,20 +35,22 @@ Cursor at a fraction of the running cost, hosted in India, on open-source models
 
 ### The technique, in one line — *decomposition-first routing*
 
-**Decomposition-first routing:** split each turn into typed slices and route each slice to the
-cheapest tier that can *actually* solve it — escalating **up front on ambiguity and
-code-structural hardness**, and on **verified failure** only as the backstop — so small open
-models do the boring ~90% and the frontier-grade model only ever sees the irreducible-hard core.
-(Named to contrast with commodity "model routers" that pick one model per prompt; the lever is
-the *decomposition*, not the routing.)
+**Decomposition-first routing:** split each turn into typed slices and, for each slice, set two
+independent dials — the **writer** tier from *difficulty* (ambiguity + hardness) and the
+**checker** rung from *consequence* (code-structural blast radius) — with **verified failure**
+as the backstop, so small open models do the boring ~90% and the frontier-grade model only ever
+sees the irreducible-hard core. (Named to contrast with commodity "model routers" that pick one
+model per prompt; the lever is the *decomposition*, not the routing.)
 
 **Escalate before failure, not just on it.** You can't know a slice will fail until the fix has
 already landed in the tree — and by then you've paid for the cheap attempt *and* touched the
-codebase. So the router is built to predict what the least-capable tier *can't* solve — reading
-ambiguity and code structure (blast-radius, fan-in, coupling), not the prompt's wording — and
-send those slices straight to a stronger tier. Verify-then-escalate is the safety net for the
-hardness that slips through, not the primary trigger. That predictive step is what a
-text-only "model router" structurally cannot do — it can't see the code.
+codebase. So the router predicts, up front, what the cheap tier will struggle with: it reads
+**task difficulty** (ambiguity + hardness) to pick *who writes* the slice, and **code structure**
+(blast-radius, fan-in, coupling) to pick *how hard to check* it — sending a hard or ambiguous
+slice to a stronger author, and a high-blast-radius one to a stricter verifier, before the cheap
+attempt is ever trusted. Verify-then-escalate is the safety net for what slips through, not the
+primary trigger. That predictive step is what a text-only "model router" structurally cannot
+do — it can't see the code.
 
 **The three insights that drove us to build it:**
 
@@ -199,75 +201,136 @@ to reply "insufficient context, send me X" instead of guessing.
 
 ---
 
-## 4. The router — deciding when to spend more
+## 4. The router — deciding which model writes, and which model checks
 
-**In plain terms:** the agent itself decides what's hard. It splits the job into small pieces,
-does each cheaply by default, checks the result, and only "phones the expert" for the pieces
-that are genuinely risky or that the cheap attempt couldn't get right. The user never has to
-pick a model.
+**In plain terms:** the agent decides for itself what each piece of work needs. It splits the
+job into small pieces and asks **two separate questions** about each one — *how likely is the
+cheap model to get this wrong?* (which decides who **writes** it) and *how costly is it if it's
+wrong?* (which decides how hard we **check** it). Most pieces are easy and low-stakes, so a
+cheap model writes them and a light check passes them; the genuinely hard or ambiguous pieces
+get a stronger writer up front, and the high-blast-radius pieces get a stricter checker. The
+user never picks a model.
 
-**The key idea — decompose first, then escalate on *code risk*, not on the prompt.** Most cheap
-routers pick one model for the whole request by guessing difficulty from its text ("this prompt
-is long, use the big model") — commoditized and blind to the code. econ instead breaks the turn
-into typed slices and allocates *each slice* to the cheapest tier that clears its need, judging
-by what a change would actually *do to the codebase*. Whole-turn routing survives only as the
-degenerate one-slice case — the lever is the decomposition, not the routing. The full
-triage → decompose → allocate → verify → contain → escalate loop lives in
+**The key idea — two orthogonal axes, never confused.** Cheap routers pick one model per prompt
+by guessing difficulty from the prompt text. econ instead breaks the turn into typed slices and,
+for each slice, sets **two independent dials**:
+
+- **Who authors it — from *difficulty*.** How likely is the cheapest tier to get this wrong?
+  Signals: task ambiguity and hardness (from the arming judge), whether it's an insight-heavy
+  design slice, whether it's authoring code with no spec to transcribe.
+- **How hard we verify it — from *consequence*.** How expensive is a wrong answer? Signal: the
+  code-structural blast radius (coupling, fan-in, centrality) the graph computes.
+
+These two are **not the same axis**, and conflating them is the classic routing mistake. A
+function rename that 50 files depend on is *high-consequence* (expensive to get wrong) but
+*low-difficulty* (a cheap model does it fine). So blast radius must raise the **checker**, not
+the **writer** — paying a frontier model to *author* a rename is pure waste, while a strict
+cross-model check catches the blast for a fraction of the price. Difficulty raises the writer;
+consequence raises the checker; neither ever does the other's job. Whole-turn routing survives
+only as the degenerate one-slice case — the lever is the decomposition, not the routing. The
+full triage → decompose → allocate → verify → contain → escalate loop lives in
 [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) (its §7.1 is the proof that
 decomposition, not whole-turn routing, is what moves the bill).
 
 ### Under the hood
 
 Per-slice allocation runs on econ's risk-escalation router (the moat — see also
-[../features/03-risk-router.md](../features/03-risk-router.md)):
+[../features/03-risk-router.md](../features/03-risk-router.md)). It emits **two outputs per
+slice** — a **generator tier** (who writes it) and a **verifier rung** (how hard it's checked) —
+decided on the two independent axes above.
 
-- **Signal = the graph, not the text.** Blast-radius / fan-in, call-graph centrality,
-  cyclomatic complexity → one **0–100 risk score** per slice. (A model-routing proxy cannot
-  compute this; it can't see the code structure. That's why it's defensible.)
-- **Predict un-solvability up front — don't just wait for failure.** A slice's tier comes from
-  its shape × coupling × test-strength × need, so an ambiguous, decision-shaped, or
-  high-blast-radius slice is routed to a stronger tier *before* the cheap tier ever touches it
-  (you can't un-know a failure once the fix has landed, and it already cost you the attempt).
-  Risk is the **tiebreak** that pushes a borderline cell upward — one feature, never the whole
-  decision. For everything else, the per-slice **verification gate** — execute cheap, verify,
-  escalate only *actual* failures — is the backstop, and it's cheaper than escalating every
-  slice on the *fear* of failure.
-- **Climb the ladder, don't jump to the oracle.** A rejected slice first retries its own tier
-  while the failure signature keeps changing, then climbs one rung at a time
-  (executor → conductor → reasoner → oracle) — the oracle is the last resort, not the first
-  escalation. A structurally critical slice (high coupling / high risk) may never settle
-  unverified below the oracle.
-- **Abstention & per-repo triage.** The conductor's verifier can *abstain* (an explicit "I'm
-  not sure," not a confidence guess), and per-repo triage forces the strong tier where cheap
-  provably won't pay — only stay cheap if `cheapPassRate > 1 / interTierCostRatio` **and** the
-  risk signal actually discriminates. Don't pretend to save when the savings won't cover the
-  rework.
-- **Hysteresis (two bands, e.g. 70 / 40):** a borderline score changes nothing, so one noisy
-  reading can't flap the tier.
-- **Charge the double-pay:** every escalation = a cheap attempt **plus** a stronger attempt;
-  subtract it from the savings math or the numbers lie.
-- **Degrade open:** any missing signal / failed lookup → cheap tier. Routing is an
-  optimization; it must never crash a turn.
+**Axis 1 — the generator tier, from *difficulty*.** Applied cheapest-default-first, then a
+floor that can only raise:
+
+| Slice shape | Generator tier | Why |
+|---|---|---|
+| `design` (insight-heavy) | **reasoner** | a design decision exceeds the executor by construction; coupling never demotes it |
+| untestable · mechanical · **no spec** to transcribe | **reasoner** | authoring code with neither a patch to copy nor a check to catch it is a capability need |
+| everything else (**including high-coupling**) | **executor** (cheap) | the default — code structure alone never escalates the writer |
+| **difficulty floor:** arming `hardness = hard` **or** `ambiguity = ambiguous` | raised to **reasoner** | predicted cheap-fail, priced *before* the cheap tier ever runs |
+
+Two properties of the floor carry the design:
+
+- **Ambiguity overrides the "it's testable, keep it cheap" clamp.** A sound check proves the
+  code *runs*; it can never prove the code solved the *right* problem. Green-but-wrong is the one
+  failure a test suite structurally cannot catch — so when the spec is fuzzy we pay for a
+  stronger author up front rather than trust a green check.
+- **It only ever raises.** The floor is a one-way gate: it can lift a slice to the reasoner but
+  never demote a design slice or undercut the conductor's own minimum-tier hint.
+
+**Axis 2 — the verifier rung, from *consequence*.** The blast radius the graph computes chooses
+the gate, and *only* the gate:
+
+| Slice shape | Verifier rung |
+|---|---|
+| testable | **sound check** — its own compile / tests / types (the strongest gate) |
+| untestable · **high coupling** | **cross-model judge** — a second model adjudicates the output |
+| untestable · low coupling | **self-consistency** (sample-and-agree), escalated to the **judge** when the risk score is high |
+
+Consequence (coupling / risk / blast-radius) moves *this* column only. It never touches the
+generator column: a high-blast-radius slice is **written by the cheap tier and checked by the
+judge**.
+
+**The 0–100 risk score — one input, and where it lands.** Blast-radius / fan-in / call-graph
+centrality / cyclomatic complexity collapse to one risk score per slice. (A text-only
+model-router cannot compute this — it can't see the code, which is why the signal is
+defensible.) That score feeds the **verifier** axis — it can push a borderline untestable slice
+up to the judge — and the runtime backstop below. It does **not** feed the generator tier.
+
+**The runtime backstop — verified failure, bounded.** Prediction is the primary lever, but a
+slice can still fail its check:
+
+- A rejected slice first **retries its own tier** while the failure signature keeps changing
+  (it's still making progress), then **climbs exactly one rung**
+  (executor → conductor → reasoner → oracle). The climb budget is the **same for every slice** —
+  being high-consequence buys *no* extra climbs, because difficulty was already priced up front.
+- A high-consequence slice we **cannot verify** (no possible test, and the judge can't decide)
+  is **not** force-authored at the oracle. It settles on its best attempt and raises a loud
+  **"critical — unverified, needs review"** flag to the turn owner. Consequence's job is to
+  escalate *scrutiny*, not to burn money re-writing blind.
+
+**The rest of the discipline** (applied on top of both axes):
+
+- **Abstention & per-repo triage.** The verifier can *abstain* (an explicit "I'm not sure," not
+  a confidence guess), and per-repo triage forces the strong tier where cheap provably won't
+  pay — stay cheap only if `cheapPassRate > 1 / interTierCostRatio` **and** the risk signal
+  actually discriminates. Don't pretend to save when the savings won't cover the rework.
+- **Hysteresis (two bands, e.g. 70 / 40).** A borderline score changes nothing, so one noisy
+  reading can't flap the decision.
+- **Charge the double-pay.** Every climb = a cheap attempt **plus** a stronger one; subtract it
+  from the savings math or the numbers lie.
+- **Degrade open.** Any missing signal / failed lookup → cheap writer + the safe-default
+  checker. Routing is an optimization; it must never crash a turn.
 
 ```
-            ┌─────────────────────────────────────────────┐
-   turn ──▶ │ compute risk score from the code graph        │
-            │ (blast-radius · fan-in · centrality · cx)     │
-            └───────────────┬─────────────────────────────-─┘
-                            ▼
-        score < 40 ──────────────────────────▶ CONDUCTOR handles it (cheap)
-        40 ≤ score ≤ 70 ──▶ hysteresis: keep current tier (no flap)
-        score > 70 ──┐
-        OR verifier abstains ──┐
-        OR triage: cheap won't pay ──┐
-                                     ▼
-          reject / high-risk ─▶ climb one rung ─▶ integrate ─▶ continue
-                          (record the double-pay in the receipt)
+                        ┌──────────── one decomposed slice ───────────┐
+                        │  type · coupling · testable? ·               │
+                        │  arming hardness / ambiguity · risk score    │
+                        └──────┬──────────────────────────┬───────────┘
+       DIFFICULTY (who writes) │                          │ CONSEQUENCE (how we check)
+                               ▼                          ▼
+              ┌──────────────────────────┐   ┌────────────────────────────────┐
+              │ GENERATOR TIER            │   │ VERIFIER RUNG                   │
+              │  design         → reasoner│   │  testable      → sound check    │
+              │  hard/ambiguous → reasoner│   │  high-coupling → judge          │
+              │      (difficulty floor)   │   │  low-coupling  → self-consist.  │
+              │  else           → executor│   │      (→ judge if risk high)     │
+              └────────────┬──────────────┘   └───────────────┬────────────────┘
+                           │ cheap tier authors               │ the gate checks
+                           ▼                                  ▼
+                  dispatch on the tier ───────▶ verify ───▶ PASS → accept
+                           ▲                                  │
+              reject: squeeze same tier,                      │
+              then climb ONE rung  ◀──────────────────────────┘
+              (consequence buys NO extra climbs; a high-consequence
+               slice we can't verify settles LOUD for review — never
+               force-authored at the oracle)
 ```
 
-*Read this per slice, not per turn: the score above is one input to each slice's tier choice,
-and "climb one rung" means executor ▶ conductor ▶ reasoner ▶ oracle, one step at a time — the
-oracle is the last resort, not the first escalation (full mechanism:
+*Read this per slice, not per turn. The two columns are independent: difficulty sets the left
+(who writes), consequence sets the right (how hard we check), and neither crosses over. "Climb
+one rung" means executor ▶ conductor ▶ reasoner ▶ oracle, one step at a time and the same budget
+for every slice — the oracle is the last resort, not the first escalation (full mechanism:
 [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) §2, §4).*
 
 ---
@@ -508,8 +571,10 @@ is.
 1. **Prompt arrives.** Anchored memory for the touched code is injected; the conductor reads it.
 2. **Recon.** One call to the context engine returns the relevant slices + callers +
    conventions (no fan-out of file reads).
-3. **Route.** The router scores code-structural risk. Low → the conductor proceeds. High /
-   abstain / triage → the conductor compiles a brief and consults the oracle.
+3. **Route.** For each slice the router sets two dials — the **writer** tier from difficulty
+   (ambiguity + hardness) and the **checker** rung from consequence (blast radius). Hard or
+   ambiguous slices get a stronger writer up front; high-blast-radius slices get a stricter
+   check; the oracle is compiled a brief and consulted only for the irreducible-hard core.
 4. **Act.** The conductor dispatches tool calls to executors (in parallel) and/or delegates a
    known flow to a specialist sub-agent; it integrates the results.
 5. **Govern.** Before any edit lands, the governance gate fires — breaking callers, blast
@@ -962,15 +1027,16 @@ Two things, held together, make econ defensible:
 - **Compiled brief** — the distilled package (problem + slices + attempts + question + output
   shape) sent to the oracle in place of the raw transcript.
 - **Decomposition-first routing** — econ's core technique (§1): split each turn into typed
-  slices and route each to the cheapest tier that can actually solve it — escalating up front on
-  ambiguity and code-structural hardness, and on verified failure as the backstop — so small
-  models do the bulk and the oracle sees only the irreducible-hard core. Named to contrast with
-  commodity model-routers that pick one model per prompt — the lever is the decomposition (it
-  raises the cheap-tier share), not the routing.
-- **Risk-escalation router** — allocates each decomposed slice to the cheapest capable tier,
-  using code-structural risk (blast-radius, fan-in, centrality) as one feature/tiebreak, with
-  hysteresis, abstention, triage, and double-pay accounting; whole-turn routing is the
-  degenerate single-slice case.
+  slices and, per slice, set the **writer** tier from difficulty (ambiguity + hardness) and the
+  **checker** rung from consequence (blast radius), with verified failure as the backstop — so
+  small models do the bulk and the oracle sees only the irreducible-hard core. Named to contrast
+  with commodity model-routers that pick one model per prompt — the lever is the decomposition
+  (it raises the cheap-tier share), not the routing.
+- **Risk-escalation router** — allocates each decomposed slice on two axes: the generator tier
+  from difficulty and the verifier rung from consequence. Code-structural risk (blast-radius,
+  fan-in, centrality) sets the **verifier rung, never the generator tier**; with hysteresis,
+  abstention, triage, and double-pay accounting. Whole-turn routing is the degenerate
+  single-slice case.
 - **Code graph / context engine** — the live map of the codebase that delivers the right slice.
 - **Anchored memory** — typed, code-pinned notes (conventions, rules, warnings, decisions) that
   re-anchor as code moves and flag when they drift.

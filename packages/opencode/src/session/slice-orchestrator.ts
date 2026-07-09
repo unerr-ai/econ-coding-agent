@@ -34,6 +34,8 @@ import {
   type CommandResult,
   type EconTier,
   type ExtraRungFn,
+  type SliceHardness,
+  type SliceAmbiguity,
 } from "@opencode-ai/code-intelligence"
 
 // ---------------------------------------------------------------------------
@@ -1338,13 +1340,18 @@ function withDerivedTypes(todos: readonly OrchestrationTodo[]): readonly Orchest
  * OL-9.3f backstop (withDerivedTypes) fires and types the whole batch first.
  * A typed todo already `completed`/`failed`/`cancelled` is excluded too
  * (OL-9.5c settled-slice memory) — a re-engagement must not re-dispatch work
- * that already reached a terminal status.
+ * that already reached a terminal status. The optional `arming` param carries
+ * the turn's arming-judge difficulty signals (§1.1b) — goal-level, not
+ * per-todo — so every slice built here inherits the same `hardness`/
+ * `ambiguity`, letting the two-axis allocator floor a hard/ambiguous slice's
+ * generator tier at the reasoner.
  *
  * @sem domain=routing role=digest
  */
 export async function todosToLoopSlices(
   todos: readonly OrchestrationTodo[],
   probes: SliceProbes,
+  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity },
 ): Promise<LoopSlice[]> {
   const effectiveTodos = withDerivedTypes(todos)
   const typed = effectiveTodos.filter(isDispatchableSlice)
@@ -1490,6 +1497,8 @@ export async function todosToLoopSlices(
         coupling: coupling.coupling,
         testStrength: testStrength.testStrength,
         specBacked: t.sliceType === "mechanical" && dependsOnDesign(i) ? true : undefined,
+        hardness: arming?.hardness,
+        ambiguity: arming?.ambiguity,
         ...(verifyCommands.length > 0 ? { verifyCommands } : {}),
         ...(probeCommand ? { probeCommand } : {}),
         ...(TEST_AUTHORING_RE.test(t.content) ? { isTestSlice: true } : {}),
@@ -1546,6 +1555,8 @@ export interface ConductorOrchestrationDeps {
   options?: ConductorLoopOptions
   /** U2 — the turn's triage goal count (§1.2), fed into `shouldOrchestrate`'s width check. Absent on a null-verdict (legacy) turn. */
   goalCount?: number
+  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). Absent on a null-verdict (legacy) turn. */
+  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }
 }
 
 /** What the hook reports back to the turn: whether it took over, and whether it fell back on error. */
@@ -1611,7 +1622,7 @@ export async function runConductorOrchestration(
 
   try {
     const typedIndices = todos.map((t, i) => (isDispatchableSlice(t) ? i : -1)).filter((i) => i >= 0)
-    const slices = await todosToLoopSlices(todos, deps.probes)
+    const slices = await todosToLoopSlices(todos, deps.probes, deps.arming)
     if (!shouldOrchestrate(slices, deps.goalCount)) return { engaged: false }
     const todoIndexOf = (sliceId: string): number | undefined => {
       const k = slices.findIndex((s) => s.id === sliceId)
