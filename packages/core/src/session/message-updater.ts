@@ -238,7 +238,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.text.ended": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           const match = latestText(draft, event.data.textID)
-          if (match) match.text = event.data.text
+          if (match) {
+            match.text = event.data.text
+            if (event.data.providerMetadata !== undefined) match.providerMetadata = event.data.providerMetadata
+          }
         })
       },
       "session.next.tool.input.started": (event) => {

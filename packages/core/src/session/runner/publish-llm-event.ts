@@ -141,7 +141,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
     return { start, append, end, flush }
   }
 
-  const text = fragments("text", (textID, value) =>
+  const text = fragments("text", (textID, value, providerMetadata) =>
     Effect.gen(function* () {
       yield* events.publish(SessionEvent.Text.Ended, {
         sessionID: input.sessionID,
@@ -149,6 +149,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         timestamp: yield* timestamp,
         textID,
         text: value,
+        providerMetadata,
       })
     }),
   )
@@ -286,7 +287,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         })
         return
       case "text-end":
-        yield* text.end(event.id)
+        yield* text.end(event.id, event.providerMetadata)
         return
       case "reasoning-start":
         yield* reasoning.start(event.id)

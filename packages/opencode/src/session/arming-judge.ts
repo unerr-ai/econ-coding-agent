@@ -138,21 +138,65 @@ export function buildArmingUser(input: {
 }
 
 /**
+ * Extract the first balanced top-level JSON object from `raw` — brace-match
+ * from the first `{` to its matching `}`, tracking string literals so a
+ * quoted `{`/`}` never miscounts depth — so a reasoning preamble before the
+ * JSON, or trailing prose after it, doesn't break parsing. Returns `null`
+ * when no balanced object is found.
+ *
+ * Local copy of turn-triage.ts's private `extractJsonObject` (not exported
+ * there) — same brace-matching logic, kept in sync by hand until a shared
+ * util module exists to de-duplicate the two.
+ */
+function extractJsonObject(raw: string): string | null {
+  const start = raw.indexOf("{")
+  if (start === -1) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) return raw.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+/**
  * Parse + validate the judge's raw JSON into an `ArmingVerdict`. Tolerant of a
- * ```json fence (some models add one despite the instruction) but otherwise
- * strict: an invalid `hardness`/`ambiguity`, a non-boolean decision, or
- * malformed JSON fails to null so the caller degrades to `heuristicArming`.
- * Never throws.
+ * reasoning preamble or trailing prose around the JSON — extracts the first
+ * balanced top-level `{...}` object (`extractJsonObject`) before parsing,
+ * since an un-muted conductor can stream commentary alongside the answer
+ * (armingDispatch's `content.trim() || reasoning` fallback, prompt.ts) — and
+ * of a ```json fence. Otherwise strict: an invalid `hardness`/`ambiguity`, a
+ * non-boolean decision, no balanced JSON object, or malformed JSON fails to
+ * null so the caller degrades to `heuristicArming`. Never throws.
  *
  * @sem domain=routing role=extractor
  */
 export function parseArmingResponse(raw: string): ArmingVerdict | null {
   if (!raw) return null
   const stripped = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
+  const jsonText = extractJsonObject(stripped)
+  if (!jsonText) return null
 
   let parsed: unknown
   try {
-    parsed = JSON.parse(stripped)
+    parsed = JSON.parse(jsonText)
   } catch {
     return null
   }

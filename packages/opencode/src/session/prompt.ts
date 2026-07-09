@@ -61,6 +61,7 @@ import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
 import { ToolRegistry } from "@/tool/registry"
+import { Question } from "@/question"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
 import { ulid } from "ulid"
@@ -259,6 +260,12 @@ export const layer = Layer.effect(
     // OL-7.3b — the conductor slice-loop hook reads the just-written typed DAG and
     // mirrors slice status back onto the todo tracker through this service.
     const todoStore = yield* SessionTodo.Service
+    // #53/#54 resolution gate's "ask-user" mode (sliceHook, below) — resolved
+    // here, not inside sliceHook's own Effect.gen, so that block's explicit
+    // `Effect.Effect<void>` (R=never) annotation still holds: `question`'s
+    // methods return already-concrete effects once the service itself is
+    // resolved, same as `todoStore` above.
+    const question = yield* Question.Service
     // Turn-open LLM calls (triage + title) are always-on in production; only
     // mock-provider test harnesses provide TurnOpenCalls to switch them off.
     const turnOpen = Option.getOrElse(yield* Effect.serviceOption(TurnOpenCalls), () => ({
@@ -2420,6 +2427,48 @@ export const layer = Layer.effect(
                   // every slice todosToLoopSlices builds, so a hard/ambiguous
                   // slice floors its generator tier at the reasoner.
                   arming: getArmingDecision(sessionID),
+                  // #53/#54 resolution gate — the resolution-store key.
+                  sessionID,
+                  // #53/#54 "resolve-first" re-seed: append (dedup by
+                  // content, re-reads the live list so a concurrent write
+                  // is never clobbered) a design/planner pre-pass todo when
+                  // the turn-open skeleton did not already plant one.
+                  appendTodos: (seed) =>
+                    bridge.promise(
+                      Effect.gen(function* () {
+                        const current = yield* todoStore.get(sessionID)
+                        if (current.some((t) => t.content === seed.content)) return
+                        yield* todoStore.update({ sessionID, todos: [...current, seed] })
+                      }),
+                    ),
+                  // #53/#54 "ask-user": fire the question and don't wait —
+                  // Question.ask() parks its own fiber on a Deferred until
+                  // the user replies over the HTTP/TUI question API, so
+                  // forking (not awaiting) is what lets THIS turn return
+                  // without slicing instead of hanging on the answer.
+                  // RejectedError (the user dismisses it) is expected and
+                  // swallowed, not a failure worth surfacing here.
+                  askUser: (q) => {
+                    bridge.fork(
+                      question
+                        .ask({
+                          sessionID,
+                          questions: [{ question: q, header: "Clarify approach", options: [], custom: true }],
+                        })
+                        .pipe(Effect.ignore),
+                    )
+                  },
+                  onResolutionGate: (info) => {
+                    bridge.fork(
+                      Effect.logInfo("resolution_gate", {
+                        "session.id": sessionID,
+                        flagged: info.flagged,
+                        mode: info.mode,
+                        candidatePlanValid: info.candidatePlanValid,
+                        resolveAttempts: info.resolveAttempts,
+                      }),
+                    )
+                  },
                   options: {
                     cwd: ctx.directory,
                     rmRung,
@@ -2763,6 +2812,7 @@ export const defaultLayer = Layer.suspend(() =>
         EventV2Bridge.defaultLayer,
         SessionTodo.defaultLayer,
         Snapshot.defaultLayer,
+        Question.defaultLayer,
       ),
     ),
   ),
@@ -2895,6 +2945,7 @@ export const node = LayerNode.make(layer, [
   SessionSummary.node,
   Snapshot.node,
   SessionTodo.node,
+  Question.node,
   SystemPrompt.node,
   LLM.node,
   EventV2Bridge.node,

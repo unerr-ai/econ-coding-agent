@@ -16,11 +16,14 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
+import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
   runSliceLoop,
   tierModelRef,
   ECON_PERSONAS,
   planWaves,
+  validatePlan,
+  resolutionDecision,
   type EconPersona,
   type LoopSlice,
   type SliceLoopDeps,
@@ -36,6 +39,8 @@ import {
   type ExtraRungFn,
   type SliceHardness,
   type SliceAmbiguity,
+  type PlanNode,
+  type ResolutionMode,
 } from "@opencode-ai/code-intelligence"
 
 // ---------------------------------------------------------------------------
@@ -1548,6 +1553,74 @@ export function shouldOrchestrate(slices: readonly LoopSlice[], goalCount?: numb
 }
 
 /**
+ * #53/#54 resolution-gate — placeholder token budget for `validatePlan`'s
+ * structural check at the todo→slice seam. No turn-level TOKEN budget exists
+ * at this seam today (`sliceStepBudget`/`PERSONA_STEP_BUDGET` above are
+ * tool-CALL step budgets, not tokens); `todosToPlanNodes` below never sets
+ * `estimateTokens` (a todo-derived plan carries none), so `validatePlan`'s
+ * budget-headroom check (`totalEstimate > 0.7*budget`) is always `0 >
+ * ~0.7*budget` — a structural no-op regardless of this value. Chosen to
+ * match the placeholder value evaluator.test.ts already uses for the same
+ * check; kept only so the call shape matches `validatePlan`'s signature.
+ */
+const RESOLUTION_GATE_BUDGET = 10_000
+
+/**
+ * #53/#54 — map the live todo list to `PlanNode[]` for `validatePlan`'s
+ * structural-only check (`requireNodeFields:false`). `id` is positional
+ * index (todos carry no persisted id at this seam); `dependsOn` resolves
+ * each todo's `deps` refs the same way `todosToLoopSlices` resolves them —
+ * exact content match, or a `todo_N`/bare-number position ref — against that
+ * same index set, dropping an unresolvable ref. `parentId` is always
+ * omitted: `OrchestrationTodo` carries no parent-child structure past
+ * turn-open (`TriageTodoRow.parentID` is a skeleton-only field this seam
+ * never sees). `estimateTokens` is omitted too — see RESOLUTION_GATE_BUDGET.
+ *
+ * @sem domain=routing role=router
+ */
+function todosToPlanNodes(todos: readonly OrchestrationTodo[]): PlanNode[] {
+  const ids = todos.map((_, i) => String(i))
+  const firstIndexOfContent = new Map<string, number>()
+  todos.forEach((t, i) => {
+    if (!firstIndexOfContent.has(t.content)) firstIndexOfContent.set(t.content, i)
+  })
+  const resolveRef = (ref: string, selfIdx: number): string | undefined => {
+    const byContent = firstIndexOfContent.get(ref)
+    if (byContent !== undefined) return byContent === selfIdx ? undefined : ids[byContent]
+    const m = /^(?:todo[\s_-]?)?(\d+)$/i.exec(ref.trim())
+    if (!m) return undefined
+    const n = Number(m[1])
+    for (const idx of [n - 1, n]) {
+      if (idx >= 0 && idx < ids.length && idx !== selfIdx) return ids[idx]
+    }
+    return undefined
+  }
+  return todos.map((t, i) => {
+    const dependsOn = [
+      ...new Set((t.deps ?? []).map((r) => resolveRef(r, i)).filter((d): d is string => d !== undefined)),
+    ]
+    return dependsOn.length > 0 ? { id: ids[i]!, dependsOn } : { id: ids[i]! }
+  })
+}
+
+/**
+ * #53/#54 — one clarifying question derived from what the arming judge
+ * threaded through to this seam. The judge's `evidence` string (the exact
+ * span that decided its call) lives on `ArmingVerdict`, not the narrow
+ * `ArmingDecision`/`{hardness, ambiguity}` shape this seam receives, so the
+ * question is grounded in the two axes only, not a quoted span.
+ *
+ * @sem domain=routing role=router
+ */
+function resolutionClarifyingQuestion(arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }): string {
+  const bits: string[] = []
+  if (arming?.ambiguity === "ambiguous") bits.push("the intended approach is ambiguous")
+  if (arming?.hardness === "hard") bits.push("the task is structurally hard to decompose cleanly")
+  const why = bits.length > 0 ? bits.join(" and ") : "the approach for this turn isn't settled"
+  return `This turn is flagged uncertain (${why}), and an autonomous resolution pass could not produce a valid plan. Can you clarify the intended approach or scope before I continue?`
+}
+
+/**
  * Everything the OL-7.3b hook needs from the live turn, all injected so the
  * driver has no Effect/DB dependency and runs under unit-test doubles. The
  * three status-write and dispatch ports are the only live seams.
@@ -1569,6 +1642,19 @@ export interface ConductorOrchestrationDeps {
   goalCount?: number
   /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). Absent on a null-verdict (legacy) turn. */
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }
+  /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
+  sessionID?: string
+  /** #53/#54 — plant one design/planner pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLANNER_PREPASS_TODO`, via `diagnosisPrepassSeed`) carry. */
+  appendTodos?: (seed: InjectedSliceTodo) => Promise<void>
+  /** #53/#54 — register one clarifying question and return without waiting for the answer; the caller wires this to `Question.Service.ask` via a non-blocking Effect fork so the turn yields instead of parking on the Deferred. Absent (headless/test double) → `"ask-user"` can never be acted on (it is also gated off by `interactive` below). */
+  askUser?: (question: string) => void
+  /** #53/#54 — resolution-gate telemetry sink, mirrors `options.onProvenance`'s callback-to-caller pattern (this file has no Effect dependency; the caller emits `Effect.logInfo`). */
+  onResolutionGate?: (info: {
+    flagged: boolean
+    mode: ResolutionMode
+    candidatePlanValid?: boolean
+    resolveAttempts: number
+  }) => void
 }
 
 /** What the hook reports back to the turn: whether it took over, and whether it fell back on error. */
@@ -1598,7 +1684,12 @@ export interface ConductorOrchestrationResult {
  * every index this run marks `in_progress` is guaranteed a terminal status
  * (settled to `failed` if nothing else claimed it) no matter how the run
  * ends — a child crash, an abort, a dispatch throw, or the catch above must
- * never leave a slice's mirrored todo orphaned `in_progress`.
+ * never leave a slice's mirrored todo orphaned `in_progress`. #53/#54: before
+ * any of that, a flagged (ambiguous/hard) turn passes the resolution gate
+ * first — `decompose-now` falls straight into the path above unchanged;
+ * `resolve-first`/`ask-user` both return `{engaged:false}` without touching a
+ * todo status, so this function's own crash-safety net is untouched by the
+ * gate.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -1633,6 +1724,59 @@ export async function runConductorOrchestration(
   }
 
   try {
+    // #53/#54 resolution gate (Option A, structural) — a flagged
+    // (ambiguous/hard) turn resolves its approach before committing to cheap
+    // slicing, gated by validatePlan's STRUCTURAL-ONLY check. Requires
+    // deps.sessionID (the resolution-store key); absent it — a caller/test
+    // double that predates this gate — a flagged turn falls straight through
+    // to the decompose path below, unchanged from before the gate existed.
+    if (deps.sessionID !== undefined) {
+      const flagged = deps.arming?.ambiguity === "ambiguous" || deps.arming?.hardness === "hard"
+      if (flagged) {
+        const sessionID = deps.sessionID
+        const candidatePlan = todosToPlanNodes(todos)
+        const candidatePlanValid = validatePlan(candidatePlan, RESOLUTION_GATE_BUDGET, {
+          requireNodeFields: false,
+        }).ok
+        const resolveAttempts = getResolveAttempts(sessionID)
+        // OL-9.0b's own headless marker (run.ts:263) — the same "is a real
+        // user present" signal permission/index.ts's ask() backstop reads.
+        const interactive = process.env["OPENCODE_HEADLESS"] !== "1"
+        // resolutionDecision's OWN step-2 short-circuit re-validates
+        // candidatePlan via `validatePlan(candidatePlan, budget)` with NO
+        // third arg — i.e. `requireNodeFields:true` — which a todo-derived
+        // plan (no objective/outputShape/successCriterion; see
+        // todosToPlanNodes) can never satisfy. A valid structural-only check
+        // is therefore handled here, directly, instead of round-tripping
+        // through resolutionDecision — resolutionDecision is still the
+        // single source of truth for every OTHER branch (ask-user vs
+        // resolve-first vs the attempts-cap termination), none of which
+        // re-run validatePlan.
+        const mode: ResolutionMode = candidatePlanValid
+          ? "decompose-now"
+          : resolutionDecision({
+              ambiguity: deps.arming?.ambiguity,
+              hardness: deps.arming?.hardness,
+              candidatePlan,
+              budget: RESOLUTION_GATE_BUDGET,
+              interactive,
+              needsUserInput: resolveAttempts >= 1,
+              resolveAttempts,
+            }).mode
+        deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
+        if (mode === "resolve-first") {
+          incResolveAttempts(sessionID)
+          if (deps.appendTodos) await deps.appendTodos(diagnosisPrepassSeed(deps.arming?.hardness === "hard"))
+          return { engaged: false }
+        }
+        if (mode === "ask-user") {
+          deps.askUser?.(resolutionClarifyingQuestion(deps.arming))
+          return { engaged: false }
+        }
+        // mode === "decompose-now" — fall through to the slice path below.
+      }
+    }
+
     const typedIndices = todos.map((t, i) => (isDispatchableSlice(t) ? i : -1)).filter((i) => i >= 0)
     const slices = await todosToLoopSlices(todos, deps.probes, deps.arming)
     if (!shouldOrchestrate(slices, deps.goalCount)) return { engaged: false }

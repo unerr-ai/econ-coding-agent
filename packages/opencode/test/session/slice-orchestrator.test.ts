@@ -62,6 +62,7 @@ import {
 } from "../../src/session/slice-orchestrator"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 import type { ArmingDecision } from "../../src/session/arming-judge"
+import { getResolveAttempts, incResolveAttempts } from "../../src/session/resolution-store"
 
 /** Probes that never touch a graph — fixed verdicts, with a call counter. */
 function fakeProbes(
@@ -1889,6 +1890,200 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     expect(res.fellBack).toBe(true)
     expect(metered).toBe(1)
     expect(dispatched).toBe(0)
+  })
+})
+
+describe("runConductorOrchestration — #53/#54 resolution gate", () => {
+  let sid = 0
+  const nextSessionID = () => `resolution-gate-test-${++sid}`
+
+  // Two independent typed slices — a real parallel wave, so the OL-9.5c
+  // benefit gate passes and dispatch actually reaches the loop whenever the
+  // resolution gate takes the decompose-now path.
+  const dispatchableTodos: OrchestrationTodo[] = [
+    { content: "alpha", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+    { content: "beta", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+  ]
+
+  // A structurally-invalid candidate plan for validatePlan's structural-only
+  // check: mutual `deps` refs form a two-node cycle (cycle detection runs
+  // regardless of requireNodeFields). todosToLoopSlices' own cycle backstop
+  // (stage-DAG fallback) still converts this into two independent slices, so
+  // the decompose-now path (once reached) dispatches normally.
+  const cyclicTodos: OrchestrationTodo[] = [
+    { content: "a", status: "pending", sliceType: "mechanical", deps: ["b"] },
+    { content: "b", status: "pending", sliceType: "mechanical", deps: ["a"] },
+  ]
+
+  afterEach(() => {
+    delete process.env["OPENCODE_HEADLESS"]
+  })
+
+  it("not flagged (clear/trivial) → decompose unchanged, gate never runs", async () => {
+    let dispatched = 0
+    let gateCalls = 0
+    const res = await runConductorOrchestration({
+      getTodos: async () => dispatchableTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID: nextSessionID(),
+      arming: { hardness: "trivial", ambiguity: "clear" },
+      onResolutionGate: () => {
+        gateCalls++
+      },
+    })
+    expect(gateCalls).toBe(0)
+    expect(dispatched).toBeGreaterThan(0)
+    expect(res.fellBack).toBeUndefined()
+  })
+
+  it("flagged + structurally valid candidate plan → decompose unchanged (short-circuit)", async () => {
+    let dispatched = 0
+    let captured: { mode: string; candidatePlanValid?: boolean } | undefined
+    await runConductorOrchestration({
+      getTodos: async () => dispatchableTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID: nextSessionID(),
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("decompose-now")
+    expect(captured?.candidatePlanValid).toBe(true)
+    expect(dispatched).toBeGreaterThan(0)
+  })
+
+  it("flagged + invalid plan + attempts 0 + interactive → resolve-first: design pre-pass seeded, no slice", async () => {
+    delete process.env["OPENCODE_HEADLESS"]
+    let dispatched = 0
+    let seeded: OrchestrationTodo | undefined
+    let asked = 0
+    let captured: { mode: string } | undefined
+    const res = await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID: nextSessionID(),
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      appendTodos: async (seed) => {
+        seeded = seed
+      },
+      askUser: () => {
+        asked++
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("resolve-first")
+    // hardness:"hard" → diagnosisPrepassSeed picks the planner seed, not localization.
+    expect(seeded?.content).toBe(PLANNER_SLICE_CONTENT)
+    expect(asked).toBe(0)
+    expect(dispatched).toBe(0)
+    expect(res.engaged).toBe(false)
+  })
+
+  it("flagged + invalid plan + attempts>=1 + interactive → ask-user: one question, turn yielded, no slice", async () => {
+    delete process.env["OPENCODE_HEADLESS"]
+    const sessionID = nextSessionID()
+    incResolveAttempts(sessionID) // simulate one prior resolve-first pass that still didn't converge
+    let dispatched = 0
+    let asked: string | undefined
+    let appended = 0
+    let captured: { mode: string } | undefined
+    const res = await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID,
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      appendTodos: async () => {
+        appended++
+      },
+      askUser: (q) => {
+        asked = q
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("ask-user")
+    expect(asked).toBeTruthy()
+    expect(appended).toBe(0)
+    expect(dispatched).toBe(0)
+    expect(res.engaged).toBe(false)
+  })
+
+  it("flagged + invalid plan + HEADLESS → ask-user never fires, falls to resolve-first", async () => {
+    process.env["OPENCODE_HEADLESS"] = "1"
+    const sessionID = nextSessionID()
+    incResolveAttempts(sessionID) // attempts=1 — would ask-user if a real user were present
+    let asked = 0
+    let captured: { mode: string } | undefined
+    await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => ({ text: "ok", parts: [] }),
+      setTodoStatus: async () => {},
+      sessionID,
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      appendTodos: async () => {},
+      askUser: () => {
+        asked++
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(asked).toBe(0)
+    expect(captured?.mode).not.toBe("ask-user")
+  })
+
+  it("resolveAttempts >= MAX_RESOLVE_ATTEMPTS (headless) → decompose-now: termination, no infinite loop", async () => {
+    process.env["OPENCODE_HEADLESS"] = "1"
+    const sessionID = nextSessionID()
+    incResolveAttempts(sessionID)
+    incResolveAttempts(sessionID) // attempts=2, matches code-intelligence's MAX_RESOLVE_ATTEMPTS
+    expect(getResolveAttempts(sessionID)).toBe(2)
+    let dispatched = 0
+    let captured: { mode: string } | undefined
+    await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID,
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      askUser: () => {
+        throw new Error("must not be reached — attempts cap wins over ask-user only when non-interactive")
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("decompose-now")
+    expect(dispatched).toBeGreaterThan(0)
   })
 })
 

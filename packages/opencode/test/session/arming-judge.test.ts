@@ -94,6 +94,33 @@ describe("parseArmingResponse", () => {
     expect(parseArmingResponse("{not valid json")).toBeNull()
   })
 
+  // Un-muted, the conductor can stream a reasoning preamble alongside the JSON
+  // answer, or land the answer entirely in the reasoning channel — see
+  // armingDispatch's `content.trim() || reasoning` fallback, prompt.ts. These
+  // cases cover the resulting balanced-brace extraction tolerance.
+
+  test("a reasoning preamble before the JSON parses correctly", () => {
+    const json = JSON.stringify({
+      armLocalization: true,
+      localized: false,
+      hardness: "hard",
+      ambiguity: "ambiguous",
+      evidence: "multiple candidate call sites, none clearly the root cause",
+    })
+    const raw = `Let me reason through this before answering.\n${json}`
+
+    const verdict = parseArmingResponse(raw)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.armLocalization).toBe(true)
+    expect(verdict!.hardness).toBe("hard")
+    expect(verdict!.ambiguity).toBe("ambiguous")
+  })
+
+  test("raw text with no JSON object at all returns null", () => {
+    expect(parseArmingResponse("Sure, I can help with that.")).toBeNull()
+  })
+
   test('a body missing "localized" defaults it to the inverse of armLocalization', () => {
     const armedRaw = JSON.stringify({
       armLocalization: true,

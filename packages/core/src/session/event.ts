@@ -231,6 +231,7 @@ export namespace Text {
       assistantMessageID: SessionMessageID.ID,
       textID: Schema.String,
       text: Schema.String,
+      providerMetadata: ProviderMetadata.pipe(Schema.optional),
     },
   })
   export type Ended = typeof Ended.Type

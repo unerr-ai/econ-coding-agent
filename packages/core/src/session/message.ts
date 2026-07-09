@@ -125,6 +125,7 @@ export class AssistantText extends Schema.Class<AssistantText>("Session.Message.
   type: Schema.Literal("text"),
   id: Schema.String,
   text: Schema.String,
+  providerMetadata: ProviderMetadata.pipe(Schema.optional),
 }) {}
 
 export class AssistantReasoning extends Schema.Class<AssistantReasoning>("Session.Message.Assistant.Reasoning")({

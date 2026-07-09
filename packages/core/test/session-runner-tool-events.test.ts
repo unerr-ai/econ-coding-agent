@@ -112,6 +112,26 @@ test("binary failure emits no success event", async () => {
   expect(published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
 })
 
+test("text-end providerMetadata lands on the emitted text.ended event (task #56 Part A)", async () => {
+  const { published, publisher } = capture()
+  const providerMetadata = { openai: { logprobs: [{ token: "a", logprob: -0.2 }] } }
+  await Effect.runPromise(publisher.publish(LLMEvent.textStart({ id: "text-1" })))
+  await Effect.runPromise(publisher.publish(LLMEvent.textDelta({ id: "text-1", text: "hi" })))
+  await Effect.runPromise(publisher.publish(LLMEvent.textEnd({ id: "text-1", providerMetadata })))
+
+  const ended = published.find((event) => event.type === "session.next.text.ended.1")
+  expect(ended?.data).toMatchObject({ providerMetadata })
+})
+
+test("text-end without providerMetadata still emits (backward-compatible)", async () => {
+  const { published, publisher } = capture()
+  await Effect.runPromise(publisher.publish(LLMEvent.textStart({ id: "text-2" })))
+  await Effect.runPromise(publisher.publish(LLMEvent.textEnd({ id: "text-2" })))
+
+  const ended = published.find((event) => event.type === "session.next.text.ended.1")
+  expect(ended?.data).toMatchObject({ text: "" })
+})
+
 test("old success event data containing result still decodes", () => {
   const decoded = Schema.decodeUnknownSync(SessionEvent.Tool.Success.data)({
     sessionID,

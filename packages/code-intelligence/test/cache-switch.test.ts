@@ -4,20 +4,31 @@
  * Model IDs are always resolved through ECON_TIER_BINDING/model-registry
  * (tier-speak only) — never hardcoded, per project convention.
  *
- * IMPORTANT FINDING (see closing note): with the real ECON_COST_MATRIX rates,
- * a "10x price ratio, brief ≈ half the session context" scenario does NOT
- * land breakEven in a ~20-30 band as ORCHESTRATION_MECHANISM.md §3.3's
- * illustrative worked-shape prose describes. Conductor (0.14 $/M) vs oracle
- * (1.4 $/M) is the only real tier pair at an exact 10x ratio, and at that
- * ratio a half-context-sized brief written at oracle's real (no-discount,
- * writePremium=1.0) cold-write rate costs far more than any number of
- * cache-discounted conductor calls saves — stay dominates unconditionally
- * (breakEven is negative: no positive crossing exists). A crossing in the
- * doc's favor only exists once the brief is much smaller relative to context
- * (see the "compacted brief" tests below), which is also what the doc's own
- * follow-on sentence says ("the decisive variable is T_brief, not the price
- * ratio"). Verified against this repo's real rates, not asserted from doc
- * prose — flagged for senior review, not silently forced.
+ * RATIO UPDATE (task #57, 2026-07-09): the conductor tier's ECON_TIER_BINDING
+ * entry swapped from deepseek-v4-flash ($0.14/M input) to minimax-m3 ($0.30/M
+ * input) — model-registry.ts ECON_TIER_BINDING.conductor. Oracle (z-ai/glm-5.2,
+ * $1.4/M input) is unchanged, so the conductor->oracle price ratio narrowed
+ * from an exact 10x to ~4.6667x (1.4/0.3 = 14/3). This is a real cost-matrix
+ * change, not a stale test constant — re-derived below from ECON_COST_MATRIX,
+ * never hardcoded back to 10.
+ *
+ * IMPORTANT FINDING (re-derived at the new ratio): under the OLD 10x ratio, a
+ * "brief ≈ half the session context" scenario (brief/ctx ~0.46, h=0.85) had a
+ * NEGATIVE breakEven — stay dominated unconditionally, no positive crossing
+ * existed at any call count. At the NEW ~4.6667x ratio the identical scenario
+ * now has a finite POSITIVE breakEven (~95.02 calls): narrowing the ratio
+ * raised the conductor's own hit-rate-weighted per-call cost (stay) above the
+ * oracle's steady cache-read repeat cost (move) — a crossing the old 10x gap
+ * never produced. The crossing is real, but it still sits far past
+ * ORCHESTRATION_MECHANISM.md §3.3's illustrative "~20-30" worked-shape band
+ * and past what's typical for one slice group's call count — for a
+ * half-context brief, cache-casting only pays off at unusually high volume
+ * now. The doc's own follow-on point still holds: the decisive variable is
+ * T_brief, not the price ratio alone — see the "compacted brief" (small
+ * brief/ctx) tests below, which stay favorable at expectedCalls 1-2
+ * regardless of the ratio narrowing. Verified against this repo's real
+ * rates, not asserted from doc prose — flagged for senior review, not
+ * silently forced.
  */
 
 import { describe, it, expect } from "bun:test"
@@ -105,16 +116,33 @@ describe("breakEvenCalls / shouldSwitch — worked shapes", () => {
     }
   }
 
-  it("10x price ratio (conductor -> oracle) confirmed from the real cost matrix", () => {
-    expect(oracleRate / conductorRate).toBeCloseTo(10, 5)
+  it("~4.6667x price ratio (conductor -> oracle) confirmed from the real cost matrix — narrowed from 10x by the 2026-07-09 conductor swap (deepseek-v4-flash $0.14/M -> minimax-m3 $0.30/M in ECON_TIER_BINDING); oracle unchanged at $1.4/M", () => {
+    // 1.4 / 0.3 = 14/3 ≈ 4.6667 — the true ratio, re-derived from ECON_COST_MATRIX, not hardcoded back to the pre-swap 10.
+    expect(oracleRate / conductorRate).toBeCloseTo(14 / 3, 5)
   })
 
-  it("half-context brief at a 10x-pricier move target: stay dominates unconditionally (no valid finite breakEven), NOT a ~20-30 crossing", () => {
+  it("half-context brief at the true ~4.6667x ratio: a finite POSITIVE breakEven now exists (~95.02 calls) — the old 10x ratio's unconditional stay-dominance no longer holds", () => {
     const input = upSwitchInput(0.85, 46_000) // brief/ctx ~= 0.46, h=0.85, d=0.1 — the doc's stated worked-shape params
     const breakEven = breakEvenCalls(input)
-    expect(breakEven).toBeLessThanOrEqual(0) // no positive crossing exists
+
+    // Re-derive the crossing from the same cost lines breakEvenCalls solves
+    // (rather than a hardcoded magic number) — documents WHY ~95.02 is
+    // correct, not just THAT it is.
+    const stayMultiplier = input.stay.hitRate * input.stay.readDiscount + (1 - input.stay.hitRate)
+    const moveMultiplier = input.move.hitRate * input.move.readDiscount + (1 - input.move.hitRate)
+    const unitStay = input.stay.ctxTokens * conductorRate * stayMultiplier
+    const writeCost = input.move.briefTokens * oracleRate * input.move.writePremium
+    const repeatUnit = input.move.briefTokens * oracleRate * moveMultiplier
+    const expectedBreakEven = (writeCost - repeatUnit) / (unitStay - repeatUnit)
+
+    expect(breakEven).toBeGreaterThan(0) // a finite positive crossing now exists — the old "never crosses" claim no longer holds at this ratio
+    expect(breakEven).toBeCloseTo(expectedBreakEven, 6)
+    expect(breakEven).toBeCloseTo(95.02, 1)
+    // Still stay-favored at realistic call counts — the crossing is real but
+    // sits far past ORCHESTRATION_MECHANISM.md §3.3's illustrative ~20-30 band.
     expect(shouldSwitch(input).move).toBe(false)
     expect(shouldSwitch({ ...input, expectedCalls: 30 }).move).toBe(false) // still false well past the doc's "20+"
+    expect(shouldSwitch({ ...input, expectedCalls: 100 }).move).toBe(true) // flips true past the ~95.02 crossing — unreachable for most slice groups in practice
   })
 
   it("compacted brief (small brief/ctx ratio): shouldSwitch is true even at expectedCalls 1-2", () => {
