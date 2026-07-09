@@ -447,7 +447,10 @@ export function uncertaintyFromParts(parts: readonly unknown[], tier: EconTier):
  */
 export function redecompositionSignalsFromOutcomes(outcomes: readonly SliceOutcome[]): RedecompositionSignals {
   const total = outcomes.length
-  const coverageGaps = outcomes.filter((o) => o.state === "unverified").length
+  // P6a: a `blocked` slice (dep terminal-failed, never dispatched) is a
+  // coverage gap exactly like an unverified one — work the run did not deliver,
+  // surfaced to the re-plan seed rather than lost silently (Q-J decision).
+  const coverageGaps = outcomes.filter((o) => o.state === "unverified" || o.state === "blocked").length
   const escalated = outcomes.filter((o) => o.state === "escalated").length
   return {
     coverageGaps,
@@ -492,6 +495,12 @@ export async function runConductorSliceLoop(
     rmRung: options?.rmRung,
     snapshot: options?.snapshot,
     onProvenance: options?.onProvenance,
+    // P6b/P6c — predicted edit scope from the path-shaped tokens the slice's
+    // own text names (the same extraction the coupling probes consume). Cheap,
+    // deterministic, and empty when a slice names no files (no false overlap).
+    // The conductor thread is always the requesting seat on this path.
+    editScopeOf: (slice) => new Set(extractSliceFiles(`${slice.prompt}\n${slice.wiring ?? ""}`)),
+    requestingTier: "conductor",
   }
 
   return runSliceLoop(slices, deps)
@@ -1690,8 +1699,8 @@ export interface ConductorOrchestrationDeps {
   options?: ConductorLoopOptions
   /** U2 — the turn's triage goal count (§1.2), fed into `shouldOrchestrate`'s width check. Absent on a null-verdict (legacy) turn. */
   goalCount?: number
-  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). Absent on a null-verdict (legacy) turn. */
-  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }
+  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). Absent on a null-verdict (legacy) turn. */
+  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity; armLocalization?: boolean }
   /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
   sessionID?: string
   /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLAN_PREPASS_TODO`) carry. */
@@ -1825,7 +1834,12 @@ export async function runConductorOrchestration(
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
           incResolveAttempts(sessionID)
-          if (deps.appendTodos) await deps.appendTodos(LOCALIZATION_PREPASS_TODO)
+          // P12 (resolve-first residual case): the resolution pass's brief
+          // must match the turn's shape — an armed vague diagnosis resolves by
+          // localizing; anything else (ambiguous build/audit) resolves by
+          // producing the plan, never by hunting a bug that does not exist.
+          if (deps.appendTodos)
+            await deps.appendTodos(deps.arming?.armLocalization === true ? LOCALIZATION_PREPASS_TODO : PLAN_PREPASS_TODO)
           return { engaged: false }
         }
         if (mode === "ask-user") {
@@ -1859,7 +1873,10 @@ export async function runConductorOrchestration(
 
     for (const outcome of result.outcomes) {
       const idx = todoIndexOf(outcome.id)
-      if (idx !== undefined) await settle(idx, "completed")
+      // P6a: a blocked slice was never dispatched (its dep terminal-failed) —
+      // "cancelled", not "completed" (nothing ran) and not "failed" (nothing
+      // was attempted). It re-enters via the re-decomposition coverage gap.
+      if (idx !== undefined) await settle(idx, outcome.state === "blocked" ? "cancelled" : "completed")
     }
     await chain
 

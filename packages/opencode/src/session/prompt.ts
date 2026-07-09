@@ -2638,10 +2638,10 @@ export const layer = Layer.effect(
                 // P9 — synthesis is faithful assembly (a writing job), so it
                 // runs on the reasoner regardless of which tiers the slices
                 // touched; only MIXED outcomes — an "unverified" terminal
-                // failure among the settled slices (the SliceState union's one
-                // failure state; accepted/escalated both mean verified work) —
+                // failure or a "blocked" never-dispatched dependent among the
+                // settled slices (accepted/escalated both mean verified work) —
                 // are judgment work worth the oracle's arbitration.
-                const mixedOutcomes = outcomes.some((o) => o.state === "unverified")
+                const mixedOutcomes = outcomes.some((o) => o.state === "unverified" || o.state === "blocked")
                 const synthesisTier = mixedOutcomes ? ("oracle" as const) : ("reasoner" as const)
                 yield* Effect.logInfo("synthesis_dispatched", {
                   "session.id": sessionID,

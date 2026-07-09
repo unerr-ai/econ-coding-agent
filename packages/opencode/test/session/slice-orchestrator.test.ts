@@ -2098,11 +2098,66 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
       },
     })
     expect(captured?.mode).toBe("resolve-first")
-    // The resolve-first branch re-seeds the single writer pre-pass, regardless of hardness.
-    expect(seeded?.content).toBe(LOCALIZATION_SLICE_CONTENT)
+    // P12 residual case: this turn is flagged hard/ambiguous but NOT an armed
+    // diagnosis (no armLocalization), so the resolution pass resolves by
+    // producing the plan — never by hunting a bug that does not exist.
+    expect(seeded?.content).toBe(PLAN_SLICE_CONTENT)
     expect(asked).toBe(0)
     expect(dispatched).toBe(0)
     expect(res.engaged).toBe(false)
+  })
+
+  it("P6a wiring: a blocked dependent's todo settles cancelled — never completed or failed", async () => {
+    const finalStatus = new Map<number, string>()
+    // alpha terminal-fails (its verify command always exits 1, ladder exhausts
+    // to unverified); beta depends on alpha → blocked, never dispatched.
+    const todos: OrchestrationTodo[] = [
+      { content: "alpha — verify with `tsc --noEmit`", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+      { content: "beta builds on alpha", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable", deps: ["alpha — verify with `tsc --noEmit`"] },
+    ]
+    const dispatched: string[] = []
+    const res = await runConductorOrchestration({
+      getTodos: async () => todos,
+      probes: fakeProbes(),
+      dispatch: async (req) => {
+        dispatched.push(req.sliceId)
+        return { text: "attempt", parts: [] }
+      },
+      setTodoStatus: async (idx, status) => {
+        finalStatus.set(idx, status)
+      },
+      sessionID: nextSessionID(),
+      goalCount: 2, // clears the benefit gate for a 2-slice series chain
+      arming: { hardness: "trivial", ambiguity: "clear" },
+      options: { runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "verify failed" }) },
+    })
+    expect(res.engaged).toBe(true)
+    // beta never dispatched...
+    expect(dispatched.some((id) => id.startsWith("beta"))).toBe(false)
+    // ...alpha (attempted, settled unverified) completes; beta cancels.
+    expect(finalStatus.get(0)).toBe("completed")
+    expect(finalStatus.get(1)).toBe("cancelled")
+  })
+
+  it("resolve-first on an ARMED diagnosis re-seeds the localization writer pre-pass", async () => {
+    let seeded: OrchestrationTodo | undefined
+    let captured: { mode: string } | undefined
+    await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => ({ text: "ok", parts: [] }),
+      setTodoStatus: async () => {},
+      sessionID: nextSessionID(),
+      arming: { armLocalization: true, hardness: "hard", ambiguity: "ambiguous" },
+      appendTodos: async (seed) => {
+        seeded = seed
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("resolve-first")
+    expect(seeded?.content).toBe(LOCALIZATION_SLICE_CONTENT)
   })
 
   it("flagged + invalid plan + attempts>=1 + interactive → ask-user: one question, turn yielded, no slice", async () => {
@@ -2331,6 +2386,32 @@ describe("runConductorSliceLoop", () => {
     expect(prompts).toEqual(["trivial edit"])
     expect(escalatedFlags).toEqual([false])
     expect(result.outcomes[0].state).toBe("accepted")
+  })
+
+  it("P6b wiring: two slices naming the same file serialize via an implicit dep (editScopeOf is live)", async () => {
+    const ok: ConductorSliceDispatch = async () => ({ text: "done", parts: [] })
+    const runCommand = async () => ({ exitCode: 0, stdout: "", stderr: "" })
+    const overlapping = await runConductorSliceLoop(
+      [
+        { id: "a", prompt: "edit src/config.ts header", testStrength: "testable" as const, verifyCommands: [{ kind: "typecheck" as const, command: "true" }] },
+        { id: "b", prompt: "edit src/config.ts footer", testStrength: "testable" as const, verifyCommands: [{ kind: "typecheck" as const, command: "true" }] },
+      ],
+      ok,
+      { runCommand },
+    )
+    expect(overlapping.telemetry.implicitDeps).toEqual([{ sliceId: "b", dependsOn: "a", overlap: ["src/config.ts"] }])
+    expect(overlapping.waves).toEqual([["a"], ["b"]])
+
+    const disjoint = await runConductorSliceLoop(
+      [
+        { id: "a", prompt: "edit src/one.ts", testStrength: "testable" as const, verifyCommands: [{ kind: "typecheck" as const, command: "true" }] },
+        { id: "b", prompt: "edit src/two.ts", testStrength: "testable" as const, verifyCommands: [{ kind: "typecheck" as const, command: "true" }] },
+      ],
+      ok,
+      { runCommand },
+    )
+    expect(disjoint.telemetry.implicitDeps).toEqual([])
+    expect(disjoint.waves).toEqual([["a", "b"]])
   })
 })
 
@@ -2902,6 +2983,12 @@ describe("redecompositionSignalsFromOutcomes", () => {
 
   it("composes with redecompositionCheck: a coverage gap fires the new-items trigger", () => {
     const signals: RedecompositionSignals = redecompositionSignalsFromOutcomes([oc("unverified"), oc("accepted")])
+    expect(redecompositionCheck(signals)).toContain("new-items")
+  })
+
+  it("P6a: a blocked dependent counts as a coverage gap exactly like an unverified slice", () => {
+    const signals = redecompositionSignalsFromOutcomes([oc("accepted"), oc("blocked")])
+    expect(signals).toEqual({ coverageGaps: 1, budgetOverrunPct: 0 })
     expect(redecompositionCheck(signals)).toContain("new-items")
   })
 })
