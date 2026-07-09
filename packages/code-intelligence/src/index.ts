@@ -218,7 +218,6 @@ export * from "./slice-loop.js"
 export * from "./posterior-uncertainty.js"
 export * from "./evaluator.js"
 export * from "./resolution-phase.js"
-export * from "./cache-switch.js"
 
 // econ OL-7.7: retrieval-augmented slice wiring — deterministic graph facts
 // (callers/blast-radius, entity summaries, signatures) woven into a slice's

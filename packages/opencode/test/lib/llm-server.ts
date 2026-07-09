@@ -3,8 +3,8 @@ import * as Http from "node:http"
 import { Deferred, Effect, Layer, Context, Stream } from "effect"
 import * as HttpServer from "effect/unstable/http/HttpServer"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
-import { TRIAGE_PROMPT_MARKER } from "../../src/session/turn-triage"
-import { TITLE_GENERATION_PROMPT_MARKER } from "../../src/session/prompt"
+import { TRIAGE_PROMPT_MARKER } from "../../src/session/prompts/judges"
+import { TITLE_GENERATION_PROMPT_MARKER } from "../../src/session/prompts/protocol"
 
 export type Usage = { input: number; output: number }
 

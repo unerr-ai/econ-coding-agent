@@ -24,6 +24,8 @@
  *
  * @sem domain=routing role=extractor
  */
+import { extractJsonObject } from "../util/json-extract"
+import { TRIAGE_SYSTEM_PROMPT } from "./prompts/judges"
 
 // ---------------------------------------------------------------------------
 // The verdict shape — docs/architecture/ORCHESTRATION_MECHANISM.md §4.1
@@ -119,41 +121,6 @@ function parseConstraint(entry: unknown, userPrompt: string): TriageConstraint |
 }
 
 /**
- * Extract the first balanced top-level JSON object from `raw` — brace-match
- * from the first `{` to its matching `}`, tracking string literals so a
- * quoted `{`/`}` never miscounts depth — so a reasoning preamble before the
- * JSON, or trailing prose after it, doesn't break parsing. Returns `null`
- * when no balanced object is found.
- */
-function extractJsonObject(raw: string): string | null {
-  const start = raw.indexOf("{")
-  if (start === -1) return null
-
-  let depth = 0
-  let inString = false
-  let escaped = false
-  for (let i = start; i < raw.length; i++) {
-    const ch = raw[i]
-    if (inString) {
-      if (escaped) escaped = false
-      else if (ch === "\\") escaped = true
-      else if (ch === '"') inString = false
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-      continue
-    }
-    if (ch === "{") depth++
-    else if (ch === "}") {
-      depth--
-      if (depth === 0) return raw.slice(start, i + 1)
-    }
-  }
-  return null
-}
-
-/**
  * Parse + validate the model's raw output into a `TriageVerdict`. Tolerant
  * of a reasoning preamble or trailing prose around the JSON — extracts the
  * first balanced top-level `{...}` object (`extractJsonObject`) before
@@ -212,22 +179,6 @@ export function parseTriageResponse(raw: string, userPrompt: string): TriageVerd
 
 /** Blocking cap on the triage call (§4.1) — schema-invalid or slower than this falls back to the heuristic classifier. 10s: un-muting the conductor for triage (see triageDispatch, prompt.ts) adds reasoning tokens — a live probe measured max ~7.7s wall (median ~1.9s), 96% of the old 8s cap, so 10s gives headroom. Kept below arming's 12s ARMING_TIMEOUT_MS: triage sits on every turn's critical path, so a gateway hang shouldn't stall turn-open longer than necessary. */
 export const TRIAGE_TIMEOUT_MS = 10000
-
-/** Stable, single-line prefix of `TRIAGE_SYSTEM_PROMPT` — lets an out-of-band test harness (e.g. a scripted LLM stub) recognize a turn-triage request by its system message without duplicating the full prompt text. */
-export const TRIAGE_PROMPT_MARKER = "You are the turn-triage extractor"
-
-const TRIAGE_SYSTEM_PROMPT = `${TRIAGE_PROMPT_MARKER}. Read the user's prompt once and extract its goals and constraints. Output JSON only — no prose, no markdown fences, no commentary.
-
-Rules:
-- Every "quote" field must be a VERBATIM, case-sensitive substring of the user's prompt. Never paraphrase, translate, summarize, or invent a quote — if you cannot cite an exact span, drop that goal or constraint.
-- Never plan, localize, or propose how to do the work. This is extraction only.
-- At most 7 goals. If the prompt genuinely names more, keep the 7 most load-bearing.
-- "shape" is exactly one of: "diagnosis-vague" (a symptom that does not say where in this codebase the defect lives — needs localization before a fix; naming the misbehaving class, API, or feature does NOT ground it), "diagnosis-grounded" (a symptom that names the defect's code location: a file path, file name, or module of this repo), "build" (create/add/implement something new), "audit" (review/check/judge existing work), "qa" (a question, not a work item), "run-only" (execute something, no edit implied).
-- "kind" (for constraints) is exactly one of: "no-test-edit", "scope-limit", "no-new-files", "other".
-- "confidence" is "high" only when every goal and constraint is unambiguous; otherwise "low".
-
-Output exactly this JSON shape and nothing else:
-{"goals":[{"quote":"...","shape":"...","deliverable":"...","dependsOn":[0],"needsPlan":false}],"constraints":[{"quote":"...","kind":"..."}],"confidence":"high"}`
 
 /** One request to the injected small-model completion — see the adapter recon note above. */
 export interface TriageCompleteRequest {

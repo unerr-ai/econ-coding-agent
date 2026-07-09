@@ -144,7 +144,7 @@ export function econDefaultConfig(): ConfigV1.Info {
         tools: { todowrite: false },
       },
       // OL-9.1c — six stateless executor-persona intern agents, all backed by the executor
-      // tier's model but with their own prompt delta (session/system.ts PERSONA_DELTA) and a
+      // tier's model but with their own prompt delta (session/prompts/personas.ts PERSONA_DELTA) and a
       // reduced, persona-specific toolset so a slice child can't silently escalate (e.g. a
       // recon slice spawning a "fixer") the way an unrestricted conductor-prompted child could.
       ...Object.fromEntries(

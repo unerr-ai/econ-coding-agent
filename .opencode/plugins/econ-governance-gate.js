@@ -20,9 +20,30 @@
 import { fileURLToPath } from "node:url"
 import { dirname, resolve, relative, isAbsolute } from "node:path"
 import { readFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+/**
+ * Resolve a code-intelligence engine source file by on-disk path.
+ *
+ * In the SWE-bench container the plugin ships inside the TARGET repo's .opencode/
+ * tree (e.g. /testbed/.opencode/plugins/), so the old "../../packages/..." resolve
+ * points at /testbed/packages/ — the graded repo, NOT the econ checkout — and does
+ * not exist. The benchmark vendor step therefore co-locates the engine at
+ * .opencode/vendor/code-intelligence/, which this resolver prefers. Local dev runs
+ * (plugin inside the econ monorepo) have no .opencode/vendor/, so it falls back to
+ * the original ../../packages/ path — keeping local runs working unchanged.
+ *
+ * @param {string} rel  path relative to code-intelligence/src (e.g. "index.ts")
+ * @returns {string} absolute path to the engine source
+ */
+function ciResolve(rel) {
+  const vendored = resolve(__dirname, "../vendor/code-intelligence/src", rel)
+  if (existsSync(vendored)) return vendored
+  return resolve(__dirname, "../../packages/code-intelligence/src", rel)
+}
 
 /** Tool IDs that perform file writes/edits (matches Tool.define names). */
 const EDIT_TOOLS = new Set(["write", "edit", "apply_patch"])
@@ -35,10 +56,8 @@ let _state = null
 async function load() {
   if (_graph && _guardrail) return
   try {
-    const ciPath = resolve(__dirname, "../../packages/code-intelligence/src/index.ts")
-    const guardrailPath = resolve(__dirname, "../../packages/code-intelligence/src/guardrail.ts")
-    const { BunSqliteGraph } = await import(ciPath)
-    _guardrail = await import(guardrailPath)
+    const { BunSqliteGraph } = await import(ciResolve("index.ts"))
+    _guardrail = await import(ciResolve("guardrail.ts"))
     _state = _guardrail.createGuardrailState()
     _graph = new BunSqliteGraph(":memory:", process.cwd())
     // Background index — fire and forget; empty results are fine until done.

@@ -4,12 +4,8 @@
 // Plain script, NOT a *.test.ts: run via `bun run test/arming-rig/run.ts`
 // from packages/opencode. `bun test` does not pick this file up (its name
 // doesn't match the *.test.ts/*.spec.ts patterns bun test scans for).
-import {
-  autoTypeTodos,
-  buildTriageTodoSkeleton,
-  LOCALIZATION_SLICE_CONTENT,
-  PLANNER_SLICE_CONTENT,
-} from "../../src/session/slice-orchestrator"
+import { autoTypeTodos, buildTriageTodoSkeleton } from "../../src/session/slice-orchestrator"
+import { LOCALIZATION_SLICE_CONTENT } from "../../src/session/prompts/seeds"
 import { heuristicArming, judgeArming, type ArmingVerdict } from "../../src/session/arming-judge"
 import { runTurnTriage, type TriageComplete, type TriageCompleteRequest } from "../../src/session/turn-triage"
 import { ECON_TIER_BINDING } from "../../../code-intelligence/src/model-registry"
@@ -183,18 +179,14 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
   }
 
   // Arming judge decides (heuristicArming deterministic / judgeArming live);
-  // the skeleton + autoTypeTodos net then materializes the localization
-  // pre-pass from that decision.
+  // the skeleton + autoTypeTodos net then materializes the writer pre-pass
+  // from that decision.
   const skeleton = buildTriageTodoSkeleton(verdict, arming)
   const typed = autoTypeTodos(scenario.todos ?? skeleton, arming.armLocalization)
-  // A pre-pass of EITHER flavor engages the expensive reasoner/oracle tier, so
-  // over/under-fire is measured on "any pre-pass armed"; the `seed` column shows
-  // which flavor (localization vs the plan-first planner) the decision produced.
-  const seed = typed.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)
-    ? "localization"
-    : typed.some((t) => t.content === PLANNER_SLICE_CONTENT)
-      ? "planner"
-      : "—"
+  // The pre-pass engages the expensive reasoner tier, so over/under-fire is
+  // measured on "any pre-pass armed"; the `seed` column shows whether the
+  // single writer pre-pass was planted.
+  const seed = typed.some((t) => t.content === LOCALIZATION_SLICE_CONTENT) ? "localization" : "—"
   const actualArmed = seed !== "—"
   const shapes = verdict.goals.map((g) => g.shape).join(", ") || "-"
 

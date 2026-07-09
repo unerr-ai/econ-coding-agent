@@ -28,9 +28,30 @@
 
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { existsSync } from "node:fs"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+/**
+ * Resolve a code-intelligence engine source file by on-disk path.
+ *
+ * In the SWE-bench container the plugin ships inside the TARGET repo's .opencode/
+ * tree (e.g. /testbed/.opencode/plugins/), so the old "../../packages/..." resolve
+ * points at /testbed/packages/ — the graded repo, NOT the econ checkout — and does
+ * not exist. The benchmark vendor step therefore co-locates the engine at
+ * .opencode/vendor/code-intelligence/, which this resolver prefers. Local dev runs
+ * (plugin inside the econ monorepo) have no .opencode/vendor/, so it falls back to
+ * the original ../../packages/ path — keeping local runs working unchanged.
+ *
+ * @param {string} rel  path relative to code-intelligence/src (e.g. "checkpoint.ts")
+ * @returns {string} absolute path to the engine source
+ */
+function ciResolve(rel) {
+  const vendored = resolve(__dirname, "../vendor/code-intelligence/src", rel)
+  if (existsSync(vendored)) return vendored
+  return resolve(__dirname, "../../packages/code-intelligence/src", rel)
+}
 
 // Default model context window when the event stream carries no limit. Override
 // with ECON_CONTEXT_LIMIT. Used only to turn token counts into a fill ratio.
@@ -45,8 +66,7 @@ let _checkpoint = null
 async function loadEngine() {
   if (_checkpoint) return _checkpoint
   try {
-    const path = resolve(__dirname, "../../packages/code-intelligence/src/checkpoint.ts")
-    _checkpoint = await import(path)
+    _checkpoint = await import(ciResolve("checkpoint.ts"))
   } catch (err) {
     console.error("[econ-checkpoint] engine load failed (checkpoint disabled):", err?.message ?? String(err))
     _checkpoint = null

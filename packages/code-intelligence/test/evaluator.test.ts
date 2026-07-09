@@ -17,9 +17,9 @@ import {
 import { allocateSlice, ALLOCATION_RISK_TIEBREAK, type SliceAllocationInput } from "../src/allocation.js"
 
 // ---------------------------------------------------------------------------
-// Fixture helper — every EvalContext field except `cache` is required by the
-// spec; this gives each test a minimal, override-friendly baseline that
-// otherwise never fires rules 2–6.
+// Fixture helper — every EvalContext field is required by the spec; this
+// gives each test a minimal, override-friendly baseline that otherwise never
+// fires rules 2–5.
 // ---------------------------------------------------------------------------
 
 function ctx(overrides: Partial<EvalContext> = {}): EvalContext {
@@ -209,55 +209,10 @@ describe("evaluate — rule 4: venue affinity", () => {
 })
 
 // ---------------------------------------------------------------------------
-// (5) Cache — moving tiers costs more; keep the prior (capable) tier
+// (5) Hysteresis — holds without a signal delta, releases with one (Q6)
 // ---------------------------------------------------------------------------
 
-describe("evaluate — rule 5: cache-switch guard", () => {
-  it("keeps the prior tier when switchDelta > 0 and the prior tier is capable", () => {
-    const v = evaluate(
-      ctx({
-        coupling: "low",
-        testStrength: "untestable", // base -> executor + qe
-        cache: { switchDelta: 5 },
-        hysteresis: { lastTier: "reasoner", signalDelta: true },
-      }),
-    )
-    expect(v.tier).toBe("reasoner")
-    expect(v.reasons.some((r) => r.startsWith("cache: switchDelta=5"))).toBe(true)
-  })
-
-  it("never lowers below the pins/ceilings/round-up floor even when switchDelta > 0", () => {
-    // design floor forces oracle; the prior tier (executor) is not capable of it.
-    const v = evaluate(
-      ctx({
-        sliceType: "design",
-        cache: { switchDelta: 5 },
-        hysteresis: { lastTier: "executor", signalDelta: true },
-      }),
-    )
-    expect(v.tier).toBe("reasoner")
-    expect(v.reasons.some((r) => r.startsWith("cache:"))).toBe(false)
-  })
-
-  it("does nothing when switchDelta is not positive", () => {
-    const v = evaluate(
-      ctx({
-        coupling: "low",
-        testStrength: "untestable",
-        cache: { switchDelta: 0 },
-        hysteresis: { lastTier: "reasoner", signalDelta: true },
-      }),
-    )
-    expect(v.tier).toBe("executor")
-    expect(v.reasons.some((r) => r.startsWith("cache:"))).toBe(false)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// (6) Hysteresis — holds without a signal delta, releases with one (Q6)
-// ---------------------------------------------------------------------------
-
-describe("evaluate — rule 6: per-turn hysteresis", () => {
+describe("evaluate — rule 5: per-turn hysteresis", () => {
   it("holds the last-dispatched tier when there is no signal delta", () => {
     const v = evaluate(
       ctx({

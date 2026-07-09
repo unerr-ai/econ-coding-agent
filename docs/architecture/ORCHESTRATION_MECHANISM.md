@@ -1,6 +1,6 @@
 # The econ Orchestration Mechanism
 
-**Status: v1.6 (2026-07-09) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, and the uncertainty-management engine (§8 — arming judge, prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition); live-fire smoked. Wave 4b (#55/#56B/#59/#61) is verified in the working tree. Open work: U5 (cache-aware casting — helper + tests written, not yet wired into dispatch), the §6 SM-series hardening, and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5).**
+**Status: v1.6 (2026-07-09) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, and the uncertainty-management engine (§8 — arming judge, prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition); live-fire smoked. Wave 4b (#55/#56B/#59/#61) is verified in the working tree. Open work: the §6 SM-series hardening and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5). U5 (cache-aware casting) was CUT 2026-07-10: the helper was deleted unwired — its evaluator input was never populated — and the cache economics stay live via session affinity + per-turn hysteresis.**
 This doc also absorbed the still-relevant content of the three retired plan docs
 (DECOMPOSITION_ORCHESTRATION_PLAN, PERSONA_ORCHESTRATION_PLAN, SELF_ORCHESTRATION_PLAN —
 deleted 2026-07-07) into §7 "Inherited foundations".
@@ -10,7 +10,7 @@ service). Two live-fire fixes landed during the smoke: small (housekeeping) call
 adaptive reasoning gate (un-muted thinking starved the triage JSON), and the triage cap is 8s
 (a triage-shaped completion measures ~3.7–4.3s through the live gateway). All research
 streams are in (Claude Code source recon, econ seam map, routing/triage literature, cache
-economics, hierarchy/fan-out); every §5 decision is closed; §6's U1–U4 + U3 have shipped (always-on), leaving U5 and the SM-series as the open build. Companion docs:
+economics, hierarchy/fan-out); every §5 decision is closed; §6's U1–U4 + U3 have shipped (always-on), leaving the SM-series as the open build (U5 was cut 2026-07-10). Companion docs:
 [ECON_ARCHITECTURE](./ECON_ARCHITECTURE.md) (whole-system design),
 [failure-taxonomy](../design/failure-taxonomy.md) (the evidence this doc is built on; its §8
 holds the flow-selection verdict + casting policy this doc extends),
@@ -49,8 +49,8 @@ everything else already runs in production today (§2 has the as-built detail).
     ▼
  ┌─────────────────────────────────────────────────────────────────┐
  │ [3] EVALUATE ── NEW: pre-flight check per task, AT DISPATCH:    │
- │     difficulty + blast radius + verifiability + history +       │
- │     cache cost → pick the tier, UP or DOWN                      │
+ │     difficulty + blast radius + verifiability + history →       │
+ │     pick the tier, UP or DOWN                                   │
  └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -129,8 +129,9 @@ wall of text. This finishes a journey we've already been on: live fire proved th
 conductor won't reliably *type* todos (structural nets now do it), and this step stops
 trusting it to *create* them, too.
 
-Each goal also brings its own setup: a symptom-shaped goal seeds a planner pre-pass (a
-senior investigates before anyone edits — the door that produced the django gold-file fix),
+Each goal also brings its own setup: a symptom-shaped goal seeds a diagnosis pre-pass when the arming judge arms it (§8.1;
+the difficulty-allocated generator localizes *and* fixes — the door that produced the django gold-file fix; it
+owns edit → run → verify per §1.4's correction, rather than handing a plan down),
 a build-list goal arms the mechanical dispatch net, and every extracted constraint arms a
 *hard* gate — "don't touch tests" becomes an edit-time block, not a polite suggestion. The
 negation bug we hand-patched ("Do not modify any test files" accidentally *disarming* the
@@ -187,7 +188,6 @@ The evaluator's inputs, all cheap to read:
 | verify strength (tests exist? commands derived?) | will a failure even be *detected*? |
 | triage shape + difficulty | what kind of work is this, per the goal it serves? |
 | attempt history + prior-failure notes | has this slice (or this entity) burned us before? |
-| cache term (§1.7) | what does *moving* this work actually cost? |
 
 And one rule does most of the deciding: **verification strength is what makes a cheap
 attempt safe.** If the work is well-tested and cleanly revertible, giving it to the junior
@@ -213,12 +213,40 @@ budget burns (§3.2, rule 3).
 
 ### 1.4 Execute: the right seat, with the right tools removed
 
-Unchanged from today, and worth restating because the evaluator feeds it: work runs in
-child sessions with **seat-scoped toolsets**. A senior brought in to *decide* (plan, judge)
-physically cannot edit files or run shell commands — deciding is the job, grinding is
-delegated down. A runner that executes builds cannot edit. Every child gets a lean compiled
-brief, never the session transcript. (Proven live: the django planner delivered its ranked
-plan in 9 read-only steps; the zod runner ran the build with edit permissions denied.)
+Work runs in child sessions with **seat-scoped toolsets** — but the seat, not the tier,
+decides which tools are removed. A senior brought in to *decide for a fan-out* (plan a
+build-list, judge/audit someone else's work) physically cannot edit files or run shell
+commands — deciding is the job, grinding is delegated down. A runner brought in to *execute
+a build* cannot edit. Every child gets a lean compiled brief, never the session transcript.
+(Proven live: the zod runner ran the build with edit permissions denied.)
+
+**Correction (2026-07-09):** tool-removal is scoped to those *decider* and *build-runner*
+seats — not to every high-tier child. The **diagnosis pre-pass** (§1.2's atomic-insight
+route, §7.2) is a **writer**, not a planner: it localizes, applies the
+minimal fix, and runs the failing test to green — it owns edit → run → verify end to end,
+because handing an atomic insight off to a second seat costs more context-switching than it
+saves (the authoring seat already holds the diagnosis warm). The old "django planner delivers a
+ranked plan in 9 read-only steps, executor applies it" split is retired for this path: a
+read-only pre-pass has no test-run stopping signal, so it wandered its budget and shipped
+empty patches. The pre-pass now writes; it falls back to a *ranked-candidates* hand-off to
+the conductor only when it genuinely cannot localize. Decider and build-runner seats are
+unchanged.
+
+**Correction (2026-07-10):** the writer-owns-edit→run→verify shape above is unchanged — only
+*how the pre-pass's tier is chosen* changes, on two counts. **(1) The arming judge owns
+diagnosis-localization; `needsPlan` owns build-planning — cleanly split.** `armLocalization`
+(§8.1) is now the *sole* authority on whether a *diagnosis* bug gets a localization pre-pass;
+the triage `needsPlan` flag decides planning for **build** goals only and no longer OR-bypasses
+the judge to force-plant a pre-pass on a diagnosis goal. **(2) The pre-pass tier is
+difficulty-allocated, not reasoner-pinned.** The old `need:"reasoner"` pin is gone: the pre-pass
+now allocates on the generator axis (§8.3, difficulty ← arming `hardness`; §7.2's SM5
+correction) — a mechanical, *already-located* fix goes to the **executor** (the cheap mechanical
+seat), and only a genuinely *hard* or *ambiguous* bug floors up to the **reasoner** via the
+allocator's difficulty floor. The `shouldOrchestrate` benefit gate opens on the *allocated*
+tier, not on a raw `need` hint. Under the hood, this was paid for by **django-12039** — a
+trivial, already-located fix that the old `needsPlan` OR-bypass plus the reasoner pin
+force-routed to the reasoner, where it burned the full 8-min wall-clock cap and cost ~2× the
+prior conductor-only pass.
 
 ### 1.5 Verify: the work is checked, not trusted
 
@@ -317,8 +345,8 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 
 > Since the original 2026-07-06 snapshot, §6's U1–U4 and the containment bracket (U3) have
 > shipped and are always-on (see the status header); the rows below reflect that current state.
-> §6 stays the ordered plan — most of its rungs are now complete, with U5 (cache-aware casting)
-> and the SM-series still open.
+> §6 stays the ordered plan — most of its rungs are now complete, with the SM-series still
+> open (U5, cache-aware casting, was cut 2026-07-10 — its helper was deleted unwired).
 
 | stage | what runs today | where |
 |---|---|---|
@@ -337,10 +365,11 @@ visible; judgment door proven 4×; residual/judge-sampler door awaits an express
 
 ### 2.2 The five gaps
 
-> Status (2026-07-08): G1/G2/G3 are now closed by the shipped U1/U2, U4 and U3, and G5 is being
-> closed by the prompt-content overhaul. **G4 (cache-blind switching) is the one still open** —
-> its U5 casting helper has tests but no production caller. The descriptions below are retained
-> as the motivation for §6.
+> Status (2026-07-10): G1/G2/G3 are now closed by the shipped U1/U2, U4 and U3, and G5 is being
+> closed by the prompt-content overhaul. **G4 (cache-blind switching) remains a known economic
+> gap**, but its U5 switch-pricing helper was deleted unwired on 2026-07-10 (its evaluator input
+> was never populated); the live mitigations are session affinity and the per-turn hysteresis
+> hold. The descriptions below are retained as the motivation for §6.
 
 **G1 — one label per prompt.** Compound requests are unrepresentable; even a clean build
 prompt was mislabeled `qa/low` in live fire (harmless only because a structural net caught
@@ -358,7 +387,12 @@ but is wired only to user-facing revert.
 
 **G4 — cache-blind switching.** Nothing prices the cold-start cost of moving work between
 models. Already measured internally: one tier's provider discounts cached reads ≈11.6×;
-session-affinity behavior differs per model (W8 probe, `model-registry.ts` notes).
+session-affinity behavior differs per model (W8 probe, `model-registry.ts` notes). The U5
+switch-pricing helper built for this was deleted on 2026-07-10 — it never gained a production
+caller, and the evaluator input it was meant to feed was never populated. What keeps G4
+contained in practice: session affinity (the owner seat never moves, §3.3) and the per-turn
+hysteresis hold (§4.2). Revisit a pricing term only if real switch-cost signals get wired
+into dispatch.
 
 **G5 — the mechanism runs invisibly to the models that must cooperate with it.** Several stages need model cooperation the prompts don't supply: the generator is never shown the judge's checks (§1.5), so it can't pre-satisfy them; the reasoner delta described a delegating principal, not the leaf slice it actually runs as; the conductor is never told that inline edits escape the containment bracket (§1.6). Verify (generator pre-satisfies checks), Track (conductor types slices correctly), Execute (well-formed edits) and Contain (route uncertain edits into slices) each have a cooperation seam the prompts were silent on. Being closed by the prompt-content overhaul — the prompt-side companion to U3/U4. The Verify seam narrows further with the task #7 probe rung (§1.5, landed 2026-07-08): a bug-fix slice's own pinned reproduction becomes a checked verify rung rather than a flag-and-continue warning, and the LOCALIZATION/PLANNER prompt tweak (tier-prompts.md §5.3) now asks the generator to name each discriminating probe as a single runnable, backticked command — so the artifact the conductor produces is the exact string the probe rung later pins and re-runs.
 
@@ -402,8 +436,9 @@ containment *are* the product.
 6. **Blocking triage is the right latency pattern** for chat-shaped agents (~100–200ms class
    latency for large savings on the simple share).
 7. **The architect/editor split is independently proven** (Aider: reasoning model plans,
-   cheap model edits, 30–50% cheaper at parity) — the same split our planner pre-pass +
-   cheap execution just validated live.
+   cheap model edits, 30–50% cheaper at parity) — the same split our **mechanical
+   decomposition** (conductor plans a build-list, executor edits) uses; the atomic-insight
+   path deliberately keeps reasoning-and-editing in one seat instead (§1.4 correction).
 
 Citations: FrugalGPT [2305.05176](https://arxiv.org/abs/2305.05176) · RouteLLM
 [2406.18665](https://arxiv.org/abs/2406.18665) · AutoMix
@@ -441,8 +476,8 @@ Cost_stay(N)   = N × T_ctx × rate_M1 × (h·d + (1−h))
 Cost_switch(N) = T_brief × rate_M2 × w  +  (N−1) × T_brief × rate_M2 × d
 ```
 
-Worked shape — **verified against real `ECON_COST_MATRIX` rates** (`cache-switch.test.ts`,
-2026-07-06): every current econ model bills cache writes at the plain input rate
+Worked shape — **verified against real `ECON_COST_MATRIX` rates** (the since-removed
+`cache-switch.test.ts`, 2026-07-06): every current econ model bills cache writes at the plain input rate
 (`writePremium = 1.0` across all four; conductor↔oracle is an exact 10× price pair), and at
 that setting a lean-brief switch to a cheaper tier wins at **every** group size — the
 "~20-call amortization threshold" in an earlier draft was an artifact of illustrative
@@ -520,7 +555,7 @@ type TriageVerdict = {
     shape: "diagnosis-vague" | "diagnosis-grounded" | "build" | "audit" | "qa" | "run-only"
     deliverable: string    // one line: what "done" looks like
     dependsOn?: number[]   // ordering ("apply whichever fixes the audit approves")
-    needsPlan?: boolean    // seed a planner pre-pass for this goal
+    needsPlan?: boolean    // BUILD goals only: plan a build-list (diagnosis-localization is the arming judge's call, §8.1)
   }>
   constraints: Array<{ quote: string; kind: "no-test-edit" | "scope-limit" | "no-new-files" | "other" }>
   confidence: "high" | "low"
@@ -539,7 +574,7 @@ goal count, graph prefetch for named files/symbols.
 
 Runs at dispatch and at every re-dispatch; inputs per §1.3 (probes — refreshed if the tree
 changed since decompose — triage shape, attempt history + `rsk` anchors on touched entities,
-verify strength, cache term). Decision rules, in priority order:
+verify strength). Decision rules, in priority order:
 
 1. Constraint pins win (`need:` pins, slice-type ceilings — unchanged).
 2. Decision-shaped work rounds up on ambiguity (§8 casting policy — unchanged).
@@ -550,8 +585,7 @@ verify strength, cache term). Decision rules, in priority order:
    holds warm), or a write tightly coupled to work in flight → **inline, no spawn**.
    Delegate when the tier changes, the context diverges (a lean brief suffices), or the
    work is read-only parallel. One or two small same-tier items: always inline.
-5. Cache term: price any proposed move per §3.3; groups move together or not at all.
-6. Hysteresis: re-evaluation within a turn needs a signal *delta* (new failure, new
+5. Hysteresis: re-evaluation within a turn needs a signal *delta* (new failure, new
    contradiction, refreshed probe change), not a marginal score wobble.
 
 **Decomposition quality gate — the plan itself is verified before any spend.** Checked
@@ -594,7 +628,9 @@ least the conductor before it may settle unverified.
 
 `snap.track()` before each attempt → rungs reject → `restore()` → escalate on a clean tree,
 with the failed diff attached to the escalation brief as context ("rejected because X — do
-not repeat this approach"). Parallel slices run in worktrees; only rung-passed diffs merge.
+not repeat this approach"). The wired containment is this shadow-git snapshot bracket —
+worktree isolation for parallel slices remains an unbuilt follow-up (§6 U3); only
+rung-passed diffs fold back.
 Per-turn snapshot cadence (the Claude Code pattern) as the outer backstop so a turn that
 dies mid-failure is still revertible from the receipt. Default is clean-tree
 (diff-as-advice), not salvage-in-place — revisit only with live-fire evidence that
@@ -609,6 +645,11 @@ roll back; attempt-level snapshots are pruned once the turn closes cleanly, keep
 the per-turn backstop for user-facing rewind.
 
 ### 4.4 Cache-aware casting rules
+
+> Design intent, not shipped mechanism: the U5 switch-pricing helper that implemented
+> rule 3 was cut 2026-07-10 (deleted unwired — no dispatch path ever computed the term).
+> Rules 1–2 hold by construction today (the owner seat never moves; only briefs travel);
+> tier stickiness comes from session affinity + the §4.2 hysteresis hold.
 
 1. The owner seat never moves (economic proof in §3.3; spine rule in failure-taxonomy §8).
 2. Only briefs travel — never a transcript.
@@ -727,9 +768,12 @@ and the decomposition quality gate on the plan itself — hysteresis state, de-e
 and the §4.2 re-decomposition triggers during execution. Mid-flight re-entry from the
 convergence/contradiction triggers. `allocate()` keeps ceilings and pins.
 
-**U5 — Cache-aware casting term** *(completes G4; depends on U4)*
-Switch-pricing helper reading `ECON_COST_MATRIX` + `cacheAccounting`; group-move rule in
-dispatch ordering; hit-rate alarm (<70%) into telemetry + status line.
+**U5 — Cache-aware casting term** *(was to complete G4; depends on U4)* — **CUT 2026-07-10.**
+The switch-pricing helper (reading `ECON_COST_MATRIX` + `cacheAccounting`) was built with
+tests but never wired into dispatch — the evaluator input it fed was never populated — and
+was deleted. G4 stays mitigated by session affinity + the §4.2 hysteresis hold; revisit only
+if real switch-cost signals get wired. The group-move rule and hit-rate alarm (<70%) remain
+unbuilt design intent (§4.4).
 
 **U6 — Receipt & decode upgrades** *(rides along each step)*
 Goals + evaluator verdicts (with reasons) + reverts + escalation provenance on the internal
@@ -991,7 +1035,9 @@ only). It returns an `ArmingVerdict` — `armLocalization` (does this turn need 
 pre-pass?), `localized`, `hardness`, `ambiguity`, and the `evidence` spans behind the call —
 stored per-session (`setArmingDecision`) so every downstream door reads the *same* decision. It
 replaces the file-target regex that used to arm the localization pre-pass and over-fired the
-reasoner. When the call is unavailable it degrades to `heuristicArming` (the triage-shape
+reasoner, and it is now the **sole** authority on whether a *diagnosis* bug gets a
+localization pre-pass — the triage `needsPlan` flag governs **build**-planning only and no
+longer overrides it (§1.4's 2026-07-10 correction). When the call is unavailable it degrades to `heuristicArming` (the triage-shape
 heuristic), never back to the old regex. An offline arming-rig (`corpus.ts` + `run.ts`)
 regression-guards the judge so a prompt change is validated without live-fire spend. The two
 signals it produces — `hardness` and `ambiguity` — are the inputs the rest of this engine reads.

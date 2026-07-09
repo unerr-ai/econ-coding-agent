@@ -14,17 +14,27 @@ and run as a regression suite (see [Running](#running) at the bottom).
 
 ## The model (recap)
 
-- **Shape** (from triage): `diagnosis-grounded` (bug, fix-site known), `diagnosis-vague`
-  (bug, fix-site unknown), `build` (new feature/code), `audit` (review/analyze/explain,
-  no edit), `run-only` (execute & report, no edit).
+- **Shape** (from triage — six in code, `turn-triage.ts`): `diagnosis-grounded` (bug,
+  fix-site known), `diagnosis-vague` (bug, fix-site unknown), `build` (new feature/code),
+  `audit` (review/analyze, no edit), `qa` (question/navigation — answered inline; **no
+  corpus rows yet**, see [Coverage gaps](#coverage-gaps-2026-07-10)), `run-only` (execute
+  & report, no edit).
 - **Pre-pass we may ARM:** `LOCALIZATION` (a find-the-fix-site pass first), `PLANNER`
-  (a plan-first pass — pulls a stronger/more expensive tier), or `NONE` (execute directly).
+  (plan-first), or `NONE` (execute directly). **Code reality (verified 2026-07-10):**
+  there is ONE frame seed — `diagnosisPrepassSeed()` always returns the localization
+  writer todo; "PLANNER" exists only as the `needsPlan`/hardness flag that (a) plants that
+  same seed for non-diagnosis goals and (b) floors its allocation to the reasoner. A hard
+  BUILD therefore receives a diagnosis-worded brief ("own this bug… run the failing
+  test") — a misframed seed; fix proposed as **P12** in
+  [ORCHESTRATION_IMPROVEMENTS.md](../architecture/ORCHESTRATION_IMPROVEMENTS.md). The
+  single-seed rule (never planner AND localization on one turn) is correct and stays.
 - **Doors** (where arming happens): **Door-1** = the triage skeleton at turn-open
   (`buildTriageTodoSkeleton`); **Door-2** = the todowrite net (`autoTypeTodos`) when the
   conductor writes its to-do list.
-- **Tiers:** `conductor` (cheap default) → escalate to `reasoner`/`oracle`. Arming a
-  PLANNER is the strongest signal that a stronger tier is warranted. **Over-arming wastes
-  money** — that is the failure mode we are tuning against.
+- **Tiers (four, two-axis allocation):** generator tier ← difficulty (`conductor` default
+  inline; mechanical+testable slices → `executor`; hardness floors the pre-pass at the
+  `reasoner`); verifier rung ← consequence (R5 — routes the *verifier*, never the
+  generator). **Over-arming wastes money** — that is the failure mode we are tuning against.
 
 ## Decision rules (the authority)
 
@@ -153,7 +163,10 @@ have bitten us — keep them.
 
 ## Fixes this corpus drove
 
-Tracked against the live-judge run of 2026-07-09 (9 ok / 3 over-fire on minimax-m3):
+Tracked against the live-judge run of 2026-07-09 (9 ok / 3 over-fire on minimax-m3).
+**All three landed 2026-07-09** (suppressor at `slice-orchestrator.ts` `fileTargetsOf`,
+diagnosis-gating in `arming-judge.ts`, relabel in `corpus.ts`); offline rig green since
+(0 over-fire / 0 under-fire):
 
 1. **`autoTypeTodos` file-target suppressor (R4).** Door-2 must not inject localization when
    the active to-dos already name a file target — fixes `door2-grounded-mechanical-todos`.
@@ -163,6 +176,25 @@ Tracked against the live-judge run of 2026-07-09 (9 ok / 3 over-fire on minimax-
 3. **Asymmetric grounding arms (R2).** `grounded-cross-layer-file-named` is **relabeled to
    arm** — the judge was correct; the prior hand-label was wrong. Open tuning question:
    prefer LOCALIZATION (vague side) over PLANNER for a 2-layer case (R3 breakeven ≈ 5 files).
+
+## Coverage gaps (2026-07-10)
+
+Audited against the current code + the proposal round in
+[ORCHESTRATION_IMPROVEMENTS.md](../architecture/ORCHESTRATION_IMPROVEMENTS.md); the rules
+(R1–R5) and expected labels above all held — these are missing *rows*, not wrong ones:
+
+1. **No `qa` rows.** The shape exists in code; `audit-where-is` / `audit-explain` are
+   question-shaped and may live-classify as `qa`, not `audit` (the rig mocks triage, so it
+   never checks). Add qa rows + verify those two labels with a live run before trusting them.
+2. **No follow-up-turn rows.** A third of real messages continue a prior task (P4's
+   subject); the corpus is 100% first-turn. Add continuation cases (no re-arm expected).
+3. **P3 will relabel/add:** `build-refactor-jwt` becomes shape `refactor` when it lands;
+   `research` needs new rows. Expectations for existing rows are otherwise unchanged.
+4. **The rig is seed-kind-blind.** `run.ts` scores "any pre-pass armed" and only detects
+   the localization content — so the PLANNER rows (`vague-hard-race`, the four hard
+   builds) pass green while actually planting the diagnosis-worded seed (the P12 gap this
+   audit found). When P12 lands, add a seed-kind column assertion so planner-vs-localizer
+   is tested, not assumed.
 
 ## Running
 

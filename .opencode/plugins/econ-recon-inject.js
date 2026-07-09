@@ -31,9 +31,30 @@
 
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { existsSync } from "node:fs"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+/**
+ * Resolve a code-intelligence engine source file by on-disk path.
+ *
+ * In the SWE-bench container the plugin ships inside the TARGET repo's .opencode/
+ * tree (e.g. /testbed/.opencode/plugins/), so the old "../../packages/..." resolve
+ * points at /testbed/packages/ — the graded repo, NOT the econ checkout — and does
+ * not exist. The benchmark vendor step therefore co-locates the engine at
+ * .opencode/vendor/code-intelligence/, which this resolver prefers. Local dev runs
+ * (plugin inside the econ monorepo) have no .opencode/vendor/, so it falls back to
+ * the original ../../packages/ path — keeping local runs working unchanged.
+ *
+ * @param {string} rel  path relative to code-intelligence/src (e.g. "index.ts")
+ * @returns {string} absolute path to the engine source
+ */
+function ciResolve(rel) {
+  const vendored = resolve(__dirname, "../vendor/code-intelligence/src", rel)
+  if (existsSync(vendored)) return vendored
+  return resolve(__dirname, "../../packages/code-intelligence/src", rel)
+}
 
 // ---------------------------------------------------------------------------
 // Lazy BunSqliteGraph singleton — indexed once against process.cwd()
@@ -52,8 +73,7 @@ let _graph = null
 async function getGraph() {
   if (_graph) return _graph
   try {
-    const ciPath = resolve(__dirname, "../../packages/code-intelligence/src/index.ts")
-    const { BunSqliteGraph } = await import(ciPath)
+    const { BunSqliteGraph } = await import(ciResolve("index.ts"))
     const root = process.cwd()
     _graph = new BunSqliteGraph(":memory:", root)
     // Background index — fire and forget; empty results are fine until done

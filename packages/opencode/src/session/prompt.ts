@@ -18,7 +18,15 @@ import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
 import { setTestEditGate, testEditGateArmed } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { observeStep, stuckNudgeText } from "./turn-supervisor"
+import { observeStep } from "./turn-supervisor"
+import { stuckNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
+import { categoryPreamble, triagePreamble } from "./prompts/preambles"
+import { LOCALIZATION_SLICE_CONTENT } from "./prompts/seeds"
+import {
+  STRUCTURED_OUTPUT_DESCRIPTION,
+  STRUCTURED_OUTPUT_SYSTEM_PROMPT,
+  TITLE_GENERATION_PROMPT_MARKER,
+} from "./prompts/protocol"
 import {
   createRmVerifierRung,
   resolveVerifierTier,
@@ -31,14 +39,10 @@ import {
   resolveSliceModel,
   hasPendingTypedSlices,
   classifyTurnShape,
-  categoryPreamble,
   diagnosisPrepassSeed,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
-  triagePreamble,
   buildTriageTodoSkeleton,
-  LOCALIZATION_SLICE_CONTENT,
-  PLANNER_SLICE_CONTENT,
   childSlicePermission,
   isDeciderSeat,
   personaForSlice,
@@ -121,19 +125,6 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/png",
   "image/webp",
 ])
-
-const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
-
-IMPORTANT:
-- You MUST call this tool exactly once at the end of your response
-- The input must be valid JSON matching the required schema
-- Complete all necessary research and tool calls BEFORE calling this tool
-- This tool provides your final answer - no further actions are taken after calling it`
-
-const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
-
-/** Stable prefix of the hidden title-generation turn's opening user message — lets an out-of-band test harness (e.g. a scripted LLM stub) recognize the turn-open title call without duplicating the full prompt text. */
-export const TITLE_GENERATION_PROMPT_MARKER = "Generate a title for this conversation"
 
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
@@ -1665,7 +1656,7 @@ export const layer = Layer.effect(
                 messageID: nudge.id,
                 sessionID,
                 type: "text",
-                text: "Your previous response was cut off by the output-token limit before any tool call or final answer was produced. Continue from where you stopped: re-issue the intended tool calls or give the final answer, and keep any visible reasoning brief.",
+                text: LENGTH_CONTINUATION_NUDGE,
                 synthetic: true,
               } satisfies SessionV1.TextPart)
               continue
@@ -1757,9 +1748,9 @@ export const layer = Layer.effect(
           // store BEFORE the conductor's first step, so the OL-7.3b hook
           // dispatches it on the first step boundary — the higher tier frames
           // the turn instead of rescuing it (casting policy: proactive
-          // escalation). Hard shapes (diagnosisPrepassSeed) buy the reasoner
-          // PLANNER seat; ordinary ones keep the localization slice. The old
-          // trigger sat at todowrite time, downstream of the conductor's
+          // escalation). The seed (diagnosisPrepassSeed) is a single reasoner
+          // WRITER slice that localizes, fixes, and verifies in one session.
+          // The old trigger sat at todowrite time, downstream of the conductor's
           // explore-first localization, and never fired on diagnosis turns
           // (cases 1A/1B: todos arrive as retro logs). Never over an existing
           // todo list.
@@ -1863,13 +1854,13 @@ export const layer = Layer.effect(
                 if (existingTodos.length === 0) {
                   const skeleton = buildTriageTodoSkeleton(verdict, arming ?? heuristicArming(verdict))
                   // Owner-decision trace: which goals seeded a reasoner pre-pass
-                  // (localization/planner) and the shapes that drove it — the
+                  // (the diagnosis writer) and the shapes that drove it — the
                   // stage-1 routing decision, logged with mechanism:"orchestrator"
                   // so a trace separates a reasoner cast UP FRONT here from one
                   // cast as RECOVERY by the SM backstop (stuck_escalate below).
                   const seeds = skeleton
-                    .filter((t) => (t as { sliceType?: string }).sliceType === "design")
-                    .map((t) => (t.content === PLANNER_SLICE_CONTENT ? "planner" : "localization"))
+                    .filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)
+                    .map(() => "localization")
                   yield* Effect.logInfo("frame_seed_planted", {
                     "session.id": sessionID,
                     mechanism: "orchestrator",
@@ -1890,11 +1881,11 @@ export const layer = Layer.effect(
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0 && shape.category === "diagnosis-vague") {
-                  const seed = diagnosisPrepassSeed(false)
+                  const seed = diagnosisPrepassSeed()
                   yield* todoStore.update({ sessionID, todos: [seed] }).pipe(Effect.ignore)
                   yield* Effect.logInfo("diagnosis_prepass_armed", {
                     "session.id": sessionID,
-                    seed: seed.content === PLANNER_SLICE_CONTENT ? "planner" : "localization",
+                    seed: "localization",
                   })
                 }
               }
@@ -2482,7 +2473,7 @@ export const layer = Layer.effect(
                   sessionID,
                   // #53/#54 "resolve-first" re-seed: append (dedup by
                   // content, re-reads the live list so a concurrent write
-                  // is never clobbered) a design/planner pre-pass todo when
+                  // is never clobbered) the diagnosis writer pre-pass todo when
                   // the turn-open skeleton did not already plant one.
                   appendTodos: (seed) =>
                     bridge.promise(
@@ -2569,24 +2560,32 @@ export const layer = Layer.effect(
                   attempts: outcome.attempts,
                 })
               }
-              // F1/§8 — a pre-pass-only engagement (the seeded frame slice —
-              // localization or planner — and nothing else) produced a FRAME
-              // for the turn, not a final answer: relay it as the working
-              // frame the conductor executes against, instead of synthesizing
-              // a premature "final" answer from a diagnosis artifact. The
-              // planner relay is execute-shaped: the conductor transcribes
-              // the plan's DAG into typed todowrite slices, never re-derives.
-              const prepassOnly =
-                outcomes.length > 0 &&
-                outcomes.every((o) => o.id === LOCALIZATION_SLICE_CONTENT || o.id === PLANNER_SLICE_CONTENT)
+              // F1/§8 — a pre-pass-only engagement (the seeded diagnosis writer
+              // slice and nothing else) already DID the work: the reasoner
+              // writer localized, applied the fix, and re-ran the failing test
+              // in one session. Relay its RESULT, not a re-edit instruction —
+              // when the fix was applied AND verified (state accepted/escalated,
+              // edits kept in the tree by containment), tell the conductor to
+              // confirm and FINISH; only the fallback (no verified fix landed —
+              // unverified, or the edits were rolled back, so the writer handed
+              // back ranked candidates) relays the analysis for the conductor to
+              // execute against.
+              const prepassOnly = outcomes.length > 0 && outcomes.every((o) => o.id === LOCALIZATION_SLICE_CONTENT)
               if (prepassOnly) {
                 const frame = outcomes[0]!
-                const isPlan = frame.id === PLANNER_SLICE_CONTENT
+                // "accepted"/"escalated" ⇒ the verifier ladder passed the
+                // writer's edits (the failing/pinned test ran green) and
+                // containment kept them in the working tree. "unverified" or a
+                // present revertedDiff ⇒ no verified fix landed → fall back to
+                // relaying the analysis for the conductor to execute.
+                const verifiedFix =
+                  (frame.state === "accepted" || frame.state === "escalated") && frame.revertedDiff === undefined
                 const truncatedOutput =
                   frame.output.length > 4000 ? `${frame.output.slice(0, 4000)}\n…[truncated]` : frame.output
-                const body = isProbeGrounded(frame.output)
-                  ? truncatedOutput
-                  : `⚠ Localization is narrative-only — no discriminating probe result rules out the alternatives. Before you edit, run the probe yourself and confirm this site is the CAUSE, not just where the symptom surfaces.\n\n${truncatedOutput}`
+                const body =
+                  verifiedFix || isProbeGrounded(frame.output)
+                    ? truncatedOutput
+                    : `⚠ No verified fix landed and the analysis is narrative-only — no discriminating probe result rules out the alternatives. Before you edit, run the probe yourself and confirm this site is the CAUSE, not just where the symptom surfaces.\n\n${truncatedOutput}`
                 const frameMsg: SessionV1.User = {
                   id: MessageID.ascending(),
                   sessionID,
@@ -2602,15 +2601,15 @@ export const layer = Layer.effect(
                   sessionID,
                   type: "text",
                   text: [
-                    isPlan
-                      ? "Planning pre-pass (completed before your work): a higher-tier plan slice mapped this turn. Its plan:"
-                      : "Diagnosis pre-pass (completed before your work): a higher-tier localization slice analyzed the reported defect. Its analysis:",
+                    verifiedFix
+                      ? "Diagnosis pre-pass (completed before your work): a higher-tier writer slice localized the reported defect, applied the fix, and re-ran the failing test to GREEN — all in one session. Its report:"
+                      : "Diagnosis pre-pass (completed before your work): a higher-tier writer slice investigated the reported defect but did NOT land a verified fix (it produced ranked candidates / its change could not be confirmed). Its report:",
                     "---",
                     body,
                     "---",
-                    isPlan
-                      ? "Treat this as the turn's execution plan: (1) transcribe its slice DAG into typed todowrite items verbatim (content, sliceType, deps as given) and let them dispatch — execute the plan, do not re-derive it or do the sliced work inline; (2) run each discriminating probe it names and confirm the chosen site BEFORE any edit; (3) if evidence contradicts the plan, stop and enumerate at least two candidate layers — with a cheap probe for each — before choosing."
-                      : "Treat this as the frame for the turn: (1) run each discriminating probe/check it names and confirm the target BEFORE any edit; (2) if evidence contradicts the analysis, stop and enumerate at least two candidate layers — with a cheap probe for each — before choosing; (3) do not re-derive the localization from scratch.",
+                    verifiedFix
+                      ? "The fix is ALREADY APPLIED to the working tree and VERIFIED (the failing test now passes). Do NOT re-edit, re-derive, or redo the sliced work — confirm the change is present and complete, then FINISH by summarizing for the user what was fixed and how it was verified. Only if the working tree does not actually contain this change should you re-apply it."
+                      : "No verified fix landed yet — treat this as the frame for the turn: (1) run each discriminating probe/check it names and confirm the target BEFORE any edit; (2) apply the minimal fix at the confirmed cause and re-run the failing test to green; (3) if evidence contradicts the analysis, stop and enumerate at least two candidate layers — with a cheap probe for each — before choosing.",
                   ].join("\n"),
                   synthetic: true,
                 } satisfies SessionV1.TextPart)

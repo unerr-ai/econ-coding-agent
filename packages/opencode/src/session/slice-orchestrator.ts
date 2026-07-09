@@ -16,11 +16,14 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
+import { LOCALIZATION_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
   runSliceLoop,
   tierModelRef,
   ECON_PERSONAS,
+  allocateSlice,
+  TIER_RANK,
   planWaves,
   validatePlan,
   resolutionDecision,
@@ -261,16 +264,17 @@ export const PERSONA_STEP_BUDGET: Record<EconPersona, number> = {
 }
 
 /**
- * Frame slices (localization / planner pre-pass) localize across a whole
- * unfamiliar repo — the researcher's web-lookup budget starves them: the
- * caseA live fire burned all 15 calls on searches and delivered NOTHING,
- * which re-derailed the turn exactly like the pre-fix runs.
+ * The diagnosis pre-pass writer localizes across a whole unfamiliar repo AND
+ * then applies the fix and re-runs the failing test in the SAME session, so it
+ * needs headroom beyond a plain applier: 45 tool calls (a read-only
+ * localization at 15 burned out with NOTHING delivered in the caseA live fire;
+ * a writer that must also edit and iterate to green needs more, not less).
  */
-export const FRAME_SLICE_STEP_BUDGET = 35
+export const FRAME_SLICE_STEP_BUDGET = 45
 
-/** Step budget for a slice: frame slices get their own allowance, everything else the persona's. */
+/** Step budget for a slice: the diagnosis pre-pass writer gets its own allowance, everything else the persona's. */
 export function sliceStepBudget(persona: EconPersona, sliceId?: string): number {
-  if (sliceId === LOCALIZATION_SLICE_CONTENT || sliceId === PLANNER_SLICE_CONTENT) return FRAME_SLICE_STEP_BUDGET
+  if (sliceId === LOCALIZATION_SLICE_CONTENT) return FRAME_SLICE_STEP_BUDGET
   return PERSONA_STEP_BUDGET[persona]
 }
 
@@ -825,14 +829,6 @@ function isFreshPlan(todos: readonly OrchestrationTodo[]): boolean {
 }
 
 /**
- * Content of the localization slice the diagnosis pre-pass appends to a
- * bug-shaped build turn. Exported so the boundary test asserts the injected
- * item verbatim.
- */
-export const LOCALIZATION_SLICE_CONTENT =
-  "Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s) that must change, the defect mechanism (why the current behavior is wrong), and the minimal fix strategy — every claim backed by evidence — and for the named cause, the call edge that connects the symptom to it, not just a file/line at the symptom. Trace the failure path from symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — name each probe as a single runnable shell command on its own backticked line so it can be pinned and re-run — never assert a single site as the cause without a probe result that rules the others out."
-
-/**
  * Shape of the todo the diagnosis pre-pass injects: OrchestrationTodo plus the
  * `priority` the todowrite boundary's SessionTodo.Info persistence requires.
  */
@@ -840,49 +836,30 @@ export interface InjectedSliceTodo extends OrchestrationTodo {
   readonly priority: string
 }
 
-/** The one localization slice the diagnosis pre-pass arms — shared by the turn-open seed (F1) and the todowrite-time net in autoTypeTodos. */
+/**
+ * The single diagnosis pre-pass seed — shared by the turn-open seed (F1), the
+ * triage skeleton, and the todowrite-time net in autoTypeTodos. WRITER seat:
+ * `mechanical` + `applier` leaves edit+bash ALLOWED (it is neither a decider
+ * seat nor a read-only lane; see childSlicePermission/isDeciderSeat), so the
+ * tier that runs it localizes, FIXES, and verifies the failing test in one
+ * session instead of handing off a read-only analysis. DIFFICULTY-allocated,
+ * NOT reasoner-pinned: the brief is a test-driven bug-fix writer (it runs the
+ * failing test to green), so `testStrength:"testable"` clamps this mechanical
+ * slice to the executor via allocateSlice and floors it to the reasoner ONLY
+ * when the arming judge rates the bug genuinely hard/ambiguous (the difficulty
+ * floor) — "generator tier ← difficulty". A trivial, already-located bug stays
+ * on the cheap executor instead of the old blanket reasoner pin (django-12039).
+ */
 export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
   content: LOCALIZATION_SLICE_CONTENT,
   status: "pending",
   priority: "high",
-  sliceType: "design",
-  // Localization sets the whole turn's ceiling, so the entry rung rounds UP
-  // (§2 / casting rule 2) — and without a need pin a LONE seed never opens
-  // shouldOrchestrate's benefit gate and sits pending forever.
-  need: "reasoner",
-  persona: "researcher",
+  sliceType: "mechanical",
+  testStrength: "testable",
+  persona: "applier",
 }
 
-/**
- * Content of the planner slice the hard-shape pre-pass seeds (§8 planner
- * seat): one bounded PLAN artifact — the plan/execute split — authored on the
- * reasoner tier and executed by the conductor. Exported so the fold-back
- * relay recognizes the frame slice by id, same as LOCALIZATION_SLICE_CONTENT.
- */
-export const PLANNER_SLICE_CONTENT =
-  "Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly: (1) ranked candidate defect sites (file + function), each with the evidence that earns its rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome separates it from the rest; (3) the fix layer(s) the evidence points to, with the risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps. Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the plan. If budget runs short, deliver the ranked candidates with their discriminating probes still OPEN — name each probe as a single runnable shell command on its own backticked line so it can be pinned and re-run — never assert a single site as the cause without a probe result that rules the others out."
-
-/** The planner seat's seed (§8): the localization pre-pass's frame-slice shape pinned `need:"reasoner"` — a hard diagnosis turn buys one bounded plan up front, and the pin is what carries a lone frame slice through the shouldOrchestrate benefit gate. */
-export const PLANNER_PREPASS_TODO: InjectedSliceTodo = {
-  content: PLANNER_SLICE_CONTENT,
-  status: "pending",
-  priority: "high",
-  sliceType: "design",
-  need: "reasoner",
-  persona: "researcher",
-}
-
-/**
- * #55 — content of the re-plan seed the mid-flight re-decomposition trigger
- * (`new-items`, §4.2) plants after a run leaves unverifiable coverage gaps.
- * DELIBERATELY distinct from PLANNER_SLICE_CONTENT so appendTodos' dedup-by-
- * content never collides with a resolve-first planner seed already on the list
- * — this must be able to land even when a planner pre-pass ran this session.
- */
-export const REDECOMPOSITION_SLICE_CONTENT =
-  "Re-plan the unfinished work from the previous pass. Some slices were accepted but could NOT be verified — coverage gaps, surfaced here rather than lost silently. Produce a bounded re-decomposition, not code: (1) list the unverified/uncovered items and why each stayed unconfirmed; (2) break each into smaller, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the re-plan and DAG only."
-
-/** #55 — the re-plan seed (§4.2 `new-items`): reasoner-pinned like PLANNER_PREPASS_TODO so a lone re-plan seed still clears the shouldOrchestrate benefit gate on the hook re-fire. */
+/** #55 — the re-plan seed (§4.2 `new-items`): a `design` slice, so allocateSlice floors it to the reasoner (design-insight) and a lone re-plan seed still clears the shouldOrchestrate benefit gate (which keys on the ALLOCATED tier) on the hook re-fire. */
 export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
   content: REDECOMPOSITION_SLICE_CONTENT,
   status: "pending",
@@ -1012,62 +989,23 @@ export function classifyTurnShape(userPrompt: string): TurnShape {
   return { category: QUESTION_SHAPE_RE.test(prompt) ? "qa" : "build", confidence: "low" }
 }
 
-// One casting playbook per shape (§8): ≤4 lines each, appended to the turn's
-// system array tail — never a prefix swap. Tier-speak only.
-const CATEGORY_PREAMBLE: Record<TurnShapeCategory, string> = {
-  "diagnosis-vague": [
-    "TURN SHAPE: diagnosis (vague symptom — no site named).",
-    "A localization/plan pre-pass frames this turn; do not anchor on a cause before its result folds back.",
-    "Accept a defect site only with a discriminating probe result attached — never narrative alone.",
-    "If evidence contradicts the frame, enumerate at least two candidate layers with a cheap probe each.",
-  ].join("\n"),
-  "diagnosis-grounded": [
-    "TURN SHAPE: diagnosis (grounded — the prompt names the site).",
-    "Verify the named site before editing: one discriminating probe that confirms the mechanism, then the fix.",
-    "Confirm the named site is the CAUSE, not just where the symptom surfaces — trace one edge upstream before editing; keep exploration to that confirmation.",
-  ].join("\n"),
-  build: [
-    "TURN SHAPE: build.",
-    "Type the plan: write the full pending list first; decided changes become typed slices and parallel-eligible slices run as a DAG.",
-    "Give every check-run item a real runnable command — a verify slice without one cannot reject.",
-    "If the build uncovers a defect, localize its cause before patching — do not fix the first symptom site.",
-  ].join("\n"),
-  audit: [
-    "TURN SHAPE: audit.",
-    "Judgment items are dispatched reasoner slices — never judge inline; synthesis composes the slice verdicts.",
-    "Keep your own steps to dispatch and relay.",
-  ].join("\n"),
-  qa: [
-    "TURN SHAPE: Q&A.",
-    "Answer directly with the graph/read tools; no decomposition, no todo slices, no plan.",
-    "Prefer the smallest read that answers — an explorer child only for a genuinely broad sweep.",
-  ].join("\n"),
-}
-
 /**
- * §8 rule 4 — the turn-scoped category preamble. Pure so the prompt seam and
- * tests share one source of truth.
- *
- * @sem domain=routing role=config
- */
-export function categoryPreamble(category: TurnShapeCategory): string {
-  return CATEGORY_PREAMBLE[category]
-}
-
-/**
- * §8 casting, rule 2 (ambiguity rounds UP): the frame slice an armed diagnosis
- * turn seeds at turn open — the reasoner planner when the arming judge rated the
- * task hard (or a goal needs a plan), the localization slice otherwise. One
- * selection rule, shared by the prompt loop's seed block and the tests.
+ * The single frame seed an armed diagnosis turn plants at turn open: one
+ * WRITER pre-pass (localize → fix → verify in one session), difficulty-allocated
+ * (executor for an already-located fix, floored to the reasoner only when the
+ * judge rates the bug hard/ambiguous). Collapsed
+ * to a single seed — a diagnosis turn never plants both a planner and a
+ * localization seed (the 12050 double-seed regression). Shared by the prompt
+ * loop's seed block, the triage skeleton, and the tests.
  *
  * @sem domain=routing role=router
  */
-export function diagnosisPrepassSeed(hard: boolean): InjectedSliceTodo {
-  return hard ? PLANNER_PREPASS_TODO : LOCALIZATION_PREPASS_TODO
+export function diagnosisPrepassSeed(): InjectedSliceTodo {
+  return LOCALIZATION_PREPASS_TODO
 }
 
-/** Engine-authored frame-seed contents (the localization/planner pre-pass) — typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
-const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLANNER_SLICE_CONTENT])
+/** Engine-authored frame-seed content (the diagnosis pre-pass writer) — the typed slice the turn-open skeleton plants, which a conductor rewrite must never drop. */
+const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT])
 
 /**
  * Todowrite-boundary reconcile net (case-2 tierfire3 double-wave decode): slice
@@ -1126,43 +1064,6 @@ export function reconcileSettledSlices<T extends OrchestrationTodo, S extends Or
 // ---------------------------------------------------------------------------
 
 /**
- * §1.1/§4.1 — the turn-scoped preamble built from a non-null triage verdict:
- * lists every extracted goal (shape + deliverable) and constraint so the
- * conductor tracks each goal against its own todo instead of collapsing a
- * compound turn into one label. Pure and byte-stable for the turn — the same
- * verdict AND arming decision always yield the same string — so it rides the
- * system-array tail exactly like `categoryPreamble`, replacing it whenever
- * triage is non-null. Task #52 — when the arming judge flagged the turn
- * ambiguous or hard, appends a decomposition-bias line steering the conductor
- * toward `todowrite` over an inline single-shot, so the work reaches the
- * per-slice tier allocator instead of being authored inline.
- *
- * @sem domain=routing role=config
- */
-export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): string {
-  const lines = [
-    `TURN SHAPE: triage (${verdict.goals.length} goal${verdict.goals.length === 1 ? "" : "s"} extracted, confidence=${verdict.confidence}).`,
-  ]
-  verdict.goals.forEach((goal, i) => {
-    const tags = goal.needsPlan ? `${goal.shape}, needs-plan` : goal.shape
-    lines.push(`${i + 1}. [${tags}] "${goal.quote}" — done when: ${goal.deliverable || "the goal is satisfied"}`)
-  })
-  for (const constraint of verdict.constraints) {
-    lines.push(`CONSTRAINT (${constraint.kind}): "${constraint.quote}"`)
-  }
-  lines.push("Track each goal against its own todo; verify each independently — never conflate or drop one for another.")
-  if (arming.ambiguity === "ambiguous" || arming.hardness === "hard") {
-    const flags = [arming.ambiguity === "ambiguous" ? "AMBIGUOUS" : null, arming.hardness === "hard" ? "HARD" : null]
-      .filter((x): x is string => x !== null)
-      .join("/")
-    lines.push(
-      `TURN FLAGGED ${flags}: prefer todowrite over inline single-shot handling — decompose so each goal routes through the per-slice tier allocator.`,
-    )
-  }
-  return lines.join("\n")
-}
-
-/**
  * §1.2 — order a verdict's goals so a `dependsOn` reference always precedes
  * its dependent, otherwise stable in prompt order (Kahn's algorithm; a cycle
  * the model hallucinated falls back to prompt order for the unresolved
@@ -1201,14 +1102,22 @@ export interface TriageTodoRow extends OrchestrationTodo {
 /**
  * §1.2/U2 — materialize the turn-open todo skeleton from a non-null triage
  * verdict: one root todo per goal (dependency order, `orderTriageGoals`), and
- * for any goal carrying `needsPlan` or shaped `diagnosis-vague`, one
- * frame-seed child (`diagnosisPrepassSeed`, reused verbatim) linked by the
- * goal-tree's `parentID` position index (goal -> task, one level — well
- * inside the tracker's depth-3 cap). Dedup is by CONTENT across goals, not
- * per-goal: two qualifying goals whose seed resolves to the same content
- * (both LOCALIZATION_PREPASS_TODO or both PLANNER_PREPASS_TODO) plant it
- * once, parented to the first qualifying goal in dependency order — a mixed
- * pair (one localization, one planner) still plants two distinct seeds.
+ * for any goal that needs a frame pre-pass, one frame-seed child
+ * (`diagnosisPrepassSeed`, the single writer pre-pass) linked by the goal-tree's
+ * `parentID` position index (goal -> task, one level — well inside the tracker's
+ * depth-3 cap). The seed decision is a clean DOMAIN SPLIT: for a DIAGNOSIS goal
+ * the arming judge OWNS localization arming (`armLocalization` — an LLM call, the
+ * semantic authority on whether a bug needs a localization pre-pass), so
+ * `needsPlan` cannot override it; `needsPlan` is a conductor triage flag set
+ * blind (the field is undefined in the triage prompt) and its old OR would else
+ * force a reasoner pre-pass onto an already-located bug the judge correctly
+ * declined (the django-12039 regression). For a NON-diagnosis/build goal,
+ * `needsPlan` owns the planning pre-pass (the judge answers armLocalization=false
+ * for build work, so `needsPlan` is the right signal there). Every qualifying
+ * goal resolves to the SAME writer seed, so cross-goal content dedup plants
+ * EXACTLY ONE pre-pass, parented to the first qualifying goal in dependency
+ * order — never a planner AND a localization seed (the 12050 double-seed
+ * regression).
  *
  * @sem domain=routing role=router
  */
@@ -1225,9 +1134,8 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict, arming: ArmingDe
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
     const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
-    if (goal.needsPlan || (arming.armLocalization && isDiagnosis)) {
-      const hard = goal.needsPlan === true || arming.hardness === "hard"
-      const seed = diagnosisPrepassSeed(hard)
+    if (isDiagnosis ? arming.armLocalization : (goal.needsPlan ?? false)) {
+      const seed = diagnosisPrepassSeed()
       if (plantedSeedContent.has(seed.content)) continue
       plantedSeedContent.add(seed.content)
       todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
@@ -1320,11 +1228,13 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * overridden by the judge — "string-matchers refine, never override": R4 —
  * the active to-dos must not already name a file target, because a to-do
  * naming its own file means Door-2 knows the site the judge could not. Only
- * when both hold does the pre-pass append one typed localization slice —
- * `design` allocates to the oracle tier
- * (judge-verified when untestable) and the researcher persona is read+fetch
- * only on the tightest step budget — a lean decider front-loaded before the
- * conductor's own checklist, never a second workhorse. Existing items are
+ * when both hold does the pre-pass append one typed localization slice — the
+ * single WRITER seed (`mechanical` + `applier`, so it localizes, FIXES, and
+ * verifies the failing test in ONE session), difficulty-allocated on the
+ * generator axis: an already-located fix stays on the cheap executor and only a
+ * genuinely hard/ambiguous bug floors to the reasoner (the difficulty floor) —
+ * front-loaded before the conductor's own checklist so the localization
+ * decision is settled first, never a second workhorse. Existing items are
  * never edited or reordered (append-only: `todo_N` positional deps must not
  * shift), and the injected slice is typed, so a second pass exits on the
  * active-DAG guard while the seed is live and a content check keeps the
@@ -1426,9 +1336,19 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
   // §4.2 rule 4 (venue affinity, conservative v1): a typed candidate set this
   // small, with nothing pinned above the conductor, earns nothing from a
   // spawn (§1.3) — leave it untyped so the conductor executes it inline
-  // instead of paying a child's brief-compile + cold-cache-write cost.
+  // instead of paying a child's brief-compile + cold-cache-write cost. The
+  // engine-planted diagnosis frame seed is EXEMPT: its plant already passed the
+  // `shouldArm` gate (a deliberate localization decision), so it must not be
+  // force-swallowed here just because it is difficulty-allocated and no longer
+  // carries a `need` pin. Whether the seed actually spawns a child is decided
+  // downstream by `shouldOrchestrate` on the ALLOCATED tier (a trivial seed
+  // allocates to the executor and the benefit gate declines it there).
   const newlyTyped = typed.filter(isDispatchableSlice)
-  if (newlyTyped.length > 0 && newlyTyped.length <= VENUE_INLINE_MAX_ITEMS && newlyTyped.every((t) => !t.need)) {
+  if (
+    newlyTyped.length > 0 &&
+    newlyTyped.length <= VENUE_INLINE_MAX_ITEMS &&
+    newlyTyped.every((t) => !t.need && !FRAME_SEED_CONTENTS.has(t.content))
+  ) {
     return [...todos]
   }
   return typed
@@ -1640,14 +1560,18 @@ export async function todosToLoopSlices(
  * splitting demonstrably helps — real parallelism exists (some wave
  * `planWaves` schedules has >=2 slices that can run concurrently), the
  * batch is large enough that no single context could hold it (>=6 slices),
- * or a slice needs a tier above the executor (run-21: a lone judgment slice
- * pinned `need:"reasoner"` IS the benefit — a fresh-context higher-tier
- * verdict the lead model cannot produce inline — so it must not be declined
- * for being a width-1 DAG). A linear all-cheap chain — every wave width 1,
- * no raised need — gains nothing from being split: each child still pays its
- * own context re-derivation and the waves still serialize, so it is strictly
- * worse than handling the same work inline (run-8 evidence: 868 LLM calls
- * for one trivial, purely-linear issue). Applied once per engagement, right
+ * or a slice ALLOCATES to a tier above the executor (run-21: a lone judgment
+ * slice whose `allocateSlice` tier is reasoner/oracle IS the benefit — a
+ * fresh-context higher-tier verdict the lead model cannot produce inline — so
+ * it must not be declined for being a width-1 DAG). Keying on the ALLOCATED
+ * tier, not a raw `need` hint, is load-bearing: the allocator can clamp a
+ * `need` request away (a testable mechanical slice hinting `need:"reasoner"`
+ * still allocates to the executor), so a raw-`need` gate would open on a slice
+ * the router then runs cheap. A linear all-cheap chain — every wave width 1,
+ * nothing allocating above the executor — gains nothing from being split: each
+ * child still pays its own context re-derivation and the waves still serialize,
+ * so it is strictly worse than handling the same work inline (run-8 evidence:
+ * 868 LLM calls for one trivial, purely-linear issue). Applied once per engagement, right
  * after `todosToLoopSlices`, before any dispatch. `goalCount` (U2, from the
  * turn's triage verdict) is a second, independent width signal: >=2 tracked
  * goals is real width even when each goal's own DAG is a linear chain — the
@@ -1658,7 +1582,7 @@ export async function todosToLoopSlices(
  */
 export function shouldOrchestrate(slices: readonly LoopSlice[], goalCount?: number): boolean {
   if (slices.length >= 6) return true
-  if (slices.some((s) => s.need === "reasoner" || s.need === "oracle")) return true
+  if (slices.some((s) => TIER_RANK[allocateSlice(s).tier] >= TIER_RANK.reasoner)) return true
   if ((goalCount ?? 0) >= 2) return true
   return planWaves(slices).some((wave) => wave.length >= 2)
 }
@@ -1755,7 +1679,7 @@ export interface ConductorOrchestrationDeps {
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity }
   /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
   sessionID?: string
-  /** #53/#54 — plant one design/planner pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLANNER_PREPASS_TODO`, via `diagnosisPrepassSeed`) carry. */
+  /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constant (`LOCALIZATION_PREPASS_TODO`, via `diagnosisPrepassSeed`) carries. */
   appendTodos?: (seed: InjectedSliceTodo) => Promise<void>
   /** #53/#54 — register one clarifying question and return without waiting for the answer; the caller wires this to `Question.Service.ask` via a non-blocking Effect fork so the turn yields instead of parking on the Deferred. Absent (headless/test double) → `"ask-user"` can never be acted on (it is also gated off by `interactive` below). */
   askUser?: (question: string) => void
@@ -1886,7 +1810,7 @@ export async function runConductorOrchestration(
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
           incResolveAttempts(sessionID)
-          if (deps.appendTodos) await deps.appendTodos(diagnosisPrepassSeed(deps.arming?.hardness === "hard"))
+          if (deps.appendTodos) await deps.appendTodos(diagnosisPrepassSeed())
           return { engaged: false }
         }
         if (mode === "ask-user") {

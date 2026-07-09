@@ -32,7 +32,9 @@ framing plus an "Under the hood" track. TikZ figures live in
 orchestration-mechanism doc: how the conductor triages a task, decomposes it into typed slices,
 allocates each to the cheapest capable tier (execute-cheap-then-verify, escalate only the failures),
 verifies, and hardens the loop as an explicit state machine (the squeeze-then-climb ladder + the
-SM-series). It absorbed and superseded the three earlier plan docs (`SELF_ORCHESTRATION_PLAN`,
+SM-series). [ORCHESTRATION_IMPROVEMENTS.md](./architecture/ORCHESTRATION_IMPROVEMENTS.md) is the
+working **proposal** doc for the next round (merged turn-read call, temp-0 extraction, goal-shape
+taxonomy) — decisions pending; accepted items fold back into the mechanism doc. It absorbed and superseded the three earlier plan docs (`SELF_ORCHESTRATION_PLAN`,
 `DECOMPOSITION_ORCHESTRATION_PLAN`, `PERSONA_ORCHESTRATION_PLAN`) — grounded in the current codebase,
 the checked-out Claude Code source, and the 2026-07 model/reasoning/cost research (F1–F8).
 
@@ -88,6 +90,10 @@ seam table: [features/README.md](./features/README.md).
   global demand map: affordability × independence as two axes (affordability splitting into
   parity vs scale), the 2×2 by business type and region, the model-per-tier config that lets one
   product serve every segment, and the three GTM lanes. The segment cut of POSITIONING's regional cut.
+- [GTM_DEMAND_SIGNALS.md](./strategy/GTM_DEMAND_SIGNALS.md) — is coding-agent demand real and
+  *observable* in the reachable segment (mid/small IT services + mid-market GCCs, India + SEA)?
+  Verdict: bottom-up adoption (devs done, employers un-provisioned), the drivers, and the
+  signals playbook for building a company-level target list.
 - Model strategy — [MODEL_SELECTION.md](./strategy/MODEL_SELECTION.md) (which open/rented models
   we run per tier, Phase 1) + [MODEL_TRAINING_STRATEGY.md](./strategy/MODEL_TRAINING_STRATEGY.md)
   (how we post-train our *own* mid-tier reasoner in Phase 2 — recipe, data flywheel, parity math).

@@ -711,6 +711,91 @@ export async function probeSliceVerifyCommands(files: string[]): Promise<VerifyC
 }
 
 // ---------------------------------------------------------------------------
+// Ripgrep downgrade — the universal fallback for a graph query that failed, is
+// unavailable (module/construction error), or is still indexing. Every
+// content-search tool (recon, search, refs, get_references) routes here instead
+// of surfacing a hard tool error or a misleading "still indexing" string, so a
+// broken/cold graph degrades to plain text search rather than blocking the
+// model. Mirrors the read tool's Effect.catch(() => raw-read) template
+// (read.ts:300-318): on ANY graph failure, fall through to inbuilt search.
+//
+// INVARIANT: search / recon / get_references (refs) must NEVER hard-error due
+// to the graph — worst case they return ripgrep results. The happy path (graph
+// available and succeeding) is untouched.
+// ---------------------------------------------------------------------------
+
+/** Max ripgrep matches a downgrade returns before truncating. */
+const RIPGREP_FALLBACK_LIMIT = 100
+
+/**
+ * Runs ripgrep for `query` under `cwd` and formats the matches, or returns
+ * `undefined` when there are no matches or ripgrep itself fails. `mode` selects
+ * the pattern treatment: 'regex' passes the query through unescaped; every
+ * other mode (literal / symbol / task / refs / undefined) escapes it to a
+ * literal string — a symbol/entity-name lookup degrades to a literal name grep,
+ * the best text proxy for a call-graph query. Never throws.
+ *
+ * @sem domain=intelligence role=query
+ */
+async function ripgrepMatches(
+  ripgrep: Ripgrep.Interface,
+  query: string,
+  mode: string | undefined,
+  cwd: string,
+): Promise<string | undefined> {
+  const pattern = mode === "regex" ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  try {
+    const rgResult = await Effect.runPromise(ripgrep.grep({ cwd, pattern, limit: RIPGREP_FALLBACK_LIMIT }))
+    if (rgResult.length === 0) return undefined
+    const rows = rgResult.map((item) => ({
+      path: path.resolve(cwd, item.entry.path),
+      line: item.line,
+      text: item.text,
+    }))
+    const truncated = rows.length === RIPGREP_FALLBACK_LIMIT
+    const lines = [`Found ${rows.length} matches${truncated ? " (more available)" : ""} [ripgrep fallback]`]
+    let current = ""
+    for (const match of rows) {
+      if (current !== match.path) {
+        if (current !== "") lines.push("")
+        current = match.path
+        lines.push(`${match.path}:`)
+      }
+      lines.push(`  Line ${match.line}: ${match.text}`)
+    }
+    if (truncated) lines.push("\n(Results truncated. Use a more specific pattern.)")
+    return lines.join("\n")
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Shaped ripgrep downgrade: runs ripgrepMatches and ALWAYS returns the same
+ * {title, metadata, output} triple the graph tools return (recording the tool
+ * call), so a caller can `return ripgrepFallback(...)` directly. A hit yields
+ * the formatted matches; no hit / ripgrep failure yields a descriptive
+ * "no matches" line. Never throws — this is the floor that keeps a content
+ * search from ever hard-erroring on the graph (see the module INVARIANT).
+ *
+ * @sem domain=intelligence role=query
+ */
+export async function ripgrepFallback(
+  ripgrep: Ripgrep.Interface,
+  opts: { tool: string; query: string; mode?: string; cwd: string },
+): Promise<{ title: string; metadata: Record<string, unknown>; output: string }> {
+  const found = await ripgrepMatches(ripgrep, opts.query, opts.mode, opts.cwd)
+  const output = found ?? `No matches for "${opts.query}" [ripgrep fallback]`
+  const meta = withMeta(output, output)
+  recordToolCall({ tool: opts.tool, ...meta })
+  return {
+    title: opts.tool,
+    metadata: { meta, mode: opts.mode ?? "literal", fallback: "ripgrep" } as Record<string, unknown>,
+    output,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // recon
 // ---------------------------------------------------------------------------
 
@@ -741,7 +826,9 @@ const ReconParameters = Schema.Struct({
  */
 export const GraphReconTool = Tool.define(
   "recon",
-  Effect.succeed({
+  Effect.gen(function* () {
+    const ripgrep = yield* Ripgrep.Service
+    return {
     description:
       "Return a lean recon bundle for a natural-language task phrase: entities with " +
       "signature + 15-line preview + caller_count, their references, and anchored notes. " +
@@ -776,48 +863,55 @@ export const GraphReconTool = Tool.define(
 
       const root = process.cwd()
       return Effect.promise(async () => {
-        const gate = await ensureGraphReadyBounded()
-        if (!gate.ready) {
-          const output = "Graph still indexing the repo — retry this call shortly for full results."
-          const meta = withMeta(output, output)
-          recordToolCall({ tool: "recon", ...meta })
-          return { title: "recon", metadata: { meta } as Record<string, unknown>, output }
-        }
-        const rawOutput = await makeReconTool(gate.graph).execute(input as Record<string, unknown>)
+        try {
+          // Wrapping ensureGraphReadyBounded catches a construction failure too —
+          // getOrCreateEntry's `new BunSqliteGraph` throw surfaces here — so a not-
+          // ready, unloadable, or query-erroring graph all downgrade to the
+          // ripgrep floor below instead of hard-erroring.
+          const gate = await ensureGraphReadyBounded()
+          if (gate.ready) {
+            const rawOutput = await makeReconTool(gate.graph).execute(input as Record<string, unknown>)
 
-        let parsed: unknown
-        try { parsed = JSON.parse(rawOutput) } catch {
-          const meta = withMeta(rawOutput, rawOutput)
-          recordToolCall({ tool: "recon", ...meta })
-          return { title: "recon", metadata: { meta } as Record<string, unknown>, output: rawOutput }
-        }
+            let parsed: unknown
+            try { parsed = JSON.parse(rawOutput) } catch {
+              const meta = withMeta(rawOutput, rawOutput)
+              recordToolCall({ tool: "recon", ...meta })
+              return { title: "recon", metadata: { meta } as Record<string, unknown>, output: rawOutput }
+            }
 
-        const bundle = parsed as { entities?: unknown[]; references?: unknown[]; notes?: unknown[] }
-        const entityList: LeanEntity[] = Array.isArray(bundle?.entities)
-          ? (bundle.entities as LeanEntity[])
-          : []
+            const bundle = parsed as { entities?: unknown[]; references?: unknown[]; notes?: unknown[] }
+            const entityList: LeanEntity[] = Array.isArray(bundle?.entities)
+              ? (bundle.entities as LeanEntity[])
+              : []
 
-        const queryCacheKey = hashInputs(String(input.task), "recon")
-        const { lean, cacheKey, total, signals } = await enrichEntities(entityList, root, queryCacheKey)
+            const queryCacheKey = hashInputs(String(input.task), "recon")
+            const { lean, cacheKey, total, signals } = await enrichEntities(entityList, root, queryCacheKey)
 
-        const leanBundle = { ...bundle, entities: lean }
-        const leanJson = JSON.stringify(
-          { ...leanBundle, _meta: { cache_ref: cacheKey, total, more: false } },
-          null,
-          2,
-        )
-        const signalBlock = signals.length > 0 ? "\n\n" + signals.join("\n") : ""
-        const output = leanJson + signalBlock
+            const leanBundle = { ...bundle, entities: lean }
+            const leanJson = JSON.stringify(
+              { ...leanBundle, _meta: { cache_ref: cacheKey, total, more: false } },
+              null,
+              2,
+            )
+            const signalBlock = signals.length > 0 ? "\n\n" + signals.join("\n") : ""
+            const output = leanJson + signalBlock
 
-        const meta = withMeta(rawOutput, output)
-        recordToolCall({ tool: "recon", ...meta })
-        return {
-          title: "recon",
-          metadata: { meta } as Record<string, unknown>,
-          output,
-        }
+            const meta = withMeta(rawOutput, output)
+            recordToolCall({ tool: "recon", ...meta })
+            return {
+              title: "recon",
+              metadata: { meta } as Record<string, unknown>,
+              output,
+            }
+          }
+        } catch { /* graph unavailable/failed → ripgrep downgrade below */ }
+        // Not ready or any graph failure: downgrade to plain search rather than
+        // the old "still indexing" string (a permanently-failed index never flips
+        // ready, so that string would tell the model to "retry shortly" forever).
+        return ripgrepFallback(ripgrep, { tool: "recon", query: input.task, cwd: root })
       })
     },
+    }
   }),
 )
 
@@ -855,7 +949,9 @@ const GetReferencesParameters = Schema.Struct({
  */
 export const GraphGetReferencesTool = Tool.define(
   "get_references",
-  Effect.succeed({
+  Effect.gen(function* () {
+    const ripgrep = yield* Ripgrep.Service
+    return {
     description:
       "Return the caller list (fan-in) or callee list (outgoing imports/calls) for a " +
       "named entity. Use direction='callers' to see blast radius; 'callees' for dependencies.",
@@ -866,25 +962,21 @@ export const GraphGetReferencesTool = Tool.define(
     ) =>
       Effect.promise(async () => {
         const root = process.cwd()
-        const gate = await ensureGraphReadyBounded()
-        if (!gate.ready) {
-          const output = "Graph still indexing the repo — retry this call shortly for full results."
-          const meta = withMeta(output, output)
-          recordToolCall({ tool: "get_references", ...meta })
-          return { title: "get_references", metadata: { meta } as Record<string, unknown>, output }
-        }
-        return makeGetReferencesTool(gate.graph, root)
-          .execute(input as Record<string, unknown>)
-          .then((output: string) => {
+        try {
+          const gate = await ensureGraphReadyBounded()
+          if (gate.ready) {
+            const output = await makeGetReferencesTool(gate.graph, root).execute(input as Record<string, unknown>)
             const meta = withMeta(output, output)
             recordToolCall({ tool: "get_references", ...meta })
-            return {
-              title: "get_references",
-              metadata: { meta } as Record<string, unknown>,
-              output,
-            }
-          })
+            return { title: "get_references", metadata: { meta } as Record<string, unknown>, output }
+          }
+        } catch { /* graph unavailable/failed → ripgrep downgrade below */ }
+        // Not ready or any graph failure: a call-graph lookup has no ripgrep
+        // equivalent, so degrade to a literal name search — the best text proxy
+        // for "where is this entity referenced".
+        return ripgrepFallback(ripgrep, { tool: "get_references", query: input.entity, cwd: root })
       }),
+    }
   }),
 )
 
@@ -1031,148 +1123,127 @@ export const GraphSearchCodeTool = Tool.define(
       // -----------------------------------------------------------------------
       if (input.mode === "refs") {
         return Effect.promise(async () => {
-          const gate = await ensureGraphReadyBounded()
-          if (!gate.ready) {
-            const output = "Graph still indexing the repo — retry this call shortly for full results."
-            const meta = withMeta(output, output)
-            recordToolCall({ tool: "search", ...meta })
-            return { title: "search", metadata: { meta, mode: "refs" } as Record<string, unknown>, output }
-          }
-          const refsInput: Record<string, unknown> = {
-            entity: input.query,
-            direction: input.direction ?? "callers",
-            limit: input.limit ?? 25,
-            include_text_occurrences: input.include_text_occurrences ?? false,
-          }
-          const output = await makeGetReferencesTool(gate.graph, root).execute(refsInput)
-          const meta = withMeta(output, output)
-          recordToolCall({ tool: "search", ...meta })
-          return {
-            title: "search",
-            metadata: { meta, mode: "refs" } as Record<string, unknown>,
-            output,
-          }
+          try {
+            const gate = await ensureGraphReadyBounded()
+            if (gate.ready) {
+              const refsInput: Record<string, unknown> = {
+                entity: input.query,
+                direction: input.direction ?? "callers",
+                limit: input.limit ?? 25,
+                include_text_occurrences: input.include_text_occurrences ?? false,
+              }
+              const output = await makeGetReferencesTool(gate.graph, root).execute(refsInput)
+              const meta = withMeta(output, output)
+              recordToolCall({ tool: "search", ...meta })
+              return {
+                title: "search",
+                metadata: { meta, mode: "refs" } as Record<string, unknown>,
+                output,
+              }
+            }
+          } catch { /* graph unavailable/failed → ripgrep downgrade below */ }
+          // Not ready or any graph failure: degrade a refs lookup to a literal
+          // name search rather than the old "still indexing" string.
+          return ripgrepFallback(ripgrep, {
+            tool: "search",
+            query: input.query,
+            mode: "refs",
+            cwd: input.path ?? root,
+          })
         })
       }
 
       return Effect.promise(async () => {
-        const gate = await ensureGraphReadyBounded()
-        if (!gate.ready) {
-          const output = "Graph still indexing the repo — retry this call shortly for full results."
-          const meta = withMeta(output, output)
-          recordToolCall({ tool: "search", ...meta })
-          return { title: "search", metadata: { meta } as Record<string, unknown>, output }
-        }
-        const rawOutput = await makeSearchCodeTool(gate.graph, root).execute(
-          input as Record<string, unknown>,
-        )
-
-        // Literal/regex modes: content search — try indexed files first, fall back to ripgrep.
         const mode = input.mode
-        if (mode === "literal" || mode === "regex") {
-          // Trigger ripgrep fallback when the indexed search returned no matches
-          let isIndexedEmpty = false
-          try {
-            const parsed = JSON.parse(rawOutput)
-            if (Array.isArray(parsed)) isIndexedEmpty = parsed.length === 0
-          } catch { /* rawOutput not JSON */ }
-          if (!isIndexedEmpty) isIndexedEmpty = !rawOutput || rawOutput.trim() === ""
+        const cwd = input.path ?? root
+        try {
+          const gate = await ensureGraphReadyBounded()
+          if (gate.ready) {
+            const rawOutput = await makeSearchCodeTool(gate.graph, root).execute(
+              input as Record<string, unknown>,
+            )
 
-          if (isIndexedEmpty) {
-            const cwd = input.path ?? root
-            const pattern =
-              mode === "literal"
-                ? input.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-                : input.query
-            try {
-              const rgResult = await Effect.runPromise(
-                ripgrep.grep({ cwd, pattern, limit: 100 }),
-              )
-              if (rgResult.length > 0) {
-                const rows = rgResult.map((item) => ({
-                  path: path.resolve(cwd, item.entry.path),
-                  line: item.line,
-                  text: item.text,
-                }))
-                const truncated = rows.length === 100
-                const lines = [
-                  `Found ${rows.length} matches${truncated ? " (more available)" : ""} [ripgrep fallback]`,
-                ]
-                let current = ""
-                for (const match of rows) {
-                  if (current !== match.path) {
-                    if (current !== "") lines.push("")
-                    current = match.path
-                    lines.push(`${match.path}:`)
+            // Literal/regex modes: content search — try indexed files first, fall back to ripgrep.
+            if (mode === "literal" || mode === "regex") {
+              // Trigger ripgrep fallback when the indexed search returned no matches
+              let isIndexedEmpty = false
+              try {
+                const parsed = JSON.parse(rawOutput)
+                if (Array.isArray(parsed)) isIndexedEmpty = parsed.length === 0
+              } catch { /* rawOutput not JSON */ }
+              if (!isIndexedEmpty) isIndexedEmpty = !rawOutput || rawOutput.trim() === ""
+
+              if (isIndexedEmpty) {
+                const rgText = await ripgrepMatches(ripgrep, input.query, mode, cwd)
+                if (rgText) {
+                  const meta = withMeta(rawOutput, rgText)
+                  recordToolCall({ tool: "search", ...meta })
+                  return {
+                    title: "search",
+                    metadata: { meta, mode, fallback: "ripgrep" } as Record<string, unknown>,
+                    output: rgText,
                   }
-                  lines.push(`  Line ${match.line}: ${match.text}`)
-                }
-                if (truncated) lines.push("\n(Results truncated. Use a more specific pattern.)")
-                const output = lines.join("\n")
-                const meta = withMeta(rawOutput, output)
-                recordToolCall({ tool: "search", ...meta })
-                return {
-                  title: "search",
-                  metadata: { meta, mode, fallback: "ripgrep" } as Record<string, unknown>,
-                  output,
                 }
               }
-            } catch { /* ripgrep unavailable — return indexed output */ }
+
+              const meta = withMeta(rawOutput, rawOutput)
+              recordToolCall({ tool: "search", ...meta })
+              return {
+                title: "search",
+                metadata: { meta } as Record<string, unknown>,
+                output: rawOutput,
+              }
+            }
+
+            // Symbol / task-phrase modes: enrich entity list with lean-index projection.
+            let parsed: unknown
+            try { parsed = JSON.parse(rawOutput) } catch {
+              const meta = withMeta(rawOutput, rawOutput)
+              recordToolCall({ tool: "search", ...meta })
+              return { title: "search", metadata: { meta } as Record<string, unknown>, output: rawOutput }
+            }
+
+            const isBundle =
+              parsed !== null &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed) &&
+              "entities" in (parsed as object)
+            const entityList: LeanEntity[] = isBundle
+              ? ((parsed as { entities: unknown[] }).entities as LeanEntity[])
+              : Array.isArray(parsed)
+                ? (parsed as LeanEntity[])
+                : []
+
+            if (entityList.length === 0) {
+              const meta = withMeta(rawOutput, rawOutput)
+              recordToolCall({ tool: "search", ...meta })
+              return { title: "search", metadata: { meta } as Record<string, unknown>, output: rawOutput }
+            }
+
+            const queryCacheKey = hashInputs(String(input.query), mode ?? "task")
+            const { lean, cacheKey, total, signals } = await enrichEntities(entityList, root, queryCacheKey)
+
+            const leanParsed = isBundle ? { ...(parsed as object), entities: lean } : lean
+            const leanJson = JSON.stringify(
+              { ...leanParsed, _meta: { cache_ref: cacheKey, total, more: false } },
+              null,
+              2,
+            )
+            const signalBlock = signals.length > 0 ? "\n\n" + signals.join("\n") : ""
+            const output = leanJson + signalBlock
+
+            const meta = withMeta(rawOutput, output)
+            recordToolCall({ tool: "search", ...meta })
+            return {
+              title: "search",
+              metadata: { meta } as Record<string, unknown>,
+              output,
+            }
           }
-
-          const meta = withMeta(rawOutput, rawOutput)
-          recordToolCall({ tool: "search", ...meta })
-          return {
-            title: "search",
-            metadata: { meta } as Record<string, unknown>,
-            output: rawOutput,
-          }
-        }
-
-        // Symbol / task-phrase modes: enrich entity list with lean-index projection.
-        let parsed: unknown
-        try { parsed = JSON.parse(rawOutput) } catch {
-          const meta = withMeta(rawOutput, rawOutput)
-          recordToolCall({ tool: "search", ...meta })
-          return { title: "search", metadata: { meta } as Record<string, unknown>, output: rawOutput }
-        }
-
-        const isBundle =
-          parsed !== null &&
-          typeof parsed === "object" &&
-          !Array.isArray(parsed) &&
-          "entities" in (parsed as object)
-        const entityList: LeanEntity[] = isBundle
-          ? ((parsed as { entities: unknown[] }).entities as LeanEntity[])
-          : Array.isArray(parsed)
-            ? (parsed as LeanEntity[])
-            : []
-
-        if (entityList.length === 0) {
-          const meta = withMeta(rawOutput, rawOutput)
-          recordToolCall({ tool: "search", ...meta })
-          return { title: "search", metadata: { meta } as Record<string, unknown>, output: rawOutput }
-        }
-
-        const queryCacheKey = hashInputs(String(input.query), mode ?? "task")
-        const { lean, cacheKey, total, signals } = await enrichEntities(entityList, root, queryCacheKey)
-
-        const leanParsed = isBundle ? { ...(parsed as object), entities: lean } : lean
-        const leanJson = JSON.stringify(
-          { ...leanParsed, _meta: { cache_ref: cacheKey, total, more: false } },
-          null,
-          2,
-        )
-        const signalBlock = signals.length > 0 ? "\n\n" + signals.join("\n") : ""
-        const output = leanJson + signalBlock
-
-        const meta = withMeta(rawOutput, output)
-        recordToolCall({ tool: "search", ...meta })
-        return {
-          title: "search",
-          metadata: { meta } as Record<string, unknown>,
-          output,
-        }
+        } catch { /* graph unavailable/failed → ripgrep downgrade below */ }
+        // Not ready or any graph failure: downgrade every mode (symbol/task via a
+        // literal name grep) to ripgrep rather than the old "still indexing" string.
+        return ripgrepFallback(ripgrep, { tool: "search", query: input.query, mode, cwd })
       })
     },
   }
@@ -1212,24 +1283,28 @@ export const GraphFileOutlineTool = Tool.define(
     execute: (input: Schema.Schema.Type<typeof FileOutlineParameters>, _ctx: Tool.Context) => {
       const root = process.cwd()
       return Effect.promise(async () => {
-        const gate = await ensureGraphReadyBounded()
-        if (!gate.ready) {
-          const output = "Graph still indexing the repo — retry this call shortly for full results."
+        // file_outline is structural, not a text search — ripgrep can't produce
+        // an outline — so an unavailable/failed graph degrades to a graceful
+        // "read the file directly" message rather than a hard error or the old
+        // "still indexing" string (which a permanently-failed index never clears).
+        const unavailable = () => {
+          const output =
+            "File outline unavailable (code graph not ready) — read the file directly with the read tool " +
+            "(optionally pass entity: to target one symbol)."
           const meta = withMeta(output, output)
           recordToolCall({ tool: "file_outline", ...meta })
           return { title: "file_outline", metadata: { meta } as Record<string, unknown>, output }
         }
-        return makeFileOutlineTool(gate.graph, root)
-          .execute(input as Record<string, unknown>)
-          .then((output: string) => {
+        try {
+          const gate = await ensureGraphReadyBounded()
+          if (gate.ready) {
+            const output = await makeFileOutlineTool(gate.graph, root).execute(input as Record<string, unknown>)
             const meta = withMeta(output, output)
             recordToolCall({ tool: "file_outline", ...meta })
-            return {
-              title: "file_outline",
-              metadata: { meta } as Record<string, unknown>,
-              output,
-            }
-          })
+            return { title: "file_outline", metadata: { meta } as Record<string, unknown>, output }
+          }
+        } catch { /* construction/query failure → graceful unavailable below */ }
+        return unavailable()
       })
     },
   }),

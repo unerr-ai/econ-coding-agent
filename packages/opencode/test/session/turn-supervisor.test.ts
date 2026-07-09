@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test"
-import { observeStep, normalizeResult, stuckNudgeText } from "../../src/session/turn-supervisor"
+import { observeStep, normalizeResult } from "../../src/session/turn-supervisor"
+import { stuckNudgeText } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 
 // SM4 — the root-loop step observer that feeds the stuck supervisor. Pure, so

@@ -1,3 +1,7 @@
+// Single source of the tool-call batching doctrine — composed into the tool block below, all six persona deltas (personas.ts), and the conductor delta (roles.ts).
+export const BATCH_RULE =
+  "Issue every independent tool call in the SAME response — reads of different files, parallel searches, independent commands. One call per turn wastes a full round trip."
+
 // Generate the authoritative tool-usage section from the live advertised tool set (Sprint 5b §10.1).
 // This is the single source of truth: the prompt can never name a tool the model isn't given, which
 // closes the prompt↔tool drift class (the grep/glob coupling) permanently. The full per-tool schema
@@ -44,10 +48,7 @@ export function toolUsage(toolIds: readonly string[]): string {
   // OL-9.4a — batching: live-run evidence showed 47/70 turns carrying exactly one tool call, so
   // every independent read became its own round trip. Gated on having more than one tool at all —
   // a single-tool agent has nothing to batch.
-  if (ids.length > 1)
-    notes.push(
-      "- Batch independent tool calls into the same response — reads of different files, parallel searches, independent commands. One call per turn wastes a full round trip.",
-    )
+  if (ids.length > 1) notes.push(`- ${BATCH_RULE}`)
   return [
     "# Available tools",
     `You have exactly these tools, and no others — call each by its exact id: ${ids.join(", ")}.`,

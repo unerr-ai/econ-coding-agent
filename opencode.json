@@ -52,7 +52,7 @@
     },
 
     // OL-9.1c — six stateless executor-persona intern agents (persona-deltas-design.md), all
-    // backed by the executor tier's model with their own prompt delta (session/system.ts
+    // backed by the executor tier's model with their own prompt delta (session/prompts/personas.ts
     // PERSONA_DELTA) and a reduced toolset — mirrors econ-defaults.ts econDefaultConfig()
     // (drift test: packages/opencode/test/config/econ-defaults.test.ts).
     "explorer": {

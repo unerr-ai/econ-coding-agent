@@ -8,13 +8,13 @@
  * ceilings, the design floor, the testable-safety-net invariant — to
  * `allocateSlice` and never re-implements it; it only adds the one sanctioned
  * de-escalation path (mechanical work behind a strong safety net), the venue
- * affinity rule, the cache-switch guard, and per-turn hysteresis. Pure: no I/O,
+ * affinity rule, and per-turn hysteresis. Pure: no I/O,
  * Bun-only.
  *
  * @sem domain=routing role=evaluator
  */
 
-import { allocateSlice, lowerTier, TIER_RANK, type SliceAllocationInput } from "./allocation.js"
+import { allocateSlice, lowerTier, type SliceAllocationInput } from "./allocation.js"
 import type { EconTier } from "./region.js"
 
 /** Triage goal shapes treated as decision-shaped ambiguity (§1.1's "needs a plan first"). */
@@ -44,9 +44,7 @@ export interface EvalVenueContext {
  * allocation-input fields (flattened in, so `evaluate()` can hand `this`
  * straight to `allocateSlice`), triage's read on the goal, attempt history,
  * risk context, verification strength, containment availability, the venue
- * affinity inputs, a precomputed cache-switch term, and per-turn hysteresis
- * state. `cache` is the only optional top-level field — its absence means no
- * switch-cost signal is available yet, not that switching is free.
+ * affinity inputs, and per-turn hysteresis state.
  *
  * @sem domain=routing role=type
  */
@@ -72,10 +70,6 @@ export interface EvalContext extends SliceAllocationInput {
   containmentAvailable: boolean
   /** Affinity inputs for the inline-vs-child decision. */
   venue: EvalVenueContext
-  /** Precomputed switch-cost delta (§1.7/§3.3); positive means moving tiers costs more. The caller prices this — evaluate() never imports the cache-switch helper. */
-  cache?: {
-    switchDelta?: number
-  }
   /** Per-turn hysteresis state (Q6): the tier this slice last ran at, and whether a new signal arrived since. */
   hysteresis: {
     lastTier?: EconTier
@@ -98,9 +92,9 @@ export interface EvalVerdict {
 
 /**
  * Decide a task's tier and venue at dispatch (and re-dispatch) time, per
- * §4.2's six-rule priority order: allocate()'s base (pins/ceilings/design
+ * §4.2's five-rule priority order: allocate()'s base (pins/ceilings/design
  * floor/testable invariant) → decision-shaped ambiguity guard → the one
- * sanctioned mechanical round-down → venue affinity → cache-switch guard →
+ * sanctioned mechanical round-down → venue affinity →
  * per-turn hysteresis. Every rule that changes or holds the tier/venue appends
  * a reason string. Pure: no I/O.
  *
@@ -124,9 +118,6 @@ export function evaluate(ctx: EvalContext): EvalVerdict {
   const base = allocateSlice(ctx)
   let tier: EconTier = base.tier
   reasons.push(`base: ${base.reason}`)
-  // The floor this decision must never drop below via the cache guard (5) —
-  // captured before the one de-escalation path (3) can lower `tier`.
-  const floorTier = tier
 
   // (2) Decision-shaped ambiguity rounds up — allocateSlice already forces the
   //     reasoner floor for sliceType "design"; this rule's job here is only to
@@ -180,19 +171,7 @@ export function evaluate(ctx: EvalContext): EvalVerdict {
     reasons.push("venue: context diverges from the requesting thread → child")
   }
 
-  // (5) Cache — moving tiers costs more when the switch delta is positive;
-  //     keep the prior (owner) tier if it's still capable — never below the
-  //     pins/ceilings/round-up floor from steps (1)-(2).
-  const switchDelta = ctx.cache?.switchDelta
-  const priorTier = ctx.hysteresis.lastTier
-  if (typeof switchDelta === "number" && switchDelta > 0 && priorTier !== undefined && priorTier !== tier) {
-    if (TIER_RANK[priorTier] >= TIER_RANK[floorTier]) {
-      reasons.push(`cache: switchDelta=${switchDelta} > 0 → keep prior tier ${priorTier} instead of ${tier} (moving costs more)`)
-      tier = priorTier
-    }
-  }
-
-  // (6) Hysteresis — no new signal this turn → the last-dispatched tier wins
+  // (5) Hysteresis — no new signal this turn → the last-dispatched tier wins
   //     over a marginal re-evaluation.
   if (ctx.hysteresis.lastTier !== undefined && !ctx.hysteresis.signalDelta) {
     if (ctx.hysteresis.lastTier !== tier) {

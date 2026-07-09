@@ -85,12 +85,14 @@ describe("SystemPrompt.toolUsage", () => {
 
   test("batching note present when more than one tool id (OL-9.4a)", () => {
     const out = toolUsage(["read", "search"])
-    expect(out).toContain("Batch independent tool calls into the same response")
+    expect(out).toContain(
+      "- Issue every independent tool call in the SAME response — reads of different files, parallel searches, independent commands. One call per turn wastes a full round trip.",
+    )
   })
 
   test("batching note absent for a single tool id", () => {
     const out = toolUsage(["read"])
-    expect(out).not.toContain("Batch independent tool calls into the same response")
+    expect(out).not.toContain("Issue every independent tool call in the SAME response")
   })
 
   test("de-dupes ids — duplicate read counts once", () => {

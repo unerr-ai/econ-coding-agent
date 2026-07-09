@@ -7,7 +7,7 @@ to run any instance on this laptop** (§Run-it-locally) and the **methodology ru
 keeps local runs honest** (§The one rule).
 
 Dataset: `princeton-nlp/SWE-bench_Verified` (django subset). Tiers: conductor
-(deepseek-v4-flash, cheap default) · executor (gpt-oss-120b) · reasoner
+(minimax-m3, cheap default) · executor (gpt-oss-120b) · reasoner
 (deepseek-v4-pro, thinking) · oracle (glm-5.2).
 
 ---
@@ -29,15 +29,19 @@ false-greened locally while the benchmark correctly marked it ✗.
 
 ## The 10 instances (fastest → slowest)
 
-Benchmark verdict = the trustworthy real-graded result from the Docker harness
-(`unerr-benchmarks/e2e/econ`). "Local triage" = our per-instance investigation status here.
+Two verdict columns, and they mean different things — read them as a **before → after**:
+- **Baseline verdict** = the prior Docker-harness result (`unerr-benchmarks/e2e/econ`),
+  captured *before* this session's engine changes. It is the comparison baseline, **not**
+  the current state. A ✗ here that now passes is a win, not a live failure.
+- **Current result (this session)** = the real-graded run on the latest binary
+  (§Run-it-locally + §The one rule). **This is the trustworthy, up-to-date verdict.**
 
-| # | instance | bench time | bench verdict | prior routing | base_commit | F2P/P2P | local triage |
+| # | instance | bench time | baseline verdict | prior routing | base_commit | F2P/P2P | current result (this session) |
 |---|---|---|---|---|---|---|---|
-| 1 | django-12039 | 159s | ✓ pass | conductor-only | `58c1acb1d605` | 1/11 | ⚠️ **correct pass but $0.31 over-fire** — see below |
-| 2 | django-11880 | 200s | ✓ pass | conductor-only | `06909fe084f8` | 1/114 | ⬜ not started |
-| 3 | django-11951 | 224s | ✓ pass | conductor-only | `312049091288` | 1/21 | ⬜ not started |
-| 4 | django-11848 | 357s | ✗ **fail** | oracle+conductor | `f0adf3b9b7a1` | 2/43 | ⬜ not started |
+| 1 | django-12039 | 159s | ✓ pass | conductor-only | `58c1acb1d605` | 1/11 | ✅ **re-validated 2026-07-09 — over-fire FIXED: $0.063, 100% conductor, real-grade 12/12** (see below) |
+| 2 | django-11880 | 200s | ✓ pass | conductor-only | `06909fe084f8` | 1/114 | ✅ **validated 2026-07-09 — PASS: $0.021, 100% conductor, module-grade 115/115** (canonical `error_messages` deepcopy fix) |
+| 3 | django-11951 | 224s | ✓ pass | conductor-only | `312049091288` | 1/21 | ✅ **validated 2026-07-09 — PASS: $0.046, 100% conductor, real-grade 22/22** |
+| 4 | django-11848 | 357s | ✗ **fail** | oracle+conductor | `f0adf3b9b7a1` | 2/43 | 🎉 **validated 2026-07-09 — IMPROVEMENT (was ✗): $0.045, 100% conductor, real-grade 45/45** (engine now cracks it) |
 | 5 | django-11964 | 481s | ✗ **fail** | conductor-only | `fc2b1cc926e3` | 2/15 | ⬜ not started |
 | 6 | django-11999 | 492s | ✓ pass | — | `84633905273f` | 1/30 | ⬜ not started |
 | 7 | django-12050 | 802s | ✓ pass | — | `b93a0e34d9b9` | 1/10 | ⬜ not started |
@@ -57,9 +61,11 @@ Benchmark verdict = the trustworthy real-graded result from the Docker harness
 - **11815** — Migrations use the *value* of an enum object instead of its *name*
 - **11885** — Combine fast-delete queries
 
-**Triage focus.** The ✗ cases (11848, 11964, 11815, 11885) tell us where the slicer is
-weak. The ✓ cases are the guardrail: any slicer change must **not** make a cheap
-conductor-only pass more expensive (no burning cache / no needless escalation).
+**Triage focus.** The baseline ✗ cases (11964, 11815, 11885) tell us where the slicer is
+weak — **11848 has since flipped to a clean pass** (45/45, conductor-only; see its row), so
+it's now a win rather than a weak spot. The ✓ cases are the guardrail: any slicer change
+must **not** make a cheap conductor-only pass more expensive (no burning cache / no needless
+escalation).
 
 ---
 
@@ -104,6 +110,17 @@ fires here because the shape is `build`, not diagnosis-grounded.
 ---
 
 ## Case 12039 — triaged: **correct pass, but a $0.31 cost blow-up** ⚠️
+
+> **✅ RE-VALIDATED 2026-07-09 (current engine, fresh binary `0.0.0-main-202607091104`).**
+> The over-fire is **fixed**. Re-run of 12039 with the D1 fix (`4ec39134f`) in place:
+> **$0.063007 upstream, 100% conductor** (`minimax/minimax-m3`, 27 msgs, ~638k cached reads),
+> **0 reasoner / 0 oracle / 0 escalations**, ~2m19s. Agent changed only `ddl_references.py`
+> (+6/−3, a clean whitespace fix that also guards the empty-suffix case); **zero test files
+> touched** (no-test-edit gate held). Real-grader simulation: **F2P + all 11 P2P → 12/12 OK**
+> ⇒ genuine **PASS** (matches benchmark ✓). Net vs the original triage below: same correct
+> result at **~4.9× lower cost** — the reasoner-localization + oracle-climb cascade is gone.
+> D2 does not trigger here (no localization pre-pass fires now). The analysis below is retained
+> as the record of the defect that D1 fixed.
 
 **Local run:** correct fix (`ddl_references.py` +10/−4), **zero test files touched** (the
 no-test-edit gate held — clean), grader red→green, full `indexes` module `24 OK`. Real
@@ -217,6 +234,16 @@ cp /tmp/agent-tests.bak tests/<touched_test>.py      # restore the run record af
 **Never `git clean -fd`** in an arena — it deletes the untracked `.venv/` and `PROMPT.txt`.
 Revert only tracked files with `git checkout -- <path>`.
 
+**Grading gotcha — docstring-style labels.** `FAIL_TO_PASS`/`PASS_TO_PASS` are mostly
+`test_method (module.Class)`, but a handful are the test's **docstring** (prose with
+spaces, e.g. `#5749 - `field_name` may be used as a key in _html_output().`). A naive
+`sed`→`xargs` label→id conversion word-splits those into bogus `unittest.loader._FailedTest`
+entries → phantom "errors" that are **not** real regressions. When labels share one module
+(common for these django cases), grade at **module level** instead —
+`runtests.py <module>` runs every listed test (docstring ones included) and a fully-green
+`Ran N tests … OK` is the honest verdict. This is exactly what tripped 11880 (24 phantom
+"errors" from 3 docstring P2P; the real result is 115/115 OK).
+
 ---
 
 ## Fix backlog (understand → apply → rerun; do not batch-apply)
@@ -224,7 +251,7 @@ Revert only tracked files with `git checkout -- <path>`.
 | id | defect | proposed fix | status |
 |---|---|---|---|
 | F-11885a | spec-language bug report ("currently X / should be Y") → shape defaults to `build` → localization pre-pass **and** no-test-edit gate both skip | broaden stage-1 defect detection to treat behavior-discrepancy phrasing as `diagnosis` | 🧠 understood, **not applied** |
-| **D1-12039** | committed round-up over-fires: `isHardDiagnosisPrompt` counts path/URL tokens in issue prose as cross-layer ⇒ arms reasoner localization on trivial single-file bugs (net regression across the set) | **reverted the text-hardness gate** in `roundUpTriageShapes`: a grounded bug that names its file goes direct on the cheap conductor path; only a grounded bug with NO file target rounds up | ✅ **applied — commit `4ec39134f`** (reverts `6b3f50912`'s asymmetric gate) |
+| **D1-12039** | committed round-up over-fires: `isHardDiagnosisPrompt` counts path/URL tokens in issue prose as cross-layer ⇒ arms reasoner localization on trivial single-file bugs (net regression across the set) | **reverted the text-hardness gate** in `roundUpTriageShapes`: a grounded bug that names its file goes direct on the cheap conductor path; only a grounded bug with NO file target rounds up | ✅ **applied — commit `4ec39134f`** (reverts `6b3f50912`'s asymmetric gate); **verified live 2026-07-09** — 12039 now $0.063, 100% conductor, real-grade 12/12 |
 | **D2-12039** | untestable analysis slice (localization pre-pass) is scored *critical* (graph blast-radius) → M3 floor force-climbs its untestable vacuous-accept reasoner→oracle→oracle, though climbing can't verify analysis | mark the analysis-only pre-pass read-only-for-escalation (or pin it non-critical) so it settles accepted-unverified at its assigned reasoner tier — surgical, no FSM change | 🟡 root-caused, **deferred to its own verified pass** (not exercised after D1 on this set; touches escalation core) |
 
 **Working discipline (per user):** understand the fix first → apply → rerun that one
