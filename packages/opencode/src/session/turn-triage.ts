@@ -167,8 +167,8 @@ export function parseTriageResponse(raw: string, userPrompt: string): TriageVerd
 // The call itself — one blocking, forced-schema request on the conductor tier
 // ---------------------------------------------------------------------------
 
-/** Blocking cap on the triage call (§4.1) — schema-invalid or slower than this falls back to the heuristic classifier. 8s, not the doc's original 2.5s: a triage-shaped completion through the live gateway measures 3.8–4.3s wall, so 2.5s lost the race on every real turn. */
-export const TRIAGE_TIMEOUT_MS = 8000
+/** Blocking cap on the triage call (§4.1) — schema-invalid or slower than this falls back to the heuristic classifier. 10s: un-muting the conductor for triage (see triageDispatch, prompt.ts) adds reasoning tokens — a live probe measured max ~7.7s wall (median ~1.9s), 96% of the old 8s cap, so 10s gives headroom. Kept below arming's 12s ARMING_TIMEOUT_MS: triage sits on every turn's critical path, so a gateway hang shouldn't stall turn-open longer than necessary. */
+export const TRIAGE_TIMEOUT_MS = 10000
 
 /** Stable, single-line prefix of `TRIAGE_SYSTEM_PROMPT` — lets an out-of-band test harness (e.g. a scripted LLM stub) recognize a turn-triage request by its system message without duplicating the full prompt text. */
 export const TRIAGE_PROMPT_MARKER = "You are the turn-triage extractor"

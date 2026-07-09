@@ -417,6 +417,10 @@ export const layer = Layer.effect(
               user: lastUser,
               system: [system],
               small: true,
+              // Un-mute the conductor for triage: a live probe showed muted minimax-m3
+              // degrades shape-classification accuracy 6.1% (mis-types build as audit) —
+              // the ~800ms latency buys accuracy and avoids expensive downstream misroutes.
+              unmuteReasoning: true,
               tools: {},
               model: mdl,
               sessionID,
@@ -443,10 +447,11 @@ export const layer = Layer.effect(
     /**
      * §1.1b — the conductor-tier `TriageComplete` port for `judgeArming`, built
      * like `triageDispatch`'s conductor branch (the turn's own bound model, the
-     * "summary" hidden agent, all tools denied) but with `unmuteReasoning: true` —
-     * arming is a judgement that needs the conductor to reason (muted, minimax
-     * over-fires STRONG-grounded diagnoses; triage stays muted). Returns `null` on
-     * any failure so the caller degrades to `heuristicArming`.
+     * "summary" hidden agent, all tools denied) and, like triage, with
+     * `unmuteReasoning: true` — arming is a judgement that needs the conductor to
+     * reason (muted, minimax over-fires STRONG-grounded diagnoses; muted minimax
+     * also mis-shapes triage extraction). Returns `null` on any failure so the
+     * caller degrades to `heuristicArming`.
      *
      * @sem domain=routing role=extractor
      */
@@ -471,8 +476,8 @@ export const layer = Layer.effect(
               small: true,
               // Un-mute the conductor for this one call: arming is a judgement that
               // needs minimax to reason through grounding strength — muted, it over-fires
-              // STRONG-grounded diagnoses (PROMPT_SLICING_CORPUS.md R2). Unlike triage,
-              // which stays muted (extraction, not judgement). 12s ARMING_TIMEOUT_MS covers it.
+              // STRONG-grounded diagnoses (PROMPT_SLICING_CORPUS.md R2). Triage now also
+              // un-mutes (muted minimax mis-shapes extraction too). 12s ARMING_TIMEOUT_MS covers it.
               unmuteReasoning: true,
               tools: {},
               model: mdl,

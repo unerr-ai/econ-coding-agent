@@ -210,8 +210,8 @@ describe("runTurnTriage", () => {
       const verdict = await runTurnTriage({ userPrompt: "Fix the profile-name bug.", complete })
       expect(verdict).toBeNull()
     },
-    // waits out the full TRIAGE_TIMEOUT_MS (8s) race — needs more than bun's 5s default
-    12_000,
+    // waits out the full TRIAGE_TIMEOUT_MS (10s) race — needs more than bun's 5s default
+    14_000,
   )
 
   test("a rejected complete callback resolves to null", async () => {
