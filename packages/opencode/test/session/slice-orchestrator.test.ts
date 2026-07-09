@@ -552,11 +552,12 @@ describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
       constraints: [{ quote: "don't touch the tests", kind: "no-test-edit" }],
       confidence: "high",
     }
-    const preamble = triagePreamble(verdict)
+    const preamble = triagePreamble(verdict, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })
     expect(preamble).toContain("2 goals extracted, confidence=high")
     expect(preamble).toContain('"fix the login bug" — done when: login succeeds')
     expect(preamble).toContain("[build, needs-plan]")
     expect(preamble).toContain('CONSTRAINT (no-test-edit): "don\'t touch the tests"')
+    expect(preamble).not.toContain("TURN FLAGGED")
   })
 
   it("singular goal wording and a missing deliverable fall back to a generic done-when", () => {
@@ -565,10 +566,42 @@ describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
       constraints: [],
       confidence: "low",
     }
-    const preamble = triagePreamble(verdict)
+    const preamble = triagePreamble(verdict, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })
     expect(preamble).toContain("1 goal extracted, confidence=low")
     expect(preamble).toContain("done when: the goal is satisfied")
     expect(preamble).not.toContain("CONSTRAINT")
+    expect(preamble).not.toContain("TURN FLAGGED")
+  })
+
+  it("appends a decomposition-bias line when the arming judge flagged the turn ambiguous", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "figure out why checkout fails intermittently", shape: "diagnosis-vague", deliverable: "" }],
+      constraints: [],
+      confidence: "low",
+    }
+    const preamble = triagePreamble(verdict, { armLocalization: false, hardness: "moderate", ambiguity: "ambiguous" })
+    expect(preamble).toContain("TURN FLAGGED AMBIGUOUS")
+    expect(preamble).toContain("prefer todowrite over inline single-shot handling")
+  })
+
+  it("appends a decomposition-bias line when the arming judge flagged the turn hard, even if ambiguity is clear", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "migrate every caller to the new API", shape: "build", deliverable: "all callers updated" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const preamble = triagePreamble(verdict, { armLocalization: false, hardness: "hard", ambiguity: "clear" })
+    expect(preamble).toContain("TURN FLAGGED HARD")
+  })
+
+  it("flags both AMBIGUOUS/HARD when the arming judge fires on both axes", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "something is broken somewhere in checkout", shape: "diagnosis-vague", deliverable: "" }],
+      constraints: [],
+      confidence: "low",
+    }
+    const preamble = triagePreamble(verdict, { armLocalization: true, hardness: "hard", ambiguity: "ambiguous" })
+    expect(preamble).toContain("TURN FLAGGED AMBIGUOUS/HARD")
   })
 })
 

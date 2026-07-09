@@ -428,9 +428,21 @@ export const layer = Layer.effect(
               messages: [{ role: "user", content: user }],
             })
             .pipe(
-              Stream.filter(LLMEvent.is.textDelta),
-              Stream.map((e) => e.text),
-              Stream.mkString,
+              // Un-muted, the JSON answer can land as reasoningDelta instead of
+              // textDelta, or content can be length-starved by verbose reasoning
+              // (finish_reason:"length", content empty, all tokens in
+              // reasoning_content) — collect both separately and prefer content,
+              // falling back to reasoning only when content is empty.
+              Stream.filter((e) => LLMEvent.is.textDelta(e) || LLMEvent.is.reasoningDelta(e)),
+              Stream.runFold(
+                () => ({ content: "", reasoning: "" }),
+                (acc, e) => {
+                  if (LLMEvent.is.textDelta(e)) acc.content += e.text
+                  else acc.reasoning += e.text
+                  return acc
+                },
+              ),
+              Effect.map(({ content, reasoning }) => content.trim() || reasoning),
               Effect.orDie,
             ),
         )
@@ -486,9 +498,20 @@ export const layer = Layer.effect(
               messages: [{ role: "user", content: user }],
             })
             .pipe(
-              Stream.filter(LLMEvent.is.textDelta),
-              Stream.map((e) => e.text),
-              Stream.mkString,
+              // Un-muted, the JSON answer can land as reasoningDelta instead of
+              // textDelta, or content can be length-starved by verbose reasoning —
+              // collect both separately and prefer content, falling back to
+              // reasoning only when content is empty (mirrors triageDispatch above).
+              Stream.filter((e) => LLMEvent.is.textDelta(e) || LLMEvent.is.reasoningDelta(e)),
+              Stream.runFold(
+                () => ({ content: "", reasoning: "" }),
+                (acc, e) => {
+                  if (LLMEvent.is.textDelta(e)) acc.content += e.text
+                  else acc.reasoning += e.text
+                  return acc
+                },
+              ),
+              Effect.map(({ content, reasoning }) => content.trim() || reasoning),
               Effect.orDie,
             ),
         )
@@ -1817,7 +1840,7 @@ export const layer = Layer.effect(
               if (verdict) {
                 // U1/U2 — a non-null verdict is the decider: it replaces
                 // classifyTurnShape's preamble/gate/seed role for this turn.
-                turnPreamble = triagePreamble(verdict)
+                turnPreamble = triagePreamble(verdict, arming ?? heuristicArming(verdict))
                 turnGoalCount = verdict.goals.length
                 yield* Effect.logInfo("turn_triage", { "session.id": sessionID, ...triageTelemetry(verdict) })
 

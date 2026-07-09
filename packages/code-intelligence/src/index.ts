@@ -215,7 +215,9 @@ export * from "./rm-verifier.js"
 export * from "./judge.js"
 export * from "./compose-rungs.js"
 export * from "./slice-loop.js"
+export * from "./posterior-uncertainty.js"
 export * from "./evaluator.js"
+export * from "./resolution-phase.js"
 export * from "./cache-switch.js"
 
 // econ OL-7.7: retrieval-augmented slice wiring — deterministic graph facts

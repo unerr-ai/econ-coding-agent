@@ -15,6 +15,7 @@ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import { applyAdaptiveReasoning } from "./reasoning-gate"
+import { getArmingDecision } from "../arming-store"
 import { sessionAffinityFor } from "@opencode-ai/code-intelligence"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
@@ -139,6 +140,28 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   if (input.unmuteReasoning && options.reasoningEffort === "none") {
     delete options.reasoningEffort
     yield* Effect.logInfo("reasoning un-muted (explicit)", { sessionID: input.sessionID, reason: "unmuteReasoning" })
+  }
+  // Turn-level ambiguity trigger (task #52): the per-slice difficulty floor
+  // (allocation.ts) only fires once the conductor has decomposed a turn into
+  // typed slices — a turn it handles inline, no decomposition, never reaches it
+  // and gets authored at the conductor's cheap baseline despite being flagged
+  // ambiguous or hard. Floors the conductor's OWN reasoning at reasoner-grade
+  // ("high", the same effort reasoner/oracle ship at) for every non-housekeeping
+  // step of the turn — never a model/tier swap, which run-19's live-fire proved
+  // costly at turn-open (tier-router.ts: "the lead agent is never swapped at
+  // turn-open"). One-way: only fires from the muted "none" baseline, so a turn
+  // OL-7.5's plan-raise (or this same floor on an earlier step) already lifted
+  // is left untouched, never lowered.
+  if (!input.small && options.reasoningEffort === "none") {
+    const arming = getArmingDecision(input.sessionID)
+    if (arming && (arming.ambiguity === "ambiguous" || arming.hardness === "hard")) {
+      options.reasoningEffort = "high"
+      yield* Effect.logInfo("reasoning un-muted (turn ambiguity floor)", {
+        sessionID: input.sessionID,
+        ambiguity: arming.ambiguity,
+        hardness: arming.hardness,
+      })
+    }
   }
   const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(input.messages, options)
   if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID, reason: reasoningGate })

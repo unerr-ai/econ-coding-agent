@@ -1335,3 +1335,167 @@ describe("runSliceLoop — FSM table (sliceTransition drives squeeze/climb/settl
     expect(result.outcomes.every((o) => o.state === "accepted")).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Task #48 — posterior-uncertainty gate: a green sound-rung verdict on a
+// prior-flagged (ambiguous/hard) slice still earns ONE generator escalation
+// when the posterior signal reads high. Unflagged or confident slices accept
+// on green unchanged — the cost thesis never inverts.
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
+  // hardness:"hard" floors allocateSlice's generator tier at "reasoner"
+  // (allocation.ts's difficulty floor); no `snapshot` dep is injected so the
+  // mechanical round-down (evaluator.ts step 3) stays blocked (containment
+  // unavailable) and the tier holds at "reasoner" — escalateTier("reasoner")
+  // is "oracle", giving a clean, deterministic one-hop climb to assert on.
+  const flaggedSlice: LoopSlice = {
+    id: "flagged",
+    prompt: "p",
+    sliceType: "mechanical",
+    coupling: "low",
+    testStrength: "testable",
+    verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    hardness: "hard",
+  }
+
+  it("green + prior-flagged + high uncertainty (confidenceGenerate fallback) ⇒ exactly one extra generator escalation", async () => {
+    const { dispatch, calls } = recordingDispatch({
+      onCheap: () => ({ text: "cheap patch", trajectory: { events: [] } }),
+      onEscalated: (req) => ({ text: `reviewed:${req.tier}`, trajectory: { events: [] } }),
+    })
+    const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([flaggedSlice], {
+      dispatch,
+      runCommand: passRunner, // both the cheap attempt and the review re-verify green
+      confidenceGenerate: async () => 0.1, // low self-confidence → high uncertainty
+      onProvenance: (e) => provenance.push(e),
+    })
+
+    const outcome = result.outcomes[0]
+    expect(calls.map((c) => c.tier)).toEqual(["reasoner", "oracle"])
+    expect(calls.map((c) => c.escalated)).toEqual([false, true])
+    expect(outcome.attempts).toBe(2)
+    expect(outcome.state).toBe("escalated")
+    expect(outcome.output).toBe("reviewed:oracle")
+    const loud = provenance.find((p) => p.rungReason === "posterior-uncertain-review")
+    expect(loud).toBeDefined()
+    expect(loud).toMatchObject({ fromTier: "reasoner", toTier: "oracle" })
+  })
+
+  it("prefers a dispatch-supplied result.uncertainty over the confidenceGenerate fallback", async () => {
+    const { dispatch, calls } = recordingDispatch({
+      onCheap: () => ({
+        text: "cheap patch",
+        trajectory: { events: [] },
+        uncertainty: { kind: "perplexity", value: 10, high: true },
+      }),
+      onEscalated: (req) => ({ text: `reviewed:${req.tier}`, trajectory: { events: [] } }),
+    })
+    let confidenceGenerateCalls = 0
+    const result = await runSliceLoop([flaggedSlice], {
+      dispatch,
+      runCommand: passRunner,
+      confidenceGenerate: async () => {
+        confidenceGenerateCalls += 1
+        return 0.99 // would NOT escalate if consulted — proves the fallback never ran
+      },
+    })
+
+    expect(confidenceGenerateCalls).toBe(0)
+    expect(calls.length).toBe(2)
+    expect(result.outcomes[0].attempts).toBe(2)
+    expect(result.outcomes[0].state).toBe("escalated")
+  })
+
+  it("green + unflagged ⇒ accepts unchanged, even with a high-uncertainty confidenceGenerate", async () => {
+    const unflaggedSlice: LoopSlice = {
+      id: "plain",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "low",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+    }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([unflaggedSlice], {
+      dispatch,
+      runCommand: passRunner,
+      confidenceGenerate: async () => 0.05, // very low confidence — would trigger if flagged
+    })
+
+    const outcome = result.outcomes[0]
+    expect(calls.length).toBe(1)
+    expect(outcome.attempts).toBe(1)
+    expect(outcome.state).toBe("accepted")
+  })
+
+  it("green + prior-flagged (ambiguous) + confident ⇒ accepts unchanged, no escalation", async () => {
+    const ambiguousSlice: LoopSlice = {
+      id: "amb",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "low",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+      ambiguity: "ambiguous",
+    }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([ambiguousSlice], {
+      dispatch,
+      runCommand: passRunner,
+      confidenceGenerate: async () => 0.95, // high confidence → uncertainty below the threshold
+    })
+
+    const outcome = result.outcomes[0]
+    expect(calls.length).toBe(1)
+    expect(outcome.attempts).toBe(1)
+    expect(outcome.state).toBe("accepted")
+  })
+
+  it("falls back to the cheap accepted output when the escalation review itself fails re-verification", async () => {
+    let runs = 0
+    const cheapPassesReviewFails = async (): Promise<CommandResult> => {
+      runs += 1
+      return runs === 1 ? { exitCode: 0, stdout: "ok", stderr: "" } : { exitCode: 1, stdout: "", stderr: "typecheck failed: TS2322" }
+    }
+    const { dispatch, calls } = recordingDispatch({
+      onCheap: () => ({ text: "cheap patch", trajectory: { events: [] } }),
+      onEscalated: (req) => ({ text: `reviewed:${req.tier}`, trajectory: { events: [] } }),
+    })
+    const result = await runSliceLoop([flaggedSlice], {
+      dispatch,
+      runCommand: cheapPassesReviewFails,
+      confidenceGenerate: async () => 0.1,
+    })
+
+    const outcome = result.outcomes[0]
+    // Second dispatch DID happen (the one-shot review), but its re-verification
+    // rejected — never force-replace a proven-green result with one that failed.
+    expect(calls.length).toBe(2)
+    expect(outcome.attempts).toBe(2)
+    expect(outcome.state).toBe("accepted")
+    expect(outcome.output).toBe("cheap patch")
+  })
+
+  it("never fires on a read-only (recon/verify) slice even when flagged + confidenceGenerate reads high", async () => {
+    const reconSlice: LoopSlice = {
+      id: "recon-flagged",
+      prompt: "p",
+      sliceType: "recon",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "test", command: "bun test" }],
+      hardness: "hard",
+    }
+    const { dispatch, calls } = recordingDispatch()
+    const result = await runSliceLoop([reconSlice], {
+      dispatch,
+      runCommand: passRunner,
+      confidenceGenerate: async () => 0.05,
+    })
+
+    expect(calls.length).toBe(1)
+    expect(result.outcomes[0].attempts).toBe(1)
+    expect(result.outcomes[0].state).toBe("accepted")
+  })
+})

@@ -44,7 +44,7 @@ describe("evaluate — rule 1: base tier delegates to allocateSlice", () => {
     const input = { coupling: "high" as const, testStrength: "untestable" as const }
     const base = allocateSlice(input)
     const v = evaluate(ctx(input))
-    expect(v.tier).toBe(base.tier) // oracle — the residual cell
+    expect(v.tier).toBe(base.tier) // executor now — coupling routes the verifier, not the tier
     expect(v.reasons[0]).toBe(`base: ${base.reason}`)
   })
 
@@ -132,11 +132,12 @@ describe("evaluate — rule 3: mechanical round-down (verify strong AND containm
         sliceType: "recon",
         coupling: "high",
         testStrength: "untestable",
+        hardness: "hard", // lifts the base to reasoner so a (wrongly) applied round-down would be visible
         verifyStrength: strongVerify,
         containmentAvailable: true,
       }),
     )
-    expect(v.tier).toBe("oracle") // base for high-coupling · untestable, untouched
+    expect(v.tier).toBe("reasoner") // non-mechanical → round-down skipped, the difficulty-floor base stands
   })
 })
 
@@ -173,7 +174,8 @@ describe("evaluate — rule 4: venue affinity", () => {
     const v = evaluate(
       ctx({
         coupling: "high",
-        testStrength: "untestable", // base -> oracle
+        testStrength: "untestable",
+        hardness: "hard", // difficulty floor -> reasoner base, differs from the executor requester
         venue: { requestingTier: "executor", sameFilesInScope: true, readOnlyParallel: false },
       }),
     )
@@ -272,11 +274,12 @@ describe("evaluate — rule 6: per-turn hysteresis", () => {
     const v = evaluate(
       ctx({
         coupling: "high",
-        testStrength: "untestable", // base -> oracle
+        testStrength: "untestable",
+        hardness: "hard", // difficulty floor -> reasoner base (distinct from lastTier=executor)
         hysteresis: { lastTier: "executor", signalDelta: true },
       }),
     )
-    expect(v.tier).toBe("oracle")
+    expect(v.tier).toBe("reasoner")
   })
 
   it("is a no-op when there's no lastTier to hold", () => {
@@ -284,10 +287,11 @@ describe("evaluate — rule 6: per-turn hysteresis", () => {
       ctx({
         coupling: "high",
         testStrength: "untestable",
+        hardness: "hard", // difficulty floor -> reasoner base; hysteresis with no lastTier leaves it
         hysteresis: { signalDelta: false },
       }),
     )
-    expect(v.tier).toBe("oracle")
+    expect(v.tier).toBe("reasoner")
   })
 })
 
@@ -415,6 +419,22 @@ describe("validatePlan", () => {
     const result = validatePlan(tree, 10_000)
     expect(result.ok).toBe(false)
     expect(result.violations.some((v) => v.includes("bare: missing objective, outputShape, successCriterion"))).toBe(true)
+  })
+
+  it("structural-only mode (requireNodeFields:false) skips the per-node field check", () => {
+    // A todo-derived plan carries no objective/outputShape/successCriterion; the
+    // #53 resolution gate must pass it on structure alone.
+    const tree: PlanNode[] = [{ id: "bare" }]
+    const result = validatePlan(tree, 10_000, { requireNodeFields: false })
+    expect(result.ok).toBe(true)
+  })
+
+  it("structural-only mode still flags a structural breach (>5 children)", () => {
+    const children = Array.from({ length: 6 }, (_, i) => ({ id: `c-${i}`, parentId: "goal" }))
+    const tree: PlanNode[] = [{ id: "goal" }, ...children]
+    const result = validatePlan(tree, 10_000, { requireNodeFields: false })
+    expect(result.ok).toBe(false)
+    expect(result.violations.some((v) => v.includes("goal: 6 children"))).toBe(true)
   })
 
   it("flags summed estimateTokens over 70% of budget", () => {

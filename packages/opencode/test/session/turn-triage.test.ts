@@ -179,6 +179,111 @@ describe("parseTriageResponse", () => {
     expect(verdict).not.toBeNull()
     expect(verdict!.goals[0].quote).toBe("Fix the Login bug")
   })
+
+  // Un-muted, the conductor can stream a reasoning preamble (or trailing
+  // prose) alongside the JSON answer, or land the answer entirely in the
+  // reasoning channel — see triageDispatch/armingDispatch, prompt.ts. These
+  // cases cover the resulting `extractJsonObject` tolerance.
+
+  test("a reasoning preamble before the JSON parses correctly", () => {
+    const userPrompt = "Fix the login bug where users can't reset their password."
+    const json = JSON.stringify({
+      goals: [
+        {
+          quote: "Fix the login bug where users can't reset their password.",
+          shape: "diagnosis-grounded",
+          deliverable: "password reset works again",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    const raw = `Let me think through this step by step before answering.\n${json}`
+
+    const verdict = parseTriageResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals).toHaveLength(1)
+    expect(verdict!.goals[0].quote).toBe("Fix the login bug where users can't reset their password.")
+  })
+
+  test("trailing prose after the JSON is ignored by the balanced-brace extraction", () => {
+    const userPrompt = "Fix the profile-name bug."
+    const json = JSON.stringify({
+      goals: [
+        {
+          quote: "Fix the profile-name bug.",
+          shape: "diagnosis-grounded",
+          deliverable: "profile name displays correctly",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    const raw = `${json}\n\nThat's my full analysis of the request.`
+
+    const verdict = parseTriageResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals).toHaveLength(1)
+  })
+
+  test("a brace inside a quoted field doesn't confuse the balanced-brace extraction", () => {
+    const userPrompt = "Fix the config parser for the {invalid} block syntax."
+    const json = JSON.stringify({
+      goals: [
+        {
+          quote: "Fix the config parser for the {invalid} block syntax.",
+          shape: "diagnosis-grounded",
+          deliverable: "parser handles {invalid} blocks",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    const raw = `Reasoning first.\n${json}\ntrailing`
+
+    const verdict = parseTriageResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].quote).toBe("Fix the config parser for the {invalid} block syntax.")
+  })
+
+  test("empty raw (the extraction pipe yielded no content and no reasoning) returns null", () => {
+    const userPrompt = "Fix the profile-name bug."
+    expect(parseTriageResponse("", userPrompt)).toBeNull()
+  })
+
+  test("a reasoning-only fallback string — no content, just a reasoning stream ending in the JSON answer — still parses", () => {
+    const userPrompt = "Fix the profile-name bug."
+    const json = JSON.stringify({
+      goals: [
+        {
+          quote: "Fix the profile-name bug.",
+          shape: "diagnosis-grounded",
+          deliverable: "profile name displays correctly",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    // Mirrors triageDispatch's `content.trim() || reasoning` fallback: when the
+    // model's content channel comes back empty, the un-muted reasoning stream
+    // (which typically opens with commentary before the JSON answer) is passed
+    // to the parser instead.
+    const raw = `I need to identify the goals and constraints in this prompt. The user wants a bug fixed, so the shape is diagnosis-grounded.\n${json}`
+
+    const verdict = parseTriageResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals).toHaveLength(1)
+    expect(verdict!.goals[0].shape).toBe("diagnosis-grounded")
+  })
+
+  test("raw text with no JSON object at all returns null", () => {
+    const userPrompt = "Fix the profile-name bug."
+    expect(parseTriageResponse("Sure, I can help with that.", userPrompt)).toBeNull()
+  })
 })
 
 describe("runTurnTriage", () => {

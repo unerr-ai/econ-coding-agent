@@ -43,7 +43,13 @@
  * evaluation (the first dispatch and each escalation re-entry) is also
  * reported via the optional `onEvaluation` dep, carrying the decided
  * tier/venue and the rule reasons behind them, for the receipt's evaluator
- * drilldown (U6).
+ * drilldown (U6). A green verdict on a prior-flagged (ambiguous/hard) slice
+ * still passes through the posterior-uncertainty gate (task #48,
+ * posterior-uncertainty.ts): a high-uncertainty signal (from the dispatch's
+ * own logprobs, or the optional `confidenceGenerate` fallback) earns ONE
+ * extra generator escalation even though verification already passed,
+ * reported via `onProvenance` as `"posterior-uncertain-review"` — every
+ * unflagged or confident slice accepts on green unchanged.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -87,6 +93,7 @@ import {
   type SliceTransitionCtx,
   type SliceVerdictLike,
 } from "./orchestration-fsm.js"
+import { posteriorEscalation, signalFromConfidence, type UncertaintySignal } from "./posterior-uncertainty.js"
 
 // ---------------------------------------------------------------------------
 // Slice + dispatch types
@@ -162,7 +169,7 @@ export function isReadOnlySlice(sliceType?: string): boolean {
   return sliceType === "recon" || sliceType === "verify"
 }
 
-/** What a dispatch returns: the output, the trajectory to monitor, and usage for double-pay. */
+/** What a dispatch returns: the output, the trajectory to monitor, usage for double-pay, and (task #48) an optional posterior-uncertainty signal. */
 export interface SliceDispatchResult {
   /** The tier's final text output. */
   text: string
@@ -170,14 +177,22 @@ export interface SliceDispatchResult {
   trajectory: SliceTrajectory
   /** Cost/tokens for the honest net receipt; when absent the loop records zeros + the tier's model. */
   usage?: { model: string; cost: number; tokens: TurnTokens }
+  /**
+   * Host-populated posterior-uncertainty reading (task #48/#56) when logprobs
+   * were available for this dispatch — e.g. `signalFromPerplexity(perplexityFromLogprobs(answerChannelTokens(...)))`.
+   * Absent ⇒ the accept-on-green gate falls back to `deps.confidenceGenerate` (if injected) or skips the gate entirely.
+   */
+  uncertainty?: UncertaintySignal
 }
 
 /**
  * Everything the loop depends on from the outside world. All optional deps
  * degrade safely: no runner ⇒ sound rung inapplicable; no judge ⇒ judge rung
- * skipped; no QE sampler ⇒ QE fallback skipped; no dispatchTimeout/loopTimeout
- * ⇒ a real wall-clock race (OL-9.3e). `dispatch` is the only required dep —
- * it is the sub-agent spawn (live: the task tool; tests: a double).
+ * skipped; no QE sampler ⇒ QE fallback skipped; no confidenceGenerate ⇒ the
+ * posterior-uncertainty gate's verbalized fallback skipped (task #48); no
+ * dispatchTimeout/loopTimeout ⇒ a real wall-clock race (OL-9.3e). `dispatch`
+ * is the only required dep — it is the sub-agent spawn (live: the task tool;
+ * tests: a double).
  *
  * @sem domain=routing role=type
  */
@@ -190,6 +205,15 @@ export interface SliceLoopDeps {
   judgeGenerate?: (prompt: string) => Promise<string>
   /** QE self-consistency extra-sample sampler for the untestable fallback rung (OL-3.5a). */
   qeGenerate?: (sliceId: string) => Promise<string>
+  /**
+   * Verbalized self-confidence fallback (task #48's posterior-uncertainty gate):
+   * asks the generator to self-report confidence (0 = none, 1 = certain) in its
+   * own just-accepted answer. Consulted ONLY when a green cheap attempt has no
+   * `result.uncertainty` AND the slice was prior-flagged (ambiguous/hard).
+   * Absent ⇒ that fallback is skipped — a prior-flagged green slice with no
+   * logprob signal and no confidence dep accepts unchanged.
+   */
+  confidenceGenerate?: (sliceId: string) => Promise<number>
   /** Allocation override for tests; defaults to the pure allocateSlice. */
   allocate?: (input: SliceAllocationInput) => SliceAllocation
   /** Double-pay telemetry sink; the loop always also accumulates into its own ledger. */
@@ -964,6 +988,55 @@ async function runSlice(
   })
 
   if (verdict.accepted) {
+    // Posterior-uncertainty gate (task #48, posterior-uncertainty.ts): a green
+    // sound-rung verdict only proves the code RUNS, never that it solved the
+    // RIGHT problem. On a prior-flagged (ambiguous/hard) slice with a
+    // high-uncertainty signal, ONE generator escalation still fires even
+    // though verification already passed; every other slice (unflagged, or
+    // flagged-but-confident) accepts unchanged — the cost-thesis guard lives
+    // in `posteriorEscalation` itself, this is just the one-shot dispatch.
+    const priorFlagged = slice.ambiguity === "ambiguous" || slice.hardness === "hard"
+    if (priorFlagged && !isReadOnlySlice(slice.sliceType) && maxAttempts >= 2) {
+      const posteriorSignal =
+        cheap.uncertainty ??
+        (deps.confidenceGenerate ? signalFromConfidence(await deps.confidenceGenerate(slice.id)) : undefined)
+      const posteriorTargetTier = escalateTier(allocation.tier)
+      if (posteriorTargetTier !== allocation.tier && posteriorEscalation(posteriorSignal, slice)) {
+        deps.onProvenance?.({
+          sliceId: slice.id,
+          fromTier: allocation.tier,
+          toTier: posteriorTargetTier,
+          rungReason: "posterior-uncertain-review",
+        })
+        // Snapshot the cheap-accepted tree (if bracketed) before the hop reverts
+        // to the pre-cheap baseline — the restore path below needs it back if
+        // the second opinion doesn't hold up under re-verification.
+        const acceptedHash = deps.snapshot ? await deps.snapshot.track() : undefined
+        const posteriorHop = await dispatchRescueHop({
+          slice,
+          deps,
+          ledger,
+          allocation,
+          atTier: allocation.tier,
+          targetTier: posteriorTargetTier,
+          attempt: cheap,
+          attemptVerdict: verdict,
+          currentHash,
+          baseTimeoutMs,
+          dispatchTimeout,
+          tierModel,
+          attempts: 1,
+        })
+        if (posteriorHop.verdict.accepted) {
+          return settleAccepted(posteriorHop.verdict, posteriorHop.result, 2, posteriorHop.escalation)
+        }
+        // The second opinion did not re-verify — never force-replace a
+        // proven-green result with one that failed re-verification; restore
+        // the cheap-accepted tree (when bracketed) and keep the cheap output.
+        if (deps.snapshot && acceptedHash !== undefined) await deps.snapshot.restore(acceptedHash)
+        return settleAccepted(verdict, cheap, 2)
+      }
+    }
     return settleAccepted(verdict, cheap, 1)
   }
 

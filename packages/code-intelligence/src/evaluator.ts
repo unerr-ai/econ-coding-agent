@@ -242,12 +242,21 @@ const BUDGET_FRACTION = 0.7
  * the `dependsOn` graph), ≤3 inbound dependencies per node, tree depth ≤3,
  * ≤5 children per node, every node carries an objective/output shape/success
  * criterion, and the summed token estimate leaves 30% of `budget` for
- * synthesis and correction. Pure: no I/O.
+ * synthesis and correction. Pure: no I/O. In structural-only mode
+ * (`opts.requireNodeFields=false`) the per-node objective/outputShape/
+ * successCriterion check is skipped — a todo-derived plan carries none of
+ * those, so the #53 resolution gate validates structure (cycles, depth,
+ * branching, deps, budget) only.
  *
  * @sem domain=routing role=validator
  */
-export function validatePlan(tree: PlanNode[], budget: number): PlanValidation {
+export function validatePlan(
+  tree: PlanNode[],
+  budget: number,
+  opts: { requireNodeFields?: boolean } = {},
+): PlanValidation {
   const violations: string[] = []
+  const requireNodeFields = opts.requireNodeFields ?? true
   const byId = new Map(tree.map((node) => [node.id, node]))
 
   // --- Cycle detection over the combined parent-hierarchy + dependency graph.
@@ -331,14 +340,19 @@ export function validatePlan(tree: PlanNode[], budget: number): PlanValidation {
     }
   }
 
-  // --- Every node needs an objective, an output shape, and a success criterion.
-  for (const node of tree) {
-    const missing: string[] = []
-    if (!node.objective) missing.push("objective")
-    if (!node.outputShape) missing.push("outputShape")
-    if (!node.successCriterion) missing.push("successCriterion")
-    if (missing.length > 0) {
-      violations.push(`${node.id}: missing ${missing.join(", ")}`)
+  // --- Every node needs an objective, an output shape, and a success
+  //     criterion. Skipped in structural-only mode (requireNodeFields=false):
+  //     a todo-derived plan carries none of these, so the resolution gate
+  //     checks cycles/depth/branching/deps/budget only.
+  if (requireNodeFields) {
+    for (const node of tree) {
+      const missing: string[] = []
+      if (!node.objective) missing.push("objective")
+      if (!node.outputShape) missing.push("outputShape")
+      if (!node.successCriterion) missing.push("successCriterion")
+      if (missing.length > 0) {
+        violations.push(`${node.id}: missing ${missing.join(", ")}`)
+      }
     }
   }
 

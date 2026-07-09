@@ -1014,12 +1014,16 @@ export function reconcileSettledSlices<T extends OrchestrationTodo, S extends Or
  * lists every extracted goal (shape + deliverable) and constraint so the
  * conductor tracks each goal against its own todo instead of collapsing a
  * compound turn into one label. Pure and byte-stable for the turn — the same
- * verdict always yields the same string — so it rides the system-array tail
- * exactly like `categoryPreamble`, replacing it whenever triage is non-null.
+ * verdict AND arming decision always yield the same string — so it rides the
+ * system-array tail exactly like `categoryPreamble`, replacing it whenever
+ * triage is non-null. Task #52 — when the arming judge flagged the turn
+ * ambiguous or hard, appends a decomposition-bias line steering the conductor
+ * toward `todowrite` over an inline single-shot, so the work reaches the
+ * per-slice tier allocator instead of being authored inline.
  *
  * @sem domain=routing role=config
  */
-export function triagePreamble(verdict: TriageVerdict): string {
+export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): string {
   const lines = [
     `TURN SHAPE: triage (${verdict.goals.length} goal${verdict.goals.length === 1 ? "" : "s"} extracted, confidence=${verdict.confidence}).`,
   ]
@@ -1031,6 +1035,14 @@ export function triagePreamble(verdict: TriageVerdict): string {
     lines.push(`CONSTRAINT (${constraint.kind}): "${constraint.quote}"`)
   }
   lines.push("Track each goal against its own todo; verify each independently — never conflate or drop one for another.")
+  if (arming.ambiguity === "ambiguous" || arming.hardness === "hard") {
+    const flags = [arming.ambiguity === "ambiguous" ? "AMBIGUOUS" : null, arming.hardness === "hard" ? "HARD" : null]
+      .filter((x): x is string => x !== null)
+      .join("/")
+    lines.push(
+      `TURN FLAGGED ${flags}: prefer todowrite over inline single-shot handling — decompose so each goal routes through the per-slice tier allocator.`,
+    )
+  }
   return lines.join("\n")
 }
 

@@ -119,21 +119,64 @@ function parseConstraint(entry: unknown, userPrompt: string): TriageConstraint |
 }
 
 /**
- * Parse + validate the model's raw JSON output into a `TriageVerdict`.
- * Extraction-only enforcement lives entirely here: a goal or constraint
- * whose `quote` isn't a verbatim, case-sensitive substring of `userPrompt`
- * is dropped, not corrected; an invalid `shape`/`kind` drops the whole
- * entry; zero surviving goals, or more than `TRIAGE_MAX_GOALS`, fails the
- * verdict outright; malformed JSON fails outright. Never throws.
+ * Extract the first balanced top-level JSON object from `raw` — brace-match
+ * from the first `{` to its matching `}`, tracking string literals so a
+ * quoted `{`/`}` never miscounts depth — so a reasoning preamble before the
+ * JSON, or trailing prose after it, doesn't break parsing. Returns `null`
+ * when no balanced object is found.
+ */
+function extractJsonObject(raw: string): string | null {
+  const start = raw.indexOf("{")
+  if (start === -1) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) return raw.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * Parse + validate the model's raw output into a `TriageVerdict`. Tolerant
+ * of a reasoning preamble or trailing prose around the JSON — extracts the
+ * first balanced top-level `{...}` object (`extractJsonObject`) before
+ * parsing, since an un-muted conductor can stream commentary alongside the
+ * answer (§4.1, prompt.ts `triageDispatch`/`armingDispatch`). Extraction-only
+ * enforcement lives entirely here otherwise: a goal or constraint whose
+ * `quote` isn't a verbatim, case-sensitive substring of `userPrompt` is
+ * dropped, not corrected; an invalid `shape`/`kind` drops the whole entry;
+ * zero surviving goals, or more than `TRIAGE_MAX_GOALS`, fails the verdict
+ * outright; no balanced JSON object, or malformed JSON, fails outright.
+ * Never throws.
  *
  * @sem domain=routing role=extractor
  */
 export function parseTriageResponse(raw: string, userPrompt: string): TriageVerdict | null {
   if (!raw || !userPrompt) return null
 
+  const jsonText = extractJsonObject(raw)
+  if (!jsonText) return null
+
   let parsed: unknown
   try {
-    parsed = JSON.parse(raw)
+    parsed = JSON.parse(jsonText)
   } catch {
     return null
   }
