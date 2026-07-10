@@ -254,6 +254,14 @@ const fmtTokens = (n: number): string => {
 }
 
 /**
+ * Avg tool calls per assistant message ("turns" here = assistant messages) —
+ * the L1 batching health metric (>1.0 means batching is happening). Pure
+ * ratio, 2 decimals; "—" when there are no messages to divide by.
+ */
+const batchPerMsg = (toolCalls: number, turns: number): string =>
+  turns > 0 ? (toolCalls / turns).toFixed(2) : "—"
+
+/**
  * Render an {@link EconReceipt} as a compact multi-line block for the
  * end-of-turn surface: overall totals, a routing line naming which tiers ran
  * above conductor (when any did — double-pay alone only counts mid-turn
@@ -265,7 +273,7 @@ const fmtTokens = (n: number): string => {
 export function formatReceipt(r: EconReceipt): string {
   const lines: string[] = []
   lines.push("econ receipt")
-  lines.push(`  turns:      ${r.turns} · tool calls: ${r.toolCalls}`)
+  lines.push(`  turns:      ${r.turns} · tool calls: ${r.toolCalls} · batch ${batchPerMsg(r.toolCalls, r.turns)}/msg`)
   lines.push(
     `  tokens:     ${fmtTokens(r.totalTokens)} — in ${fmtTokens(r.tokens.input)} · out ${fmtTokens(r.tokens.output)} · think ${fmtTokens(r.tokens.reasoning)} · cache r ${fmtTokens(r.tokens.cacheRead)} / w ${fmtTokens(r.tokens.cacheWrite)}`,
   )
@@ -304,7 +312,7 @@ export function formatReceipt(r: EconReceipt): string {
       const cacheCell =
         acct === "none" ? "n/a" : acct === "nonstream-only" && t.cacheHitRatio === 0 ? "n/r" : pct(t.cacheHitRatio)
       lines.push(
-        `    ${t.tier.padEnd(nameWidth)}  ${t.turns} turn${t.turns === 1 ? "" : "s"} · ${fmtTokens(t.totalTokens)} tok (${pct(t.tokenShare)}) · ${money(t.cost, r.currency)} (${pct(t.costShare)}) · cache ${cacheCell} · ${t.toolCalls} tool${t.toolCalls === 1 ? "" : "s"} · ctx ${ctx}`,
+        `    ${t.tier.padEnd(nameWidth)}  ${t.turns} turn${t.turns === 1 ? "" : "s"} · ${fmtTokens(t.totalTokens)} tok (${pct(t.tokenShare)}) · ${money(t.cost, r.currency)} (${pct(t.costShare)}) · cache ${cacheCell} · ${t.toolCalls} tool${t.toolCalls === 1 ? "" : "s"} (${batchPerMsg(t.toolCalls, t.turns)}/msg) · ctx ${ctx}`,
       )
     }
   }

@@ -72,9 +72,13 @@ turn, state in one or two lines what the user is really asking and how you will 
 grounded in the session so far and the recon. Skip recon and this step only for a trivial
 one-step answer.
 
-1a. Batch every independent tool call into the SAME step. Orientation reads of several files,
-parallel searches, and unrelated commands ride together in one message — one call per step
-wastes a full round trip and turns a one-step orientation into ten.
+1a. RULE: before sending, count your tool calls. If this message has ONE tool call and another
+independent read/search/command is already known to be needed, you are wasting a full round
+trip — add it to THIS message. Independent = neither call needs the other's output; example:
+reading a file AND running its tests = two calls, ONE message. Only a dependency chain — the
+next call needs this call's output — justifies a single-call message. Orientation reads of
+several files, parallel searches, and unrelated commands ride together in one message — a
+one-call-per-step habit turns a one-step orientation into ten.
 
 2. Default to inline. Solve the task yourself in this session — read, edit, run, verify, all
 in this thread — before reaching for decomposition. Most tasks are FASTER solved inline,
@@ -232,8 +236,11 @@ was dispatched. Work from the brief and the code named in it; do not re-read the
 ## 3. Executor personas (`PERSONA_DELTA`, `prompts/personas.ts`)
 
 Six persona deltas layered on the executor tier. Each embeds the same batching directive
-("Issue every independent tool call in the SAME response … Act from your first response") and
-a strict NEVER block; the distinctive parts:
+(`BATCH_RULE`, `prompts/fragments.ts:5` — "RULE: before sending, count your tool calls. If this
+message has ONE tool call and another independent read/search/command is already known to be
+needed, you are wasting a full round trip — add it to THIS message. …" + "Act from your first
+response: your first message should already carry tool calls, not a preamble.") and a strict
+NEVER block; the distinctive parts:
 
 | Persona | Role (one line from its prompt) | Report format keys | Permissions (`econ-defaults.ts:27-56`) |
 |---|---|---|---|

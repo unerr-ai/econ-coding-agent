@@ -1,6 +1,9 @@
 // Single source of the tool-call batching doctrine — composed into the tool block below, all six persona deltas (personas.ts), and the conductor delta (roles.ts).
+// L1.2b (turn-cache-economics.md §5-L1): the earlier advisory phrasing was ignored by the default
+// tier (266/267 messages single-call) — failure-taxonomy learning: a RULE with a consequence and a
+// self-check steers this tier; advice does not. Hence the count-your-calls form below.
 export const BATCH_RULE =
-  "Issue every independent tool call in the SAME response — reads of different files, parallel searches, independent commands. One call per turn wastes a full round trip."
+  "RULE: before sending, count your tool calls. If this message has ONE tool call and another independent read/search/command is already known to be needed, you are wasting a full round trip — add it to THIS message. Independent = neither call needs the other's output; example: reading a file AND running its tests = two calls, ONE message. Only a dependency chain — the next call needs this call's output — justifies a single-call message."
 
 // Generate the authoritative tool-usage section from the live advertised tool set (Sprint 5b §10.1).
 // This is the single source of truth: the prompt can never name a tool the model isn't given, which

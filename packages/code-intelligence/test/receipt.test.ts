@@ -7,9 +7,10 @@
  *     peakContextTokens; contextLimit present for econ tiers (conductor/
  *     executor/reasoner/oracle) and absent for "unknown"; catches pass-
  *     through; largeTiers override; double-pay reflects the ledger snapshot.
- *  2. formatReceipt — overall block (turns/tools/tokens/cache/context/spend/
- *     reduction/double-pay), per-tier drilldown lines, catches rendering. No
- *     frontier baseline anywhere.
+ *  2. formatReceipt — overall block (turns/tools/batch-per-msg/tokens/cache/
+ *     context/spend/reduction/double-pay), per-tier drilldown lines (including
+ *     the per-tier batch ratio), catches rendering. No frontier baseline
+ *     anywhere.
  *  3. formatReceipt cache honesty + routing — the "n/r" (not a hollow 0%)
  *     render only fires for a tier whose bound model's registry
  *     cacheAccounting is "nonstream-only"; since W8 (2026-07-06) fixed the
@@ -415,6 +416,30 @@ describe("formatReceipt", () => {
     expect(text.toLowerCase()).not.toContain("frontier")
     expect(text).not.toContain("NET SAVED")
     expect(text).not.toContain("gross saved")
+  })
+
+  it("turns line carries the batch ratio (tool calls per assistant message, 2 decimals)", () => {
+    // makeStore: 3 assistant messages ("turns"), 10 tool calls → 10/3 ≈ 3.33
+    const store = makeStore()
+    const ledger = new DoublePayLedger()
+    const text = formatReceipt(buildReceipt({ store, ledger }))
+    expect(text).toContain("turns:      3 · tool calls: 10 · batch 3.33/msg")
+  })
+
+  it("batch ratio renders '—' when there are no assistant messages (turns=0)", () => {
+    const store = new TelemetryStore() // no events recorded
+    const ledger = new DoublePayLedger()
+    const text = formatReceipt(buildReceipt({ store, ledger }))
+    expect(text).toContain("turns:      0 · tool calls: 0 · batch —/msg")
+  })
+
+  it("each per-tier line carries its own batch ratio after the tools count", () => {
+    const store = makeStore()
+    const ledger = new DoublePayLedger()
+    const text = formatReceipt(buildReceipt({ store, ledger }))
+    // conductor: 5 tool calls over 2 messages → 2.50; oracle: 5 over 1 → 5.00
+    expect(text).toMatch(/conductor\s+2 turns.*5 tools \(2\.50\/msg\)/)
+    expect(text).toMatch(/oracle\s+1 turn .*5 tools \(5\.00\/msg\)/)
   })
 
   it("renders a per-tier drilldown line for each tier with tokens, cost, cache, tools, and context", () => {

@@ -8,6 +8,7 @@ import { Tool } from "@/tool/tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
+import { Token } from "@/util/token"
 
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
@@ -138,7 +139,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 messageID: input.processor.message.id,
               })),
             }
-            const decorated = yield* nudgeStandaloneTodowrite(item.id, ctx, output)
+            const nudged = yield* nudgeStandaloneTodowrite(item.id, ctx, output)
+            const decorated = withStepBudget(item.id, ctx, nudged)
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
@@ -215,7 +217,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               )
             const content = JSON.stringify({ resources: filtered.map(formatMcpResource) }, null, 2)
             const truncated = yield* truncate.output(content, {}, input.agent)
-            const output = {
+            const output = withStepBudget(LIST_MCP_RESOURCES_TOOL, ctx, {
               title: parsed.server ? `MCP resources: ${parsed.server}` : "MCP resources",
               metadata: {
                 count: filtered.length,
@@ -225,7 +227,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 ...(truncated.truncated && { outputPath: truncated.outputPath }),
               },
               output: truncated.content,
-            }
+            })
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: LIST_MCP_RESOURCES_TOOL, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -290,7 +292,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
             const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
             const truncated = yield* truncate.output(formatted.text, {}, input.agent)
-            const output = {
+            const output = withStepBudget(READ_MCP_RESOURCE_TOOL, ctx, {
               title: `MCP resource: ${parsed.uri}`,
               metadata: {
                 server: parsed.server,
@@ -307,7 +309,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 sessionID: ctx.sessionID,
                 messageID: input.processor.message.id,
               })),
-            }
+            })
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: READ_MCP_RESOURCE_TOOL, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -403,7 +405,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
           }
 
-          const output = {
+          const output = withStepBudget(key, ctx, {
             title: "",
             metadata,
             output: truncated.content,
@@ -414,7 +416,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               messageID: input.processor.message.id,
             })),
             content: result.content,
-          }
+          })
           if (opts.abortSignal?.aborted) {
             yield* input.processor.completeToolCall(opts.toolCallId, output)
           }
@@ -426,6 +428,61 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   return tools
 })
+
+// L1.3 guardrail (docs/design/turn-cache-economics.md §5-L1 sub-move 3): aggregate
+// tool-result token budget per assistant message (step), so a batched fan-out cannot
+// stuff the context it was meant to save. Once a step's combined results exceed the
+// budget, each SUBSEQUENT result in the same message is cut to its first
+// STEP_RESULT_TRUNCATE_LINES lines with a self-describing marker — truncation is
+// visible, never silent. The call that crosses the boundary is kept whole; only later
+// calls are cut. Exempt tools (mutating/bookkeeping) are never truncated — governance
+// fires at the edit and plan state must stay intact — but their tokens still count
+// toward the step total.
+export const STEP_RESULT_BUDGET = 20_000
+const STEP_RESULT_TRUNCATE_LINES = 40
+const STEP_BUDGET_EXEMPT = new Set(["edit", "write", "skill", "todowrite", "todoread"])
+
+// One accumulator per session, pinned to that session's current assistant message; a
+// new messageID replaces the old entry, so stale steps drop without timers.
+const stepResultTokens = new Map<string, { messageID: string; tokens: number }>()
+
+export function applyStepResultBudget(input: {
+  sessionID: string
+  messageID: string
+  toolID: string
+  output: string
+}): string {
+  let entry = stepResultTokens.get(input.sessionID)
+  if (!entry || entry.messageID !== input.messageID) {
+    entry = { messageID: input.messageID, tokens: 0 }
+    stepResultTokens.set(input.sessionID, entry)
+  }
+  const breached = entry.tokens > STEP_RESULT_BUDGET
+  entry.tokens += Token.estimate(input.output)
+  if (!breached || STEP_BUDGET_EXEMPT.has(input.toolID)) return input.output
+  const lines = input.output.split("\n")
+  if (lines.length <= STEP_RESULT_TRUNCATE_LINES) return input.output
+  const kept = lines.slice(0, STEP_RESULT_TRUNCATE_LINES).join("\n")
+  const total = Math.round(entry.tokens / 1000)
+  return `${kept}\n[step result budget reached — output truncated to ${STEP_RESULT_TRUNCATE_LINES} lines. Total this step: ~${total}k tokens. Re-run narrower, or continue in the next message.]`
+}
+
+// Last transform on every wrapper's result, so the persisted part, the after-hook
+// payload, and the model all see the same value.
+const withStepBudget = <T extends { output: string }>(
+  toolID: string,
+  ctx: Pick<Tool.Context, "sessionID" | "messageID">,
+  result: T,
+): T =>
+  ({
+    ...result,
+    output: applyStepResultBudget({
+      sessionID: ctx.sessionID,
+      messageID: ctx.messageID,
+      toolID,
+      output: result.output,
+    }),
+  }) as T
 
 // Sorts an assembled tool map by id so the same enabled-tool set always serializes to
 // the same key order in the model request, independent of the async resolution order

@@ -1254,7 +1254,23 @@ const SLUG_OVERRIDES: Record<string, string> = {
   amazon: "bedrock",
 }
 
-export function providerOptions(model: Provider.Model, options: { [x: string]: any }) {
+export function providerOptions(model: Provider.Model, options: { [x: string]: any }, hasTools = false) {
+  // L1.1: batched tool calls need the explicit provider hint. @ai-sdk/openai-compatible's
+  // getArgs spreads every key under providerOptions["<name>"] that is not a known SDK
+  // option into the request body verbatim, so `parallel_tool_calls` here lands on the
+  // wire as-is. Gated on tools presence — OpenAI-compatible servers 400 on the field
+  // when the request carries no tools — which also strips a config-supplied value from
+  // tool-less (small/housekeeping) calls. Copy, never mutate: callers share this object
+  // with messageTransformOptions.
+  if (model.api.npm === "@ai-sdk/openai-compatible") {
+    if (hasTools) {
+      options = { ...options, parallel_tool_calls: true }
+    } else if ("parallel_tool_calls" in options) {
+      const { parallel_tool_calls: _, ...rest } = options
+      options = rest
+    }
+  }
+
   if (model.api.npm === "@ai-sdk/gateway") {
     // Gateway providerOptions are split across two namespaces:
     // - `gateway`: gateway-native routing/caching controls (order, only, byok, etc.)

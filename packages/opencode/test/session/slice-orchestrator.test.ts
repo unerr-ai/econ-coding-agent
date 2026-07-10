@@ -1131,6 +1131,8 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(/until it passes GREEN/)
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(/Never weaken, delete, skip, or edit the failing test/i)
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(/ranked candidate sites/i)
+    // L1.2b — the localization framing pre-marks the orientation batch (probes ride in ONE message).
+    expect(LOCALIZATION_SLICE_CONTENT).toMatch(/orientation probes .* as ONE message with multiple tool calls/i)
     // No trace of the old read-only shackle.
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/Do not write code/i)
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/deliver targets, mechanism, and strategy only/i)

@@ -313,7 +313,13 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
+          providerOptions: ProviderTransform.providerOptions(
+            input.model,
+            prepared.params.options,
+            // Wire-level tools presence: "invalid" is the repair sink filtered out of
+            // activeTools below, so it alone never puts tools on the request.
+            Object.keys(prepared.tools).some((x) => x !== "invalid"),
+          ),
           activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
           tools: prepared.tools,
           toolChoice: input.toolChoice,

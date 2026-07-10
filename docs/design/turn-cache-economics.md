@@ -369,8 +369,16 @@ Measurement is the receipt (observability is the product surface): per-run `cach
 `[econ:meter]` already expose the inputs; add a `reclaimed` line attributing tokens saved by
 batch/mask/memo (the AC-5.1 attribution plumbing already exists for compaction).
 
+**Metric note (2026-07-10):** the conductor model was swapped (minimax-m3 → deepseek-v4-flash,
+user-directed) between the baseline ladder and L1 validation, so raw $ is not comparable
+across that boundary. The primary L1 validation metrics are **turns (assistant messages)**
+and **batch calls/msg** (the receipt's new `batch X.XX/msg` line) — both model-comparable;
+cost stays on the receipt as secondary evidence. The §1 baselines (1.00–1.01 calls/msg) were
+measured on minimax-m3.
+
 Guardrails (standing, from the build directive):
-- **No ✓ case may get more expensive** — the nine cheap instances are the regression set.
+- **No ✓ case may get more expensive** — the nine cheap instances are the regression set
+  (compared within the same conductor binding; across a model swap, compare turns).
 - Pass rate is senior to cost: a lever that costs even one real-graded pass is reverted.
 - Masking/memoization must be observable in the transcript (tombstones, "unchanged since
   step N") — never silently absent context, or debugging trust dies.

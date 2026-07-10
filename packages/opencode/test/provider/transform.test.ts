@@ -718,6 +718,56 @@ describe("ProviderTransform.providerOptions", () => {
       groq: { reasoningFormat: "parsed" },
     })
   })
+
+  // L1.1: the openai-compatible SDK spreads unknown providerOptions keys into the request
+  // body verbatim, so parallel_tool_calls must appear exactly when the request has tools.
+  describe("openai-compatible parallel_tool_calls", () => {
+    const createCompatModel = () =>
+      createModel({
+        id: "compat/some-model",
+        providerID: "compat",
+        api: {
+          id: "some-model",
+          url: "https://compat.example.com/v1",
+          npm: "@ai-sdk/openai-compatible",
+        },
+      })
+
+    test("sets parallel_tool_calls when the request has tools", () => {
+      expect(ProviderTransform.providerOptions(createCompatModel(), { reasoningEffort: "none" }, true)).toEqual({
+        compat: { reasoningEffort: "none", parallel_tool_calls: true },
+      })
+    })
+
+    test("omits parallel_tool_calls when the request has no tools", () => {
+      expect(ProviderTransform.providerOptions(createCompatModel(), { reasoningEffort: "none" }, false)).toEqual({
+        compat: { reasoningEffort: "none" },
+      })
+    })
+
+    test("strips a config-supplied parallel_tool_calls on tool-less requests", () => {
+      expect(
+        ProviderTransform.providerOptions(createCompatModel(), { reasoningEffort: "none", parallel_tool_calls: true }),
+      ).toEqual({
+        compat: { reasoningEffort: "none" },
+      })
+    })
+
+    test("does not mutate the caller's options object", () => {
+      const options = { reasoningEffort: "none", parallel_tool_calls: true }
+      ProviderTransform.providerOptions(createCompatModel(), options, false)
+      expect(options).toEqual({ reasoningEffort: "none", parallel_tool_calls: true })
+      const bare = { reasoningEffort: "none" }
+      ProviderTransform.providerOptions(createCompatModel(), bare, true)
+      expect(bare).toEqual({ reasoningEffort: "none" })
+    })
+
+    test("does not add parallel_tool_calls for non-openai-compatible packages", () => {
+      expect(ProviderTransform.providerOptions(createModel(), { reasoningEffort: "high" }, true)).toEqual({
+        openai: { reasoningEffort: "high" },
+      })
+    })
+  })
 })
 
 describe("ProviderTransform.schema - gemini array items", () => {

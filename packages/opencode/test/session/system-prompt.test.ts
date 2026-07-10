@@ -83,16 +83,16 @@ describe("SystemPrompt.toolUsage", () => {
     expect(out).not.toContain("- `webfetch`")
   })
 
-  test("batching note present when more than one tool id (OL-9.4a)", () => {
+  test("batching note present when more than one tool id (OL-9.4a, hardened per L1.2b)", () => {
     const out = toolUsage(["read", "search"])
     expect(out).toContain(
-      "- Issue every independent tool call in the SAME response — reads of different files, parallel searches, independent commands. One call per turn wastes a full round trip.",
+      "- RULE: before sending, count your tool calls. If this message has ONE tool call and another independent read/search/command is already known to be needed, you are wasting a full round trip — add it to THIS message. Independent = neither call needs the other's output; example: reading a file AND running its tests = two calls, ONE message. Only a dependency chain — the next call needs this call's output — justifies a single-call message.",
     )
   })
 
   test("batching note absent for a single tool id", () => {
     const out = toolUsage(["read"])
-    expect(out).not.toContain("Issue every independent tool call in the SAME response")
+    expect(out).not.toContain("RULE: before sending, count your tool calls")
   })
 
   test("de-dupes ids — duplicate read counts once", () => {
@@ -167,12 +167,10 @@ describe("SystemPrompt.select — personas (OL-9.1a)", () => {
       expect(result[1]).toContain(marker)
     })
 
-    test(`${persona}: delta carries the shared batching directive (OL-9.4a)`, () => {
+    test(`${persona}: delta carries the shared batching directive (OL-9.4a, hardened per L1.2b)`, () => {
       const agent = { name: persona } as any
       const result = select(qwenModel, agent)
-      expect(result[1]).toContain(
-        "Issue every independent tool call in the SAME response — reads of different files, parallel searches, independent commands.",
-      )
+      expect(result[1]).toContain("RULE: before sending, count your tool calls.")
     })
   }
 })

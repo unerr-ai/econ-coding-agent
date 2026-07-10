@@ -105,7 +105,7 @@ Usage notes:
     - Write files: Use Write (NOT echo >/cat <<EOF)
     - Communication: Output text directly (NOT echo/printf)
   - When issuing multiple commands:
-    - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
+    - When running multiple independent commands, send them as multiple bash tool calls in a SINGLE message (e.g. \`git status\` and \`git diff\` = two calls, one message); never chain independent commands with \`&&\` just to fit one call.
     - ${chain}
     - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
     - DO NOT use newlines to separate commands (newlines are ok in quoted strings)

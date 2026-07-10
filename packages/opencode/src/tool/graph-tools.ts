@@ -1188,7 +1188,8 @@ export const GraphSearchCodeTool = Tool.define(
       "  refs      — callers/callees of a named entity; pair with direction (replaces get_references)\n" +
       "Returns lean index by default — signatures, line ranges, caller counts, 15-line preview. " +
       "Full bodies are cached under _meta.cache_ref; supply cache_ref+offset to page them in. " +
-      "ur|rsk lines are emitted for chokepoint entities (fan-in ≥ 10).",
+      "ur|rsk lines are emitted for chokepoint entities (fan-in ≥ 10). " +
+      "Independent searches (different symbols/patterns) belong in ONE message as parallel calls.",
     parameters: SearchCodeParameters,
     execute: (input: Schema.Schema.Type<typeof SearchCodeParameters>, _ctx: Tool.Context) => {
       // cache_ref fast-path: return a withheld full-body slice without recomputing.
