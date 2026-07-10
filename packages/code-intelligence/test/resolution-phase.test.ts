@@ -70,6 +70,47 @@ describe("resolutionDecision — branch 1: not flagged", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Branch 1b — armed vague diagnosis, first pass: localize before slicing
+// ---------------------------------------------------------------------------
+
+describe("resolutionDecision — branch 1b: armLocalization first pass", () => {
+  it("resolves first on the first pass even when candidatePlan validates (the 11885 case)", () => {
+    const result = resolutionDecision(
+      baseInput({ ambiguity: "ambiguous", armLocalization: true, candidatePlan: VALID_PLAN }),
+    )
+    expect(result.mode).toBe("resolve-first")
+    expect(result.reason).toBe("armed vague diagnosis — localize before slicing")
+  })
+
+  it("lets the valid-plan short-circuit fire after one localization pass (decompose WITH knowledge)", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        armLocalization: true,
+        resolveAttempts: 1,
+        candidatePlan: VALID_PLAN,
+      }),
+    )
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach fixed, plan valid")
+  })
+
+  it("does not bypass the short-circuit when armLocalization is false", () => {
+    const result = resolutionDecision(
+      baseInput({ ambiguity: "ambiguous", armLocalization: false, candidatePlan: VALID_PLAN }),
+    )
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach fixed, plan valid")
+  })
+
+  it("never fires on an unflagged task — branch 1 takes precedence", () => {
+    const result = resolutionDecision(baseInput({ armLocalization: true }))
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach not uncertain")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Branch 2 — short-circuit: flagged but a valid candidate plan already exists
 // ---------------------------------------------------------------------------
 

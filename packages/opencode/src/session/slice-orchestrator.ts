@@ -1913,6 +1913,9 @@ export async function runConductorOrchestration(
           requireNodeFields: false,
           interactive,
           needsUserInput: resolveAttempts >= 1,
+          // 1b — an armed vague diagnosis localizes inline before any
+          // decompose (11885: blind decompose 0/3 vs inline 2/2).
+          armLocalization: deps.arming?.armLocalization === true,
           resolveAttempts,
         }).mode
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })

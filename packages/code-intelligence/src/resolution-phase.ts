@@ -44,6 +44,8 @@ export interface ResolutionInput {
   needsUserInput?: boolean
   /** When false, the step-2 valid-plan short-circuit validates `candidatePlan` STRUCTURALLY ONLY — cycles/depth/branching/deps/budget — skipping the per-node objective/outputShape/successCriterion check. Required for todo-derived plans (which carry no node fields). Defaults to true (full validation). */
   requireNodeFields?: boolean
+  /** True when the arming judge armed the localization pre-pass (vague diagnosis, location/mechanism unknown). On the FIRST pass this bypasses the step-2 valid-plan short-circuit: a structurally-valid todo skeleton is a plan-shaped guess, not a fixed approach — decompose-blind went 0/3 on the 11885 live fires while localize-inline-first passed 2/2. */
+  armLocalization?: boolean
   /** How many resolution passes already ran on this task — the recursion/termination guard. */
   resolveAttempts: number
 }
@@ -82,6 +84,20 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
   // 1. Not flagged — no approach uncertainty to resolve; decompose straight away.
   if (!flagged) {
     return { mode: "decompose-now", reason: "approach not uncertain" }
+  }
+
+  // 1b. Armed vague diagnosis, first pass — localize before slicing. The
+  //     step-2 short-circuit below must not fire here: the candidate plan is
+  //     a turn-open todo skeleton (a plan-shaped guess), and armLocalization
+  //     means the location/mechanism is by definition unknown, so no approach
+  //     can be "fixed" yet. 11885 live fires: decompose-blind through the
+  //     short-circuit went 0/3 (two wrong fixes, one design-slice timeout) at
+  //     2–3× the cost of localize-inline-first, which passed 2/2. After one
+  //     localization pass (resolveAttempts ≥ 1) the short-circuit applies —
+  //     decomposing WITH knowledge stays available, and MAX_RESOLVE_ATTEMPTS
+  //     still terminates the loop.
+  if (input.armLocalization === true && input.resolveAttempts === 0) {
+    return { mode: "resolve-first", reason: "armed vague diagnosis — localize before slicing" }
   }
 
   // 2. Short-circuit: a prior resolution pass already produced a plan, and it
