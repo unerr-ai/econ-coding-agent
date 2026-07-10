@@ -119,6 +119,11 @@ interface StoredRange {
   start: number
   end: number
   timestamp: number
+  /** Assistant step (messageID) whose result delivered this range — L3.2 stub
+   * provenance ("unchanged since step N"), so the model can find the prior
+   * result instead of guessing. Optional: pure state-layer callers (tests)
+   * may omit it; read.ts/write.ts always supply it. */
+  messageID?: string
 }
 
 interface FileMemo {
@@ -173,6 +178,8 @@ export interface ReadDedupResult {
   exact?: boolean
   /** When hit: the stored range that covers the request — used to word a strict-subset notice. */
   covering?: { start: number; end: number }
+  /** When hit: the step (messageID) that delivered the covering range — L3.2 "unchanged since step N". */
+  messageID?: string
 }
 
 /**
@@ -191,6 +198,8 @@ export function checkReadDedup(input: {
   start: number
   end: number
   fileHash: string
+  /** Current assistant step — recorded with the range for L3.2 stub provenance. */
+  messageID?: string
   force?: boolean
   now?: number
 }): ReadDedupResult {
@@ -215,13 +224,15 @@ export function checkReadDedup(input: {
     )
     if (covering) {
       // No new information delivered — refresh the covering range's recency
-      // instead of growing the memo with a redundant entry.
+      // instead of growing the memo with a redundant entry. Provenance stays
+      // on the step that actually delivered the data, never the repeat.
       covering.timestamp = now
       touch(sessionMemo, input.filePath, covering)
       return {
         hit: true,
         exact: covering.start === input.start && covering.end === input.end,
         covering: { start: covering.start, end: covering.end },
+        messageID: covering.messageID,
       }
     }
   }
@@ -231,11 +242,27 @@ export function checkReadDedup(input: {
     sessionMemo.files.set(input.filePath, fileMemo)
   }
 
-  const range: StoredRange = { start: input.start, end: input.end, timestamp: now }
+  const range: StoredRange = { start: input.start, end: input.end, timestamp: now, messageID: input.messageID }
   fileMemo.ranges.push(range)
   touch(sessionMemo, input.filePath, range)
 
   return { hit: false }
+}
+
+/**
+ * Drop every stored range for one file in one session. L3.2 guard
+ * (docs/design/turn-cache-economics.md §5-L3 item 2): the session wrapper
+ * (session/tools.ts) calls this when a read result was cut by the per-result
+ * ceiling (L2.4) or the aggregate step budget (L1.3) AFTER the memo had
+ * already recorded its range as delivered — the model never saw the full
+ * range, so a later identical read must re-deliver, never stub toward
+ * truncated data. Per-file and implicit; the rest of the session memo stands.
+ */
+export function dropReadDedup(sessionID: string, filePath: string): void {
+  const sessionMemo = sessions.get(sessionID)
+  if (!sessionMemo) return
+  if (!sessionMemo.files.delete(filePath)) return
+  sessionMemo.order = sessionMemo.order.filter((entry) => entry.filePath !== filePath)
 }
 
 /**
@@ -248,7 +275,14 @@ export function checkReadDedup(input: {
  * Best-effort by construction: never throws on a normal input, so callers
  * (write.ts) can call it without risking the write itself.
  */
-export function seedReadDedup(input: { sessionID: string; filePath: string; content: string; now?: number }): void {
+export function seedReadDedup(input: {
+  sessionID: string
+  filePath: string
+  content: string
+  /** The writing step — a later dedup stub cites it as the range's provenance. */
+  messageID?: string
+  now?: number
+}): void {
   const { fileHash, lineCount, exceedsReadCap } = computeContentHash(input.content)
   if (exceedsReadCap) return
 
@@ -267,7 +301,7 @@ export function seedReadDedup(input: { sessionID: string; filePath: string; cont
   const fileMemo: FileMemo = { fileHash, ranges: [] }
   sessionMemo.files.set(input.filePath, fileMemo)
 
-  const range: StoredRange = { start: 1, end: lineCount + 1, timestamp: now }
+  const range: StoredRange = { start: 1, end: lineCount + 1, timestamp: now, messageID: input.messageID }
   fileMemo.ranges.push(range)
   touch(sessionMemo, input.filePath, range)
 }

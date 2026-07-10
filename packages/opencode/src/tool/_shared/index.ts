@@ -20,6 +20,7 @@ export {
   hashContent,
   checkReadDedup,
   clearReadDedup,
+  dropReadDedup,
   seedReadDedup,
   computeContentHash,
   IncrementalLineHasher,

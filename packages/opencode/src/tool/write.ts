@@ -110,7 +110,7 @@ export const WriteTool = Tool.define(
           // case and the memo re-arms as usual — best-effort, never fails
           // the write.
           try {
-            seedReadDedup({ sessionID: ctx.sessionID, filePath: filepath, content: contentNew })
+            seedReadDedup({ sessionID: ctx.sessionID, filePath: filepath, content: contentNew, messageID: ctx.messageID })
           } catch {
             // best-effort only
           }

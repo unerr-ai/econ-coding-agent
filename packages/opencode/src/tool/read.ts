@@ -414,23 +414,30 @@ export const ReadTool = Tool.define<
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
       }
 
-      // econ read-dedup guard: a requested range that is a subset of an
-      // already-delivered range of the same unchanged file (an exact repeat
-      // included) returns a short notice instead of re-delivering the body,
-      // saving the round-trip. `force` bypasses and refreshes the memo; a
-      // changed file naturally misses the stored fileHash.
+      // L3.2 read-dedup stub (docs/design/turn-cache-economics.md §5-L3 item 2): a
+      // requested range that is a subset of an already-delivered range of the same
+      // unchanged file (an exact repeat included) returns a step-provenanced stub
+      // instead of re-delivering the body (~18% of reads are dups, CC telemetry).
+      // Freshness is the whole-file content hash — strictly stronger than mtime; a
+      // changed file naturally misses the stored fileHash and re-arms per file.
+      // Errored reads never reach this point, so they are never recorded; a prior
+      // result cut by the L2.4 ceiling / L1.3 step budget is un-recorded by the
+      // session wrapper (dropReadDedup in session/tools.ts), so it never stubs.
+      // `force` bypasses and refreshes the memo.
       const dedup = checkReadDedup({
         sessionID: ctx.sessionID,
         filePath: filepath,
         start: file.offset,
         end: last + 1,
         fileHash: file.fileHash,
+        messageID: ctx.messageID,
         force: params.force,
       })
       if (dedup.hit) {
+        const step = dedup.messageID ?? "an earlier step"
         const notice = dedup.exact
-          ? `[econ-ctx] ${title} (lines ${file.offset}-${last}) already delivered earlier this session, unchanged — reuse the prior read. Pass force:true if it is no longer in your context.`
-          : `[econ-ctx] ${title} (lines ${file.offset}-${last}) already delivered within an earlier read this session (lines ${dedup.covering!.start}-${dedup.covering!.end - 1}), unchanged — reuse the prior read. Pass force:true if it is no longer in your context.`
+          ? `[read-dedup] unchanged since step ${step} — this exact range (${title} lines ${file.offset}-${last}) was already read and the file has not been modified. See that result (it may have been summarized; carry facts forward). Pass force:true if it is no longer in your context.`
+          : `[read-dedup] unchanged since step ${step} — lines ${file.offset}-${last} of ${title} were already delivered within an earlier read (lines ${dedup.covering!.start}-${dedup.covering!.end - 1}) and the file has not been modified. See that result (it may have been summarized; carry facts forward). Pass force:true if it is no longer in your context.`
         return {
           title,
           output: notice,

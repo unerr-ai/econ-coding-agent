@@ -23,6 +23,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
+import { dropReadDedup } from "@/tool/_shared/read-dedup"
 
 const LIST_MCP_RESOURCES_TOOL = "list_mcp_resources"
 const READ_MCP_RESOURCE_TOOL = "read_mcp_resource"
@@ -147,6 +148,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             const nudged = yield* nudgeStandaloneTodowrite(item.id, ctx, output)
             const decorated = withStepBudget(item.id, ctx, nudged)
+            // L3.2 guard (docs/design/turn-cache-economics.md §5-L3 item 2): if the
+            // ceiling/step budget above cut a read result, the read-dedup memo's
+            // just-recorded range no longer matches what the model actually saw —
+            // drop the file's ranges so the next identical read re-delivers instead
+            // of stubbing toward truncated data. metadata.display.path is the
+            // resolved path read.ts keyed the memo with (the raw filePath arg may
+            // be relative); only the raw-content read path carries it, and only
+            // that path records ranges.
+            if (item.id === "read" && decorated.output !== nudged.output) {
+              const display = isRecord(nudged.metadata) ? nudged.metadata["display"] : undefined
+              if (isRecord(display) && typeof display["path"] === "string") {
+                dropReadDedup(ctx.sessionID, display["path"])
+              }
+            }
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
@@ -456,6 +471,34 @@ const STEP_BUDGET_EXEMPT = new Set(["edit", "write", "skill", "todowrite", "todo
 // new messageID replaces the old entry, so stale steps drop without timers.
 const stepResultTokens = new Map<string, { messageID: string; tokens: number }>()
 
+// L2.4 unified per-RESULT ceiling (docs/design/turn-cache-economics.md §5-L2 item 4):
+// finishes what M3's per-tool search caps started — one hard token ceiling on EVERY
+// individual tool result at the same wrapper sites the L1.3 aggregate covers, applied
+// BEFORE the aggregate accounting so a single 70k blob enters the step ledger at ≤6k
+// instead of instantly breaching it. Grounded decision on oversize handling: the
+// design doc's "spills to cache_ref pagination" path was checked and NOT taken —
+// graph-tools/webfetch/websearch page *arrays of items* (tool/_shared/cache.ts
+// put/getSlice) behind each tool's own `cache_ref` parameter; there is no generic
+// paging entry point at this layer, and withStepBudget is the last transform before
+// the part is persisted, so the full output is not retrievable later either. Reusing
+// it would mean new pagination infrastructure (a paging tool or a cache_ref param on
+// every tool), so oversize results are cut at a line boundary with a self-describing
+// marker steering the model to narrow — the M3/L1.3 pattern.
+export const RESULT_TOKEN_CEILING = 6_000
+
+export function applyResultCeiling(input: { toolID: string; output: string }): string {
+  // Same exempt set as L1.3: mutating/bookkeeping results are never cut.
+  if (STEP_BUDGET_EXEMPT.has(input.toolID)) return input.output
+  const raw = Token.estimate(input.output)
+  if (raw <= RESULT_TOKEN_CEILING) return input.output
+  // Proportional cut (exact for any linear Token.estimate), snapped back to the last
+  // full line so the kept text never ends mid-line.
+  const slice = input.output.slice(0, Math.floor(input.output.length * (RESULT_TOKEN_CEILING / raw)))
+  const lastBreak = slice.lastIndexOf("\n")
+  const kept = lastBreak > 0 ? slice.slice(0, lastBreak) : slice
+  return `${kept}\n[result ceiling: ~${Math.round(raw / 1000)}k-token output truncated to ~${Math.round(RESULT_TOKEN_CEILING / 1000)}k. This is a partial view — do not treat it as complete; narrow the call (tighter pattern, smaller range, offset/limit) to see the rest.]`
+}
+
 export function applyStepResultBudget(input: {
   sessionID: string
   messageID: string
@@ -478,21 +521,30 @@ export function applyStepResultBudget(input: {
 }
 
 // Last transform on every wrapper's result, so the persisted part, the after-hook
-// payload, and the model all see the same value.
-const withStepBudget = <T extends { output: string }>(
+// payload, and the model all see the same value. Compose order is ceiling-first
+// (L2.4), then the L1.3 aggregate ledger sees the post-ceiling size. The markers
+// never stack: a post-breach aggregate cut keeps only the first 40 lines, which
+// drops a trailing ceiling marker, and a ceiling-cut result short enough to survive
+// the 40-line rule keeps only its own marker — exactly one marker per result. The
+// L3.1 green-memo stub (metadata.green_memo) is already a tiny self-describing
+// marker and skips the ceiling outright; its tokens still count in the ledger.
+const withStepBudget = <T extends { output: string; metadata?: unknown }>(
   toolID: string,
   ctx: Pick<Tool.Context, "sessionID" | "messageID">,
   result: T,
-): T =>
-  ({
+): T => {
+  const memoStub = isRecord(result.metadata) && result.metadata["green_memo"] === true
+  const ceiled = memoStub ? result.output : applyResultCeiling({ toolID, output: result.output })
+  return {
     ...result,
     output: applyStepResultBudget({
       sessionID: ctx.sessionID,
       messageID: ctx.messageID,
       toolID,
-      output: result.output,
+      output: ceiled,
     }),
-  }) as T
+  } as T
+}
 
 // L3.1 green-test memo (docs/design/turn-cache-economics.md §5-L3 item 1): hard runs spend
 // 12–21 steps re-running test commands that already passed with nothing changed in between

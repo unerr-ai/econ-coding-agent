@@ -10,7 +10,14 @@ import { LSP } from "@/lsp/lsp"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { Instruction } from "../../src/session/instruction"
 import { ReadTool } from "../../src/tool/read"
-import { checkReadDedup, clearReadDedup, hashContent, seedReadDedup, computeContentHash } from "@/tool/_shared/read-dedup"
+import {
+  checkReadDedup,
+  clearReadDedup,
+  dropReadDedup,
+  hashContent,
+  seedReadDedup,
+  computeContentHash,
+} from "@/tool/_shared/read-dedup"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { disposeAllInstances, provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
@@ -76,11 +83,16 @@ describe("tool.read dedup guard", () => {
 
       const first = yield* exec(dir, { filePath })
       expect(first.output).toContain("hello world")
-      expect(first.output).not.toContain("[econ-ctx]")
+      expect(first.output).not.toContain("[read-dedup]")
 
       const second = yield* exec(dir, { filePath })
-      expect(second.output).toContain("[econ-ctx]")
-      expect(second.output).toContain("already delivered earlier this session")
+      // L3.2 stub: marker, step provenance, carry-forward steering, escape hatch —
+      // never impersonating fresh output.
+      expect(second.output).toContain("[read-dedup]")
+      expect(second.output).toContain("unchanged since step msg_test")
+      expect(second.output).toContain("this exact range")
+      expect(second.output).toContain("the file has not been modified")
+      expect(second.output).toContain("it may have been summarized; carry facts forward")
       expect(second.output).toContain("force:true")
       expect(second.output).not.toContain("hello world")
     }),
@@ -94,15 +106,15 @@ describe("tool.read dedup guard", () => {
 
       yield* exec(dir, { filePath })
       const deduped = yield* exec(dir, { filePath })
-      expect(deduped.output).toContain("[econ-ctx]")
+      expect(deduped.output).toContain("[read-dedup]")
 
       const forced = yield* exec(dir, { filePath, force: true })
       expect(forced.output).toContain("hello world")
-      expect(forced.output).not.toContain("[econ-ctx]")
+      expect(forced.output).not.toContain("[read-dedup]")
 
       // force refreshed the memo, so the very next plain repeat is deduped again.
       const again = yield* exec(dir, { filePath })
-      expect(again.output).toContain("[econ-ctx]")
+      expect(again.output).toContain("[read-dedup]")
     }),
   )
 
@@ -118,10 +130,10 @@ describe("tool.read dedup guard", () => {
       yield* put(filePath, "version two")
       const second = yield* exec(dir, { filePath })
       expect(second.output).toContain("version two")
-      expect(second.output).not.toContain("[econ-ctx]")
+      expect(second.output).not.toContain("[read-dedup]")
 
       const third = yield* exec(dir, { filePath })
-      expect(third.output).toContain("[econ-ctx]")
+      expect(third.output).toContain("[read-dedup]")
     }),
   )
 
@@ -134,11 +146,11 @@ describe("tool.read dedup guard", () => {
 
       yield* exec(dir, { filePath, offset: 1, limit: 5 })
       const repeat = yield* exec(dir, { filePath, offset: 1, limit: 5 })
-      expect(repeat.output).toContain("[econ-ctx]")
+      expect(repeat.output).toContain("[read-dedup]")
 
       const otherRange = yield* exec(dir, { filePath, offset: 6, limit: 5 })
       expect(otherRange.output).toContain("line6")
-      expect(otherRange.output).not.toContain("[econ-ctx]")
+      expect(otherRange.output).not.toContain("[read-dedup]")
     }),
   )
 
@@ -151,9 +163,11 @@ describe("tool.read dedup guard", () => {
 
       yield* exec(dir, { filePath })
       const slice = yield* exec(dir, { filePath, offset: 10, limit: 15 })
-      expect(slice.output).toContain("[econ-ctx]")
-      expect(slice.output).toContain("already delivered within an earlier read this session")
+      expect(slice.output).toContain("[read-dedup]")
+      expect(slice.output).toContain("unchanged since step msg_test")
+      expect(slice.output).toContain("already delivered within an earlier read")
       expect(slice.output).toContain("lines 1-50")
+      expect(slice.output).toContain("carry facts forward")
       expect(slice.output).toContain("force:true")
       expect(slice.output).not.toContain("line10:")
     }),
@@ -199,6 +213,91 @@ describe("read-dedup range containment", () => {
 
     const overlap = checkReadDedup({ sessionID: "ses_overlap", filePath: "/tmp/overlap.txt", start: 80, end: 150, fileHash: hash })
     expect(overlap.hit).toBe(false)
+  })
+})
+
+describe("read-dedup step provenance (L3.2)", () => {
+  test("a hit returns the messageID of the step that delivered the covering range, not the repeat's", () => {
+    clearReadDedup()
+    const hash = hashContent("whole file content")
+    checkReadDedup({
+      sessionID: "ses_prov",
+      filePath: "/tmp/prov.txt",
+      start: 1,
+      end: 100,
+      fileHash: hash,
+      messageID: "msg_delivered",
+    })
+
+    const repeat = checkReadDedup({
+      sessionID: "ses_prov",
+      filePath: "/tmp/prov.txt",
+      start: 10,
+      end: 20,
+      fileHash: hash,
+      messageID: "msg_repeat",
+    })
+    expect(repeat.hit).toBe(true)
+    expect(repeat.messageID).toBe("msg_delivered")
+  })
+})
+
+describe("read-dedup truncated-prior-result guard (L3.2)", () => {
+  // A stub pointing at a budget/ceiling-truncated result is a trap: the session
+  // wrapper (session/tools.ts) calls dropReadDedup when it cuts a read result, so
+  // the memo forgets the range the model never fully saw.
+  test("dropReadDedup: the next identical read misses (fresh re-delivery), then re-arms", () => {
+    clearReadDedup()
+    const hash = hashContent("whole file content")
+    checkReadDedup({
+      sessionID: "ses_trunc",
+      filePath: "/tmp/trunc.txt",
+      start: 1,
+      end: 200,
+      fileHash: hash,
+      messageID: "msg_truncated",
+    })
+
+    dropReadDedup("ses_trunc", "/tmp/trunc.txt")
+
+    const fresh = checkReadDedup({
+      sessionID: "ses_trunc",
+      filePath: "/tmp/trunc.txt",
+      start: 1,
+      end: 200,
+      fileHash: hash,
+      messageID: "msg_fresh",
+    })
+    expect(fresh.hit).toBe(false)
+
+    // The fresh (untruncated) delivery re-armed the memo with its own provenance.
+    const repeat = checkReadDedup({
+      sessionID: "ses_trunc",
+      filePath: "/tmp/trunc.txt",
+      start: 1,
+      end: 200,
+      fileHash: hash,
+      messageID: "msg_later",
+    })
+    expect(repeat.hit).toBe(true)
+    expect(repeat.messageID).toBe("msg_fresh")
+  })
+
+  test("dropReadDedup is per-file: other files in the session keep their ranges", () => {
+    clearReadDedup()
+    const hash = hashContent("whole file content")
+    checkReadDedup({ sessionID: "ses_perfile", filePath: "/tmp/a.txt", start: 1, end: 50, fileHash: hash })
+    checkReadDedup({ sessionID: "ses_perfile", filePath: "/tmp/b.txt", start: 1, end: 50, fileHash: hash })
+
+    dropReadDedup("ses_perfile", "/tmp/a.txt")
+
+    expect(
+      checkReadDedup({ sessionID: "ses_perfile", filePath: "/tmp/b.txt", start: 1, end: 50, fileHash: hash }).hit,
+    ).toBe(true)
+    // /tmp/a.txt was dropped: this call misses (and re-records).
+    expect(
+      checkReadDedup({ sessionID: "ses_perfile", filePath: "/tmp/a.txt", start: 1, end: 50, fileHash: hash }).hit,
+    ).toBe(false)
   })
 })
 
@@ -393,7 +492,7 @@ describe("read-dedup seed-from-write", () => {
       seedReadDedup({ sessionID: ctx.sessionID, filePath, content })
 
       const slice = yield* exec(dir, { filePath, offset: 5, limit: 5 })
-      expect(slice.output).toContain("[econ-ctx]")
+      expect(slice.output).toContain("[read-dedup]")
       expect(slice.output).not.toContain("line5:")
     }),
   )
