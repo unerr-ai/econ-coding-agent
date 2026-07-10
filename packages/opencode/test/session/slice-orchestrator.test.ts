@@ -41,6 +41,7 @@ import {
   LOCALIZATION_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
+  diagnosisDeniesTestEdits,
   PLAN_PREPASS_TODO,
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
@@ -1138,6 +1139,24 @@ describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gat
       false,
     )
     expect(promptAuthorizesTestEdits("never rename, rewrite or update the tests")).toBe(false)
+  })
+
+  // F4c — 11885 fire-3: triage constraints are quote-grounded (a ticket that
+  // never mentions tests can't arm the gate) and optimization phrasing evades
+  // the fix-shape regex; the verdict's own diagnosis shape is the evidence.
+  it("diagnosis-shaped goals deny test edits even when the prompt never mentions tests", () => {
+    const ticket =
+      "Combine fast delete queries. When emulating ON DELETE CASCADE via on_delete=models.CASCADE the deletion.Collector will try to perform fast queries which are DELETE FROM table WHERE table.pk IN .... There are cases where the query isn't fast."
+    expect(diagnosisDeniesTestEdits(["diagnosis-vague"], ticket)).toBe(true)
+    expect(diagnosisDeniesTestEdits(["diagnosis-grounded", "qa"], ticket)).toBe(true)
+  })
+
+  it("diagnosis-shape denial yields to explicit test-work authorization and to non-diagnosis turns", () => {
+    expect(diagnosisDeniesTestEdits(["diagnosis-vague"], "the delete path is slow — update the tests to cover it")).toBe(
+      false,
+    )
+    expect(diagnosisDeniesTestEdits(["build"], "add a --json flag to the export command")).toBe(false)
+    expect(diagnosisDeniesTestEdits([], "anything")).toBe(false)
   })
 
   it("no engine-authored prompt string authorizes test edits (registry sweep)", async () => {

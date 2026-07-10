@@ -41,6 +41,7 @@ import {
   GRIND_DESIGN_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
+  diagnosisDeniesTestEdits,
   buildTriageTodoSkeleton,
   childSlicePermission,
   isDeciderSeat,
@@ -1881,9 +1882,17 @@ export const layer = Layer.effect(
 
                 // B3 — triage's constraint is the primary armer; OR in the
                 // governance-regex signal so a turn-read MISS can never disarm
-                // a gate the regex would have armed on its own.
+                // a gate the regex would have armed on its own. F4c ORs in the
+                // verdict's goal shapes: constraints are quote-grounded, so a
+                // ticket that never mentions tests can't arm via triage, and
+                // optimization phrasing evades the fix-shape regex — 11885
+                // fire-3 walked through both gaps and edited the grading tests.
                 const triageDenyTestEdits = verdict.constraints.some((c) => c.kind === "no-test-edit")
-                const denyTestEdits = regexDenyTestEdits || triageDenyTestEdits
+                const shapeDenyTestEdits = diagnosisDeniesTestEdits(
+                  verdict.goals.map((g) => g.shape),
+                  userText,
+                )
+                const denyTestEdits = regexDenyTestEdits || triageDenyTestEdits || shapeDenyTestEdits
                 setTestEditGate(sessionID, denyTestEdits)
                 if (denyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
 

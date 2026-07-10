@@ -1055,6 +1055,22 @@ export function promptAuthorizesTestEdits(userPrompt: string): boolean {
 }
 
 /** Engine-authored frame-seed contents (the diagnosis pre-pass writer and the P12 build plan seed) — the typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
+/**
+ * F4c — diagnosis-shaped work denies test edits by default (11885 fire-3 live
+ * fire): triage constraints are quote-grounded, so a ticket that never
+ * mentions tests can NEVER arm the gate via triage, and optimization-phrased
+ * diagnosis work evades the fix-shape regex — with both doors shut, slices
+ * edited the grading tests and self-greened a wrong fix twice. The verdict's
+ * own goal shapes are the missing evidence: when a turn diagnoses failing
+ * behavior, that behavior's tests ARE the contract, so editing them is
+ * tampering unless the user explicitly asked for test work (B3 above).
+ *
+ * @sem domain=routing role=router
+ */
+export function diagnosisDeniesTestEdits(goalShapes: readonly string[], userPrompt: string): boolean {
+  return goalShapes.some((s) => s.startsWith("diagnosis")) && !promptAuthorizesTestEdits(userPrompt)
+}
+
 const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT])
 
 /**
