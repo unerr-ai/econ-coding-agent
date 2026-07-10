@@ -39,7 +39,7 @@ Two verdict columns, and they mean different things — read them as a **before 
 | # | instance | bench time | baseline verdict | prior routing | base_commit | F2P/P2P | current result (this session) |
 |---|---|---|---|---|---|---|---|
 | 1 | django-12039 | 159s | ✓ pass | conductor-only | `58c1acb1d605` | 1/11 | ✅ **re-validated 2026-07-10 on the W1–W4 engine — PASS: $0.1158, 100% conductor, 0 escalations, real-grade 43/43 OK** after M1+M2 (runs 1–2 were $0.30/$0.31 with a reasoner-authored fix slice + unverified cascade; the tuning log has the arc). Prior baseline 2026-07-09: $0.063, real-grade 12/12 |
-| 2 | django-11880 | 200s | ✓ pass | conductor-only | `06909fe084f8` | 1/114 | ✅ **validated 2026-07-09 — PASS: $0.021, 100% conductor, module-grade 115/115** (canonical `error_messages` deepcopy fix) |
+| 2 | django-11880 | 200s | ✓ pass | conductor-only | `06909fe084f8` | 1/114 | ✅ **re-validated 2026-07-10 on the W1–W4 engine — PASS: $0.0511, 100% conductor, 0 escalations, module-grade 115/115** (canonical one-line `error_messages` deepcopy fix, inline path, no modification needed). Prior baseline 2026-07-09: $0.021 |
 | 3 | django-11951 | 224s | ✓ pass | conductor-only | `312049091288` | 1/21 | ✅ **validated 2026-07-09 — PASS: $0.046, 100% conductor, real-grade 22/22** |
 | 4 | django-11848 | 357s | ✗ **fail** | oracle+conductor | `f0adf3b9b7a1` | 2/43 | 🎉 **validated 2026-07-09 — IMPROVEMENT (was ✗): $0.045, 100% conductor, real-grade 45/45** (engine now cracks it) |
 | 5 | django-11964 | 481s | ✗ **fail** | conductor-only | `fc2b1cc926e3` | 2/15 | ⬜ not started |
