@@ -167,6 +167,14 @@ export interface SliceDispatchRequest {
   escalated: boolean
   /** The slice's DAG node type, carried so the host can enforce the slice's lane (e.g. read-only). */
   sliceType?: SliceType
+  /**
+   * P11b depth-1 marker: true when this dispatch belongs to a delegate's own
+   * mini-loop (a reasoner/oracle slice seat handing a sub-item down). Set by
+   * the delegate path's dispatch wrapper — every request it forwards, cheap
+   * hop and rescue hop alike, carries it — so the host never grants a
+   * delegate child a delegation seat of its own (no grandchildren).
+   */
+  delegated?: boolean
 }
 
 /**
@@ -406,8 +414,14 @@ const TIER_ORDER: EconTier[] = ["conductor", "executor", "reasoner", "oracle"]
  *
  * @sem domain=routing role=allocator
  */
-/** Ladder position per tier — used to enforce a slice's escalation ceiling (recon caps at conductor). */
-const LADDER_RANK: Record<EconTier, number> = { executor: 0, conductor: 1, reasoner: 2, oracle: 3 }
+/**
+ * Ladder position per tier — used to enforce a slice's escalation ceiling
+ * (recon caps at conductor), and by the P11b delegate gate's down-only rule
+ * (a delegate must resolve strictly below its caller's rung). Distinct from
+ * allocation.ts's TIER_RANK (a price order, conductor cheapest): this is the
+ * CAPABILITY ladder the escalation path climbs.
+ */
+export const LADDER_RANK: Record<EconTier, number> = { executor: 0, conductor: 1, reasoner: 2, oracle: 3 }
 
 export function escalateTier(tier: EconTier): EconTier {
   switch (tier) {

@@ -10,6 +10,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+import { DelegateTool } from "./delegate"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -124,6 +125,7 @@ export const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
+    const delegate = yield* DelegateTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -246,6 +248,7 @@ export const layer = Layer.effect(
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
+          delegate: Tool.init(delegate),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
@@ -310,6 +313,11 @@ export const layer = Layer.effect(
             tool.edit,
             tool.write,
             tool.task,
+            // P11b — the delegating-seat downward door; permission-gated
+            // (childSlicePermission allows it only for reasoner/oracle slice
+            // seats; a wildcard deny elsewhere drops it from the advertised
+            // set via Permission.disabled at request prep).
+            tool.delegate,
             tool.fetch,
             tool.todo,
             tool.search,

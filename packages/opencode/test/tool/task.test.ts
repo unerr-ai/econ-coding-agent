@@ -15,6 +15,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { rawTaskChildGateArmed, clearRawTaskChildGate } from "../../src/tool/edit-governance"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -344,6 +345,53 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("P11c: execute arms the raw-task-child edit gate for fresh and resumed children, never the parent", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps()
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      // Fresh spawn arms the child's session id.
+      const fresh = yield* def.execute(
+        { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+        ctx,
+      )
+      expect(rawTaskChildGateArmed(fresh.metadata.sessionId)).toBe(true)
+      expect(rawTaskChildGateArmed(chat.id)).toBe(false)
+
+      // A task_id resume of an existing session arms it too (the category is
+      // per child session, so re-arming an armed id is a no-op).
+      const existing = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
+      expect(rawTaskChildGateArmed(existing.id)).toBe(false)
+      const resumed = yield* def.execute(
+        {
+          description: "follow up",
+          prompt: "also check invalidation",
+          subagent_type: "general",
+          task_id: existing.id,
+        },
+        ctx,
+      )
+      expect(resumed.metadata.sessionId).toBe(existing.id)
+      expect(rawTaskChildGateArmed(existing.id)).toBe(true)
+
+      clearRawTaskChildGate(fresh.metadata.sessionId)
+      clearRawTaskChildGate(existing.id)
+    }),
+  )
+
   it.instance("execute creates a child when task_id does not exist", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
@@ -416,6 +464,14 @@ describe("tool.task", () => {
         expect(child.permission).toEqual([
           {
             permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+          // P11b: the delegate tool belongs to dispatched reasoner/oracle
+          // slice seats only — a raw task child is never one, so the deny is
+          // unconditional (and drops the tool from the advertised set).
+          {
+            permission: "delegate",
             pattern: "*",
             action: "deny",
           },

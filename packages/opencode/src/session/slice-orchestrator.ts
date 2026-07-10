@@ -126,7 +126,12 @@ export interface SlicePermissionRule {
  * job is read+fetch only (webfetch/websearch flip to allow, bash+edit to
  * deny), and the explorer's job is read/search only (bash+edit deny — recon
  * happens through the read tools; probing with shell commands is the runner's
- * shape), so neither can ever touch the working tree or a shell.
+ * shape), so neither can ever touch the working tree or a shell. P11b: the
+ * `delegate` tool is the ONE downward door — allowed only for a delegating
+ * seat (a reasoner/oracle slice child that is not itself a delegate child,
+ * `isDelegatingSeat`), denied everywhere else, so an executor seat or a
+ * delegate child never sees it (a wildcard deny also drops it from the
+ * advertised toolset via Permission.disabled).
  *
  * @sem domain=routing role=config
  */
@@ -135,6 +140,7 @@ export function childSlicePermission(
   readOnly: boolean,
   persona?: EconPersona,
   deciderSeat = false,
+  delegatingSeat = false,
 ): SlicePermissionRule[] {
   const isResearcher = persona === "researcher"
   // F6 seat-scoping (casting rule 4): a decider seat loses the grind surfaces
@@ -149,6 +155,7 @@ export function childSlicePermission(
     { permission: "edit", pattern: "*", action: noShell ? "deny" : "allow" },
     { permission: "question", pattern: "*", action: "deny" },
     { permission: "task", pattern: "*", action: "deny" },
+    { permission: "delegate", pattern: "*", action: delegatingSeat ? "allow" : "deny" },
     { permission: "webfetch", pattern: "*", action: isResearcher ? "allow" : "deny" },
     { permission: "websearch", pattern: "*", action: isResearcher ? "allow" : "deny" },
     { permission: "skill", pattern: "*", action: "deny" },
@@ -174,6 +181,22 @@ export function childSlicePermission(
  */
 export function isDeciderSeat(tier: string, sliceType?: string): boolean {
   return (tier === "reasoner" || tier === "oracle") && (sliceType === "design" || sliceType === "verify")
+}
+
+/**
+ * P11b — is this dispatch a DELEGATING seat? True for a reasoner/oracle-tier
+ * slice child that is not itself a delegate child (`delegated` rides the
+ * dispatch request from the delegate path's wrapper): such a seat holds the
+ * `delegate` tool and a registered delegation seat, so it can hand its own
+ * discovered sub-items down mid-slice. Executor seats are the floor (their
+ * path is report-up → re-decomposition) and conductor-tier rescues are
+ * rescues, not sub-planners — neither delegates. Depth-1 by construction:
+ * a delegate child's requests carry `delegated`, so it never qualifies.
+ *
+ * @sem domain=routing role=config
+ */
+export function isDelegatingSeat(tier: string, delegated?: boolean): boolean {
+  return (tier === "reasoner" || tier === "oracle") && delegated !== true
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +409,10 @@ export interface ConductorLoopOptions {
   snapshot?: SliceLoopDeps["snapshot"]
   /** U3 — escalation provenance sink (fromTier/toTier/rungReason), fired once per escalation hop. */
   onProvenance?: SliceLoopDeps["onProvenance"]
+  /** P11b — the tier of the seat requesting this loop (the venue rule's `requestingTier`, P6c). Defaults to the conductor — the production caller; a delegate's mini-loop passes its caller's tier. */
+  requestingTier?: EconTier
+  /** P11b — files the requesting seat already has in scope (the venue rule's `sameFilesInScope` input, P6c). A delegate's mini-loop passes the parent slice's own scope. */
+  parentScope?: ReadonlySet<string>
 }
 
 /**
@@ -504,9 +531,11 @@ export async function runConductorSliceLoop(
     // P6b/P6c — predicted edit scope from the path-shaped tokens the slice's
     // own text names (the same extraction the coupling probes consume). Cheap,
     // deterministic, and empty when a slice names no files (no false overlap).
-    // The conductor thread is always the requesting seat on this path.
+    // The conductor is the default requesting seat; a P11b delegate mini-loop
+    // overrides it with the caller seat's tier and the parent slice's scope.
     editScopeOf: (slice) => new Set(extractSliceFiles(`${slice.prompt}\n${slice.wiring ?? ""}`)),
-    requestingTier: "conductor",
+    requestingTier: options?.requestingTier ?? "conductor",
+    ...(options?.parentScope ? { parentScope: options.parentScope } : {}),
   }
 
   return runSliceLoop(slices, deps)
@@ -533,6 +562,15 @@ export interface OrchestrationTodo {
   readonly testStrength?: string
   /** Explicit persona override (OL-9.1b) — only takes effect when it names an ECON_PERSONAS member; see personaForSlice. */
   readonly persona?: string
+  /**
+   * U2a goal-tree position index of this todo's parent within the same list
+   * (goal → task → sub-item). The live todo store persists it (SessionTodo's
+   * `parent_id` column), so it survives past turn-open; P11b threads it into
+   * `todosToPlanNodes` (delegate sub-items render as a tree, and validatePlan
+   * sees the real depth/branching) and the delegate tool writes it on every
+   * accepted delegate's child todo.
+   */
+  readonly parentID?: number
 }
 
 /** True when a todo carries a non-empty OL-7.1 slice type — i.e. it is a decomposition-DAG node. */
@@ -572,7 +610,8 @@ export function hasPendingTypedSlices(todos: readonly OrchestrationTodo[]): bool
 /** Path-shaped tokens (a `/` and a source extension) a slice's text names — fed to the probes. */
 const SLICE_FILE_RE = /[\w./-]+\/[\w.-]+\.[a-z]{1,5}\b/gi
 
-function extractSliceFiles(text: string): string[] {
+/** Path-shaped tokens a slice's text names — the shared scope extraction the probes, the P6b edit-scope probe, and the P11b delegate scope-containment gate all read. */
+export function extractSliceFiles(text: string): string[] {
   const seen = new Set<string>()
   for (const m of text.matchAll(SLICE_FILE_RE)) seen.add(m[0])
   return [...seen]
@@ -777,7 +816,7 @@ const RECON_KEYWORDS = /\b(explore|find|trace|investigate|map|where)\b/i
 const VERIFY_KEYWORDS = /\b(test|run|verify|typecheck|lint|reproduce)\b/i
 const MECHANICAL_KEYWORDS = /\b(implement|fix|apply|add|wire|rename|refactor)\b/i
 
-function inferSliceType(content: string): string {
+export function inferSliceType(content: string): string {
   if (RECON_KEYWORDS.test(content)) return "recon"
   if (VERIFY_KEYWORDS.test(content)) return "verify"
   if (MECHANICAL_KEYWORDS.test(content)) return "mechanical"
@@ -1010,7 +1049,7 @@ export function reconcileSettledSlices<T extends OrchestrationTodo, S extends Or
     if (!TERMINAL_TODO_STATUSES.has(stored.status) && !FRAME_SEED_CONTENTS.has(stored.content)) continue
     // Re-appended at the tail as a root item — a stored parentID indexed the
     // OLD list's positions and must not point into the rewritten one.
-    const { parentID: _stale, ...rest } = stored as S & { parentID?: number }
+    const { parentID: _stale, ...rest } = stored
     merged.push(rest as S)
   }
   return merged
@@ -1051,10 +1090,9 @@ export function orderTriageGoals(goals: readonly TriageGoal[]): number[] {
   return order
 }
 
-/** One writable turn-open skeleton row — `OrchestrationTodo` plus the `priority`/`parentID` fields `SessionTodo.Info` (§1.2/§4.5) carries. */
+/** One writable turn-open skeleton row — `OrchestrationTodo` (which carries `parentID`) plus the `priority` field `SessionTodo.Info` (§1.2/§4.5) requires. */
 export interface TriageTodoRow extends OrchestrationTodo {
   readonly priority: string
-  readonly parentID?: number
 }
 
 /**
@@ -1580,14 +1618,17 @@ const RESOLUTION_GATE_BUDGET = 10_000
  * index (todos carry no persisted id at this seam); `dependsOn` resolves
  * each todo's `deps` refs the same way `todosToLoopSlices` resolves them —
  * exact content match, or a `todo_N`/bare-number position ref — against that
- * same index set, dropping an unresolvable ref. `parentId` is always
- * omitted: `OrchestrationTodo` carries no parent-child structure past
- * turn-open (`TriageTodoRow.parentID` is a skeleton-only field this seam
- * never sees). `estimateTokens` is omitted too — see RESOLUTION_GATE_BUDGET.
+ * same index set, dropping an unresolvable ref. `parentId` threads straight
+ * from the todo's persisted `parentID` position index (P11b — the goal-tree
+ * structure the store carries: skeleton seeds and delegate child todos), so
+ * validatePlan sees the real depth/branching and delegates render as a tree;
+ * an out-of-range or self-referencing parentID is dropped, mirroring the
+ * dep-ref hygiene. `estimateTokens` is omitted — see RESOLUTION_GATE_BUDGET.
+ * Exported for its own unit rows.
  *
  * @sem domain=routing role=router
  */
-function todosToPlanNodes(todos: readonly OrchestrationTodo[]): PlanNode[] {
+export function todosToPlanNodes(todos: readonly OrchestrationTodo[]): PlanNode[] {
   const ids = todos.map((_, i) => String(i))
   const firstIndexOfContent = new Map<string, number>()
   todos.forEach((t, i) => {
@@ -1608,7 +1649,15 @@ function todosToPlanNodes(todos: readonly OrchestrationTodo[]): PlanNode[] {
     const dependsOn = [
       ...new Set((t.deps ?? []).map((r) => resolveRef(r, i)).filter((d): d is string => d !== undefined)),
     ]
-    return dependsOn.length > 0 ? { id: ids[i]!, dependsOn } : { id: ids[i]! }
+    const parentId =
+      t.parentID !== undefined && t.parentID >= 0 && t.parentID < todos.length && t.parentID !== i
+        ? ids[t.parentID]
+        : undefined
+    return {
+      id: ids[i]!,
+      ...(parentId !== undefined ? { parentId } : {}),
+      ...(dependsOn.length > 0 ? { dependsOn } : {}),
+    }
   })
 }
 

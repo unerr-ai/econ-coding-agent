@@ -22,6 +22,8 @@ import {
   testEditDenialMessage,
   noEditsGateArmed,
   noEditsDenialMessage,
+  rawTaskChildGateArmed,
+  rawTaskChildDenialMessage,
 } from "./edit-governance"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
@@ -58,6 +60,12 @@ export const WriteTool = Tool.define(
           // denies every file write at the tool boundary.
           if (noEditsGateArmed(ctx.sessionID)) {
             throw new Error(noEditsDenialMessage(path.relative(instance.worktree, filepath)))
+          }
+
+          // P11c raw-task hygiene: a raw task-tool child is a read-only recon
+          // lane — edit work routes through verified slice dispatch instead.
+          if (rawTaskChildGateArmed(ctx.sessionID)) {
+            throw new Error(rawTaskChildDenialMessage(path.relative(instance.worktree, filepath)))
           }
 
           // B3 no-test-edit gate: on a fix-shaped turn, overwriting an

@@ -48,6 +48,8 @@ import {
   runTurnProbeGate,
   childSlicePermission,
   isDeciderSeat,
+  isDelegatingSeat,
+  todosToPlanNodes,
   personaForSlice,
   PERSONA_STEP_BUDGET,
   sliceStepBudget,
@@ -2540,6 +2542,81 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     const parentRules: SlicePermissionRule[] = [{ permission: "external_directory", pattern: "*", action: "deny" }]
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(parentRules, false))
     expect(Permission.evaluate("external_directory", "*", effective).action).toBe("deny")
+  })
+
+  it("P11b: delegate flips to allow ONLY on a delegating seat — every other seat denies it (and never asks)", () => {
+    const delegating = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, undefined, false, true))
+    expect(Permission.evaluate("delegate", "anything", delegating).action).toBe("allow")
+
+    // The no-flag default (worker seats), a decider seat, and every persona all deny.
+    const plain = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false))
+    expect(Permission.evaluate("delegate", "anything", plain).action).toBe("deny")
+    const decider = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, true, "explorer", true, false))
+    expect(Permission.evaluate("delegate", "anything", decider).action).toBe("deny")
+    for (const persona of ECON_PERSONAS) {
+      const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, persona))
+      expect(Permission.evaluate("delegate", "anything", effective).action).toBe("deny")
+    }
+  })
+
+  it("P11b depth-1 wiring: a delegate child's own seat evaluates non-delegating, so its permission row lands deny", () => {
+    // The dispatch closure derives the 5th argument from isDelegatingSeat(tier, req.delegated):
+    // a reasoner-tier DELEGATE child (delegated: true) must come out deny — no grandchildren.
+    const delegateChild = Permission.merge(
+      BASE_AGENT_RULES,
+      childSlicePermission(undefined, false, undefined, false, isDelegatingSeat("reasoner", true)),
+    )
+    expect(Permission.evaluate("delegate", "anything", delegateChild).action).toBe("deny")
+    // ...while a first-level reasoner slice seat comes out allow.
+    const sliceSeat = Permission.merge(
+      BASE_AGENT_RULES,
+      childSlicePermission(undefined, false, undefined, false, isDelegatingSeat("reasoner", undefined)),
+    )
+    expect(Permission.evaluate("delegate", "anything", sliceSeat).action).toBe("allow")
+  })
+
+  it("P11b: delegate stays denied even when the merged agent/config ruleset carries a delegate allow", () => {
+    const rulesWithDelegateAllow: PermissionV1.Ruleset = [
+      ...BASE_AGENT_RULES,
+      { permission: "delegate", pattern: "*", action: "allow" },
+    ]
+    const effective = Permission.merge(rulesWithDelegateAllow, childSlicePermission(undefined, false))
+    expect(Permission.evaluate("delegate", "anything", effective).action).toBe("deny")
+  })
+})
+
+describe("todosToPlanNodes — P11b parentID threading (goal-tree structure reaches validatePlan)", () => {
+  it("threads a persisted parentID into the node's parentId (positional ids)", () => {
+    const todos: OrchestrationTodo[] = [
+      { content: "goal", status: "in_progress", sliceType: "design" },
+      { content: "delegate child", status: "in_progress", sliceType: "mechanical", parentID: 0 },
+      { content: "unrelated", status: "pending" },
+    ]
+    const nodes = todosToPlanNodes(todos)
+    expect(nodes[0]).toEqual({ id: "0" })
+    expect(nodes[1]).toEqual({ id: "1", parentId: "0" })
+    expect(nodes[2]).toEqual({ id: "2" })
+  })
+
+  it("drops an out-of-range or self-referencing parentID (same hygiene as dep refs)", () => {
+    const todos: OrchestrationTodo[] = [
+      { content: "self", status: "pending", parentID: 0 },
+      { content: "dangling", status: "pending", parentID: 99 },
+      { content: "negative", status: "pending", parentID: -1 },
+    ]
+    const nodes = todosToPlanNodes(todos)
+    for (const node of nodes) {
+      expect("parentId" in node).toBe(false)
+    }
+  })
+
+  it("parentId and dependsOn coexist on one node", () => {
+    const todos: OrchestrationTodo[] = [
+      { content: "design it", status: "pending", sliceType: "design" },
+      { content: "apply it", status: "pending", sliceType: "mechanical", deps: ["design it"], parentID: 0 },
+    ]
+    const nodes = todosToPlanNodes(todos)
+    expect(nodes[1]).toEqual({ id: "1", parentId: "0", dependsOn: ["0"] })
   })
 })
 

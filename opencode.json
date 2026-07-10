@@ -118,6 +118,10 @@
     "todowrite": "allow",
     "question": "allow",
     "task": "allow",
+    // P11b: delegate is a slice-seat tool — only reasoner/oracle slice children get it
+    // (childSlicePermission in slice-orchestrator.ts flips it to allow per seat). The root
+    // session and every persona/raw-task child never see it.
+    "delegate": "deny",
     "edit": "ask",
     "webfetch": "ask",
     "websearch": "ask",

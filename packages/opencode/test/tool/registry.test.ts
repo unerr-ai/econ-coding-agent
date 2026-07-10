@@ -75,6 +75,15 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("registers the delegate tool (P11b — permission rules decide who actually holds it)", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+
+      expect(ids).toContain("delegate")
+    }),
+  )
+
   it.instance("hides task background parameter unless experimental background subagents are enabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

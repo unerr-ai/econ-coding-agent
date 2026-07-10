@@ -43,6 +43,8 @@ import {
   buildTriageTodoSkeleton,
   childSlicePermission,
   isDeciderSeat,
+  isDelegatingSeat,
+  extractSliceFiles,
   personaForSlice,
   sliceStepBudget,
   countToolCalls,
@@ -52,10 +54,13 @@ import {
   deriveTurnProbe,
   runTurnProbeGate,
   makeShellCommandRunner,
+  type ConductorLoopOptions,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
   type SliceDigestEntry,
+  type SliceProbes,
 } from "./slice-orchestrator"
+import { registerDelegationSeat, releaseDelegationSeat, type DelegationPorts } from "./slice-delegation"
 import {
   runTurnRead,
   triageTelemetry,
@@ -2312,13 +2317,28 @@ export const layer = Layer.effect(
                     // downward delegation stops being advisory. Escalated mechanical
                     // rescues keep their tools (worker seat at any tier).
                     const deciderSeat = isDeciderSeat(req.tier, req.sliceType)
+                    // P11b: a reasoner/oracle slice seat (never a delegate child —
+                    // req.delegated rides every mini-loop request) is a depth-1
+                    // sub-planner: it gets the `delegate` tool and a registered
+                    // delegation seat below.
+                    const delegating = isDelegatingSeat(req.tier, req.delegated)
                     const child = yield* sessions.create({
                       parentID: sessionID,
                       title: `slice: ${req.sliceId}`.slice(0, 100),
                       agent: childAgent,
-                      permission: childSlicePermission(session.permission, readOnly, persona, deciderSeat),
+                      permission: childSlicePermission(session.permission, readOnly, persona, deciderSeat, delegating),
                     })
-                    const sliceFiles = [...req.prompt.matchAll(/[\w./-]+\/[\w.-]+\.[a-z]{1,5}\b/gi)].map((m) => m[0])
+                    const sliceFiles = extractSliceFiles(req.prompt)
+                    if (delegating) {
+                      registerDelegationSeat(child.id, {
+                        parentSliceId: req.sliceId,
+                        callerTier: req.tier,
+                        // The parent slice's own predicted scope (the same P6b
+                        // extraction) — the delegate containment boundary.
+                        parentScope: new Set(sliceFiles),
+                        ports: delegationPorts,
+                      })
+                    }
                     const framed = [
                       "You are a headless slice executor: you run ONE slice of a decomposed parent task, unattended.",
                       "Never ask the user questions — no one can answer a child session. If a detail seems ambiguous, take the most reasonable interpretation from the parent task below and proceed to a concrete result.",
@@ -2390,6 +2410,11 @@ export const layer = Layer.effect(
                         parts,
                       }),
                       watchdog,
+                    ).pipe(
+                      // P11b: the delegation seat lives exactly as long as the
+                      // child's own run — released on every exit path so a
+                      // settled/cancelled seat can never delegate again.
+                      Effect.ensuring(Effect.sync(() => releaseDelegationSeat(child.id))),
                     )
                     let dispatchResult: { text: string; parts: readonly unknown[] }
                     if (budgetExhausted) {
@@ -2466,14 +2491,67 @@ export const layer = Layer.effect(
                   }),
                 )
 
+              // Shared by the conductor's own orchestration run AND every P11b
+              // delegation seat: one probe surface, one loop-option set — a
+              // delegate's mini-loop rides the SAME pipeline (persona, budget,
+              // verify ladder, snapshot bracket, ledger), never a clone.
+              const orchestrationProbes: SliceProbes = {
+                probeCoupling: async (text, files) => probeSliceCoupling(text, files, await ensureGraphReady()),
+                probeTestStrength: (files) => probeSliceTestStrength(files),
+                probeVerifyCommands: (files) => probeSliceVerifyCommands(files),
+              }
+              const loopOptions: ConductorLoopOptions = {
+                cwd: ctx.directory,
+                rmRung,
+                judgeGenerate,
+                confidenceGenerate,
+                // U3 — the opencode-side snapshot adapter (opencode's
+                // git-based snapshot subsystem) bracketing each attempt;
+                // absent snapshot ⇒ today's dirty-tree behavior.
+                snapshot: {
+                  track: () => bridge.promise(snapshot.track()),
+                  restore: (hash: string) => bridge.promise(snapshot.restore(hash)),
+                  diff: (hash: string) => bridge.promise(snapshot.diff(hash)),
+                },
+                onProvenance: (e) => {
+                  bridge.fork(Effect.logInfo("escalation_provenance", { "session.id": sessionID, ...e }))
+                },
+              }
+              // P11b — the live seams a delegating (reasoner/oracle) slice seat
+              // needs to hand a sub-item down: the same dispatch closure and
+              // safety stack as above, plus the todo-recording ports (the TOOL
+              // HANDLER writes the child todo, never the model) and the
+              // telemetry sink. Registered per child session in `dispatch`.
+              const delegationPorts: DelegationPorts = {
+                dispatch,
+                probes: orchestrationProbes,
+                options: loopOptions,
+                getTodos: () => bridge.promise(todoStore.get(sessionID)),
+                appendTodo: (todo) =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const current = yield* todoStore.get(sessionID)
+                      yield* todoStore.update({ sessionID, todos: [...current, todo] })
+                      return current.length
+                    }),
+                  ),
+                setTodoStatus: (index, status) =>
+                  bridge.promise(
+                    Effect.gen(function* () {
+                      const current = yield* todoStore.get(sessionID)
+                      const next = current.map((t, i) => (i === index ? { ...t, status } : t))
+                      yield* todoStore.update({ sessionID, todos: next })
+                    }),
+                  ),
+                onDelegate: (info) => {
+                  bridge.fork(Effect.logInfo("delegate", { "session.id": sessionID, ...info }))
+                },
+              }
+
               const orch = yield* Effect.promise(() =>
                 runConductorOrchestration({
                   getTodos: () => bridge.promise(todoStore.get(sessionID)),
-                  probes: {
-                    probeCoupling: async (text, files) => probeSliceCoupling(text, files, await ensureGraphReady()),
-                    probeTestStrength: (files) => probeSliceTestStrength(files),
-                    probeVerifyCommands: (files) => probeSliceVerifyCommands(files),
-                  },
+                  probes: orchestrationProbes,
                   dispatch,
                   setTodoStatus: (index, status) =>
                     bridge.promise(
@@ -2537,23 +2615,7 @@ export const layer = Layer.effect(
                       }),
                     )
                   },
-                  options: {
-                    cwd: ctx.directory,
-                    rmRung,
-                    judgeGenerate,
-                    confidenceGenerate,
-                    // U3 — the opencode-side snapshot adapter (opencode's
-                    // git-based snapshot subsystem) bracketing each attempt;
-                    // absent snapshot ⇒ today's dirty-tree behavior.
-                    snapshot: {
-                      track: () => bridge.promise(snapshot.track()),
-                      restore: (hash: string) => bridge.promise(snapshot.restore(hash)),
-                      diff: (hash: string) => bridge.promise(snapshot.diff(hash)),
-                    },
-                    onProvenance: (e) => {
-                      bridge.fork(Effect.logInfo("escalation_provenance", { "session.id": sessionID, ...e }))
-                    },
-                  },
+                  options: loopOptions,
                 }),
               )
 
@@ -2671,6 +2733,10 @@ export const layer = Layer.effect(
                       `\n## Completed slice results\n${digests}`,
                     ].join("\n"),
                     escalated: false,
+                    // P11b: the synthesis hop is a writing job over settled
+                    // digests, not a slice seat — same suppression as a
+                    // delegate child, so it never gets a delegation seat.
+                    delegated: true,
                   }),
                 ).pipe(
                   Effect.catchCause((cause) =>

@@ -203,6 +203,38 @@ describe("P3 — no-edits gate store + denial message", () => {
 })
 
 // ---------------------------------------------------------------------------
+// P11c — raw-task-child gate: a per-child-session CATEGORY (armed once at
+// spawn in tool/task.ts, never per-turn), plus its denial message.
+// ---------------------------------------------------------------------------
+
+import {
+  setRawTaskChildGate,
+  rawTaskChildGateArmed,
+  clearRawTaskChildGate,
+  rawTaskChildDenialMessage,
+} from "../../src/tool/edit-governance"
+
+describe("P11c — raw-task-child gate store + denial message", () => {
+  it("arms per child session at spawn and stays armed (a category, not a per-turn toggle)", () => {
+    setRawTaskChildGate("ses_rtc_a")
+    expect(rawTaskChildGateArmed("ses_rtc_a")).toBe(true)
+    expect(rawTaskChildGateArmed("ses_rtc_parent")).toBe(false)
+    expect(rawTaskChildGateArmed("ses_rtc_never_set")).toBe(false)
+    // Test seam only — production never clears a child out of the category.
+    clearRawTaskChildGate("ses_rtc_a")
+    expect(rawTaskChildGateArmed("ses_rtc_a")).toBe(false)
+  })
+
+  it("the denial message names the file, the read-only lane, and the report-it-instead out", () => {
+    const msg = rawTaskChildDenialMessage("src/session/prompt.ts")
+    expect(msg).toContain("src/session/prompt.ts")
+    expect(msg).toContain("raw task-tool child")
+    expect(msg).toContain("read-only")
+    expect(msg).toContain("digest")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // OL-7.9 — the always-on structural test-edit gate: snapshotTestTree,
 // detectTestEdit, and the single evaluateTestEditGate decision point.
 // ---------------------------------------------------------------------------

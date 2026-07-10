@@ -98,6 +98,43 @@ export function noEditsDenialMessage(relPath: string): string {
   )
 }
 
+// P11c raw-task hygiene (Q-P) — the raw `task` tool spawns children OUTSIDE
+// the slice safety stack (no verifier, no snapshot bracket, no double-pay
+// ledger), so it stays a read-only recon lane: every raw task child session
+// gets its edit/write surface denied at the tool boundary. Same per-session
+// Set pattern as the gates above, but membership is a per-child-session
+// CATEGORY (armed once at spawn in tool/task.ts, for the session's lifetime),
+// not a per-turn arming — a raw task child never becomes edit-capable on a
+// later turn. Edit-capable delegation routes through slice dispatch instead:
+// the conductor types todowrite slices; a reasoner/oracle seat uses the
+// `delegate` tool. Slice-dispatched children never pass through task.ts, so
+// they are never gated here.
+const rawTaskChildGate = new Set<string>()
+
+/** Arm the raw-task-child edit gate for a child session — called at spawn (and resume) in tool/task.ts. */
+export function setRawTaskChildGate(sessionID: string): void {
+  rawTaskChildGate.add(sessionID)
+}
+
+/** Is this session a raw task-tool child (read-only recon lane)? */
+export function rawTaskChildGateArmed(sessionID: string): boolean {
+  return rawTaskChildGate.has(sessionID)
+}
+
+/** Test seam: clear a session's raw-task-child membership. */
+export function clearRawTaskChildGate(sessionID: string): void {
+  rawTaskChildGate.delete(sessionID)
+}
+
+/** The reason string thrown at the edit/write boundary when a raw task child tries to mutate a file. */
+export function rawTaskChildDenialMessage(relPath: string): string {
+  return (
+    `Edit denied: this session is a raw task-tool child, a read-only recon lane — "${relPath}" must not be modified. ` +
+    `Raw task children run outside the verified slice pipeline (no verification ladder, no snapshot containment, no cost ledger), so their edits cannot be trusted or contained. ` +
+    `Report the exact change needed (file, location, new code) in your digest instead; the parent routes edit work through verified slice dispatch.`
+  )
+}
+
 /**
  * Arm or disarm the no-test-edit gate for a session. Called once per turn at
  * turn open (root sessions decide from the user prompt; child sessions

@@ -14,6 +14,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
+import { setRawTaskChildGate, clearRawTaskChildGate } from "../../src/tool/edit-governance"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-edit-session"),
@@ -572,6 +573,35 @@ describe("tool.edit", () => {
         ])
 
         expect(yield* load(filepath)).toBe("top = 1\nmiddle = keep\nbottom = 2\n")
+      }),
+    )
+  })
+
+  describe("P11c — raw-task-child gate at the edit boundary", () => {
+    it.instance("denies the edit for a session armed as a raw task child and leaves the file untouched", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "gated.ts")
+        yield* put(filepath, "const x = 1\n")
+
+        setRawTaskChildGate(ctx.sessionID)
+        yield* Effect.addFinalizer(() => Effect.sync(() => clearRawTaskChildGate(ctx.sessionID)))
+
+        const err = yield* fail({ filePath: filepath, oldString: "const x = 1", newString: "const x = 2" })
+        expect(err.message).toContain("raw task-tool child")
+        expect(err.message).toContain("digest")
+        expect(yield* load(filepath)).toBe("const x = 1\n")
+      }),
+    )
+
+    it.instance("an unarmed session (a slice-dispatched child) edits normally", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "ungated.ts")
+        yield* put(filepath, "const x = 1\n")
+
+        yield* run({ filePath: filepath, oldString: "const x = 1", newString: "const x = 2" })
+        expect(yield* load(filepath)).toBe("const x = 2\n")
       }),
     )
   })

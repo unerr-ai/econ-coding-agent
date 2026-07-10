@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import path from "path"
 import fs from "fs/promises"
 import { WriteTool } from "../../src/tool/write"
@@ -15,6 +15,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { checkReadDedup, clearReadDedup, computeContentHash } from "@/tool/_shared/read-dedup"
+import { setRawTaskChildGate, clearRawTaskChildGate } from "../../src/tool/edit-governance"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -288,6 +289,37 @@ describe("tool.write", () => {
         const { fileHash } = computeContentHash(content)
         const check = checkReadDedup({ sessionID: ctx.sessionID, filePath: filepath, start: 5, end: 10, fileHash })
         expect(check.hit).toBe(true)
+      }),
+    )
+  })
+
+  describe("P11c — raw-task-child gate at the write boundary", () => {
+    it.instance("denies the write for a session armed as a raw task child — no file is created", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "gated.ts")
+
+        setRawTaskChildGate(ctx.sessionID)
+        yield* Effect.addFinalizer(() => Effect.sync(() => clearRawTaskChildGate(ctx.sessionID)))
+
+        const exit = yield* run({ filePath: filepath, content: "const x = 1\n" }).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const err = Cause.squash(exit.cause)
+          expect(String(err instanceof Error ? err.message : err)).toContain("raw task-tool child")
+        }
+        const exists = yield* Effect.promise(() => fs.access(filepath).then(() => true, () => false))
+        expect(exists).toBe(false)
+      }),
+    )
+
+    it.instance("an unarmed session (a slice-dispatched child) writes normally", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "ungated.ts")
+
+        yield* run({ filePath: filepath, content: "const x = 1\n" })
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("const x = 1\n")
       }),
     )
   })

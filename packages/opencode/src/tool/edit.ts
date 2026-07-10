@@ -25,6 +25,8 @@ import {
   testEditDenialMessage,
   noEditsGateArmed,
   noEditsDenialMessage,
+  rawTaskChildGateArmed,
+  rawTaskChildDenialMessage,
 } from "./edit-governance"
 
 function normalizeLineEndings(text: string): string {
@@ -94,6 +96,12 @@ export const EditTool = Tool.define(
           // denies every file mutation at the tool boundary.
           if (noEditsGateArmed(ctx.sessionID)) {
             throw new Error(noEditsDenialMessage(path.relative(instance.worktree, filePath)))
+          }
+
+          // P11c raw-task hygiene: a raw task-tool child is a read-only recon
+          // lane — edit work routes through verified slice dispatch instead.
+          if (rawTaskChildGateArmed(ctx.sessionID)) {
+            throw new Error(rawTaskChildDenialMessage(path.relative(instance.worktree, filePath)))
           }
 
           // B3 no-test-edit gate: on a fix-shaped turn, modifying an existing

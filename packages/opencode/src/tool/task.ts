@@ -22,6 +22,7 @@ import {
   type SliceWiringInput,
 } from "@opencode-ai/code-intelligence"
 import { getGraph } from "./graph-tools"
+import { setRawTaskChildGate } from "./edit-governance"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -341,6 +342,11 @@ export const TaskTool = Tool.define(
         ...(next.permission.some((rule) => rule.permission === id)
           ? []
           : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        // P11b: `delegate` belongs to dispatched reasoner/oracle SLICE seats
+        // only (registered delegation seat + childSlicePermission allow) — a
+        // raw task child is never one, so the deny is unconditional and also
+        // drops the tool from the child's advertised set.
+        { permission: "delegate" as const, pattern: "*" as const, action: "deny" as const },
         ...(cfg.experimental?.primary_tools?.map((permission) => ({
           permission,
           pattern: "*" as const,
@@ -364,6 +370,14 @@ export const TaskTool = Tool.define(
             ),
           ],
         }))
+
+      // P11c raw-task hygiene (Q-P): every task.ts child — fresh spawn or
+      // task_id resume — is a read-only recon lane; its edit/write surface is
+      // denied at the edit/write tool boundary. Slice dispatch (and its
+      // escalation ladder) spawns children directly in session/prompt.ts and
+      // never passes through here, so verified edit-capable slice children
+      // are untouched.
+      setRawTaskChildGate(nextSession.id)
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),

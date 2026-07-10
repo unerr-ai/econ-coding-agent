@@ -1,0 +1,11 @@
+Hand ONE discovered sub-item of YOUR slice down to a cheaper tier, mid-slice.
+
+You describe the work; code picks the cheapest capable tier and runs it as a real verified slice — its own persona, step budget, verification ladder, snapshot containment, and cost ledger — then returns a bounded digest for you to integrate. Each accepted delegate is recorded as a child item under your slice on the tracker; you never write it yourself.
+
+Rules (enforced in code — a violating call is refused with the reason):
+- Down-only: work that resolves at or above your own tier is refused — that is your job. Do it in this slice, or finish and declare the discovery in your report so the conductor re-plans it.
+- At most 4 delegates per slice; the next call is refused.
+- Scope: name only files inside your own slice's scope — out-of-scope files are refused and listed.
+- Depth 1: your delegates cannot delegate or spawn further.
+
+Write `content` as the delegate's WHOLE brief: the exact paths, the exact change/commands/question, and the report format you expect back — the child starts with zero context; never "based on findings, fix it". Optionally tag `slice_type` (the same slice shapes the tracker uses — see the parameter description; inferred from the content when omitted) and `files` (the file scope). Delegate several independent sub-items with several calls in one message; integrate the digests against your own design before you conclude.
