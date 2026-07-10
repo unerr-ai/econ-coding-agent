@@ -1027,12 +1027,15 @@ export function isFixShapedPrompt(userPrompt: string): boolean {
 // prompt shape where editing tests is the classic hack. A test path quoted in
 // a traceback never authorizes either: authorization is verb-object only.
 const PROMPT_TEST_WORK_RE =
-  /\b(?:add|write|create|author|update|extend|adjust|modify|fix|repair|rewrite)\b[^.!?\n]{0,24}?\btests?\b(?!\s+(?:pass|passes|passing|still|go|stay|remain|green))/gi
+  /\b(?:add|write|create|author|update|extend|adjust|modify|fix|repair|rewrite)\b[^.!?\n;:—]{0,24}?\btests?\b(?!\s+(?:pass|passes|passing|still|go|stay|remain|green))/gi
 
 // A negation directly before the verb means PROHIBITION, not authorization —
 // the caseA live fire showed "Do not modify any test files" disarming the
-// very gate that sentence asks for.
-const TEST_WORK_NEGATION_RE = /\b(?:not|never|don'?t|won'?t|avoid|without|no)\s+(?:\w+\s+){0,2}$/i
+// very gate that sentence asks for. The window tolerates comma-separated verb
+// enumerations ("Never weaken, delete, skip, or edit the test"): the 11885
+// full-stack live fire showed the engine's own fix-slice seed disarming the
+// child gate because "not" sat more than two plain words back.
+const TEST_WORK_NEGATION_RE = /\b(?:not|never|don'?t|won'?t|avoid|without|no)\s+(?:[\w'’]+,?\s+){0,4}(?:or\s+)?$/i
 
 /**
  * B3 — did the user (or the parent conductor, for a child slice) explicitly

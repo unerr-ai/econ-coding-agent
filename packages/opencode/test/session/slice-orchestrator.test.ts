@@ -1121,6 +1121,40 @@ describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gat
       ),
     ).toBe(false)
   })
+
+  // 11885 full-stack live fire: the fix-slice seed's own prose disarmed the
+  // child gate — "a described fix; the test must actually pass" matched
+  // verb→object across the semicolon, and "Never weaken, delete, skip, or
+  // edit…" put the negation more than two plain words back. Engine-authored
+  // boilerplate must NEVER read as authorization.
+  it("clause boundaries break the verb→tests span (the 11885 seed live-fire bug)", () => {
+    expect(promptAuthorizesTestEdits("do not stop at a described fix; the test must actually pass")).toBe(false)
+    expect(promptAuthorizesTestEdits("apply the fix: the test suite is the arbiter")).toBe(false)
+    expect(promptAuthorizesTestEdits("ship the fix — the tests define done")).toBe(false)
+  })
+
+  it("comma-separated verb enumerations under a negation stay prohibitions", () => {
+    expect(promptAuthorizesTestEdits("Never weaken, delete, skip, or edit the failing test to make it pass")).toBe(
+      false,
+    )
+    expect(promptAuthorizesTestEdits("never rename, rewrite or update the tests")).toBe(false)
+  })
+
+  it("no engine-authored prompt string authorizes test edits (registry sweep)", async () => {
+    const registries = [
+      await import("../../src/session/prompts/seeds"),
+      await import("../../src/session/prompts/preambles"),
+      await import("../../src/session/prompts/nudges"),
+      await import("../../src/session/prompts/fragments"),
+      await import("../../src/session/prompts/personas"),
+      await import("../../src/session/prompts/roles"),
+      await import("../../src/session/prompts/protocol"),
+    ]
+    for (const mod of registries)
+      for (const [name, value] of Object.entries(mod))
+        if (typeof value === "string" && value.length > 40)
+          expect(promptAuthorizesTestEdits(value), `${name} must not self-authorize test edits`).toBe(false)
+  })
 })
 
 describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize → fix → verify in one session)", () => {
