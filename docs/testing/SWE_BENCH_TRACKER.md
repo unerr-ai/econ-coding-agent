@@ -42,7 +42,7 @@ Two verdict columns, and they mean different things — read them as a **before 
 | 2 | django-11880 | 200s | ✓ pass | conductor-only | `06909fe084f8` | 1/114 | ✅ **re-validated 2026-07-10 on the W1–W4 engine — PASS: $0.0511, 100% conductor, 0 escalations, module-grade 115/115** (canonical one-line `error_messages` deepcopy fix, inline path, no modification needed). Prior baseline 2026-07-09: $0.021 |
 | 3 | django-11951 | 224s | ✓ pass | conductor-only | `312049091288` | 1/21 | ✅ **re-validated 2026-07-10 on the W1–W4 engine — PASS: $0.0989, 100% conductor, 0 escalations, real-grade 51 OK** (canonical `_batched_insert` clamp, inline path, agent self-verified bulk_create + 375 query tests). Prior baseline 2026-07-09: $0.046 |
 | 4 | django-11848 | 357s | ✗ **fail** | oracle+conductor | `f0adf3b9b7a1` | 2/43 | 🎉 **re-validated 2026-07-10 on the W1–W4 engine — PASS: $0.0659, 100% conductor, 0 escalations, real-grade 45/45** (RFC 7231 sliding-century fix, inline path). Prior: 2026-07-09 $0.045 (first crack of an original ✗) |
-| 5 | django-11964 | 481s | ✗ **fail** | conductor-only | `fc2b1cc926e3` | 2/15 | ⬜ not started |
+| 5 | django-11964 | 481s | ✗ **fail** | conductor-only | `fc2b1cc926e3` | 2/15 | ⚠️ **2026-07-10 first W-engine run VOID (future-leak)**: correct one-line `Choices.__str__` fix, real-grade 17/17, but $0.5970 / 152 conductor turns — the bash trace shows `git log --all` + `git show` on the upstream fix commits (the local-clone arena carried future refs). Arena refs stripped (recipe updated); honest re-run pending |
 | 6 | django-11999 | 492s | ✓ pass | — | `84633905273f` | 1/30 | ⬜ not started |
 | 7 | django-12050 | 802s | ✓ pass | — | `b93a0e34d9b9` | 1/10 | ⬜ not started |
 | 8 | django-11790 | 826s | ✓ pass | — | `b1d6b35e146a` | 2/77 | ⬜ not started |
@@ -196,6 +196,14 @@ cd arena-django-12039
 git checkout -q "$(cat ../base_commit.txt)"
 git apply ../test_patch.diff                                 # plants the FAIL_TO_PASS test
 git -c user.email=arena@local -c user.name=arena commit -qam "arena: plant reproduction test"
+# STRIP THE FUTURE (mandatory — found live 2026-07-10 on 11964): a local clone
+# carries origin/* refs + tags pointing PAST base_commit, and an agent that runs
+# `git log --all` can read the upstream gold fix for its own ticket out of the
+# repo's future history. After this, `git log --all` reaches only ≤base commits.
+git remote remove origin 2>/dev/null || true
+git tag -l | xargs -n100 git tag -d >/dev/null 2>&1 || true
+git branch --format='%(refname:short)' | xargs -n20 git branch -D >/dev/null 2>&1 || true
+git reflog expire --expire=now --all
 ~/.pyenv/versions/3.9.19/bin/python3.9 -m venv .venv
 ./.venv/bin/pip install -q -e .
 cp ../PROMPT.txt .
