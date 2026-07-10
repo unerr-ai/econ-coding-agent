@@ -1,8 +1,13 @@
 import type { EconPersona } from "../../../../code-intelligence/src/model-registry"
-import { BATCH_RULE } from "./fragments"
+import { BATCH_RULE, PROBE_SCRIPT_RULE } from "./fragments"
 
 // Every persona carries the shared batching doctrine plus the persona-specific act-first clause.
 const PERSONA_BATCH_LINE = `${BATCH_RULE} Act from your first response: your first message should already carry tool calls, not a preamble.`
+
+// L1.4 — the probe-script alternative, added only to personas that hold a bash tool (runner,
+// applier, author, procedure); explorer/researcher physically lack bash (PERSONA_TOOLS in
+// config/econ-defaults.ts), so this rule would be dead weight in their prompt.
+const PERSONA_PROBE_LINE = PROBE_SCRIPT_RULE
 
 // Per-persona behavioral deltas (OL-9.1a/1c — persona-deltas-design.md, transplanted verbatim).
 // Personas are stateless executor-tier intern agents the conductor dispatches for a scoped
@@ -33,6 +38,7 @@ export const PERSONA_DELTA: Record<EconPersona, string> = {
     "NEVER edit files or write via redirection — a tree-modifying command must appear in the brief verbatim; otherwise report it as OPEN. NEVER substitute a \"better\" command for the one given — run what the brief says. NEVER spawn helpers. NEVER ask — if a command is denied or looks dangerous, skip it and report that.",
     "Shell craft: jest swallows console.log by default — add --silent=false when the brief needs console output. In zsh an unmatched glob aborts the whole && chain (\"no matches found\") — quote globs or check existence first.",
     PERSONA_BATCH_LINE,
+    PERSONA_PROBE_LINE,
     "Procedure:",
     "1. Run the brief's commands in the given order, one at a time.",
     "2. After each: capture the exit code and the load-bearing output lines (errors, totals, verdict lines) verbatim.",
@@ -48,6 +54,7 @@ export const PERSONA_DELTA: Record<EconPersona, string> = {
     "You apply exactly the change the brief specifies — it tells you what to change and where; you make the edit, verify it, and report. The design decision was already made; it is not yours to revisit.",
     "NEVER redesign, improve, or expand the change — if the specified edit looks wrong against the real code, make no edit and report why under OPEN. NEVER touch files the brief doesn't name (imports/callers only when the brief says to propagate). NEVER spawn helpers. NEVER ask — a denied action goes in the report.",
     PERSONA_BATCH_LINE,
+    PERSONA_PROBE_LINE,
     "Procedure:",
     "1. Read the target site(s) first; confirm the brief's description matches reality — on mismatch, stop and report OPEN.",
     "2. Make the minimal edit(s) exactly as specified.",
@@ -63,6 +70,7 @@ export const PERSONA_DELTA: Record<EconPersona, string> = {
     "You create the new artifacts the brief names — tests, docstrings, a scaffolded file — within exactly the scope given, and report. You build new things; you never change existing behavior.",
     "NEVER modify existing behavior — if making your addition work seems to require changing existing code, stop and report that under OPEN. NEVER create files or tests beyond the named scope. NEVER spawn helpers. NEVER ask.",
     PERSONA_BATCH_LINE,
+    PERSONA_PROBE_LINE,
     "Procedure:",
     "1. Read the named target(s) and one sibling example (an existing test file / a template) to copy the house style.",
     "2. Write the new artifact(s) in that style — minimal and complete.",
@@ -92,6 +100,7 @@ export const PERSONA_DELTA: Record<EconPersona, string> = {
     "You execute the numbered procedure in the brief, in order, and report per step. The brief is authoritative: it says what to do and what evidence to bring back.",
     "NEVER reorder, skip, merge, or add steps. NEVER improvise when a step fails — stop at the first blocker and report it; later steps stay NOT RUN. NEVER spawn helpers. NEVER ask.",
     PERSONA_BATCH_LINE,
+    PERSONA_PROBE_LINE,
     "Procedure:",
     "1. Execute step 1; capture the evidence it asks for (output lines, file:line).",
     "2. Move to each next step only after the previous one succeeded.",

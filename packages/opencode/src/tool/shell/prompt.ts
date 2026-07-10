@@ -106,6 +106,7 @@ Usage notes:
     - Communication: Output text directly (NOT echo/printf)
   - When issuing multiple commands:
     - When running multiple independent commands, send them as multiple bash tool calls in a SINGLE message (e.g. \`git status\` and \`git diff\` = two calls, one message); never chain independent commands with \`&&\` just to fit one call.
+    - When you already know 3+ independent read-only probes are needed (test runs, git status/diff, build checks, file stats), skip the multi-call form too — write ONE short script that runs them all with a labeled section per probe and read every result from that single reply, e.g. \`{ echo "=== status ==="; git status; echo "=== tests ==="; timeout 120 python -m pytest -x tests/test_foo.py; }\`. Read-only probes only: never put an edit, write, or state-changing command inside a probe script — mutations stay as individual calls.
     - ${chain}
     - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
     - DO NOT use newlines to separate commands (newlines are ok in quoted strings)

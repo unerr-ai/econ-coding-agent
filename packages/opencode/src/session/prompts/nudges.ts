@@ -47,8 +47,10 @@ export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: num
  * poisoned history 2/6 batched despite BATCH_RULE, tail reminder 6/6). Recency
  * does the work the system-prompt rule cannot — this restates the doctrine's
  * self-check at the moment of choice, not its full definition (BATCH_RULE in
- * prompts/fragments.ts stays the single source).
+ * prompts/fragments.ts stays the single source). L1.4 adds the probe-script
+ * alternative (PROBE_SCRIPT_RULE, same source file) as a short pointer, not a
+ * restatement of its full definition either.
  */
 export function batchMomentumNudgeText(signal: { consecutiveSingleCalls: number }): string {
-  return `ECONOMY CHECK: your last ${signal.consecutiveSingleCalls} messages each carried exactly ONE tool call — that many paid round trips where fewer would do. Apply the BATCH RULE now: name every independent read/search/command you already know you need, then issue them ALL as tool calls in this ONE message; they run together and the results come back together. Only a true dependency chain — the next call needs this call's output — justifies another single-call message.`
+  return `ECONOMY CHECK: your last ${signal.consecutiveSingleCalls} messages each carried exactly ONE tool call — that many paid round trips where fewer would do. Apply the BATCH RULE now: name every independent read/search/command you already know you need, then issue them ALL as tool calls in this ONE message; they run together and the results come back together — or better: one read-only bash script that runs every known probe with labeled sections, if what you know you need is 3+ shell probes (tests, git, builds, file stats) rather than reads. Only a true dependency chain — the next call needs this call's output — justifies another single-call message.`
 }

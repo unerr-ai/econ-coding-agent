@@ -5,6 +5,15 @@
 export const BATCH_RULE =
   "RULE: before sending, count your tool calls. If this message has ONE tool call and another independent read/search/command is already known to be needed, you are wasting a full round trip — add it to THIS message. Independent = neither call needs the other's output; example: reading a file AND running its tests = two calls, ONE message. Only a dependency chain — the next call needs this call's output — justifies a single-call message."
 
+// L1.4 (code-execution probe channel) — a sibling rule beside BATCH_RULE, not a rewrite of it: a
+// probe script is read-only and non-interactive, a different shape from "add one more call to
+// this message." Weak-parallel-caller tiers batch far more reliably when tool use is expressed as
+// one script than as N JSON tool calls. Single source: personas.ts and roles.ts interpolate this
+// constant directly (same pattern as BATCH_RULE); nudges.ts and the bash tool description
+// (tool/shell/prompt.ts) point back to it in their own words rather than repeating the paragraph.
+export const PROBE_SCRIPT_RULE =
+  "RULE: when you already know 3+ independent read-only shell probes are needed (test runs, git status/diff, build checks, wc/ls of artifacts), do not send them as separate tool calls — write ONE short bash script that runs them all and prints a labeled section per probe, then read all results from that single reply. Read-only probes only: never put an edit, write, or state-changing command in a probe script — mutations stay as individual calls. This governs shell probes only — code reading/searching stays on the read/search/file_outline tools."
+
 // L2.3 (turn-cache-economics.md §5-L2 item 3, §7 protected-region row) — the context-eviction
 // contract, ported from CC: step-granular masking/pruning clears old tool outputs mid-run, and a
 // model that was never told treats a cleared result as a surprise and re-reads the file — spending
