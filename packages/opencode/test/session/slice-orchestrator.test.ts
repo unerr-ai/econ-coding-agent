@@ -2296,6 +2296,43 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
     expect(seeded?.content).toBe(LOCALIZATION_SLICE_CONTENT)
   })
 
+  it("ARMED + one prior localization pass → continue-inline: never decomposes even with a valid plan, no dispatch/append/ask (grind valve is the only escalation)", async () => {
+    const sessionID = nextSessionID()
+    incResolveAttempts(sessionID) // one prior armed localization pass (resolveAttempts=1)
+    let dispatched = 0
+    let appended = 0
+    let asked = 0
+    let captured: { mode: string } | undefined
+    const res = await runConductorOrchestration({
+      // dispatchableTodos form a structurally valid plan — a non-armed turn
+      // would short-circuit to decompose-now and dispatch; the armed branch
+      // must bypass that and continue inline instead (11885 0/4-vs-3/3 fix).
+      getTodos: async () => dispatchableTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID,
+      arming: { armLocalization: true, hardness: "hard", ambiguity: "ambiguous" },
+      appendTodos: async () => {
+        appended++
+      },
+      askUser: () => {
+        asked++
+      },
+      onResolutionGate: (info) => {
+        captured = info
+      },
+    })
+    expect(captured?.mode).toBe("continue-inline")
+    expect(dispatched).toBe(0)
+    expect(appended).toBe(0)
+    expect(asked).toBe(0)
+    expect(res.engaged).toBe(false)
+  })
+
   it("flagged + invalid plan + attempts>=1 + interactive → ask-user: one question, turn yielded, no slice", async () => {
     delete process.env["OPENCODE_HEADLESS"]
     const sessionID = nextSessionID()

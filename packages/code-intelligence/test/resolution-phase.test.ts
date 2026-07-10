@@ -70,10 +70,12 @@ describe("resolutionDecision — branch 1: not flagged", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Branch 1b — armed vague diagnosis, first pass: localize before slicing
+// Branch 1b — armed vague diagnosis: NEVER decompose. First pass localizes
+// (resolve-first); after localization the conductor continues inline
+// (continue-inline), with the grind valve as the only escalation.
 // ---------------------------------------------------------------------------
 
-describe("resolutionDecision — branch 1b: armLocalization first pass", () => {
+describe("resolutionDecision — branch 1b: armed turn never decomposes", () => {
   it("resolves first on the first pass even when candidatePlan validates (the 11885 case)", () => {
     const result = resolutionDecision(
       baseInput({ ambiguity: "ambiguous", armLocalization: true, candidatePlan: VALID_PLAN }),
@@ -82,7 +84,7 @@ describe("resolutionDecision — branch 1b: armLocalization first pass", () => {
     expect(result.reason).toBe("armed vague diagnosis — localize before slicing")
   })
 
-  it("lets the valid-plan short-circuit fire after one localization pass (decompose WITH knowledge)", () => {
+  it("continues inline (NOT decompose-now) after one localization pass, even when candidatePlan validates — tonight's 0/4-vs-3/3 failure pinned", () => {
     const result = resolutionDecision(
       baseInput({
         ambiguity: "ambiguous",
@@ -91,8 +93,36 @@ describe("resolutionDecision — branch 1b: armLocalization first pass", () => {
         candidatePlan: VALID_PLAN,
       }),
     )
-    expect(result.mode).toBe("decompose-now")
-    expect(result.reason).toBe("approach fixed, plan valid")
+    expect(result.mode).toBe("continue-inline")
+    expect(result.mode).not.toBe("decompose-now")
+    expect(result.reason).toBe("armed turn localized — continue inline, grind valve is the only escalation")
+  })
+
+  it("still continues inline at resolveAttempts=MAX — the armed branch precedes the termination branch", () => {
+    const result = resolutionDecision(
+      baseInput({
+        hardness: "hard",
+        armLocalization: true,
+        resolveAttempts: MAX_RESOLVE_ATTEMPTS,
+        candidatePlan: VALID_PLAN,
+      }),
+    )
+    expect(result.mode).toBe("continue-inline")
+    expect(result.mode).not.toBe("decompose-now")
+  })
+
+  it("continues inline regardless of needsUserInput — the grind valve is the only escalation for an armed turn (no ask-user)", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        armLocalization: true,
+        resolveAttempts: 1,
+        needsUserInput: true,
+        interactive: true,
+      }),
+    )
+    expect(result.mode).toBe("continue-inline")
+    expect(result.mode).not.toBe("ask-user")
   })
 
   it("does not bypass the short-circuit when armLocalization is false", () => {

@@ -14,13 +14,16 @@ import { validatePlan, type PlanNode } from "./evaluator.js"
 import type { SliceHardness, SliceAmbiguity } from "./allocation.js"
 
 /**
- * The three outcomes of one resolution-phase decision: proceed straight to
+ * The four outcomes of one resolution-phase decision: proceed straight to
  * decomposition, run (or re-run) a resolution pass to fix the approach first,
- * or stop and ask the user — only ever reachable when a user is present.
+ * stop and ask the user (only ever reachable when a user is present), or
+ * continue inline without engaging orchestration — an armed turn that already
+ * localized keeps working its own todos, with the grind valve as the only
+ * escalation.
  *
  * @sem domain=routing role=type
  */
-export type ResolutionMode = "decompose-now" | "resolve-first" | "ask-user"
+export type ResolutionMode = "decompose-now" | "resolve-first" | "ask-user" | "continue-inline"
 
 /**
  * Inputs to one resolution-phase decision for a flagged (ambiguous/hard) task.
@@ -73,8 +76,8 @@ export const MAX_RESOLVE_ATTEMPTS = 2
 /**
  * The prior-uncertainty resolution-phase decision table (task #53): for a
  * flagged (ambiguous/hard) task, decide whether to decompose now, resolve the
- * approach first, or ask the user — in strict precedence order so exactly one
- * branch ever fires. Pure: no I/O.
+ * approach first, ask the user, or continue inline — in strict precedence order
+ * so exactly one branch ever fires. Pure: no I/O.
  *
  * @sem domain=routing role=controller
  */
@@ -86,18 +89,22 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
     return { mode: "decompose-now", reason: "approach not uncertain" }
   }
 
-  // 1b. Armed vague diagnosis, first pass — localize before slicing. The
-  //     step-2 short-circuit below must not fire here: the candidate plan is
-  //     a turn-open todo skeleton (a plan-shaped guess), and armLocalization
+  // 1b. Armed vague diagnosis — an armed turn NEVER decomposes. First pass
+  //     (resolveAttempts === 0): localize before slicing — the candidate plan
+  //     is a turn-open todo skeleton (a plan-shaped guess) and armLocalization
   //     means the location/mechanism is by definition unknown, so no approach
-  //     can be "fixed" yet. 11885 live fires: decompose-blind through the
-  //     short-circuit went 0/3 (two wrong fixes, one design-slice timeout) at
-  //     2–3× the cost of localize-inline-first, which passed 2/2. After one
-  //     localization pass (resolveAttempts ≥ 1) the short-circuit applies —
-  //     decomposing WITH knowledge stays available, and MAX_RESOLVE_ATTEMPTS
-  //     still terminates the loop.
-  if (input.armLocalization === true && input.resolveAttempts === 0) {
-    return { mode: "resolve-first", reason: "armed vague diagnosis — localize before slicing" }
+  //     can be "fixed" yet, and the step-2 short-circuit below must not fire.
+  //     After localization (resolveAttempts ≥ 1) the conductor keeps fixing
+  //     INLINE (continue-inline) instead of decomposing-with-knowledge: on 11885
+  //     the decompose-after-localize route went 0/4 REAL FAIL (three wrong fixes,
+  //     one grind timeout) while the inline route went 3/3 REAL PASS, so the
+  //     grind valve (turn-supervisor) is the ONLY escalation for an armed turn.
+  //     One home for the policy — this single branch precedes 2/3/4.
+  if (input.armLocalization === true) {
+    if (input.resolveAttempts === 0) {
+      return { mode: "resolve-first", reason: "armed vague diagnosis — localize before slicing" }
+    }
+    return { mode: "continue-inline", reason: "armed turn localized — continue inline, grind valve is the only escalation" }
   }
 
   // 2. Short-circuit: a prior resolution pass already produced a plan, and it

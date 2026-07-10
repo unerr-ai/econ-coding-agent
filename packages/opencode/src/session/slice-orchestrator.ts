@@ -1915,8 +1915,9 @@ export async function runConductorOrchestration(
           requireNodeFields: false,
           interactive,
           needsUserInput: resolveAttempts >= 1,
-          // 1b — an armed vague diagnosis localizes inline before any
-          // decompose (11885: blind decompose 0/3 vs inline 2/2).
+          // 1b — an armed vague diagnosis localizes inline, then keeps fixing
+          // INLINE and never decomposes (11885: decompose-after-localize 0/4
+          // REAL FAIL vs inline 3/3 REAL PASS).
           armLocalization: deps.arming?.armLocalization === true,
           resolveAttempts,
         }).mode
@@ -1933,6 +1934,13 @@ export async function runConductorOrchestration(
         }
         if (mode === "ask-user") {
           deps.askUser?.(resolutionClarifyingQuestion(deps.arming))
+          return { engaged: false }
+        }
+        if (mode === "continue-inline") {
+          // Armed turn that already localized — the conductor keeps working the
+          // todos INLINE (they stay plain todos); orchestration never engages,
+          // nothing is appended or asked. The grind valve is the only escalation
+          // (11885: decompose-after-localize 0/4 REAL FAIL vs inline 3/3 REAL PASS).
           return { engaged: false }
         }
         // mode === "decompose-now" — fall through to the slice path below.
