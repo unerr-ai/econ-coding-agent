@@ -1262,7 +1262,11 @@ export const GraphSearchCodeTool = Tool.define(
                 limit: input.limit ?? 25,
                 include_text_occurrences: input.include_text_occurrences ?? false,
               }
-              const output = await makeGetReferencesTool(gate.graph, root).execute(refsInput)
+              // Honor `path`: it scopes the text-occurrence walk (the graph lookup
+              // itself is repo-wide either way). Without this the rename-scan walks
+              // the whole repo even when the caller asked for a subdirectory.
+              const refsRoot = input.path ? path.resolve(root, input.path) : root
+              const output = await makeGetReferencesTool(gate.graph, refsRoot).execute(refsInput)
               const meta = withMeta(output, output)
               recordToolCall({ tool: "search", ...meta })
               return {

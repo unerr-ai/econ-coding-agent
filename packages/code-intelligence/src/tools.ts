@@ -190,6 +190,13 @@ export function makeFileReadTool(graph: CodeIntelligence, repoRoot: string): Gra
  *
  * @sem domain=intelligence role=tools
  */
+/**
+ * Max text occurrences a rename-scan returns. A hot name (django's `max_length`
+ * has thousands of word-boundary hits) otherwise lands an uncapped multi-10k-token
+ * blob in the model's context that every later turn re-reads from cache.
+ */
+const TEXT_OCCURRENCE_CAP = 50
+
 export function makeGetReferencesTool(graph: CodeIntelligence, repoRoot?: string): GraphToolDef {
   return {
     id: "get_references",
@@ -259,12 +266,17 @@ export function makeGetReferencesTool(graph: CodeIntelligence, repoRoot?: string
         await walkSourceFiles(repoRoot, files)
 
         const textOccurrences: Array<{ file: string; line: number; text: string }> = []
-        for (const file of files) {
+        let truncated = false
+        outer: for (const file of files) {
           const content = await readFile(file, "utf8").catch(() => "")
           const lines = content.split("\n")
           for (let i = 0; i < lines.length; i++) {
             re.lastIndex = 0
             if (re.test(lines[i] ?? "")) {
+              if (textOccurrences.length >= TEXT_OCCURRENCE_CAP) {
+                truncated = true
+                break outer
+              }
               textOccurrences.push({
                 file: relative(repoRoot, file),
                 line: i + 1,
@@ -274,7 +286,17 @@ export function makeGetReferencesTool(graph: CodeIntelligence, repoRoot?: string
           }
         }
 
-        return JSON.stringify({ references: refs, text_occurrences: textOccurrences }, null, 2)
+        return JSON.stringify(
+          truncated
+            ? {
+                references: refs,
+                text_occurrences: textOccurrences,
+                text_occurrences_truncated: `first ${TEXT_OCCURRENCE_CAP} shown; narrow with a subdirectory path`,
+              }
+            : { references: refs, text_occurrences: textOccurrences },
+          null,
+          2,
+        )
       }
 
       return JSON.stringify(refs, null, 2)

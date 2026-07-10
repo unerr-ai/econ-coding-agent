@@ -293,6 +293,32 @@ describe("Graph tools — execute() interface smoke test", () => {
     expect(result.text_occurrences.length).toBeGreaterThan(0)
   })
 
+  it("get_references caps text_occurrences at 50 and marks truncation", async () => {
+    // repoRoot only scopes the text walk — a throwaway dir with a hot name
+    // (60 word-boundary hits) exercises the cap without touching the fixture.
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const hotDir = await mkdtemp(join(tmpdir(), "ci-occ-cap-"))
+    try {
+      await writeFile(
+        join(hotDir, "hot.ts"),
+        Array.from({ length: 60 }, (_, i) => `export const v${i} = greet // greet`).join("\n"),
+      )
+      const tool = makeGetReferencesTool(graph, hotDir)
+      const raw = await tool.execute({
+        entity: "greet",
+        direction: "callers",
+        include_text_occurrences: true,
+      })
+      const result = JSON.parse(raw)
+
+      expect(result.text_occurrences.length).toBe(50)
+      expect(String(result.text_occurrences_truncated)).toContain("first 50")
+    } finally {
+      await rm(hotDir, { recursive: true, force: true })
+    }
+  })
+
   // -------------------------------------------------------------------------
   // Sprint 2B: lean index — caller_count + preview
   // -------------------------------------------------------------------------
