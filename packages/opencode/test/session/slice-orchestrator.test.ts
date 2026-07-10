@@ -39,12 +39,9 @@ import {
   autoTypeTodos,
   reconcileSettledSlices,
   LOCALIZATION_PREPASS_TODO,
-  shouldRunDiagnosisPrepass,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
-  classifyTurnShape,
   PLAN_PREPASS_TODO,
-  type TurnShapeCategory,
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
   deriveTurnProbe,
@@ -71,7 +68,7 @@ import {
   type SliceDigestEntry,
   type TriageTodoRow,
 } from "../../src/session/slice-orchestrator"
-import { categoryPreamble, triagePreamble } from "../../src/session/prompts/preambles"
+import { triagePreamble } from "../../src/session/prompts/preambles"
 import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
@@ -970,34 +967,7 @@ describe("todosToLoopSlices — conversion", () => {
   })
 })
 
-describe("shouldRunDiagnosisPrepass (F1 — turn-open trigger)", () => {
-  it("fires on a symptom-only bug prompt (defect evidence, no file target)", () => {
-    expect(
-      shouldRunDiagnosisPrepass(
-        "The app shows Suit.HEART instead of Hearts when rendering the enum — str() on members returns the wrong value. Please fix it.",
-      ),
-    ).toBe(true)
-  })
-
-  it("stays quiet when the prompt names a concrete file (Type-B grounded — conductor goes direct)", () => {
-    expect(shouldRunDiagnosisPrepass("fix the off-by-one suffix handling in Columns.col_str in ddl_references.py")).toBe(
-      false,
-    )
-  })
-
-  it("stays quiet on build/spec prompts — 'should return X' spec language is not defect evidence", () => {
-    expect(
-      shouldRunDiagnosisPrepass(
-        "Implement a dependency-free helper exporting statusPhrase(code); unknown codes should return Unknown Status",
-      ),
-    ).toBe(false)
-  })
-
-  it("stays quiet on plain Q&A and empty prompts", () => {
-    expect(shouldRunDiagnosisPrepass("summarize how the routing layer decides which tier runs a slice")).toBe(false)
-    expect(shouldRunDiagnosisPrepass("")).toBe(false)
-  })
-
+describe("LOCALIZATION_PREPASS_TODO (the one diagnosis frame-seed constant)", () => {
   it("the seed constant is the same slice autoTypeTodos injects (one home for the shape) — a difficulty-allocated WRITER seat", () => {
     expect(LOCALIZATION_PREPASS_TODO).toMatchObject({
       content: LOCALIZATION_SLICE_CONTENT,
@@ -1013,10 +983,9 @@ describe("shouldRunDiagnosisPrepass (F1 — turn-open trigger)", () => {
 })
 
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
-  it("fix-shaped fires on defect evidence, WITH or without a file target (broader than the pre-pass)", () => {
+  it("fix-shaped fires on defect evidence, WITH or without a file target", () => {
     expect(isFixShapedPrompt("the login page crashes when the session expires")).toBe(true)
     expect(isFixShapedPrompt("fix the off-by-one in django/utils/timesince.py")).toBe(true)
-    expect(shouldRunDiagnosisPrepass("fix the off-by-one in django/utils/timesince.py")).toBe(false)
   })
 
   it("fix-shaped stays quiet on build and Q&A prompts", () => {
@@ -1049,110 +1018,6 @@ describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gat
         "the suite reports FAILED tests/test_utils.py::test_divmod — expected (0, 1) but got (1, 0)",
       ),
     ).toBe(false)
-  })
-})
-
-describe("classifyTurnShape (§8 — evidence-shape casting decision)", () => {
-  it("diagnosis-vague: defect evidence, no file target", () => {
-    expect(
-      classifyTurnShape(
-        "The app shows Suit.HEART instead of Hearts when rendering the enum — str() on members returns the wrong value. Please fix it.",
-      ),
-    ).toEqual({ category: "diagnosis-vague", confidence: "high" })
-  })
-
-  it("diagnosis-grounded: defect evidence plus a named file", () => {
-    expect(classifyTurnShape("fix the off-by-one suffix handling in Columns.col_str in ddl_references.py")).toEqual({
-      category: "diagnosis-grounded",
-      confidence: "high",
-    })
-  })
-
-  it("build: an imperative opener with no defect words — 'should return X' spec language is not defect evidence", () => {
-    expect(
-      classifyTurnShape(
-        "Implement a dependency-free helper exporting statusPhrase(code); unknown codes should return Unknown Status",
-      ),
-    ).toEqual({ category: "build", confidence: "high" })
-  })
-
-  it("audit: judgment keywords with no build opener and no defect words", () => {
-    expect(classifyTurnShape("Audit the last merge for soundness and residual risk")).toEqual({
-      category: "audit",
-      confidence: "high",
-    })
-  })
-
-  it("qa: the question-shaped default — no casting signal fires, so confidence is always low", () => {
-    expect(classifyTurnShape("how does the session compaction ladder work?")).toEqual({
-      category: "qa",
-      confidence: "low",
-    })
-    expect(classifyTurnShape("summarize how the routing layer decides which tier runs a slice")).toEqual({
-      category: "qa",
-      confidence: "low",
-    })
-  })
-
-  it("conflict → low: defect words alongside judgment keywords keep the diagnosis reading, flagged low", () => {
-    expect(classifyTurnShape("is the fix sound — audit the change for residual risk")).toEqual({
-      category: "diagnosis-vague",
-      confidence: "low",
-    })
-  })
-
-  it("conflict → low: a build opener alongside defect words stays diagnosis (the seed gate must not drift)", () => {
-    const prompt = "Add a guard so the export no longer crashes on empty input"
-    expect(classifyTurnShape(prompt)).toEqual({ category: "diagnosis-vague", confidence: "low" })
-    expect(shouldRunDiagnosisPrepass(prompt)).toBe(true)
-  })
-
-  it("conflict → low: a build opener stands the judgment reading down (autoTypeTodos' build-branch rule)", () => {
-    expect(classifyTurnShape("Update the migration script and give a verdict on its soundness")).toEqual({
-      category: "build",
-      confidence: "low",
-    })
-  })
-
-  it("empty prompt: no signals, not question-shaped → the build default, low", () => {
-    expect(classifyTurnShape("")).toEqual({ category: "build", confidence: "low" })
-  })
-
-  it("the diagnosis-vague verdict is exactly shouldRunDiagnosisPrepass — the classifier and the seed gate agree", () => {
-    const prompts = [
-      "The app shows Suit.HEART instead of Hearts when rendering the enum. Please fix it.",
-      "fix the off-by-one suffix handling in Columns.col_str in ddl_references.py",
-      "Implement a helper exporting statusPhrase(code)",
-      "Audit the last merge for soundness and residual risk",
-      "how does the session compaction ladder work?",
-      "Add a guard so the export no longer crashes on empty input",
-      "",
-    ]
-    for (const p of prompts) {
-      expect(classifyTurnShape(p).category === "diagnosis-vague").toBe(shouldRunDiagnosisPrepass(p))
-    }
-  })
-})
-
-describe("categoryPreamble (§8 rule 4 — the turn-scoped casting playbook)", () => {
-  const categories: TurnShapeCategory[] = ["diagnosis-vague", "diagnosis-grounded", "build", "audit", "qa"]
-
-  it("every category has its own preamble: non-empty, <=4 lines, opening with the shape tag", () => {
-    for (const c of categories) {
-      const p = categoryPreamble(c)
-      expect(p.length).toBeGreaterThan(0)
-      expect(p.split("\n").length).toBeLessThanOrEqual(4)
-      expect(p.startsWith("TURN SHAPE:")).toBe(true)
-    }
-    expect(new Set(categories.map(categoryPreamble)).size).toBe(categories.length)
-  })
-
-  it("each preamble teaches its shape's casting stance", () => {
-    expect(categoryPreamble("diagnosis-vague")).toMatch(/pre-pass.*frames|do not anchor/i)
-    expect(categoryPreamble("diagnosis-grounded")).toMatch(/discriminating probe/i)
-    expect(categoryPreamble("build")).toMatch(/typed slices.*DAG/i)
-    expect(categoryPreamble("audit")).toMatch(/reasoner slices.*never judge inline/i)
-    expect(categoryPreamble("qa")).toMatch(/no decomposition/i)
   })
 })
 

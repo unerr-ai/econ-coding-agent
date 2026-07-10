@@ -862,8 +862,9 @@ export interface InjectedSliceTodo extends OrchestrationTodo {
 }
 
 /**
- * The single diagnosis pre-pass seed — shared by the turn-open seed (F1), the
- * triage skeleton, and the todowrite-time net in autoTypeTodos. WRITER seat:
+ * The single diagnosis pre-pass seed — shared by the turn-open triage
+ * skeleton, the todowrite-time net in autoTypeTodos, and the resolve-first
+ * re-seed. WRITER seat:
  * `mechanical` + `applier` leaves edit+bash ALLOWED (it is neither a decider
  * seat nor a read-only lane; see childSlicePermission/isDeciderSeat), so the
  * tier that runs it localizes, FIXES, and verifies the failing test in one
@@ -904,29 +905,12 @@ export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
   persona: "researcher",
 }
 
-// F1 — turn-open prompt-shape detection. Defect evidence in the USER prompt:
-// repair verbs or symptom language. Deliberately requires defect words — a
-// build prompt's "should return X" spec language must not match.
+// B3 — defect evidence in the USER prompt: repair verbs or symptom language.
+// Serves the no-test-edit GOVERNANCE gate (isFixShapedPrompt) only — the
+// turn's shape itself comes from the turn-read verdict. Deliberately requires
+// defect words — a build prompt's "should return X" spec language must not match.
 const PROMPT_DEFECT_EVIDENCE_RE =
   /\b(?:fix|debug|resolve|repair|diagnose|bug|broken|wrong(?:ly)?|incorrect(?:ly)?|fails?|failing|failure|error|exception|crash(?:es|ing)?|regression|instead of|unexpected(?:ly)?|doesn'?t work|not working|misbehav\w*)\b/i
-
-/**
- * F1 — should this user prompt arm the diagnosis pre-pass at TURN OPEN,
- * before the conductor's first step? True for the SWE-bench shape: defect
- * evidence present (symptom language or a repair verb) and NO concrete file
- * target named — the localization decision is still open, and it sets the
- * whole turn's ceiling. A prompt that names a file is Type-B grounded (the
- * conductor goes direct); a prompt with no defect words is a build/Q&A turn.
- * The old trigger sat at todowrite time, downstream of the conductor's
- * explore-first localization — cases 1A/1B showed it never fires there on
- * diagnosis turns (todos arrive as retro logs after the wrong-layer anchor).
- *
- * @sem domain=routing role=router
- */
-export function shouldRunDiagnosisPrepass(userPrompt: string): boolean {
-  if (!userPrompt) return false
-  return PROMPT_DEFECT_EVIDENCE_RE.test(userPrompt) && !FILE_TARGET_RE.test(userPrompt)
-}
 
 /**
  * B3 — is this turn fix-shaped for the no-test-edit gate? Broader than the
@@ -970,58 +954,6 @@ export function promptAuthorizesTestEdits(userPrompt: string): boolean {
     if (!TEST_WORK_NEGATION_RE.test(userPrompt.slice(Math.max(0, m.index - 32), m.index))) return true
   }
   return false
-}
-
-// ---------------------------------------------------------------------------
-// §8 — evidence-shape classification: the turn-open casting decision
-// ---------------------------------------------------------------------------
-
-/** The five §1 flow shapes a root turn can open as. */
-export type TurnShapeCategory = "diagnosis-vague" | "diagnosis-grounded" | "build" | "audit" | "qa"
-
-/** classifyTurnShape's verdict: the flow shape plus how cleanly the signals agreed. */
-export interface TurnShape {
-  readonly category: TurnShapeCategory
-  readonly confidence: "high" | "low"
-}
-
-// Question-shaped prose — the Type-F default when no casting signal fires.
-// The only NEW pattern the classifier introduces: every casting signal below
-// reuses the F1/B3/F3 regexes verbatim, so the classifier can never disagree
-// with the structural nets those regexes arm.
-const QUESTION_SHAPE_RE = /\?|^\s*(?:what|why|how|where|when|which|who|explain|describe|summarize)\b/i
-
-/**
- * §8 rule 1 — classify the turn on EVIDENCE SHAPE, never task class, with the
- * same regexes the structural nets run on: defect evidence (F1) splits
- * diagnosis-vague/grounded on the file-target test (shouldRunDiagnosisPrepass
- * IS the vague detector, so the pre-pass seed gate and this classifier cannot
- * drift); a build-imperative opener marks a build; judgment keywords mark an
- * audit. Deterministic and synchronous — no LLM tiebreak — so ambiguity is
- * surfaced instead of resolved: two casting signals firing at once, or none,
- * is `confidence:"low"` (the no-signal default is qa for question-shaped
- * prose, build otherwise). Priority mirrors the nets: defect outranks
- * everything (the seed gate must behave exactly as before it existed), and a
- * build opener stands the judgment reading down (autoTypeTodos' build-branch
- * rule).
- *
- * @sem domain=routing role=router
- */
-export function classifyTurnShape(userPrompt: string): TurnShape {
-  const prompt = userPrompt ?? ""
-  const defect = PROMPT_DEFECT_EVIDENCE_RE.test(prompt)
-  const judgment = JUDGMENT_KEYWORDS.test(prompt)
-  const build = BUILD_IMPERATIVE_START.test(prompt)
-  const conflict = [defect, judgment, build].filter(Boolean).length > 1
-  if (defect) {
-    return {
-      category: shouldRunDiagnosisPrepass(prompt) ? "diagnosis-vague" : "diagnosis-grounded",
-      confidence: conflict ? "low" : "high",
-    }
-  }
-  if (build) return { category: "build", confidence: conflict ? "low" : "high" }
-  if (judgment) return { category: "audit", confidence: "high" }
-  return { category: QUESTION_SHAPE_RE.test(prompt) ? "qa" : "build", confidence: "low" }
 }
 
 /** Engine-authored frame-seed contents (the diagnosis pre-pass writer and the P12 build plan seed) — the typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
@@ -1125,12 +1057,11 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * for any goal that needs a frame pre-pass, one frame-seed child linked by the
  * goal-tree's `parentID` position index (goal -> task, one level — well inside
  * the tracker's depth-3 cap). The seed decision is a clean DOMAIN SPLIT: for a
- * DIAGNOSIS goal the arming judge OWNS localization arming (`armLocalization`
- * — an LLM call, the semantic authority on whether a bug needs a localization
- * pre-pass), so `needsPlan` cannot override it; `needsPlan` is a conductor
- * triage flag set blind (the field is undefined in the triage prompt) and its
- * old OR would else force a reasoner pre-pass onto an already-located bug the
- * judge correctly declined (the django-12039 regression). For a
+ * DIAGNOSIS goal the arming decision OWNS localization arming
+ * (`armLocalization` — the P1-alt code table over the turn-read's extracted
+ * evidence, arming-judge.ts), so `needsPlan` cannot override it; its old OR
+ * would else force a reasoner pre-pass onto an already-located bug the
+ * decision correctly declined (the django-12039 regression). For a
  * NON-diagnosis/build goal, `needsPlan` owns the planning pre-pass and plants
  * the P12 PLAN seed — fresh work with no bug must not receive the diagnosis
  * writer's bug-hunt brief. Same-kind goals resolve to the same seed content, so
@@ -1241,15 +1172,15 @@ const VENUE_INLINE_MAX_ITEMS = 2
  * One structural exception on the build-turn branch — the diagnosis pre-pass
  * (SWE-bench django-11964/11885 decode; hardened 2026-07-09 against the
  * PROMPT_SLICING_CORPUS.md live-judge over-fires, rule R4): on a
- * build/mechanical batch, the arming judge's turn-open decision
+ * build/mechanical batch, the turn-open arming decision
  * (`armLocalization`, threaded in) is the SEMANTIC gate — true/false, or,
  * absent a decision, the old DIAGNOSIS_START heuristic (R1 — never localizing
- * a non-diagnosis turn — is gated upstream at the judge and at
+ * a non-diagnosis turn — is gated upstream at the arming decision and at
  * Door-1/buildTriageTodoSkeleton, so it is deliberately NOT re-imposed here: a
  * vague diagnosis whose remediation to-dos aren't phrased "investigate/fix"
- * must still arm when the judge said so). One syntactic refinement from the
- * to-do list, which the judge never saw, ALWAYS applies on top and is never
- * overridden by the judge — "string-matchers refine, never override": R4 —
+ * must still arm when the decision said so). One syntactic refinement from the
+ * to-do list, which the decision never saw, ALWAYS applies on top and is never
+ * overridden — "string-matchers refine, never override": R4 —
  * the active to-dos must not already name a file target, because a to-do
  * naming its own file means Door-2 knows the site the judge could not. Only
  * when both hold does the pre-pass append one typed localization slice — the
@@ -1294,15 +1225,16 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
   const active = todos.filter((t) => !TERMINAL_TODO_STATUSES.has(t.status))
   const typed = ((): (T | InjectedSliceTodo)[] => {
     if (active.some((t) => MECHANICAL_START.test(t.content) || isDecidedChange(t))) {
-      // The arming judge (turn-open, evidence-grounded) owns the SEMANTIC
-      // localization call and is threaded in as `armLocalization`; absent a
-      // judge decision it degrades to the old DIAGNOSIS_START heuristic (R1 —
-      // build/audit/run-only never reach this as an armed decision — is now
-      // gated upstream, at the judge and at Door-1/buildTriageTodoSkeleton, so
-      // it must not be re-imposed here: a legitimate vague diagnosis whose
-      // remediation to-dos aren't phrased "investigate/diagnose" — e.g. "add
-      // pagination to the query" — must still arm when the judge said so). One
-      // syntactic refinement from the to-do list — which the judge never saw —
+      // The turn-open arming decision (the P1-alt code table over turn-read
+      // evidence) owns the SEMANTIC localization call and is threaded in as
+      // `armLocalization`; absent a decision it degrades to the old
+      // DIAGNOSIS_START heuristic (R1 — build/audit/run-only never reach this
+      // as an armed decision — is now gated upstream, at the decision table and
+      // at Door-1/buildTriageTodoSkeleton, so it must not be re-imposed here: a
+      // legitimate vague diagnosis whose remediation to-dos aren't phrased
+      // "investigate/diagnose" — e.g. "add pagination to the query" — must
+      // still arm when the decision said so). One syntactic refinement from
+      // the to-do list — which the decision never saw —
       // ALWAYS applies on top of either path and is never overridden (corpus
       // R4, "string-matchers refine, never override"): the active to-dos must
       // NOT already name a file target, because a to-do naming its own file

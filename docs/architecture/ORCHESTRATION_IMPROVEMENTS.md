@@ -1,10 +1,13 @@
 # Orchestration improvements — working proposal
 
-**Status: PROPOSAL (2026-07-10) — nothing here is implemented.** Records the pipeline as
-built, the proposed changes (P1–P12), and the open decisions (§5). Once decided, accepted
-items are implemented and folded into
+**Status: IMPLEMENTATION IN PROGRESS (2026-07-10) — all Q-table recommendations accepted
+by the user ("implement all"); landing wave by wave.** Landed: **P6a/b/c + P7(b)** (core
+`229a9303a`, wiring `5ce310868`), **P8, P9, P10, P12** (`229a9303a`, resolve-first
+residual case `5ce310868`). In flight: P1-alt/P2a/P5 (turn-open rewrite), then P3+P4,
+then P11. Accepted designs fold into
 [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md); this doc keeps the decision
-trail.
+trail. Benchmark-driven tuning is logged in
+[SWE_BENCH_TRACKER.md](../testing/SWE_BENCH_TRACKER.md).
 
 Origin: user questions (2026-07-10) — (a) merge the turn-open LLM reads into one
 temperature-0 call? (b) does the goal-shape taxonomy cover all real prompt styles

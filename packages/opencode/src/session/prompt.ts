@@ -20,7 +20,7 @@ import { setTestEditGate, testEditGateArmed } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep } from "./turn-supervisor"
 import { stuckNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
-import { categoryPreamble, triagePreamble } from "./prompts/preambles"
+import { triagePreamble } from "./prompts/preambles"
 import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
@@ -38,8 +38,6 @@ import {
   runConductorOrchestration,
   resolveSliceModel,
   hasPendingTypedSlices,
-  classifyTurnShape,
-  LOCALIZATION_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   buildTriageTodoSkeleton,
@@ -58,8 +56,8 @@ import {
   type OrchestrationTodo,
   type SliceDigestEntry,
 } from "./slice-orchestrator"
-import { runTurnTriage, triageTelemetry, type TriageComplete, type TriageVerdict, type TriageGoalShape } from "./turn-triage"
-import { judgeArming, heuristicArming, type ArmingVerdict } from "./arming-judge"
+import { runTurnRead, triageTelemetry, type TriageComplete, type TriageVerdict } from "./turn-triage"
+import { decideArming, type ArmingVerdict } from "./arming-judge"
 import { setArmingDecision, getArmingDecision } from "./arming-store"
 import { resetResolveAttempts } from "./resolution-store"
 import { Instruction } from "./instruction"
@@ -187,11 +185,11 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
 
 /**
- * Test-harness seam for the turn-open LLM calls (triage + title). Production
- * never provides this service — absent means both calls run (always-on, no
- * feature flag). Mock-provider test harnesses provide `{ triage: false,
- * titles: false }` so the extra turn-open requests don't consume their
- * scripted responses.
+ * Test-harness seam for the turn-open LLM calls (the merged turn-read +
+ * title). Production never provides this service — absent means both calls
+ * run (always-on, no feature flag). Mock-provider test harnesses provide
+ * `{ triage: false, titles: false }` so the extra turn-open requests don't
+ * consume their scripted responses; the `triage` key gates the turn-read.
  *
  * @sem domain=routing role=config
  */
@@ -200,22 +198,12 @@ export class TurnOpenCalls extends Context.Service<
   { readonly triage: boolean; readonly titles: boolean }
 >()("@opencode/SessionPrompt/TurnOpenCalls") {}
 
-/** The most-frequent goal shape in a verdict (first-occurrence tiebreak) — the `triage_vs_heuristic` telemetry's "triage" side; `undefined` for a null verdict. */
-function dominantTriageShape(verdict: TriageVerdict | null): TriageGoalShape | undefined {
-  if (!verdict || verdict.goals.length === 0) return undefined
-  const counts = new Map<TriageGoalShape, number>()
-  for (const g of verdict.goals) counts.set(g.shape, (counts.get(g.shape) ?? 0) + 1)
-  let best: TriageGoalShape | undefined
-  let bestCount = -1
-  for (const g of verdict.goals) {
-    const c = counts.get(g.shape)!
-    if (c > bestCount) {
-      bestCount = c
-      best = g.shape
-    }
-  }
-  return best
-}
+// P5 null-rate counters — per-process, counted at the turn-open turn-read.
+// The neutral-degrade rate is P5's acceptance metric (<2% of turns after the
+// cross-tier re-ask); each degrade logs `turn_read_degraded` with the
+// running counts so the number exists before the benchmark phase reads it.
+let turnReads = 0
+let turnReadNulls = 0
 
 export const layer = Layer.effect(
   Service,
@@ -376,21 +364,26 @@ export const layer = Layer.effect(
     })
 
     /**
-     * §1.1/§4.1 — the `TriageComplete` port for `runTurnTriage`: one
-     * forced-schema, all-tools-denied completion, adapted from the
-     * title/summary hidden-agent precedent above (`llm.stream` directly, no
-     * child session — `tools: {}` is what "all tools denied" means here;
-     * borrowing the "summary" agent's permission/mode shape rather than
-     * registering a new hidden agent). `tier:"conductor"` reuses the turn's
-     * own bound model — the spine never moves (§1.7); `tier:"reasoner"`
-     * resolves via the same tier->model path child slices use
-     * (`resolveSliceModel`) for the low-confidence re-run (§4.1). Returns
-     * `null` on any failure — `runTurnTriage` always falls back to
-     * `classifyTurnShape` in that case.
+     * §1.1/§4.1 — the ONE turn-open LLM read (P1-alt): a tool-free,
+     * temperature-0, forced-JSON completion whose verdict carries goals,
+     * constraints, AND the per-diagnosis-goal arming evidence — replacing the
+     * two sequential triage + arming dispatches. `tier:"conductor"` reuses
+     * the turn's own bound model — the spine never moves (§1.7);
+     * `tier:"reasoner"` resolves via the same tier->model path child slices
+     * use (`resolveSliceModel`) for the low-confidence/null re-ask (§4.1/P5).
+     * P2a — temperature is threaded the same way as the other temp-0
+     * dispatches (the verifier judge and the confidence probe below):
+     * `generateText` hands it straight to the provider request, bypassing the
+     * llm.stream capability gate that silently drops `temperature` for models
+     * whose registry entry doesn't declare it. No reasoning-effort override —
+     * the conductor reasons through the evidence fields at its provider
+     * default (muted, it mis-shapes extraction and over-fires STRONG-grounded
+     * diagnoses; PROMPT_SLICING_CORPUS.md R2). Returns `null` on any failure —
+     * the caller owns the P5 cross-tier re-ask and neutral degrade.
      *
      * @sem domain=routing role=extractor
      */
-    const triageDispatch = Effect.fn("SessionPrompt.triageDispatch")(function* (input: {
+    const turnReadDispatch = Effect.fn("SessionPrompt.turnReadDispatch")(function* (input: {
       sessionID: SessionID
       lastUser: SessionV1.User
       tier: "conductor" | "reasoner"
@@ -404,122 +397,37 @@ export const layer = Layer.effect(
               const m = resolveSliceModel(tier)
               return { providerID: ProviderV2.ID.make(m.providerID), modelID: ModelV2.ID.make(m.modelID) }
             })()
-      const mdl = yield* getModel(providerID, modelID, sessionID)
-      const ag = yield* agents.get("summary")
-      if (!ag) return null
-      const bridge = yield* EffectBridge.make()
-      const complete: TriageComplete = ({ system, user }) =>
-        bridge.promise(
-          llm
-            .stream({
-              agent: ag,
-              user: lastUser,
-              system: [system],
-              small: true,
-              // Un-mute the conductor for triage: a live probe showed muted minimax-m3
-              // degrades shape-classification accuracy 6.1% (mis-types build as audit) —
-              // the ~800ms latency buys accuracy and avoids expensive downstream misroutes.
-              unmuteReasoning: true,
-              tools: {},
-              model: mdl,
-              sessionID,
-              retries: 0,
-              messages: [{ role: "user", content: user }],
-            })
-            .pipe(
-              // Un-muted, the JSON answer can land as reasoningDelta instead of
-              // textDelta, or content can be length-starved by verbose reasoning
-              // (finish_reason:"length", content empty, all tokens in
-              // reasoning_content) — collect both separately and prefer content,
-              // falling back to reasoning only when content is empty.
-              Stream.filter((e) => LLMEvent.is.textDelta(e) || LLMEvent.is.reasoningDelta(e)),
-              Stream.runFold(
-                () => ({ content: "", reasoning: "" }),
-                (acc, e) => {
-                  if (LLMEvent.is.textDelta(e)) acc.content += e.text
-                  else acc.reasoning += e.text
-                  return acc
-                },
-              ),
-              Effect.map(({ content, reasoning }) => content.trim() || reasoning),
-              Effect.orDie,
-            ),
-        )
+      // An unresolvable model or language degrades to null — the caller's P5
+      // path owns the re-ask/neutral-degrade; a housekeeping read never kills
+      // the turn (the reasoner binding may be absent on this provider path).
+      const mdl = Option.getOrUndefined(yield* provider.getModel(providerID, modelID).pipe(Effect.option))
+      if (!mdl) {
+        yield* Effect.logInfo("turn_read_model_unavailable", { "session.id": sessionID, tier })
+        return null
+      }
+      const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
+      if (!language) return null
+      const complete: TriageComplete = async ({ system, user, timeoutMs }) => {
+        const out = await generateText({
+          model: language,
+          system,
+          prompt: user,
+          maxOutputTokens: 4096,
+          temperature: 0,
+          abortSignal: AbortSignal.timeout(timeoutMs),
+        })
+        // A reasoning conductor can length-starve content and land the JSON
+        // answer in the reasoning channel — prefer content, fall back to it.
+        return out.text.trim() || (out.reasoningText ?? "")
+      }
       let parseRetried = false
       const verdict = yield* Effect.promise(() =>
-        runTurnTriage({ userPrompt, complete, onParseRetry: () => (parseRetried = true) }),
+        runTurnRead({ userPrompt, complete, onParseRetry: () => (parseRetried = true) }),
       )
-      // The retry itself lives in runTurnTriage; this line only makes a
+      // The retry itself lives in runTurnRead; this line only makes a
       // formerly-silent extraction flake decodable from the run log.
-      if (parseRetried) yield* Effect.logInfo("turn_triage_retry", { reason: "parse" })
+      if (parseRetried) yield* Effect.logInfo("turn_read_retry", { reason: "parse", tier })
       return verdict
-    })
-
-    /**
-     * §1.1b — the conductor-tier `TriageComplete` port for `judgeArming`, built
-     * like `triageDispatch`'s conductor branch (the turn's own bound model, the
-     * "summary" hidden agent, all tools denied) and, like triage, with
-     * `unmuteReasoning: true` — arming is a judgement that needs the conductor to
-     * reason (muted, minimax over-fires STRONG-grounded diagnoses; muted minimax
-     * also mis-shapes triage extraction). Returns `null` on any failure so the
-     * caller degrades to `heuristicArming`.
-     *
-     * @sem domain=routing role=extractor
-     */
-    const armingDispatch = Effect.fn("SessionPrompt.armingDispatch")(function* (input: {
-      sessionID: SessionID
-      lastUser: SessionV1.User
-      userPrompt: string
-      verdict: TriageVerdict
-    }) {
-      const { sessionID, lastUser, userPrompt, verdict } = input
-      const mdl = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-      const ag = yield* agents.get("summary")
-      if (!ag) return null
-      const bridge = yield* EffectBridge.make()
-      const complete: TriageComplete = ({ system, user }) =>
-        bridge.promise(
-          llm
-            .stream({
-              agent: ag,
-              user: lastUser,
-              system: [system],
-              small: true,
-              // Un-mute the conductor for this one call: arming is a judgement that
-              // needs minimax to reason through grounding strength — muted, it over-fires
-              // STRONG-grounded diagnoses (PROMPT_SLICING_CORPUS.md R2). Triage now also
-              // un-mutes (muted minimax mis-shapes extraction too). 12s ARMING_TIMEOUT_MS covers it.
-              unmuteReasoning: true,
-              tools: {},
-              model: mdl,
-              sessionID,
-              retries: 0,
-              messages: [{ role: "user", content: user }],
-            })
-            .pipe(
-              // Un-muted, the JSON answer can land as reasoningDelta instead of
-              // textDelta, or content can be length-starved by verbose reasoning —
-              // collect both separately and prefer content, falling back to
-              // reasoning only when content is empty (mirrors triageDispatch above).
-              Stream.filter((e) => LLMEvent.is.textDelta(e) || LLMEvent.is.reasoningDelta(e)),
-              Stream.runFold(
-                () => ({ content: "", reasoning: "" }),
-                (acc, e) => {
-                  if (LLMEvent.is.textDelta(e)) acc.content += e.text
-                  else acc.reasoning += e.text
-                  return acc
-                },
-              ),
-              Effect.map(({ content, reasoning }) => content.trim() || reasoning),
-              Effect.orDie,
-            ),
-        )
-      let parseRetried = false
-      const decision = yield* Effect.promise(() =>
-        judgeArming({ userPrompt, verdict, complete, onParseRetry: () => (parseRetried = true) }),
-      )
-      if (parseRetried) yield* Effect.logInfo("arming_judge_retry", { reason: "parse" })
-      return decision
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1483,18 +1391,18 @@ export const layer = Layer.effect(
         // re-dispatch the same batch (run 8: status mirrors raced, todos stayed
         // pending, and every subsequent step re-ran the whole DAG).
         let engagedTodoFingerprint: string | undefined
-        // F1 — the turn-open diagnosis pre-pass arms at most once per run.
+        // The turn-open block (turn-read + arming + skeleton) runs at most once per run.
         let prepassSeeded = false
-        // §8 casting — the root turn's category preamble, set once at turn
-        // open. Appended to every step's system array this turn: the shared
-        // prefix stays byte-stable (the AC-7.2 golden hash never sees it) and
-        // the casting stance rides the tail, varying per turn without a
-        // prompt swap.
+        // The root turn's triage preamble, set once at turn open. Appended to
+        // every step's system array this turn: the shared prefix stays
+        // byte-stable (the AC-7.2 golden hash never sees it) and the turn
+        // framing rides the tail, varying per turn without a prompt swap.
+        // Undefined on a null-verdict turn — P5 neutral degrade rides nothing.
         let turnPreamble: string | undefined
         // U1/U2 — the root turn's triage goal count, set once at turn open
         // alongside turnPreamble; fed into shouldOrchestrate's width check at
         // the orchestration hook further down this same turn. Undefined on a
-        // null-verdict (legacy classifyTurnShape) turn.
+        // null-verdict (P5 neutral-degrade) turn.
         let turnGoalCount: number | undefined
         // OL-9.6b: finish="length" is an output-cap truncation, not a completed
         // turn (run 9: a 7.9k-token think hit the 8192 cap on the root-cause
@@ -1739,27 +1647,23 @@ export const layer = Layer.effect(
             break
           }
 
-          // §8 casting — the turn-open block, root sessions only, once per
-          // run. classifyTurnShape reads the prompt's EVIDENCE SHAPE (the
-          // same regexes the structural nets run on), logs category +
-          // confidence for the receipt decode, and picks the turn-scoped
-          // preamble the system assembly appends below.
-          //
-          // F1 — a diagnosis-vague verdict seeds a frame slice into the todo
-          // store BEFORE the conductor's first step, so the OL-7.3b hook
-          // dispatches it on the first step boundary — the higher tier frames
-          // the turn instead of rescuing it (casting policy: proactive
-          // escalation). The seed (LOCALIZATION_PREPASS_TODO) is a single reasoner
-          // WRITER slice that localizes, fixes, and verifies in one session.
-          // The old trigger sat at todowrite time, downstream of the conductor's
-          // explore-first localization, and never fired on diagnosis turns
-          // (cases 1A/1B: todos arrive as retro logs). Never over an existing
-          // todo list.
+          // The turn-open block, root sessions only, once per run: ONE
+          // temperature-0 turn-read call (P1-alt) extracts goals +
+          // constraints + per-diagnosis-goal evidence, and `decideArming`
+          // (pure code, arming-judge.ts) converts the evidence into the
+          // localization-arming decision. The verdict then drives the turn
+          // preamble, the todo skeleton (frame seeds included), the
+          // no-test-edit constraint, and the M4 probe pin. Failure path (P5):
+          // null after the call's one same-tier retry → ONE reasoner re-ask
+          // (a different provider family — a real redundancy domain) →
+          // NEUTRAL DEGRADE: no preamble, no skeleton, arming stands down,
+          // the turn proceeds unguided. No regex shape-guessing.
           //
           // B3 — the same turn-open point arms the no-test-edit gate: on a
           // fix-shaped turn with no explicit test-work ask, modifying an
-          // existing test file is denied at the edit/write boundary. Child
-          // slice sessions inherit the parent's gate unless their own task is
+          // existing test file is denied at the edit/write boundary
+          // (governance regexes, independent of the turn-read). Child slice
+          // sessions inherit the parent's gate unless their own task is
           // test-work-shaped (the repro/test-authoring slice stays free).
           if (step === 0 && !prepassSeeded) {
             prepassSeeded = true
@@ -1776,36 +1680,23 @@ export const layer = Layer.effect(
               // must preserve this reset or one ambiguous turn disables the
               // resolution gate for the rest of the session.
               resetResolveAttempts(sessionID)
-              // U1 — triage reads the prompt BEFORE classifyTurnShape decides
-              // anything; classifyTurnShape itself still runs unconditionally
-              // (it feeds the regex fallback signal below AND the
-              // triage_vs_heuristic evaluation telemetry either way).
-              const shape = classifyTurnShape(userText)
               const regexDenyTestEdits = isFixShapedPrompt(userText) && !promptAuthorizesTestEdits(userText)
 
-              // M4 — pin the most-specific reproduction the prompt names on a
-              // fix-shaped root turn, so the turn-end gate can re-run it even
-              // when the fix lands inline (no dispatched slice → no probe rung).
-              if (isFixShapedPrompt(userText)) {
-                turnPinnedProbe = yield* Effect.promise(() => deriveTurnProbe({ promptText: userText }))
-                if (turnPinnedProbe)
-                  yield* Effect.logInfo("turn_probe_pinned", {
-                    "session.id": sessionID,
-                    probe: turnPinnedProbe.command,
-                  })
-              }
-
-              // U1 — turn triage runs on every root turn open (always-on, no
-              // feature flag). Any failure inside it degrades to the
-              // null-verdict branch below, which runs exactly as it did
-              // before triage existed; TurnOpenCalls is the test-only off
-              // switch so mock harnesses keep their scripted choreography.
+              // The turn-read runs on every root turn open (always-on, no
+              // feature flag); TurnOpenCalls is the test-only off switch so
+              // mock harnesses keep their scripted choreography.
               let verdict: TriageVerdict | null = null
               let arming: ArmingVerdict | undefined
               if (turnOpen.triage) {
-                verdict = yield* triageDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
-                if (verdict && verdict.confidence === "low") {
-                  const reasonerVerdict = yield* triageDispatch({
+                turnReads++
+                verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
+                if (!verdict) {
+                  // P5 — the cross-tier re-ask: the same reasoner re-run the
+                  // low-confidence path uses, now also covering a null merged
+                  // verdict (extraction flake / timeout / transient error).
+                  verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "reasoner", userPrompt: userText })
+                } else if (verdict.confidence === "low") {
+                  const reasonerVerdict = yield* turnReadDispatch({
                     sessionID,
                     lastUser,
                     tier: "reasoner",
@@ -1814,52 +1705,55 @@ export const layer = Layer.effect(
                   if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length) verdict = reasonerVerdict
                 }
 
-                const dominantShape = dominantTriageShape(verdict)
-                yield* Effect.logInfo("triage_vs_heuristic", {
+                // P1-alt — arming is decided in CODE over the extracted
+                // evidence, never by the model. Stored every turn — the null
+                // verdict's stand-down included — so the todowrite door
+                // (autoTypeTodos) and the per-slice difficulty floor never
+                // read a stale decision from an earlier turn.
+                arming = decideArming(verdict)
+                setArmingDecision(sessionID, arming)
+                yield* Effect.logInfo("arming_decided", {
                   "session.id": sessionID,
-                  triage: dominantShape ?? null,
-                  heuristic: shape.category,
-                  agree: dominantShape === shape.category,
+                  armLocalization: arming.armLocalization,
+                  hardness: arming.hardness,
+                  ambiguity: arming.ambiguity,
+                  evidence: arming.evidence,
                 })
-
-                // Arming judge (§1.1b): one evidence-grounded LLM call decides
-                // whether this turn needs a localization pre-pass, replacing the
-                // file-target regex that over-fired the reasoner path. Runs AFTER
-                // triage_vs_heuristic so telemetry keeps scoring the raw
-                // extractor; degrades to the triage-shape heuristic when the
-                // judge is unavailable. Stored per-session so the todowrite door
-                // (autoTypeTodos) reads the same decision.
-                if (verdict) {
-                  arming = (yield* armingDispatch({ sessionID, lastUser, userPrompt: userText, verdict })) ?? heuristicArming(verdict)
-                  setArmingDecision(sessionID, arming)
-                  yield* Effect.logInfo("arming_judged", {
-                    "session.id": sessionID,
-                    armLocalization: arming.armLocalization,
-                    hardness: arming.hardness,
-                    ambiguity: arming.ambiguity,
-                    evidence: arming.evidence,
-                  })
-                }
               }
 
-              if (verdict) {
-                // U1/U2 — a non-null verdict is the decider: it replaces
-                // classifyTurnShape's preamble/gate/seed role for this turn.
-                turnPreamble = triagePreamble(verdict, arming ?? heuristicArming(verdict))
+              if (verdict && arming) {
+                // U1/U2 — a non-null verdict is the decider for this turn's
+                // preamble, gates, and skeleton.
+                turnPreamble = triagePreamble(verdict, arming)
                 turnGoalCount = verdict.goals.length
                 yield* Effect.logInfo("turn_triage", { "session.id": sessionID, ...triageTelemetry(verdict) })
 
                 // B3 — triage's constraint is the primary armer; OR in the
-                // regex signal so a triage MISS can never disarm a gate the
-                // regex would have armed on its own.
+                // governance-regex signal so a turn-read MISS can never disarm
+                // a gate the regex would have armed on its own.
                 const triageDenyTestEdits = verdict.constraints.some((c) => c.kind === "no-test-edit")
                 const denyTestEdits = regexDenyTestEdits || triageDenyTestEdits
                 setTestEditGate(sessionID, denyTestEdits)
                 if (denyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
 
+                // M4 — the probe pin keys on the VERDICT: a diagnosis-shaped
+                // goal arms the turn-end prove-it gate with the most-specific
+                // reproduction the prompt names, so an INLINE fix cannot
+                // conclude red (no dispatched slice → no probe rung). Turn-read
+                // failed ⇒ no turn-open pin this turn — the probe-from-red pin
+                // and the slice verify rungs still run.
+                if (verdict.goals.some((g) => g.shape === "diagnosis-vague" || g.shape === "diagnosis-grounded")) {
+                  turnPinnedProbe = yield* Effect.promise(() => deriveTurnProbe({ promptText: userText }))
+                  if (turnPinnedProbe)
+                    yield* Effect.logInfo("turn_probe_pinned", {
+                      "session.id": sessionID,
+                      probe: turnPinnedProbe.command,
+                    })
+                }
+
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0) {
-                  const skeleton = buildTriageTodoSkeleton(verdict, arming ?? heuristicArming(verdict))
+                  const skeleton = buildTriageTodoSkeleton(verdict, arming)
                   // Owner-decision trace: which goals seeded a reasoner pre-pass
                   // (the diagnosis writer) and the shapes that drove it — the
                   // stage-1 routing decision, logged with mechanism:"orchestrator"
@@ -1883,21 +1777,18 @@ export const layer = Layer.effect(
                   yield* todoStore.update({ sessionID, todos: skeleton }).pipe(Effect.ignore)
                 }
               } else {
-                // Null verdict — the legacy classifyTurnShape path, unchanged.
-                turnPreamble = categoryPreamble(shape.category)
-                yield* Effect.logInfo("turn_shape", {
-                  "session.id": sessionID,
-                  category: shape.category,
-                  confidence: shape.confidence,
-                })
+                // P5 NEUTRAL DEGRADE — a null turn plants NOTHING: no
+                // preamble, no skeleton, no probe pin. A wrong guess steers
+                // the conductor worse than no guess. Only the governance
+                // regexes still arm the no-test-edit gate.
                 setTestEditGate(sessionID, regexDenyTestEdits)
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
-                const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
-                if (existingTodos.length === 0 && shape.category === "diagnosis-vague") {
-                  yield* todoStore.update({ sessionID, todos: [LOCALIZATION_PREPASS_TODO] }).pipe(Effect.ignore)
-                  yield* Effect.logInfo("diagnosis_prepass_armed", {
+                if (turnOpen.triage) {
+                  turnReadNulls++
+                  yield* Effect.logInfo("turn_read_degraded", {
                     "session.id": sessionID,
-                    seed: "localization",
+                    turnReads,
+                    turnReadNulls,
                   })
                 }
               }

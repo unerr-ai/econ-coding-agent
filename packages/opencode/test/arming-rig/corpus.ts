@@ -6,13 +6,15 @@ import type { ArmingScenario, TriageVerdict, TriageGoalShape, OrchestrationTodo 
  * both failure modes of the localization-arming decision (OVER-FIRE vs
  * UNDER-FIRE) plus the PLANNER escalation (R3) and the Door-2 net (R4).
  *
- * Each scenario encodes the CORRECT/desired outcome in expect.localizationArmed
- * plus (P12) the expected seed KIND in expect.seedKind — diagnosis rows arm the
- * localization writer, hard-build (needsPlan) rows arm the plan seed — not
- * current behavior. The rig runs the arming pipeline and scores against this
- * baseline; violations show where the decision logic needs tuning. `expect.reason`
- * cites the corpus rule (R1-R4) that decides the case — see the doc for the
- * full rule text.
+ * P1-alt: each diagnosis goal's mock verdict carries the per-goal EVIDENCE
+ * the merged turn-read extracts — locationNamed/fixSpecified (with quotes
+ * faithful to the prompt) plus the judged hardness/ambiguity — and the rig
+ * drives the PURE decision table (`decideArming`) over it. Each scenario
+ * encodes the CORRECT/desired outcome in expect.localizationArmed plus (P12)
+ * the expected seed KIND in expect.seedKind — diagnosis rows arm the
+ * localization writer, hard-build (needsPlan) rows arm the plan seed.
+ * `expect.reason` cites the corpus rule (R1-R4) that decides the case — see
+ * the doc for the full rule text.
  */
 export const CORPUS: ArmingScenario[] = [
   // -------------------------------------------------------------------------
@@ -27,6 +29,14 @@ export const CORPUS: ArmingScenario[] = [
           quote: "fix the indentation issue in django/db/backends/ddl_references.py",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "indentation corrected to 4 spaces",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "django/db/backends/ddl_references.py lines 42-44",
+            fixSpecified: true,
+            fixQuote: "needs 4 spaces instead of 2",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -48,6 +58,14 @@ export const CORPUS: ArmingScenario[] = [
           quote: "fix the off-by-one error in src/parser.ts around line 40",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "loop index corrected to start at 1",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "src/parser.ts around line 40",
+            fixSpecified: true,
+            fixQuote: "the loop should start at 1, not 0",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -70,6 +88,13 @@ export const CORPUS: ArmingScenario[] = [
           quote: "TypeError at auth.py:42: 'NoneType' object is not subscriptable",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "null check added at auth.py:42 to prevent the TypeError",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "auth.py:42",
+            fixSpecified: false,
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -92,6 +117,13 @@ export const CORPUS: ArmingScenario[] = [
           quote: "expected 'DID NOT RAISE' but got AttributeError at line 88 of validators.py",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "AttributeError at validators.py:88 fixed so the expected exception raises",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "line 88 of validators.py",
+            fixSpecified: false,
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -113,6 +145,13 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the endpoint uses request.args.get() for a POST body when it should use request.form.get() instead",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "endpoint reads the POST body via request.form.get() instead of request.args.get()",
+          evidence: {
+            locationNamed: false,
+            fixSpecified: true,
+            fixQuote: "should use request.form.get() instead",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -134,6 +173,13 @@ export const CORPUS: ArmingScenario[] = [
           quote: "QuerySet.delete() in django/db/models/deletion.py crashes when cascading through a null foreign key",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "QuerySet.delete() in deletion.py handles a null foreign key during cascade without crashing",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "django/db/models/deletion.py",
+            fixSpecified: false,
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -158,6 +204,7 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the collection logic should combine these database queries",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "n+1 query pattern eliminated via combined query logic",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -180,6 +227,7 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the app sometimes crashes on startup",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "crash on startup root-caused and fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "ambiguous" },
         },
       ],
       constraints: [],
@@ -202,6 +250,8 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the QuerySet.delete() method incorrectly drops related rows",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "QuerySet.delete() preserves related rows that should not be deleted",
+          // A bare symbol name is NOT a location (contrast grounded-symbol-plus-file).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -224,6 +274,8 @@ export const CORPUS: ArmingScenario[] = [
           quote: "fix the memory leak in the session handler",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "memory leak in the session handler eliminated",
+          // A component/layer name is NOT a location.
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -246,6 +298,7 @@ export const CORPUS: ArmingScenario[] = [
           quote: "why does login fail with special characters in the password but not with alphanumeric ones?",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "login failure with special-character passwords root-caused and fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -268,6 +321,7 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the importer rejects vCard 4.0 files even though they look well-formed",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "importer accepts well-formed vCard 4.0 files",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -291,6 +345,7 @@ export const CORPUS: ArmingScenario[] = [
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "race condition in cache invalidation fixed so concurrent writes no longer corrupt the cache",
           needsPlan: true,
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "hard", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -318,11 +373,19 @@ export const CORPUS: ArmingScenario[] = [
           quote: "fix HTTP serialization in server/api.ts",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "HTTP serialization corrected in server/api.ts",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "server/api.ts",
+            fixSpecified: false,
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
         },
         {
           quote: "a query in the database layer that isn't fetching the right fields",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "database layer query updated to fetch the right fields",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -686,11 +749,15 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the auth flow is broken and users can't log in",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "auth flow fixed so users can log in successfully",
+          // No file/module named in the prompt — the evidence, not the shape
+          // label, is what the decision table reads.
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
         {
           quote: "the error messages are unclear",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "error messages enhanced with more context",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -726,6 +793,9 @@ export const CORPUS: ArmingScenario[] = [
           quote: "there are trailing commas in the schema import list",
           shape: "diagnosis-grounded" as TriageGoalShape,
           deliverable: "trailing commas removed and formatter passed",
+          // The PROMPT names no file — the location lives in the todos, which
+          // only the Door-2 net sees (R4 refinement suppresses the injection).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "trivial", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -757,6 +827,7 @@ export const CORPUS: ArmingScenario[] = [
           quote: "there's a performance issue when loading large datasets",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "dataset loading performance optimized for large datasets",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "ambiguous" },
         },
       ],
       constraints: [],

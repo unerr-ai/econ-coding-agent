@@ -1,31 +1,21 @@
 /**
- * §1.1/§4.1 turn triage — the one cheap, forced-schema LLM call that opens
- * every turn: read the user's prompt once and extract its goals and
- * constraints before anything else runs (docs/architecture/
- * ORCHESTRATION_MECHANISM.md §1.1, §4.1). Pure and provider-agnostic: the
- * model call itself is injected via `complete` so this module never binds
- * to a real provider or session — U1a builds the extraction contract only;
- * wiring `runTurnTriage` into the turn-open step (`session/prompt.ts`) and
- * materializing the todo skeleton from its verdict (§1.2/U2) are later
- * passes. Extraction only, never invention: every quote is validated as a
- * verbatim, case-sensitive substring of the source prompt, and the module
- * never plans, localizes, or designs.
- *
- * Adapter recon (for the later wiring pass, not wired here): OpenCode's
- * existing small-model calls — session title/summary generation — run
- * through the full hidden "primary agent" session machinery
- * (`packages/opencode/src/agent/agent.ts`, `AgentV2.ID.make("title")` /
- * `"summary"`, `PROMPT_TITLE` / `PROMPT_SUMMARY`, every tool permission
- * denied), not a lean single-call helper. The lowest-level building block,
- * `LLMNative.request` (`session/llm/native-request.ts`), still needs a full
- * `Provider.Model` plus AI-SDK-shaped messages, not a bare (system, user)
- * pair. No clean, reusable "(system, user) => text" helper exists today —
- * hence `complete` stays an injected seam for the session layer to adapt.
+ * §1.1/§4.1 turn-read — the ONE forced-JSON, temperature-0 LLM call that opens
+ * every turn (P1-alt): read the user's prompt once and extract its goals and
+ * constraints, plus per-diagnosis-goal localization EVIDENCE (locationNamed /
+ * fixSpecified with verbatim quotes, and the judged hardness/ambiguity). The
+ * model reports facts; the arming decision itself is a pure code table over
+ * this verdict (`decideArming`, arming-judge.ts) — never the model's call.
+ * Pure and provider-agnostic: the model call is injected via `complete`
+ * (`turnReadDispatch`, session/prompt.ts, supplies the real conductor-tier
+ * completion), so this module never binds to a real provider or session.
+ * Extraction only, never invention: every quote is validated as a verbatim,
+ * case-sensitive substring of the source prompt, and the module never plans,
+ * localizes, or designs.
  *
  * @sem domain=routing role=extractor
  */
 import { extractJsonObject } from "../util/json-extract"
-import { TRIAGE_SYSTEM_PROMPT } from "./prompts/judges"
+import { TURN_READ_SYSTEM_PROMPT } from "./prompts/judges"
 
 // ---------------------------------------------------------------------------
 // The verdict shape — docs/architecture/ORCHESTRATION_MECHANISM.md §4.1
@@ -37,8 +27,30 @@ export type TriageGoalShape = "diagnosis-vague" | "diagnosis-grounded" | "build"
 /** One extracted constraint's arming category. */
 export type TriageConstraintKind = "no-test-edit" | "scope-limit" | "no-new-files" | "other"
 
-/** How cleanly the extraction went — a low verdict escalates the triage call itself one tier up (§4.1). */
+/** How cleanly the extraction went — a low verdict escalates the turn-read itself one tier up (§4.1). */
 export type TriageConfidence = "high" | "low"
+
+/** How hard the fix is once found — judged per diagnosis goal by the turn-read; drives the difficulty floor and seed selection downstream (§1.2). */
+export type ArmingHardness = "trivial" | "moderate" | "hard"
+
+/** Whether a goal admits more than one reading — judged per diagnosis goal by the turn-read. */
+export type ArmingAmbiguity = "clear" | "ambiguous"
+
+/**
+ * P1-alt — the per-diagnosis-goal evidence facts the turn-read reports. A
+ * `true` fact only survives parsing when backed by a verbatim quote from the
+ * prompt; an unbacked claim degrades to `false` (the conservative,
+ * arm-leaning posture). The arming decision is computed from these in code
+ * (`decideArming`), never by the model.
+ */
+export interface TriageGoalEvidence {
+  readonly locationNamed: boolean
+  readonly locationQuote?: string
+  readonly fixSpecified: boolean
+  readonly fixQuote?: string
+  readonly hardness?: ArmingHardness
+  readonly ambiguity?: ArmingAmbiguity
+}
 
 /** One goal extracted from the prompt. `quote` is validated verbatim before this is ever constructed. */
 export interface TriageGoal {
@@ -47,6 +59,8 @@ export interface TriageGoal {
   readonly deliverable: string
   readonly dependsOn?: readonly number[]
   readonly needsPlan?: boolean
+  /** Present when the goal's evidence section validated; absent evidence is read conservatively downstream (unlocated, no handed fix). */
+  readonly evidence?: TriageGoalEvidence
 }
 
 /** One constraint extracted from the prompt — arms a hard gate once wired (§1.2). */
@@ -55,7 +69,7 @@ export interface TriageConstraint {
   readonly kind: TriageConstraintKind
 }
 
-/** `runTurnTriage`'s / `parseTriageResponse`'s output: the turn's goals, constraints, and confidence. */
+/** `runTurnRead`'s / `parseTurnReadResponse`'s output: the turn's goals, constraints, evidence, and confidence. */
 export interface TriageVerdict {
   readonly goals: readonly TriageGoal[]
   readonly constraints: readonly TriageConstraint[]
@@ -78,8 +92,49 @@ const TRIAGE_CONSTRAINT_KINDS: ReadonlySet<TriageConstraintKind> = new Set([
   "other",
 ])
 
+const ARMING_HARDNESS: ReadonlySet<ArmingHardness> = new Set(["trivial", "moderate", "hard"])
+const ARMING_AMBIGUITY: ReadonlySet<ArmingAmbiguity> = new Set(["clear", "ambiguous"])
+
 /** Hard cap on goals per verdict (§4.1) — a verdict claiming more fails validation entirely. */
 export const TRIAGE_MAX_GOALS = 7
+
+/**
+ * Q-B partial-accept: an invalid evidence section never sinks its goal — it is
+ * dropped (`undefined`), and the decision table then reads the conservative
+ * posture (locationNamed=false, fixSpecified=false, hardness/ambiguity
+ * undefined). A `true` claim must carry its verbatim quote or it degrades to
+ * `false` — evidence is auditable, never asserted.
+ */
+function parseEvidence(entry: unknown, userPrompt: string): TriageGoalEvidence | undefined {
+  if (typeof entry !== "object" || entry === null) return undefined
+  const raw = entry as Record<string, unknown>
+
+  const locationQuote =
+    typeof raw.locationQuote === "string" && raw.locationQuote.length > 0 && userPrompt.includes(raw.locationQuote)
+      ? raw.locationQuote
+      : undefined
+  const fixQuote =
+    typeof raw.fixQuote === "string" && raw.fixQuote.length > 0 && userPrompt.includes(raw.fixQuote)
+      ? raw.fixQuote
+      : undefined
+  const hardness =
+    typeof raw.hardness === "string" && ARMING_HARDNESS.has(raw.hardness as ArmingHardness)
+      ? (raw.hardness as ArmingHardness)
+      : undefined
+  const ambiguity =
+    typeof raw.ambiguity === "string" && ARMING_AMBIGUITY.has(raw.ambiguity as ArmingAmbiguity)
+      ? (raw.ambiguity as ArmingAmbiguity)
+      : undefined
+
+  return {
+    locationNamed: raw.locationNamed === true && locationQuote !== undefined,
+    ...(locationQuote !== undefined ? { locationQuote } : {}),
+    fixSpecified: raw.fixSpecified === true && fixQuote !== undefined,
+    ...(fixQuote !== undefined ? { fixQuote } : {}),
+    ...(hardness !== undefined ? { hardness } : {}),
+    ...(ambiguity !== undefined ? { ambiguity } : {}),
+  }
+}
 
 function parseGoal(entry: unknown, userPrompt: string): TriageGoal | null {
   if (typeof entry !== "object" || entry === null) return null
@@ -97,6 +152,7 @@ function parseGoal(entry: unknown, userPrompt: string): TriageGoal | null {
       ? (raw.dependsOn as number[])
       : undefined
   const needsPlan = typeof raw.needsPlan === "boolean" ? raw.needsPlan : undefined
+  const evidence = parseEvidence(raw.evidence, userPrompt)
 
   return {
     quote,
@@ -104,6 +160,7 @@ function parseGoal(entry: unknown, userPrompt: string): TriageGoal | null {
     deliverable,
     ...(dependsOn !== undefined ? { dependsOn } : {}),
     ...(needsPlan !== undefined ? { needsPlan } : {}),
+    ...(evidence !== undefined ? { evidence } : {}),
   }
 }
 
@@ -124,18 +181,19 @@ function parseConstraint(entry: unknown, userPrompt: string): TriageConstraint |
  * Parse + validate the model's raw output into a `TriageVerdict`. Tolerant
  * of a reasoning preamble or trailing prose around the JSON — extracts the
  * first balanced top-level `{...}` object (`extractJsonObject`) before
- * parsing, since an un-muted conductor can stream commentary alongside the
- * answer (§4.1, prompt.ts `triageDispatch`/`armingDispatch`). Extraction-only
- * enforcement lives entirely here otherwise: a goal or constraint whose
- * `quote` isn't a verbatim, case-sensitive substring of `userPrompt` is
- * dropped, not corrected; an invalid `shape`/`kind` drops the whole entry;
- * zero surviving goals, or more than `TRIAGE_MAX_GOALS`, fails the verdict
- * outright; no balanced JSON object, or malformed JSON, fails outright.
- * Never throws.
+ * parsing, since a reasoning conductor can stream commentary alongside the
+ * answer (§4.1, prompt.ts `turnReadDispatch`). Extraction-only enforcement
+ * lives entirely here otherwise: a goal or constraint whose `quote` isn't a
+ * verbatim, case-sensitive substring of `userPrompt` is dropped, not
+ * corrected; an invalid `shape`/`kind` drops the whole entry; zero surviving
+ * goals, or more than `TRIAGE_MAX_GOALS`, fails the verdict outright; no
+ * balanced JSON object, or malformed JSON, fails outright. The evidence
+ * section is partial-accept (Q-B): an invalid evidence object is dropped
+ * while its goal survives. Never throws.
  *
  * @sem domain=routing role=extractor
  */
-export function parseTriageResponse(raw: string, userPrompt: string): TriageVerdict | null {
+export function parseTurnReadResponse(raw: string, userPrompt: string): TriageVerdict | null {
   if (!raw || !userPrompt) return null
 
   const jsonText = extractJsonObject(raw)
@@ -174,34 +232,36 @@ export function parseTriageResponse(raw: string, userPrompt: string): TriageVerd
 }
 
 // ---------------------------------------------------------------------------
-// The call itself — one blocking, forced-schema request on the conductor tier
+// The call itself — one blocking, forced-JSON request on the conductor tier
 // ---------------------------------------------------------------------------
 
-/** Blocking cap on the triage call (§4.1) — schema-invalid or slower than this falls back to the heuristic classifier. 10s: un-muting the conductor for triage (see triageDispatch, prompt.ts) adds reasoning tokens — a live probe measured max ~7.7s wall (median ~1.9s), 96% of the old 8s cap, so 10s gives headroom. Kept below arming's 12s ARMING_TIMEOUT_MS: triage sits on every turn's critical path, so a gateway hang shouldn't stall turn-open longer than necessary. */
-export const TRIAGE_TIMEOUT_MS = 10000
+/** Blocking cap on the turn-read call (§4.1) — the merged call inherits the old arming cap: the conductor reasons through the evidence fields (~510-token chain-of-thought, ~3.2s median on a live probe), so 12s leaves headroom for cold-start + provider jitter while still capping the user's turn-open wait on a true hang. The two old calls stacked to 22s worst-case; this is the whole budget now. */
+export const TURN_READ_TIMEOUT_MS = 12000
 
-/** One request to the injected small-model completion — see the adapter recon note above. */
+/** One request to the injected completion — the dispatch (prompt.ts) owns the provider path. */
 export interface TriageCompleteRequest {
   readonly system: string
   readonly user: string
   readonly timeoutMs: number
 }
 
-/** The injected completion port: the session layer supplies the real conductor-tier call later. */
+/** The injected completion port: the session layer supplies the real conductor-tier call. */
 export type TriageComplete = (request: TriageCompleteRequest) => Promise<string>
 
-export interface RunTurnTriageInput {
+export interface RunTurnReadInput {
   readonly userPrompt: string
   readonly complete: TriageComplete
   /** Fired when a completed attempt fails parse validation and the one retry launches — the caller's telemetry hook (case-3 tierfire3 decode: a silent null closed the whole decomposition path with no trace of why). */
   readonly onParseRetry?: () => void
+  /** Override the blocking cap (defaults to TURN_READ_TIMEOUT_MS) — tests pass a small value to avoid a real wall-clock wait. */
+  readonly timeoutMs?: number
 }
 
 async function raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("turn-triage: timed out")), timeoutMs)
+      timer = setTimeout(() => reject(new Error("turn-read: timed out")), timeoutMs)
     })
     return await Promise.race([promise, timeout])
   } finally {
@@ -210,31 +270,30 @@ async function raceTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 }
 
 /**
- * Run the turn-triage call: one forced-schema request on the conductor tier,
- * `TRIAGE_TIMEOUT_MS` blocking cap, extraction-only system prompt. A completed
- * attempt that fails `parseTriageResponse`'s validation retries ONCE (case-3
- * tierfire3: one extraction flake nulled the verdict and silently closed the
- * whole decomposition path — a ~4s re-ask is cheap insurance); timeout or a
- * rejected `complete` never retries — that budget is already spent, and
- * stacking a second blocking wait on a slow gateway doubles the turn-open
- * stall. Returns `null` when both attempts fail — the caller falls back to
- * `classifyTurnShape` in every `null` case (§1.1 rule 3), never here.
+ * Run the turn-read call: one forced-JSON request on the conductor tier,
+ * `TURN_READ_TIMEOUT_MS` blocking cap, extraction-only system prompt. A
+ * completed attempt that fails `parseTurnReadResponse`'s validation retries
+ * ONCE (case-3 tierfire3: one extraction flake nulled the verdict and
+ * silently closed the whole decomposition path — a cheap re-ask is cheap
+ * insurance); timeout or a rejected `complete` never retries — that budget is
+ * already spent, and stacking a second blocking wait on a slow gateway
+ * doubles the turn-open stall. Returns `null` when both attempts fail — the
+ * caller (prompt.ts) then re-asks ONCE on the reasoner tier and, still null,
+ * degrades NEUTRALLY (P5): no preamble, no skeleton, arming stands down.
  *
  * @sem domain=routing role=extractor
  */
-export async function runTurnTriage(input: RunTurnTriageInput): Promise<TriageVerdict | null> {
+export async function runTurnRead(input: RunTurnReadInput): Promise<TriageVerdict | null> {
   const { userPrompt, complete } = input
+  const timeoutMs = input.timeoutMs ?? TURN_READ_TIMEOUT_MS
   for (let attempt = 0; attempt < 2; attempt++) {
     let raw: string
     try {
-      raw = await raceTimeout(
-        complete({ system: TRIAGE_SYSTEM_PROMPT, user: userPrompt, timeoutMs: TRIAGE_TIMEOUT_MS }),
-        TRIAGE_TIMEOUT_MS,
-      )
+      raw = await raceTimeout(complete({ system: TURN_READ_SYSTEM_PROMPT, user: userPrompt, timeoutMs }), timeoutMs)
     } catch {
       return null
     }
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
     if (verdict) return verdict
     if (attempt === 0) input.onParseRetry?.()
   }
@@ -242,7 +301,7 @@ export async function runTurnTriage(input: RunTurnTriageInput): Promise<TriageVe
 }
 
 // ---------------------------------------------------------------------------
-// Telemetry — a lean summary for the `triage_vs_heuristic` disagreement log
+// Telemetry — a lean per-verdict summary for the `turn_triage` log line
 // ---------------------------------------------------------------------------
 
 export interface TriageTelemetrySummary {
@@ -254,8 +313,7 @@ export interface TriageTelemetrySummary {
 
 /**
  * Summarize a verdict for logging (§1.8 receipt trace) — no prose, just the
- * counts and enums a log line or the `triage_vs_heuristic` disagreement
- * signal needs.
+ * counts and enums a log line needs.
  *
  * @sem domain=routing role=extractor
  */

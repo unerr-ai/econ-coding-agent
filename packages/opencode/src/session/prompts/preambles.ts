@@ -1,60 +1,17 @@
-// The turn-scoped preambles the turn driver rides on the system-array tail:
-// the §8 casting playbook per turn shape, and the §1.1/§4.1 triage preamble
-// that replaces it whenever turn triage returned a verdict.
-import type { TurnShapeCategory } from "../slice-orchestrator"
+// The turn-scoped preamble the turn driver rides on the system-array tail,
+// built from the §1.1/§4.1 turn-read verdict. A null-verdict turn rides NO
+// preamble (P5 neutral degrade) — a wrong guess steers worse than no guess.
 import type { TriageVerdict } from "../turn-triage"
 import type { ArmingDecision } from "../arming-judge"
 
-// One casting playbook per shape (§8): ≤4 lines each, appended to the turn's
-// system array tail — never a prefix swap. Tier-speak only.
-const CATEGORY_PREAMBLE: Record<TurnShapeCategory, string> = {
-  "diagnosis-vague": [
-    "TURN SHAPE: diagnosis (vague symptom — no site named).",
-    "A localization/plan pre-pass frames this turn; do not anchor on a cause before its result folds back.",
-    "Accept a defect site only with a discriminating probe result attached — never narrative alone.",
-    "If evidence contradicts the frame, enumerate at least two candidate layers with a cheap probe each.",
-  ].join("\n"),
-  "diagnosis-grounded": [
-    "TURN SHAPE: diagnosis (grounded — the prompt names the site).",
-    "Verify the named site before editing: one discriminating probe that confirms the mechanism, then the fix.",
-    "Confirm the named site is the CAUSE, not just where the symptom surfaces — trace one edge upstream before editing; keep exploration to that confirmation.",
-  ].join("\n"),
-  build: [
-    "TURN SHAPE: build.",
-    "Type the plan: write the full pending list first; decided changes become typed slices and parallel-eligible slices run as a DAG.",
-    "Give every check-run item a real runnable command — a verify slice without one cannot reject.",
-    "If the build uncovers a defect, localize its cause before patching — do not fix the first symptom site.",
-  ].join("\n"),
-  audit: [
-    "TURN SHAPE: audit.",
-    "Judgment items are dispatched reasoner slices — never judge inline; synthesis composes the slice verdicts.",
-    "Keep your own steps to dispatch and relay.",
-  ].join("\n"),
-  qa: [
-    "TURN SHAPE: Q&A.",
-    "Answer directly with the graph/read tools; no decomposition, no todo slices, no plan.",
-    "Prefer the smallest read that answers — an explorer child only for a genuinely broad sweep.",
-  ].join("\n"),
-}
-
 /**
- * §8 rule 4 — the turn-scoped category preamble. Pure so the prompt seam and
- * tests share one source of truth.
- *
- * @sem domain=routing role=config
- */
-export function categoryPreamble(category: TurnShapeCategory): string {
-  return CATEGORY_PREAMBLE[category]
-}
-
-/**
- * §1.1/§4.1 — the turn-scoped preamble built from a non-null triage verdict:
- * lists every extracted goal (shape + deliverable) and constraint so the
- * conductor tracks each goal against its own todo instead of collapsing a
+ * §1.1/§4.1 — the turn-scoped preamble built from a non-null turn-read
+ * verdict: lists every extracted goal (shape + deliverable) and constraint so
+ * the conductor tracks each goal against its own todo instead of collapsing a
  * compound turn into one label. Pure and byte-stable for the turn — the same
  * verdict AND arming decision always yield the same string — so it rides the
- * system-array tail exactly like `categoryPreamble`, replacing it whenever
- * triage is non-null. Task #52 — when the arming judge flagged the turn
+ * system-array tail, never a prefix swap (the cached prefix stays stable).
+ * Task #52 — when the arming decision flagged the turn
  * ambiguous or hard, appends a decomposition-bias line steering the conductor
  * toward `todowrite` over an inline single-shot, so the work reaches the
  * per-slice tier allocator instead of being authored inline.

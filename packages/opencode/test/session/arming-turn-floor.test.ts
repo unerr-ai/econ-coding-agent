@@ -6,13 +6,14 @@
  * decomposition) never reaches it and gets authored at the conductor's cheap
  * baseline despite being flagged ambiguous or hard. This floors the
  * conductor's OWN reasoning at reasoner-grade ("high") for every
- * non-housekeeping step of a turn the arming judge flagged, without swapping
- * which model serves the turn (packages/opencode/src/session/llm/request.ts
- * `prepare()`, guarded by `getArmingDecision`).
+ * non-housekeeping step of a turn the arming decision flagged, without
+ * swapping which model serves the turn
+ * (packages/opencode/src/session/llm/request.ts `prepare()`, guarded by
+ * `getArmingDecision`).
  *
  * No live model call is made — we drive `LLMRequestPrep.prepare` directly,
  * seed the session's arming decision via `setArmingDecision`, and inspect the
- * prepared `params.options`. Mirrors the harness in arming-unmute.test.ts.
+ * prepared `params.options`.
  */
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
@@ -95,9 +96,8 @@ const ORDINARY_STEP_MESSAGES = [
   },
 ] as unknown as ModelMessage[]
 
-// Mirrors the main-loop (non-housekeeping) authoring-step shape: small:false, no
-// explicit unmuteReasoning — the turn-ambiguity floor is the only thing that can
-// un-mute it.
+// Mirrors the main-loop (non-housekeeping) authoring-step shape: small:false —
+// the turn-ambiguity floor is the only thing that can un-mute it.
 function prepare(sessionID: string, reasoningEffort: string | undefined, small = false) {
   return Effect.runPromise(
     LLMRequestPrep.prepare({

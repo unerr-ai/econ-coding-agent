@@ -1,271 +1,200 @@
 /**
- * Tests for the arming-judge module (§1.1b) — the one cheap, evidence-grounded
- * LLM call that decides whether a turn needs a localization pre-pass, replacing
- * the brittle regex doors (`roundUpTriageShapes`, `isHardDiagnosisPrompt`).
- * Covers the pure parse/validate pipeline (`parseArmingResponse`), its
- * blocking judge wrapper (`judgeArming`), the heuristic degrade path
- * (`heuristicArming`), and the user-message builder (`buildArmingUser`). No
- * wiring here — `complete` is a plain mocked callback, never a real provider,
- * mirroring test/session/turn-triage.test.ts.
+ * Table tests for the arming decision (P1-alt) — `decideArming` is a pure
+ * function over the turn-read verdict's extracted evidence, so every rule of
+ * the policy is asserted directly: per diagnosis goal,
+ * arm = !fixSpecified && (!locationNamed || hardness === "hard"), OR-ed;
+ * localized = every diagnosis goal names a location; missing evidence reads
+ * conservatively (arm); non-diagnosis shapes never arm.
  */
 
 import { describe, test, expect } from "bun:test"
-import {
-  parseArmingResponse,
-  judgeArming,
-  heuristicArming,
-  buildArmingUser,
-} from "../../src/session/arming-judge"
-import type { TriageComplete, TriageVerdict } from "../../src/session/turn-triage"
+import { decideArming } from "../../src/session/arming-judge"
+import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 
-describe("parseArmingResponse", () => {
-  test("valid JSON parses into an ArmingVerdict", () => {
-    const raw = JSON.stringify({
-      armLocalization: true,
-      localized: false,
-      hardness: "moderate",
-      ambiguity: "clear",
-      evidence: "only a symptom is described",
-    })
+function verdictOf(goals: TriageGoal[], confidence: "high" | "low" = "high"): TriageVerdict {
+  return { goals, constraints: [], confidence }
+}
 
-    const verdict = parseArmingResponse(raw)
-
-    expect(verdict).not.toBeNull()
-    expect(verdict!.armLocalization).toBe(true)
-    expect(verdict!.localized).toBe(false)
-    expect(verdict!.hardness).toBe("moderate")
-    expect(verdict!.ambiguity).toBe("clear")
-    expect(verdict!.evidence).toBe("only a symptom is described")
+describe("decideArming — stand-down cases", () => {
+  test("no verdict at all stands down (the P5 neutral-degrade posture)", () => {
+    const decision = decideArming(null)
+    expect(decision.armLocalization).toBe(false)
+    expect(decision.localized).toBe(true)
+    expect(decision.hardness).toBe("moderate")
+    expect(decision.evidence).toContain("stands down")
   })
 
-  test("a ```json-fenced body still parses", () => {
-    const raw =
-      "```json\n" +
-      JSON.stringify({
-        armLocalization: false,
-        localized: true,
-        hardness: "trivial",
-        ambiguity: "clear",
-        evidence: "the getter in enums.py",
-      }) +
-      "\n```"
-
-    const verdict = parseArmingResponse(raw)
-
-    expect(verdict).not.toBeNull()
-    expect(verdict!.armLocalization).toBe(false)
-    expect(verdict!.hardness).toBe("trivial")
+  test("a build-only turn never arms — localization does not apply", () => {
+    const decision = decideArming(
+      verdictOf([{ quote: "add a --json flag", shape: "build", deliverable: "flag works" }]),
+    )
+    expect(decision.armLocalization).toBe(false)
+    expect(decision.localized).toBe(true)
+    expect(decision.hardness).toBe("trivial")
+    expect(decision.evidence).toContain("no diagnosis-shaped goal")
   })
 
-  test("an invalid hardness returns null", () => {
-    const raw = JSON.stringify({
-      armLocalization: true,
-      localized: false,
-      hardness: "extreme",
-      ambiguity: "clear",
-      evidence: "n/a",
-    })
-    expect(parseArmingResponse(raw)).toBeNull()
-  })
-
-  test("an invalid ambiguity returns null", () => {
-    const raw = JSON.stringify({
-      armLocalization: true,
-      localized: false,
-      hardness: "moderate",
-      ambiguity: "unsure",
-      evidence: "n/a",
-    })
-    expect(parseArmingResponse(raw)).toBeNull()
-  })
-
-  test("a non-boolean armLocalization returns null", () => {
-    const raw = JSON.stringify({
-      armLocalization: "true",
-      localized: false,
-      hardness: "moderate",
-      ambiguity: "clear",
-      evidence: "n/a",
-    })
-    expect(parseArmingResponse(raw)).toBeNull()
-  })
-
-  test("malformed JSON returns null", () => {
-    expect(parseArmingResponse("{not valid json")).toBeNull()
-  })
-
-  // Un-muted, the conductor can stream a reasoning preamble alongside the JSON
-  // answer, or land the answer entirely in the reasoning channel — see
-  // armingDispatch's `content.trim() || reasoning` fallback, prompt.ts. These
-  // cases cover the resulting balanced-brace extraction tolerance.
-
-  test("a reasoning preamble before the JSON parses correctly", () => {
-    const json = JSON.stringify({
-      armLocalization: true,
-      localized: false,
-      hardness: "hard",
-      ambiguity: "ambiguous",
-      evidence: "multiple candidate call sites, none clearly the root cause",
-    })
-    const raw = `Let me reason through this before answering.\n${json}`
-
-    const verdict = parseArmingResponse(raw)
-
-    expect(verdict).not.toBeNull()
-    expect(verdict!.armLocalization).toBe(true)
-    expect(verdict!.hardness).toBe("hard")
-    expect(verdict!.ambiguity).toBe("ambiguous")
-  })
-
-  test("raw text with no JSON object at all returns null", () => {
-    expect(parseArmingResponse("Sure, I can help with that.")).toBeNull()
-  })
-
-  test('a body missing "localized" defaults it to the inverse of armLocalization', () => {
-    const armedRaw = JSON.stringify({
-      armLocalization: true,
-      hardness: "moderate",
-      ambiguity: "clear",
-      evidence: "n/a",
-    })
-    const armed = parseArmingResponse(armedRaw)
-    expect(armed).not.toBeNull()
-    expect(armed!.localized).toBe(false)
-
-    const notArmedRaw = JSON.stringify({
-      armLocalization: false,
-      hardness: "trivial",
-      ambiguity: "clear",
-      evidence: "n/a",
-    })
-    const notArmed = parseArmingResponse(notArmedRaw)
-    expect(notArmed).not.toBeNull()
-    expect(notArmed!.localized).toBe(true)
+  test("audit/qa/run-only shapes never arm", () => {
+    for (const shape of ["audit", "qa", "run-only"] as const) {
+      const decision = decideArming(verdictOf([{ quote: "review this PR", shape, deliverable: "done" }]))
+      expect(decision.armLocalization).toBe(false)
+    }
   })
 })
 
-describe("judgeArming", () => {
-  test("resolves the verdict the injected complete callback returns", async () => {
-    const complete: TriageComplete = async () =>
-      JSON.stringify({
-        armLocalization: true,
-        localized: false,
-        hardness: "moderate",
-        ambiguity: "clear",
-        evidence: "only a symptom is described",
-      })
-
-    const verdict = await judgeArming({ userPrompt: "the app crashes on startup", complete })
-
-    expect(verdict).not.toBeNull()
-    expect(verdict!.armLocalization).toBe(true)
-    expect(verdict!.hardness).toBe("moderate")
+describe("decideArming — the per-goal evidence table", () => {
+  test("location named, not hard → no arm, localized (django-12039: the trivial file-named fix stays cheap)", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "fix the indentation in ddl_references.py",
+          shape: "diagnosis-grounded",
+          deliverable: "indentation fixed",
+          evidence: { locationNamed: true, locationQuote: "ddl_references.py", fixSpecified: false, hardness: "trivial", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.armLocalization).toBe(false)
+    expect(decision.localized).toBe(true)
+    expect(decision.hardness).toBe("trivial")
   })
 
-  test("a complete callback slower than the arming timeout resolves to null", async () => {
-    const complete: TriageComplete = () => new Promise(() => {}) // never resolves
-    // Inject a tiny cap so the race resolves instantly instead of waiting the real ARMING_TIMEOUT_MS.
-    const verdict = await judgeArming({ userPrompt: "the app crashes on startup", complete, timeoutMs: 50 })
-    expect(verdict).toBeNull()
+  test("location named but judged hard → arms anyway (knowing the file is not knowing the mechanism)", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "fix the race in cache.ts",
+          shape: "diagnosis-grounded",
+          deliverable: "race fixed",
+          evidence: { locationNamed: true, locationQuote: "cache.ts", fixSpecified: false, hardness: "hard", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.armLocalization).toBe(true)
+    expect(decision.localized).toBe(true)
+    expect(decision.hardness).toBe("hard")
   })
 
-  test("a rejected complete callback resolves to null", async () => {
-    const complete: TriageComplete = async () => {
-      throw new Error("provider unavailable")
-    }
-    const verdict = await judgeArming({ userPrompt: "the app crashes on startup", complete })
-    expect(verdict).toBeNull()
+  test("a handed fix with no location → no arm (an executor grep, not a diagnosis)", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "use request.form.get() instead of request.args.get()",
+          shape: "diagnosis-grounded",
+          deliverable: "endpoint reads the POST body",
+          evidence: { locationNamed: false, fixSpecified: true, fixQuote: "use request.form.get() instead", hardness: "trivial", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.armLocalization).toBe(false)
+    expect(decision.localized).toBe(false)
+    expect(decision.evidence).toContain("fix handed")
   })
 
-  test("first attempt malformed then valid retries once and resolves, firing onParseRetry once", async () => {
-    const validRaw = JSON.stringify({
-      armLocalization: true,
-      localized: false,
-      hardness: "moderate",
-      ambiguity: "clear",
-      evidence: "only a symptom is described",
-    })
-    let callCount = 0
-    const complete: TriageComplete = async () => {
-      callCount++
-      return callCount === 1 ? "{not valid json" : validRaw
-    }
-    let retryCount = 0
+  test("no location, no fix → arms (the vague-symptom shape)", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "the app sometimes crashes on startup",
+          shape: "diagnosis-vague",
+          deliverable: "crash root-caused and fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.armLocalization).toBe(true)
+    expect(decision.localized).toBe(false)
+  })
 
-    const verdict = await judgeArming({
-      userPrompt: "the app crashes on startup",
-      complete,
-      onParseRetry: () => {
-        retryCount++
-      },
-    })
+  test("a diagnosis goal with NO evidence reads conservatively → arms", () => {
+    const decision = decideArming(
+      verdictOf([{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }]),
+    )
+    expect(decision.armLocalization).toBe(true)
+    expect(decision.localized).toBe(false)
+    expect(decision.hardness).toBe("moderate")
+    expect(decision.evidence).toContain("no evidence extracted")
+  })
 
-    expect(verdict).not.toBeNull()
-    expect(verdict!.armLocalization).toBe(true)
-    expect(callCount).toBe(2)
-    expect(retryCount).toBe(1)
+  test("mixed goals OR: one located goal + one unlocated goal → arms, not localized", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "fix HTTP serialization in server/api.ts",
+          shape: "diagnosis-grounded",
+          deliverable: "serialization fixed",
+          evidence: { locationNamed: true, locationQuote: "server/api.ts", fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+        {
+          quote: "a query in the database layer isn't fetching the right fields",
+          shape: "diagnosis-vague",
+          deliverable: "query fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.armLocalization).toBe(true)
+    expect(decision.localized).toBe(false)
   })
 })
 
-describe("heuristicArming", () => {
-  test("no verdict at all stands down: armLocalization is false", () => {
-    const verdict = heuristicArming()
-    expect(verdict.armLocalization).toBe(false)
+describe("decideArming — turn-level hardness and ambiguity", () => {
+  test("a needsPlan goal floors hardness to hard (feeds the difficulty floor and the reasoning un-mute)", () => {
+    const decision = decideArming(
+      verdictOf([{ quote: "refactor the auth module to JWT", shape: "build", deliverable: "JWT everywhere", needsPlan: true }]),
+    )
+    expect(decision.armLocalization).toBe(false)
+    expect(decision.hardness).toBe("hard")
   })
 
-  test("a verdict with a diagnosis-vague goal arms localization", () => {
-    const triageVerdict: TriageVerdict = {
-      goals: [{ quote: "something is slow sometimes", shape: "diagnosis-vague", deliverable: "cause identified" }],
-      constraints: [],
-      confidence: "high",
-    }
-
-    const verdict = heuristicArming(triageVerdict)
-
-    expect(verdict.armLocalization).toBe(true)
+  test("turn hardness is the max judged hardness across diagnosis goals", () => {
+    const decision = decideArming(
+      verdictOf([
+        {
+          quote: "fix the typo in README rendering",
+          shape: "diagnosis-vague",
+          deliverable: "typo fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "trivial", ambiguity: "clear" },
+        },
+        {
+          quote: "the cache corrupts under concurrent writes",
+          shape: "diagnosis-vague",
+          deliverable: "corruption fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "hard", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(decision.hardness).toBe("hard")
   })
 
-  test("a needsPlan goal produces hardness:hard", () => {
-    const triageVerdict: TriageVerdict = {
-      goals: [{ quote: "diagnose the flaky test", shape: "build", deliverable: "root cause found", needsPlan: true }],
-      constraints: [],
-      confidence: "high",
-    }
+  test("per-goal judged ambiguity, or a low-confidence extraction, flags the turn ambiguous", () => {
+    const judged = decideArming(
+      verdictOf([
+        {
+          quote: "login fails with special characters",
+          shape: "diagnosis-vague",
+          deliverable: "login fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "ambiguous" },
+        },
+      ]),
+    )
+    expect(judged.ambiguity).toBe("ambiguous")
 
-    const verdict = heuristicArming(triageVerdict)
+    const lowConfidence = decideArming(
+      verdictOf([{ quote: "something is slow sometimes", shape: "diagnosis-vague", deliverable: "cause found" }], "low"),
+    )
+    expect(lowConfidence.ambiguity).toBe("ambiguous")
 
-    expect(verdict.hardness).toBe("hard")
-  })
-})
-
-describe("buildArmingUser", () => {
-  test("includes the TASK text", () => {
-    const user = buildArmingUser({ userPrompt: "Fix the profile-name bug." })
-    expect(user).toContain("TASK:")
-    expect(user).toContain("Fix the profile-name bug.")
-  })
-
-  test("includes the TRIAGE goals when a verdict is passed", () => {
-    const verdict: TriageVerdict = {
-      goals: [{ quote: "the parser drops trailing commas", shape: "diagnosis-grounded", deliverable: "fixed" }],
-      constraints: [],
-      confidence: "high",
-    }
-
-    const user = buildArmingUser({ userPrompt: "Fix the parser bug.", verdict })
-
-    expect(user).toContain("TRIAGE")
-    expect(user).toContain("diagnosis-grounded")
-    expect(user).toContain("the parser drops trailing commas")
-  })
-
-  test("includes the CURRENT PLAN when todos are passed", () => {
-    const user = buildArmingUser({
-      userPrompt: "Fix the profile-name bug.",
-      todos: [{ content: "Implement the fix", status: "pending" }],
-    })
-
-    expect(user).toContain("CURRENT PLAN")
-    expect(user).toContain("Implement the fix")
+    const clear = decideArming(
+      verdictOf([
+        {
+          quote: "the enum renders the wrong label",
+          shape: "diagnosis-vague",
+          deliverable: "label fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(clear.ambiguity).toBe("clear")
   })
 })

@@ -1,9 +1,8 @@
-// Interface contract for the arming-rig — the offline harness that exercises just
-// the localization-arming decision (Door 1 = triage round-up, Door 2 = autoTypeTodos)
-// over a labeled corpus, so we can iterate the arming logic without full arena runs.
-//
-// The main thread owns this file; the runner (run.ts) and the corpus (corpus.ts) are
-// built in parallel against it. Do NOT put logic here — contract only.
+// Interface contract for the arming-rig — the offline harness that exercises
+// the localization-arming decision (Door 1 = the turn-open skeleton, Door 2 =
+// autoTypeTodos) over a labeled corpus: mock turn-read verdicts carry the
+// P1-alt per-goal evidence, and the PURE `decideArming` table converts it
+// into the decision. Do NOT put logic here — contract only.
 import type { TriageVerdict, TriageGoalShape } from "../../src/session/turn-triage"
 import type { OrchestrationTodo } from "../../src/session/slice-orchestrator"
 

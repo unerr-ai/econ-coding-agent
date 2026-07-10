@@ -30,8 +30,6 @@ type PrepareInput = {
   readonly system: string[]
   readonly messages: ModelMessage[]
   readonly small?: boolean
-  /** Explicit un-mute for a small call whose conductor still needs to reason (the arming judge). */
-  readonly unmuteReasoning?: boolean
   readonly tools: Record<string, Tool>
   readonly provider: Provider.Info
   readonly auth: Auth.Info | undefined
@@ -129,18 +127,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // Adaptive conductor reasoning gate: default stays non-thinking; this un-mutes
   // thinking only for the turn's plan step, the step right after a failed command,
   // and the step right after a tool result contradicted the model's premise (F4).
-  // Small (housekeeping) calls skip the gate entirely: a stateless one-shot like
-  // turn triage ends in a user message and would always read as a "plan" step —
-  // un-muted thinking then starves/slows its JSON output (live-fire: triage null
-  // on every real turn until this guard).
-  // Small (housekeeping) calls skip the adaptive gate — EXCEPT an explicit
-  // unmuteReasoning request: the arming judge is a small one-shot that STILL needs
-  // the conductor to reason through grounding strength (muted, minimax over-fires
-  // STRONG-grounded diagnoses — see arming-judge.ts / PROMPT_SLICING_CORPUS.md R2).
-  if (input.unmuteReasoning && options.reasoningEffort === "none") {
-    delete options.reasoningEffort
-    yield* Effect.logInfo("reasoning un-muted (explicit)", { sessionID: input.sessionID, reason: "unmuteReasoning" })
-  }
+  // Small (housekeeping) calls skip the gate entirely: a stateless one-shot ends
+  // in a user message and would always read as a "plan" step — un-muted thinking
+  // then starves/slows its JSON output. (The turn-read call never rides this
+  // path at all: it dispatches via generateText — prompt.ts turnReadDispatch.)
   // Turn-level ambiguity trigger (task #52): the per-slice difficulty floor
   // (allocation.ts) only fires once the conductor has decomposed a turn into
   // typed slices — a turn it handles inline, no decomposition, never reaches it

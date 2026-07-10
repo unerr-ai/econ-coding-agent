@@ -1,21 +1,22 @@
 /**
- * Tests for the turn-triage extraction module (U1a) — the pure
- * parse/validate pipeline (`parseTriageResponse`) and its blocking,
- * conductor-tier call wrapper (`runTurnTriage`), per
- * docs/architecture/ORCHESTRATION_MECHANISM.md §1.1/§4.1. No wiring here —
- * `complete` is a plain mocked callback, never a real provider.
+ * Tests for the turn-read extraction module (P1-alt) — the pure
+ * parse/validate pipeline (`parseTurnReadResponse`), including the
+ * per-diagnosis-goal evidence section, and its blocking, conductor-tier call
+ * wrapper (`runTurnRead`), per docs/architecture/ORCHESTRATION_MECHANISM.md
+ * §1.1/§4.1. No wiring here — `complete` is a plain mocked callback, never a
+ * real provider.
  */
 
 import { describe, test, expect } from "bun:test"
 import {
-  parseTriageResponse,
-  runTurnTriage,
+  parseTurnReadResponse,
+  runTurnRead,
   triageTelemetry,
   TRIAGE_MAX_GOALS,
   type TriageComplete,
 } from "../../src/session/turn-triage"
 
-describe("parseTriageResponse", () => {
+describe("parseTurnReadResponse", () => {
   test("a single goal parses with its shape and deliverable intact", () => {
     const userPrompt = "Fix the login bug where users can't reset their password."
     const raw = JSON.stringify({
@@ -30,7 +31,7 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
@@ -63,7 +64,7 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(3)
@@ -80,7 +81,7 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.constraints).toHaveLength(1)
@@ -102,7 +103,7 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.constraints).toHaveLength(1)
@@ -125,7 +126,7 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
@@ -140,12 +141,12 @@ describe("parseTriageResponse", () => {
       confidence: "high",
     })
 
-    expect(parseTriageResponse(raw, userPrompt)).toBeNull()
+    expect(parseTurnReadResponse(raw, userPrompt)).toBeNull()
   })
 
   test("malformed JSON returns null", () => {
     const userPrompt = "Fix the profile-name bug."
-    expect(parseTriageResponse("{not valid json", userPrompt)).toBeNull()
+    expect(parseTurnReadResponse("{not valid json", userPrompt)).toBeNull()
   })
 
   test("more than TRIAGE_MAX_GOALS goals returns null", () => {
@@ -158,7 +159,7 @@ describe("parseTriageResponse", () => {
     expect(goals.length).toBeGreaterThan(TRIAGE_MAX_GOALS)
     const raw = JSON.stringify({ goals, constraints: [], confidence: "high" })
 
-    expect(parseTriageResponse(raw, userPrompt)).toBeNull()
+    expect(parseTurnReadResponse(raw, userPrompt)).toBeNull()
   })
 
   test("the verbatim-substring check is case-sensitive", () => {
@@ -168,22 +169,144 @@ describe("parseTriageResponse", () => {
       constraints: [],
       confidence: "high",
     })
-    expect(parseTriageResponse(wrongCase, userPrompt)).toBeNull()
+    expect(parseTurnReadResponse(wrongCase, userPrompt)).toBeNull()
 
     const exactCase = JSON.stringify({
       goals: [{ quote: "Fix the Login bug", shape: "diagnosis-grounded", deliverable: "login works again" }],
       constraints: [],
       confidence: "high",
     })
-    const verdict = parseTriageResponse(exactCase, userPrompt)
+    const verdict = parseTurnReadResponse(exactCase, userPrompt)
     expect(verdict).not.toBeNull()
     expect(verdict!.goals[0].quote).toBe("Fix the Login bug")
   })
 
-  // Un-muted, the conductor can stream a reasoning preamble (or trailing
-  // prose) alongside the JSON answer, or land the answer entirely in the
-  // reasoning channel — see triageDispatch/armingDispatch, prompt.ts. These
-  // cases cover the resulting `extractJsonObject` tolerance.
+  // JOB 2 — the per-diagnosis-goal evidence section (P1-alt). Partial-accept
+  // (Q-B): a bad evidence section never sinks its goal; an unbacked `true`
+  // claim degrades to false (the conservative, arm-leaning posture).
+
+  test("a diagnosis goal carries its evidence through: quotes validated verbatim", () => {
+    const userPrompt = "fix the off-by-one in src/parser.ts — the loop should start at 1, not 0"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "fix the off-by-one in src/parser.ts",
+          shape: "diagnosis-grounded",
+          deliverable: "loop bound corrected",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "src/parser.ts",
+            fixSpecified: true,
+            fixQuote: "the loop should start at 1, not 0",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].evidence).toEqual({
+      locationNamed: true,
+      locationQuote: "src/parser.ts",
+      fixSpecified: true,
+      fixQuote: "the loop should start at 1, not 0",
+      hardness: "trivial",
+      ambiguity: "clear",
+    })
+  })
+
+  test("locationNamed:true without a verbatim quote degrades to false — evidence is auditable, never asserted", () => {
+    const userPrompt = "the importer rejects vCard 4.0 files"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "the importer rejects vCard 4.0 files",
+          shape: "diagnosis-vague",
+          deliverable: "importer accepts vCard 4.0",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "importer.py", // not in the prompt
+            fixSpecified: true,
+            fixQuote: "", // empty — no backing quote
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].evidence!.locationNamed).toBe(false)
+    expect(verdict!.goals[0].evidence!.fixSpecified).toBe(false)
+  })
+
+  test("a malformed evidence section is dropped while its goal survives (Q-B partial-accept)", () => {
+    const userPrompt = "the app crashes on startup"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "the app crashes on startup",
+          shape: "diagnosis-vague",
+          deliverable: "crash fixed",
+          evidence: "not an object",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals).toHaveLength(1)
+    expect(verdict!.goals[0].evidence).toBeUndefined()
+  })
+
+  test("an invalid hardness/ambiguity value is dropped from the evidence, the booleans survive", () => {
+    const userPrompt = "the session handler leaks memory in handler.ts"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "the session handler leaks memory in handler.ts",
+          shape: "diagnosis-grounded",
+          deliverable: "leak fixed",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "handler.ts",
+            fixSpecified: false,
+            fixQuote: "",
+            hardness: "extreme",
+            ambiguity: "unsure",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].evidence).toEqual({
+      locationNamed: true,
+      locationQuote: "handler.ts",
+      fixSpecified: false,
+    })
+  })
+
+  // A reasoning conductor can stream a preamble (or trailing prose) alongside
+  // the JSON answer, or land the answer entirely in the reasoning channel —
+  // see turnReadDispatch, prompt.ts. These cases cover the resulting
+  // `extractJsonObject` tolerance.
 
   test("a reasoning preamble before the JSON parses correctly", () => {
     const userPrompt = "Fix the login bug where users can't reset their password."
@@ -200,7 +323,7 @@ describe("parseTriageResponse", () => {
     })
     const raw = `Let me think through this step by step before answering.\n${json}`
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
@@ -222,7 +345,7 @@ describe("parseTriageResponse", () => {
     })
     const raw = `${json}\n\nThat's my full analysis of the request.`
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
@@ -243,15 +366,15 @@ describe("parseTriageResponse", () => {
     })
     const raw = `Reasoning first.\n${json}\ntrailing`
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals[0].quote).toBe("Fix the config parser for the {invalid} block syntax.")
   })
 
-  test("empty raw (the extraction pipe yielded no content and no reasoning) returns null", () => {
+  test("empty raw (no content and no reasoning) returns null", () => {
     const userPrompt = "Fix the profile-name bug."
-    expect(parseTriageResponse("", userPrompt)).toBeNull()
+    expect(parseTurnReadResponse("", userPrompt)).toBeNull()
   })
 
   test("a reasoning-only fallback string — no content, just a reasoning stream ending in the JSON answer — still parses", () => {
@@ -267,13 +390,13 @@ describe("parseTriageResponse", () => {
       constraints: [],
       confidence: "high",
     })
-    // Mirrors triageDispatch's `content.trim() || reasoning` fallback: when the
-    // model's content channel comes back empty, the un-muted reasoning stream
+    // Mirrors turnReadDispatch's `text.trim() || reasoningText` fallback: when
+    // the model's content channel comes back empty, the reasoning stream
     // (which typically opens with commentary before the JSON answer) is passed
     // to the parser instead.
     const raw = `I need to identify the goals and constraints in this prompt. The user wants a bug fixed, so the shape is diagnosis-grounded.\n${json}`
 
-    const verdict = parseTriageResponse(raw, userPrompt)
+    const verdict = parseTurnReadResponse(raw, userPrompt)
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
@@ -282,11 +405,11 @@ describe("parseTriageResponse", () => {
 
   test("raw text with no JSON object at all returns null", () => {
     const userPrompt = "Fix the profile-name bug."
-    expect(parseTriageResponse("Sure, I can help with that.", userPrompt)).toBeNull()
+    expect(parseTurnReadResponse("Sure, I can help with that.", userPrompt)).toBeNull()
   })
 })
 
-describe("runTurnTriage", () => {
+describe("runTurnRead", () => {
   test("resolves the verdict the injected complete callback returns", async () => {
     const userPrompt = "Fix the profile-name bug."
     const complete: TriageComplete = async () =>
@@ -302,34 +425,30 @@ describe("runTurnTriage", () => {
         confidence: "high",
       })
 
-    const verdict = await runTurnTriage({ userPrompt, complete })
+    const verdict = await runTurnRead({ userPrompt, complete })
 
     expect(verdict).not.toBeNull()
     expect(verdict!.goals).toHaveLength(1)
   })
 
-  test(
-    "a complete callback slower than TRIAGE_TIMEOUT_MS resolves to null",
-    async () => {
-      const complete: TriageComplete = () => new Promise(() => {}) // never resolves
-      const verdict = await runTurnTriage({ userPrompt: "Fix the profile-name bug.", complete })
-      expect(verdict).toBeNull()
-    },
-    // waits out the full TRIAGE_TIMEOUT_MS (10s) race — needs more than bun's 5s default
-    14_000,
-  )
+  test("a complete callback slower than the timeout resolves to null", async () => {
+    const complete: TriageComplete = () => new Promise(() => {}) // never resolves
+    // Inject a tiny cap so the race resolves instantly instead of waiting the real TURN_READ_TIMEOUT_MS.
+    const verdict = await runTurnRead({ userPrompt: "Fix the profile-name bug.", complete, timeoutMs: 50 })
+    expect(verdict).toBeNull()
+  })
 
   test("a rejected complete callback resolves to null", async () => {
     const complete: TriageComplete = async () => {
       throw new Error("provider unavailable")
     }
-    const verdict = await runTurnTriage({ userPrompt: "Fix the profile-name bug.", complete })
+    const verdict = await runTurnRead({ userPrompt: "Fix the profile-name bug.", complete })
     expect(verdict).toBeNull()
   })
 
   test("malformed JSON from complete resolves to null", async () => {
     const complete: TriageComplete = async () => "{not valid json"
-    const verdict = await runTurnTriage({ userPrompt: "Fix the profile-name bug.", complete })
+    const verdict = await runTurnRead({ userPrompt: "Fix the profile-name bug.", complete })
     expect(verdict).toBeNull()
   })
 
@@ -352,7 +471,7 @@ describe("runTurnTriage", () => {
       return callCount === 1 ? "{not valid json" : validRaw
     }
     let retryCount = 0
-    const verdict = await runTurnTriage({
+    const verdict = await runTurnRead({
       userPrompt,
       complete,
       onParseRetry: () => {
@@ -373,7 +492,7 @@ describe("runTurnTriage", () => {
       return "{not valid json"
     }
     let retryCount = 0
-    const verdict = await runTurnTriage({
+    const verdict = await runTurnRead({
       userPrompt: "Fix the profile-name bug.",
       complete,
       onParseRetry: () => {
@@ -393,7 +512,7 @@ describe("runTurnTriage", () => {
       throw new Error("provider unavailable")
     }
     let retryCount = 0
-    const verdict = await runTurnTriage({
+    const verdict = await runTurnRead({
       userPrompt: "Fix the profile-name bug.",
       complete,
       onParseRetry: () => {
@@ -409,7 +528,7 @@ describe("runTurnTriage", () => {
 
 describe("triageTelemetry", () => {
   test("summarizes goal count, shapes, constraint kinds, and confidence", () => {
-    const verdict = parseTriageResponse(
+    const verdict = parseTurnReadResponse(
       JSON.stringify({
         goals: [
           { quote: "Audit the five fixes", shape: "audit", deliverable: "a pass/fail verdict per fix" },

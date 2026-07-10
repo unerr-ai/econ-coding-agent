@@ -1,19 +1,19 @@
-// Standalone OFFLINE dev harness for the localization-arming decision — scores
-// the REAL arming-judge pipeline (heuristicArming / judgeArming) against a
-// labeled corpus so the arming logic can be iterated without full arena runs.
+// Standalone OFFLINE dev harness for the localization-arming decision — drives
+// the P1-alt pipeline end to end (turn-read verdict evidence → the PURE
+// `decideArming` table → skeleton + autoTypeTodos seed planting) against a
+// labeled corpus, so the arming policy can be iterated without full arena runs.
 // Plain script, NOT a *.test.ts: run via `bun run test/arming-rig/run.ts`
 // from packages/opencode. `bun test` does not pick this file up (its name
 // doesn't match the *.test.ts/*.spec.ts patterns bun test scans for).
 import { autoTypeTodos, buildTriageTodoSkeleton } from "../../src/session/slice-orchestrator"
 import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "../../src/session/prompts/seeds"
-import { heuristicArming, judgeArming, type ArmingVerdict } from "../../src/session/arming-judge"
-import { runTurnTriage, type TriageComplete, type TriageCompleteRequest } from "../../src/session/turn-triage"
+import { decideArming, type ArmingVerdict } from "../../src/session/arming-judge"
+import { runTurnRead, type TriageComplete, type TriageCompleteRequest } from "../../src/session/turn-triage"
 import { ECON_TIER_BINDING } from "../../../code-intelligence/src/model-registry"
 import type { ArmingScenario, TriageVerdict } from "./types"
 
-// Fallback corpus — used only when ./corpus.ts (authored in parallel by a
-// sibling agent against types.ts) is missing or exports an empty CORPUS, so
-// this script stays runnable standalone.
+// Fallback corpus — used only when ./corpus.ts is missing or exports an empty
+// CORPUS, so this script stays runnable standalone.
 const STUB_CORPUS: readonly ArmingScenario[] = [
   {
     id: "stub-grounded-with-file",
@@ -24,6 +24,13 @@ const STUB_CORPUS: readonly ArmingScenario[] = [
           quote: "Fix the off-by-one bound check in packages/core/src/util/range.ts",
           shape: "diagnosis-grounded",
           deliverable: "corrected range bound",
+          evidence: {
+            locationNamed: true,
+            locationQuote: "packages/core/src/util/range.ts",
+            fixSpecified: false,
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
         },
       ],
       constraints: [],
@@ -44,6 +51,7 @@ const STUB_CORPUS: readonly ArmingScenario[] = [
           quote: "The enum renders the wrong label somewhere in the display logic",
           shape: "diagnosis-grounded",
           deliverable: "corrected label",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -52,7 +60,7 @@ const STUB_CORPUS: readonly ArmingScenario[] = [
     expect: {
       localizationArmed: true,
       seedKind: "localization",
-      reason: "grounded bug with no file target should round up to diagnosis-vague and arm localization",
+      reason: "no location evidence — the decision table arms localization",
     },
     note: "stub fallback: grounded, no file target",
   },
@@ -88,10 +96,10 @@ const GATEWAY_API_KEY = process.env.LITELLM_API_KEY ?? process.env.OPENAI_API_KE
 const GATEWAY_MODEL = ECON_TIER_BINDING.conductor
 
 // The one real `TriageComplete` port: POSTs {system,user} to the econ conductor
-// endpoint and returns the assistant message content. Shared by liveTriage and
-// liveArming — both build their own system+user prompts internally, this only
-// carries the request across the wire (mirrors packages/eval/src/index.ts's
-// gateway call).
+// endpoint and returns the assistant message content. MIRRORS production's
+// turnReadDispatch (prompt.ts): temperature 0 (P2a) and no reasoning_effort
+// override — the conductor reasons through the evidence fields at its
+// provider default.
 const gatewayComplete: TriageComplete = async (request: TriageCompleteRequest): Promise<string> => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), request.timeoutMs)
@@ -104,11 +112,6 @@ const gatewayComplete: TriageComplete = async (request: TriageCompleteRequest): 
       },
       body: JSON.stringify({
         model: GATEWAY_MODEL,
-        // Reasoning left ON (no reasoning_effort:"none") to MIRROR production: the arming
-        // dispatch un-mutes the conductor (prompt.ts armingDispatch `unmuteReasoning:true`)
-        // so minimax can reason through grounding strength — muted, it over-fires
-        // STRONG-grounded diagnoses (grounded-stacktrace / grounded-symbol-plus-file;
-        // PROMPT_SLICING_CORPUS.md R2). 12s ARMING_TIMEOUT_MS covers the ~3s thinking cost.
         messages: [
           { role: "system", content: request.system },
           { role: "user", content: request.user },
@@ -125,20 +128,14 @@ const gatewayComplete: TriageComplete = async (request: TriageCompleteRequest): 
   }
 }
 
-// Live-triage seam: runs the real `runTurnTriage` extractor against the
-// gateway. Only reached from scoreScenario when RIG_LIVE=1.
-async function liveTriage(prompt: string): Promise<TriageVerdict> {
-  const verdict = await runTurnTriage({ userPrompt: prompt, complete: gatewayComplete })
-  if (!verdict) throw new Error("liveTriage: runTurnTriage returned null (timeout or parse failure)")
+// Live turn-read seam: runs the real `runTurnRead` extractor against the
+// gateway (goals + evidence in ONE call). Only reached from scoreScenario
+// when RIG_LIVE=1. The arming decision is CODE in both modes — live mode
+// validates the extraction, never a model-made decision.
+async function liveTurnRead(prompt: string): Promise<TriageVerdict> {
+  const verdict = await runTurnRead({ userPrompt: prompt, complete: gatewayComplete })
+  if (!verdict) throw new Error("liveTurnRead: runTurnRead returned null (timeout or parse failure)")
   return verdict
-}
-
-// Live-arming seam: runs the real `judgeArming` judge against the gateway.
-// Only reached from scoreScenario when RIG_LIVE=1.
-async function liveArming(input: { userPrompt: string; verdict: TriageVerdict }): Promise<ArmingVerdict> {
-  const arming = await judgeArming({ userPrompt: input.userPrompt, verdict: input.verdict, complete: gatewayComplete })
-  if (!arming) throw new Error("liveArming: judgeArming returned null (timeout or parse failure)")
-  return arming
 }
 
 type CaseVerdict = "ok" | "over-fire" | "under-fire" | "wrong-seed" | "error"
@@ -151,7 +148,7 @@ interface ScoreRow {
   seed: string
   verdict: CaseVerdict
   shapes: string
-  /** Live mode only: the arming judge's grounding string, printed per row so it can be eyeballed. */
+  /** The decision table's grounding string, printed per row so it can be eyeballed. */
   evidence?: string
 }
 
@@ -163,25 +160,24 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
   let arming: ArmingVerdict
   try {
     if (RIG_LIVE) {
-      // Live mode validates the REAL judge: triage still honors a mock verdict
-      // when the scenario pins one, but arming always runs the live gateway.
-      verdict = scenario.mockVerdict ?? (await liveTriage(scenario.prompt))
-      arming = await liveArming({ userPrompt: scenario.prompt, verdict })
+      // Live mode validates the REAL extraction: a scenario that pins a mock
+      // verdict keeps it; otherwise the merged turn-read runs on the gateway.
+      verdict = scenario.mockVerdict ?? (await liveTurnRead(scenario.prompt))
     } else {
       if (!scenario.mockVerdict) {
         throw new Error("deterministic mode requires scenario.mockVerdict — set RIG_LIVE=1 to hit the real gateway")
       }
       verdict = scenario.mockVerdict
-      arming = heuristicArming(verdict)
     }
+    // P1-alt: the arming decision is the PURE code table in BOTH modes.
+    arming = decideArming(verdict)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return { id: scenario.id, note, expected, actual: `error: ${message}`, seed: "—", verdict: "error", shapes: "-" }
   }
 
-  // Arming judge decides (heuristicArming deterministic / judgeArming live);
-  // the skeleton + autoTypeTodos net then materializes the frame pre-pass
-  // from that decision.
+  // The decision table decides; the skeleton + autoTypeTodos net then
+  // materializes the frame pre-pass from that decision.
   const skeleton = buildTriageTodoSkeleton(verdict, arming)
   const typed = autoTypeTodos(scenario.todos ?? skeleton, arming.armLocalization)
   // The pre-pass engages the expensive reasoner tier, so over/under-fire is
@@ -215,7 +211,7 @@ async function scoreScenario(scenario: ArmingScenario): Promise<ScoreRow> {
     seed,
     verdict: caseVerdict,
     shapes,
-    evidence: RIG_LIVE ? arming.evidence : undefined,
+    evidence: arming.evidence,
   }
 }
 
