@@ -179,7 +179,7 @@
       "name": "econ LiteLLM gateway",
       "npm": "@ai-sdk/openai-compatible",
       "env": ["LITELLM_API_KEY"],
-      "options": { "baseURL": "https://econ-litellm.fly.dev/v1", "headerTimeout": 45000, "chunkTimeout": 120000 },
+      "options": { "baseURL": "https://econ-litellm.fly.dev/v1", "headerTimeout": 45000, "chunkTimeout": 120000, "timeout": 300000 },
       "models": {
         "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "reasoningEffort": "none", "parallel_tool_calls": true } },
         "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle)", "reasoning": true, "limit": { "context": 1048576, "output": 32768 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },

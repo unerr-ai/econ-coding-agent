@@ -185,6 +185,11 @@ export function econDefaultConfig(): ConfigV1.Info {
           // existing backoff absorbs the blip instead of hanging the run.
           headerTimeout: 45_000,
           chunkTimeout: 120_000,
+          // Total request cap: chunkTimeout only wraps SSE bodies — a stalled
+          // NON-streaming response (judge/triage generateText) has no byte-level
+          // watchdog and sat 6+ min on the 11885 probe before a silent exit.
+          // 300s bounds any single request; legitimate calls average ~15s.
+          timeout: 300_000,
         },
         models: {
           "deepseek/deepseek-v4-flash": econModel("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash (econ conductor)", {
