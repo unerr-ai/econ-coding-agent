@@ -31,7 +31,7 @@ evaluator, containment) in
                  ┌──────────────────────────────────────────────────────────┐
                  │ per-request mutations                                    │
                  │  · adaptive reasoning gate (request.ts:126-134)          │
-                 │  · turn-shape / triage preamble appended to system tail  │
+                 │  · turn-read (triage) preamble appended to system tail   │
                  └───────────────┬──────────────────────────────────────────┘
                                  ▼
                  ┌──────────────────────────────────────────────────────────┐
@@ -260,15 +260,14 @@ limits (`model-registry.ts:79-154`):
 
 | Tier | Model | reasoningEffort | Context / maxOutput | Notes |
 |---|---|---|---|---|
-| conductor | deepseek/deepseek-v4-flash | **"none"** (muted) | 1M / 8,192 | un-muted per-request by the gate (§5.1); sessionAffinity |
+| conductor | minimax/minimax-m3 (bound 2026-07-09, provisional) | **"none"** (muted) | 512K / 64,000 | un-muted per-request by the gate (§5.1) — whether M3 honors the no-think default is UNVERIFIED; sessionAffinity (default, unprobed on M3) |
 | executor | openai/gpt-oss-120b | "low" | 131K / 8,192 | sessionAffinity |
 | reasoner | deepseek/deepseek-v4-pro | "high" | 1.04M / 32,768 | no sessionAffinity |
 | oracle | z-ai/glm-5.2 | "high" | 1.04M / 32,768 | sessionAffinity |
 
 All four set `parallel_tool_calls: true`. Pricing and provider facts: [models.md](./models.md).
-Two additional catalog models — `minimax/minimax-m3` and `moonshotai/kimi-k2p7-code` — now also
-live in `ECON_MODELS` (why the limits range widened to `79-154`), but neither is bound to a
-tier, so this four-row table is unchanged.
+`deepseek/deepseek-v4-flash` (the previous conductor) and `moonshotai/kimi-k2p7-code` remain
+catalog-only in `ECON_MODELS` (why the limits range widened to `79-154`), unbound to any tier.
 
 ---
 
@@ -296,95 +295,104 @@ reads only the result shape and the query it recovers by `toolCallId`, never the
 so it fires only on an explicit scope token and fails closed on any ambiguity. Live effect (trace
 runs 12–18 → 19–21): un-muting at these forks cut step counts from 33–48 to 26–35.
 
-### 5.2 Turn-open: turn-shape preambles (system tail)
+### 5.2 Turn-open: the turn-read preamble (system tail)
 
-`slice-orchestrator.ts:872-900` — one of five casting briefs appended to the system array by
-turn category:
+`triagePreamble` (`prompts/preambles.ts`) — ONE turn-scoped preamble built from the §4.1
+turn-read verdict plus the arming decision, appended to the system-array tail. It is pure
+and byte-stable for the turn (same verdict + arming ⇒ same string), so the cached prefix
+never swaps. The old five per-category casting briefs (`CATEGORY_PREAMBLE`) were **deleted
+with the regex shadow taxonomy** (P5, 2026-07-10); a null-verdict turn now rides **no
+preamble at all** — a wrong guess steers the conductor worse than no guess.
 
-```
-TURN SHAPE: diagnosis (vague symptom — no site named).
-A localization/plan pre-pass frames this turn; do not anchor on a cause before its result folds back.
-Accept a defect site only with a discriminating probe result attached — never narrative alone.
-If evidence contradicts the frame, enumerate at least two candidate layers with a cheap probe each.
-```
-
-```
-TURN SHAPE: diagnosis (grounded — the prompt names the site).
-Verify the named site before editing: one discriminating probe that confirms the mechanism, then the fix.
-Confirm the named site is the CAUSE, not just where the symptom surfaces — trace one edge upstream before editing; keep exploration to that confirmation.
-```
+Shape:
 
 ```
-TURN SHAPE: build.
-Type the plan: write the full pending list first; decided changes become typed slices and parallel-eligible slices run as a DAG.
-Give every check-run item a real runnable command — a verify slice without one cannot reject.
-If the build uncovers a defect, localize its cause before patching — do not fix the first symptom site.
+TURN SHAPE: triage (N goals extracted, confidence=…).
+1. [shape(, needs-plan)] "quote" — done when: deliverable
+CONSTRAINT (kind): "quote"
+Track each goal against its own todo; verify each independently — never conflate or drop one for another.
 ```
 
-```
-TURN SHAPE: audit.
-Judgment items are dispatched reasoner slices — never judge inline; synthesis composes the slice verdicts.
-Keep your own steps to dispatch and relay.
-```
+Appended conditionally:
 
-```
-TURN SHAPE: Q&A.
-Answer directly with the graph/read tools; no decomposition, no todo slices, no plan.
-Prefer the smallest read that answers — an explorer child only for a genuinely broad sweep.
-```
-
-When multi-goal triage produced a verdict, the **triage preamble replaces** the category one
-(`slice-orchestrator.ts:1023-1036`): `TURN SHAPE: triage (N goals extracted, confidence=…)`,
-one line per goal (`[tags] "quote" — done when: deliverable`), one per constraint
-(`CONSTRAINT (kind): "quote"`), closing with "Track each goal against its own todo; verify
-each independently — never conflate or drop one for another."
+- **RESEARCH PLAYBOOK** (verdict carries a `research` goal, P3): the deliverable is a
+  CITED digest of external sources; fan out parallel `recon` lookup slices (they run as
+  web-enabled researchers) only when the questions are genuinely independent; verification
+  is the citation check — never the test suite.
+- **REFACTOR PLAYBOOK** (verdict carries a `refactor` goal, P3): behavior must NOT change
+  — done when the suite is green and no public signature breaks; type refactor slices
+  `mechanical`; work that adds behavior is a separate build goal, never smuggled in.
+- **Decomposition-bias line** (task #52 — arming decision flags the turn ambiguous or
+  hard): `TURN FLAGGED AMBIGUOUS/HARD: prefer todowrite over inline single-shot handling…`
+  so the work reaches the per-slice tier allocator instead of being authored inline.
 
 ### 5.3 Turn-open: seeded frame slices (todo injection)
 
-`buildTriageTodoSkeleton` / `autoTypeTodos` inject **prepass todos** (both
-`sliceType:"design", need:"reasoner", persona:"researcher"`), selected by
-`diagnosisPrepassSeed` (`slice-orchestrator.ts:950-952`) — planner for hard prompts
-(`isHardDiagnosisPrompt`, `:933-940`: ≥2 subsystem tokens, or ≥2 sentences + cross-layer
-markers like `intermittent|race|flaky|deadlock|under load`), localization otherwise. Seeds are
-deduped by content across goals (finding 1, commit `3f1b4ab46`).
+Seed **contents** live in `prompts/seeds.ts`; the injectable todo shells that carry them
+stay in `slice-orchestrator.ts`. `buildTriageTodoSkeleton` plants at most one seed per
+qualifying goal, **chosen by the goal's shape** (P12, 2026-07-10 — the old
+`diagnosisPrepassSeed()` single-seed selector and its `isHardDiagnosisPrompt` text-hardness
+gate are deleted): a diagnosis-shaped goal whose arming decision armed
+(`decideArming` → `armLocalization`, see the orchestration mechanism §8.1) gets
+`LOCALIZATION_PREPASS_TODO`; a non-diagnosis `needsPlan` goal gets `PLAN_PREPASS_TODO`.
+Seeds dedup by content across goals; a single diagnosis goal never plants both —
+`needsPlan` is ignored on the diagnosis branch (the 12050 double-seed regression). The
+localization seed also backs `autoTypeTodos`' Door-2 net (localization only — that net is
+diagnosis-shaped by construction); the resolution gate's resolve-first re-seed uses the
+same shape split (armed diagnosis → localization; anything else → plan).
 
-`LOCALIZATION_SLICE_CONTENT` (`:707`):
+The two shells differ deliberately:
+
+- `LOCALIZATION_PREPASS_TODO` — `sliceType:"mechanical", testStrength:"testable",
+  persona:"applier"`: a **writer** seat (edit + bash allowed) that is
+  difficulty-allocated, NOT reasoner-pinned — a trivial, already-located bug stays on the
+  cheap executor; only a judge-rated hard/ambiguous bug floors at the reasoner (the
+  django-12039 fix).
+- `PLAN_PREPASS_TODO` — `sliceType:"design", need:"reasoner", persona:"researcher"`:
+  edit-free by design (it composes with the P3 no-edits gate), reasoner-floored by
+  allocation.
+
+`LOCALIZATION_SLICE_CONTENT` (`prompts/seeds.ts`):
 
 ```
-Localize the root cause BEFORE any fix is attempted: name the exact file(s) and function(s)
-that must change, the defect mechanism (why the current behavior is wrong), and the minimal
-fix strategy — every claim backed by evidence — and for the named cause, the call edge that
-connects the symptom to it, not just a file/line at the symptom. Trace the failure path from
-symptom to cause with the graph tools (graph search, callers) and targeted file reads. Do not
-write code or propose diffs: deliver targets, mechanism, and strategy only. Budget discipline:
-your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the deliverable. If
-budget runs short, deliver the ranked candidates with their discriminating probes still OPEN —
-name each probe as a single runnable shell command on its own backticked line so it can be
-pinned and re-run — never assert a single site as the cause without a probe result that rules
-the others out.
+You OWN this bug end to end in ONE session — localize, fix, and PROVE it, all here. (1)
+LOCALIZE: name the exact file(s) and function(s) that must change and the defect mechanism
+(why the current behavior is wrong), tracing the failure path from symptom to CAUSE with the
+graph tools (graph search, callers) and targeted file reads — find the cause, not just where
+the symptom surfaces. (2) FIX: apply the minimal edit at that cause. (3) VERIFY: RUN the
+failing/pinned test (plus a focused typecheck of what you touched) and iterate edit→run until
+it passes GREEN — do not stop at a described fix; the test must actually pass. Never weaken,
+delete, skip, or edit the failing test to make it pass — fix the cause. If you GENUINELY
+cannot localize within budget, stop editing and instead report the ranked candidate sites —
+each with the evidence for its rank and one discriminating probe as a single runnable shell
+command on its own backticked line — so the next pass can rule the others out. Budget
+discipline: your tool-call budget is HARD — a watchdog ends the session at the cap and keeps
+only what you have already written and applied; make the edit and run the test EARLY, then
+refine — a verified minimal fix beats a perfect unwritten analysis.
 ```
 
-`PLANNER_SLICE_CONTENT` (`:737`):
+`PLAN_SLICE_CONTENT` (`prompts/seeds.ts`, P12):
 
 ```
-Produce a bounded execution PLAN for this turn — a plan artifact, not code. Deliver exactly:
-(1) ranked candidate defect sites (file + function), each with the evidence that earns its
-rank; (2) one discriminating probe per candidate — a cheap command or check whose outcome
-separates it from the rest; (3) the fix layer(s) the evidence points to, with the
-risk/blast-radius of touching each; (4) an execution DAG of typed slices for the conductor to
-dispatch — per slice: content, sliceType (design/recon/mechanical/verify) and need, and deps.
-Writing code, diffs, or edits is forbidden: targets, probes, layers, and the DAG only. Budget
-discipline: your tool-call budget is hard (~35 calls); reserve the final steps to WRITE the
-plan. If budget runs short, deliver the ranked candidates with their discriminating probes
-still OPEN — name each probe as a single runnable shell command on its own backticked line so
-it can be pinned and re-run — never assert a single site as the cause without a probe result
-that rules the others out.
+Plan this build before any code is written. The work is decided but too large to execute
+blind — your job is decomposition, not implementation: (1) read just enough of the codebase
+(graph search, callers, targeted file reads) to anchor the plan in the REAL structure — name
+the files/modules each change touches and the seams it must respect; (2) break the work into
+small, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) deliver the
+implementation plan as an execution DAG of typed slices (content, sliceType, need, deps) for
+the conductor to dispatch. Writing code or diffs is forbidden here — the plan and DAG only.
 ```
 
-Both blocks gained the same trailing clause in the same edit as the M1 probe rung (task #7,
-2026-07-08): naming each open probe as a single runnable, backticked shell command is what lets
-`todosToLoopSlices` (§5.5) later rank and pin it as `probeCommand` — so a localization/plan
-artifact's stated probe becomes the exact command the verify ladder re-runs, not just narrative.
+(A third seed, `REDECOMPOSITION_SLICE_CONTENT` (#55), is planted **mid-flight** by the
+re-decomposition trigger, never at turn open — its content is deliberately distinct from
+both so dedup-by-content can never collide.)
+
+The localization writer's cannot-localize fallback still carries the M1 probe-rung clause
+(task #7, 2026-07-08): naming each open probe as a single runnable, backticked shell
+command is what lets `todosToLoopSlices` (§5.5) later rank and pin it as `probeCommand` —
+the stated probe becomes the exact command the verify ladder re-runs, not just narrative.
+The plan seed carries no probe clause — a decided build has no reproduction to pin; its
+deliverable is the DAG.
 
 **Fold-back guard — narrative-only flag** (`prompt.ts` `prepassOnly` branch, `:~2265`;
 `isProbeGrounded`, `prompt.ts:~160`, 2026-07-08). When a localization/plan pre-pass is the only
@@ -533,12 +541,13 @@ is rebuilt as:
 
 ### 5.9 Turn-close: pinned-reproduction gate (M4)
 
-`packages/opencode/src/session/prompt.ts` `runLoop` (root sessions only, always-on, no flag). A
-fix-shaped turn's pinned reproduction (`deriveTurnProbe`, `slice-orchestrator.ts:556-558`,
-pinned at turn-open) is re-run by `runTurnProbeGate` (`slice-orchestrator.ts:578-610`) just
+`packages/opencode/src/session/prompt.ts` `runLoop` (root sessions only, always-on, no flag).
+The pinned reproduction (`deriveTurnProbe`, `slice-orchestrator.ts:695`; pinned at turn-open
+when the turn-read verdict carries a diagnosis-shaped goal, restored from `turn-read-store.ts`
+on a continuation turn) is re-run by `runTurnProbeGate` (`slice-orchestrator.ts:738`) just
 before the loop's exit `break`; a reject injects the gate's `reason` — a content-specific nudge
 — as a synthetic user message and re-enters the loop, bounded by `MAX_PROBE_GATE_RETRIES` (3,
-`prompt.ts:1427`). Closes the gap where an inline fix (no `todowrite`, zero dispatched slices)
+`prompt.ts:1438`). Closes the gap where an inline fix (no `todowrite`, zero dispatched slices)
 never touches the slice-level probe rung at all. Full mechanics — the bypass it closes, the
 test-tree-guard ordering, the loud-unresolved exit —
 [ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md) §4.6.
@@ -552,10 +561,10 @@ test-tree-guard ordering, the loud-unresolved exit —
 | 1 | Reasoning gate: plan | turn-open user msg | deletes `reasoningEffort:"none"` | reasoning-gate.ts:174-216 |
 | 2 | Reasoning gate: recovery | bash failure signature | same | reasoning-gate.ts:174-216 |
 | 3 | Reasoning gate: contradiction (+F4b scope-miss) | empty/error, or off-scope successful search | same | reasoning-gate.ts:142-216 |
-| 4 | Turn-shape preamble | turn category | system tail | slice-orchestrator.ts:872-900 |
-| 5 | Triage preamble | multi-goal verdict | replaces #4 | slice-orchestrator.ts:1023-1036 |
-| 6 | Localization seed | bug-shaped, not localized | injects todo | slice-orchestrator.ts:707,1249 |
-| 7 | Planner seed | hard-diagnosis prompt | injects todo | slice-orchestrator.ts:737,950 |
+| 4 | Turn-read preamble | non-null turn-read verdict | system tail | prompts/preambles.ts (`triagePreamble`) |
+| 5 | Shape playbooks + hard/ambiguous bias | research/refactor goal; arming hard or ambiguous | appended inside #4 | prompts/preambles.ts |
+| 6 | Localization seed | diagnosis goal, `decideArming` arms | injects todo | prompts/seeds.ts; `buildTriageTodoSkeleton`/`autoTypeTodos` (slice-orchestrator.ts) |
+| 7 | Plan seed (P12) | non-diagnosis `needsPlan` goal | injects todo | prompts/seeds.ts; `buildTriageTodoSkeleton` (slice-orchestrator.ts) |
 | 8 | Judgment typing | JUDGMENT_KEYWORDS | sliceType+need | slice-orchestrator.ts:1273 |
 | 9 | Verify-run typing | VERIFY_RUN_KEYWORDS | sliceType | slice-orchestrator.ts:1271-1272 |
 | 10 | Build-plan typing | MECHANICAL_START, ≥2 changes | typeBuildPlan | slice-orchestrator.ts:1157-1182 |
@@ -576,7 +585,7 @@ test-tree-guard ordering, the loud-unresolved exit —
 | 25 | Plugin hook | `context.assemble.before` | plugin-injected system | request.ts:90-103 |
 | 26 | Narrative-only localization flag | localization/plan fold-back, no probe run | prepends warning to relayed frame | prompt.ts:~2265 (`isProbeGrounded` :~160) |
 | 27 | Probe-rung reproduction gate | pinned `probeCommand` still red | rejects rung `probe` | verifier.ts:515-533 (`checkProbeRung`), slice-orchestrator.ts:1454-1461 (pin) |
-| 28 | Turn-close probe gate (M4) | pinned turn reproduction still red at turn-close | injects synthetic user nudge, re-enters loop | prompt.ts:1510-1560 (`runTurnProbeGate` call), slice-orchestrator.ts:578-610 |
+| 28 | Turn-close probe gate (M4) | pinned turn reproduction still red at turn-close | injects synthetic user nudge, re-enters loop | `runTurnProbeGate` call in prompt.ts `runLoop`, slice-orchestrator.ts:738 |
 
 ---
 
@@ -687,8 +696,9 @@ gating order: behavior-gate → sound → probe). `todosToLoopSlices`
 reproduction it can identify as `probeCommand` on every edit-emitting slice — ranking
 `extractVerifyCommands`'s own output (no second extractor), falling back to a resolved
 upstream dependency's content, and left unset when nothing identifiable exists (never
-fabricated). The shared trailing sentence of `LOCALIZATION_SLICE_CONTENT` /
-`PLANNER_SLICE_CONTENT` (§5.3) now also asks the generator to name each open probe as a single
+fabricated). The trailing clause of the frame seeds of the day (`LOCALIZATION_SLICE_CONTENT`
+and the then-planner seed — the latter since replaced by P12's `PLAN_SLICE_CONTENT`, which
+carries no probe clause; §5.3) also asks the generator to name each open probe as a single
 runnable, backticked shell command — the exact string this rung later pins and re-runs.
 Design-level treatment: [ORCHESTRATION_MECHANISM.md](../architecture/ORCHESTRATION_MECHANISM.md)
 §1.5, §2.1, §2.2 (G5).

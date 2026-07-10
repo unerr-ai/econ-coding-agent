@@ -1,12 +1,14 @@
 # Orchestration improvements — working proposal
 
-**Status: IMPLEMENTATION IN PROGRESS (2026-07-10) — all Q-table recommendations accepted
-by the user ("implement all"); landing wave by wave.** Landed: **P6a/b/c + P7(b)** (core
+**Status: IMPLEMENTED except P11 (2026-07-10) — all Q-table recommendations accepted by
+the user ("implement all"); landed wave by wave.** W1: **P6a/b/c + P7(b)** (core
 `229a9303a`, wiring `5ce310868`), **P8, P9, P10, P12** (`229a9303a`, resolve-first
-residual case `5ce310868`). In flight: P1-alt/P2a/P5 (turn-open rewrite), then P3+P4,
-then P11. Accepted designs fold into
-[ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md); this doc keeps the decision
-trail. Benchmark-driven tuning is logged in
+residual case `5ce310868`). W2: **P1-alt + P2a + P5** — the merged temp-0 turn-read,
+code-decided arming, regex shadow taxonomy deleted (`48a3499ce`). W3: **P3 + P4** —
+research/refactor shapes, no-edits gate, continuation turns (`e372a3c1d`). In progress:
+**P11** (model-initiated tier delegation, W4). The accepted designs are folded into
+[ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) — mechanism truth lives there;
+this doc keeps the decision trail. Benchmark-driven tuning is logged in
 [SWE_BENCH_TRACKER.md](../testing/SWE_BENCH_TRACKER.md).
 
 Origin: user questions (2026-07-10) — (a) merge the turn-open LLM reads into one
@@ -15,9 +17,13 @@ temperature-0 call? (b) does the goal-shape taxonomy cover all real prompt style
 
 ---
 
-## The full journey of a prompt through econ (current code)
+## The full journey of a prompt through econ (the round's opening audit)
 
-Reference map — where each stage lives and why it exists:
+Reference map as verified on 2026-07-10, **before** the waves landed — kept as the baseline
+the proposals were judged against. Where a P-status below says IMPLEMENTED, the folded-in
+current mechanism lives in [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md)
+(notably: item 1's three reads are now ONE turn-read + a code table, and the regex shape
+guess is deleted).
 
 1. **Three reads + a risk probe** (turn open, `session/prompt.ts` ~1771). A free regex
    shape guess (`classifyTurnShape` — the fallback today; P5 proposes retiring it); one LLM extraction
@@ -89,6 +95,9 @@ What fires per prompt type:
 
 ## 1. Turn-open facts the proposals change
 
+> Baseline of 2026-07-10, since replaced: P1-alt/P2a/P5 (W2, `48a3499ce`) collapsed reads
+> #1–#3 into one temperature-0 turn-read with no regex fallback.
+
 | # | Read | Produces | Cost / latency | Fallback |
 |---|------|----------|----------------|----------|
 | 1 | `classifyTurnShape` (regex) | heuristic shape | free | — (is the fallback) |
@@ -114,6 +123,11 @@ P1+P5:       prompt ─► ONE turn-read call ─► [null? reasoner re-ask → 
 ---
 
 ## 2. P1 — One merged "turn-read" call
+
+> **Status: IMPLEMENTED as P1-alt (W2, `48a3499ce`).** One temp-0 conductor turn-read
+> (`TURN_READ_SYSTEM_PROMPT`, `prompts/judges.ts`); arming decided in code (`decideArming`,
+> `arming-judge.ts`); old triage/arming dispatches deleted, no shims; all rig rows
+> reproduce from evidence + table.
 
 Replace the two turn-open LLM calls with a single conductor-tier, forced-JSON, temp-0 call:
 
@@ -173,6 +187,10 @@ resolution gate, preamble byte-compatible on the corpus; old dispatches deleted 
 
 ## 3. P2 — Temperature 0 on the extraction call(s)
 
+> **Status: P2a IMPLEMENTED (W2, `48a3499ce`)** — the merged turn-read dispatches at
+> temperature 0. P2b (provider JSON mode) stays deferred per Q-F; the brace-matching
+> extractor (`util/json-extract.ts`) remains.
+
 Set `temperature: 0` on the turn-open extraction dispatch (both calls if P1 is rejected,
 the merged call if accepted). Already the recorded open candidate after the goalCount
 2/null/3 flake — sampling diversity has no value in a validator-gated extraction; every
@@ -190,6 +208,13 @@ temp 0, the next dial is P1-alt (fewer judged fields), not more sampling knobs.
 ---
 
 ## 4. P3 — Upgrade the goal-shape taxonomy
+
+> **Status: IMPLEMENTED (W3, `e372a3c1d`).** `research` + `refactor` shapes with their
+> discriminators in the turn-read prompt (no regex keywords anywhere — P5 had already
+> deleted the shadow taxonomy, so change-inventory item 4 never happened); `no-edits`
+> constraint kind → a hard deny at the edit/write tool boundary; research turns auto-cast
+> the researcher persona on recon slices and pin `testStrength:"untestable"` (citation
+> check, no verify/probe); RESEARCH/REFACTOR playbooks in `triagePreamble`.
 
 ### 4.0 What the research says
 
@@ -281,6 +306,15 @@ side-task for that (rule 3). Only deliverable-level gaps justify shapes.
 
 ## 4b. P4 — Model the follow-up turn (research-driven)
 
+> **Status: IMPLEMENTED (W3, `e372a3c1d`).** `TurnRole` fresh|continuation on the verdict
+> (zero goals valid only on continuations); pre-LLM short-circuit for short code-free acks
+> on sessions with prior turns; a continuation inherits the stored verdict/preamble/arming
+> decision/M4 pin (`turn-read-store.ts`) and stands down the resolution gate, skeleton
+> reseed, and P10 reset; `turnContinuations` telemetry. Proposal piece 2 (feed the judge
+> session state via `JudgeArmingInput.todos`) was mooted by P1-alt — the judge LLM call no
+> longer exists; the no-re-arm rule holds through inheritance + the settled-seed dedup
+> instead, validated on the continuation rig rows.
+
 **Finding:** continuation-style prompts (follow-up, refinement, feedback, clarification)
 are half or more of real multi-turn traffic. econ treats every root message as a fresh
 turn: triage re-extracts from the new text alone, arming re-judges, the skeleton considers
@@ -318,6 +352,14 @@ telemetry (continuation rate — checks the 33–40% literature number on econ's
 ---
 
 ## 4c. P5 — Retire the regex shadow taxonomy (user-driven, steelmanned)
+
+> **Status: IMPLEMENTED (W2, `48a3499ce`)** — executed WITH P1-alt rather than after it
+> (one rewrite instead of two): cross-tier reasoner re-ask on null, neutral degrade
+> (nothing planted), `classifyTurnShape`/`CATEGORY_PREAMBLE`/`categoryPreamble`/legacy
+> null-seed block/`triage_vs_heuristic` all deleted (24+ symbols, net −440 lines);
+> M4 probe-gate arming re-homed onto the verdict's diagnosis goals; the
+> `turnReadNulls`/`turnReads` counter landed in the same commit — the <2% acceptance gate
+> is measured in the benchmark phase, not pre-landing.
 
 **The user's argument:** if the conductor tier / LLM infra is down, the whole app is down —
 a regex fallback that only matters then is pointless complexity.
@@ -368,6 +410,11 @@ fallback now actually covers a conductor-tier failure.
 ---
 
 ## 4d. P6 — Goal & slice relations: derive, don't extract
+
+> **Status: IMPLEMENTED (W1 core `229a9303a`, opencode wiring `5ce310868`).** P6a blocked
+> state (cascading, settles todos `cancelled`, feeds re-decomposition per Q-J); P6b
+> `serializeOverlappingScopes` (fixpoint, add-only, read-only exempt); P6c venue inputs
+> live (`editScopeOf` from `extractSliceFiles`, `requestingTier` "conductor").
 
 **What exists:** goal-level `dependsOn` (triage) orders the skeleton; slice-level `deps`
 build the DAG (`planWaves`: parallel within a wave, series across); dependents receive
@@ -433,6 +480,10 @@ Four real gaps found → P7–P10 below.
 
 ## 4f. P7 — Venue verdict: consume it or call it telemetry
 
+> **Status: option (b) IMPLEMENTED (W1, `229a9303a`/`5ce310868`)** — P6c un-starved the
+> inputs; the verdict is now honest telemetry that will prove or kill per-slice inline
+> execution with data (Q-K).
+
 **Verified:** the evaluator's rule 4 decides `inline|child` per slice
 (evaluator.ts:154–172, two live inline branches: same-tier+same-files, small same-tier
 batch) — but the only consumer is the `onEvaluation` telemetry callback
@@ -461,6 +512,10 @@ Options:
 
 ## 4g. P8 — Difficulty-aware step budgets
 
+> **Status: IMPLEMENTED (W1, `229a9303a`).** `sliceStepBudget(persona, sliceId, opts)` —
+> `ceil(base × 1.5)` when `sliceType === "design"`, the turn's arming hardness is `hard`,
+> or the dispatch is an escalated rescue (Q-L: both). Table-tested.
+
 **Verified:** slice step budgets key on **persona only** (slice-orchestrator.ts:257 —
 explorer 30, runner 25, applier 45, author 45, researcher 15, procedure 60; call site
 prompt.ts:2349). Difficulty, tier, and escalation don't move them. Escalated rescues get
@@ -481,6 +536,10 @@ Pure code, table-testable; telemetry counts exhaustion-then-fail before/after.
 
 ## 4h. P9 — Synthesis tier follows the synthesis job, not the max tier touched
 
+> **Status: IMPLEMENTED (W1, `229a9303a`).** Synthesis defaults to the reasoner; the
+> oracle fires only on mixed outcomes — an `unverified` or (since P6a) `blocked` slice
+> among the done needing arbitration (Q-M). `synthesis_dispatched` logs the tier.
+
 **Verified:** the closing synthesis hop runs on **oracle if any slice touched oracle,
 else reasoner** (prompt.ts:2617–2620), over per-slice digests capped at 1500 chars.
 
@@ -499,6 +558,10 @@ conditional; telemetry keeps `synthesisTier` so the receipt shows the saving.
 ---
 
 ## 4i. P10 — Resolution budget: bound the turn, not the session
+
+> **Status: IMPLEMENTED (W1, `229a9303a`).** `resetResolveAttempts(sessionID)` at every
+> FRESH turn open (per-turn reset only, Q-N); a continuation turn (P4, W3) skips the reset
+> — the same task's recursion bound holds across the follow-up.
 
 **Verified:** the resolve-attempts counter (resolution-store.ts) is keyed by sessionID
 and "only ever grows" — no reset anywhere. `MAX_RESOLVE_ATTEMPTS` (2) exists to bound the
@@ -521,6 +584,8 @@ session each get their own resolution pass.
 ---
 
 ## 4j. P11 — Model-initiated tier delegation (user-driven, 2026-07-10)
+
+> **Status: IN PROGRESS (W4)** — the delegate tool is being built now.
 
 **Framing — two orchestration levels** (the organizing idea behind P11):
 
@@ -592,6 +657,12 @@ expensive tier idles through a hub round-trip.
 ---
 
 ## 4k. P12 — A real plan seed for hard builds (corpus-audit finding, 2026-07-10)
+
+> **Status: IMPLEMENTED (W1, `229a9303a`; resolve-first residual case `5ce310868`).**
+> `PLAN_SLICE_CONTENT`/`PLAN_PREPASS_TODO` planted on the non-diagnosis `needsPlan` branch
+> (and by the resolve-first pass when the turn isn't an armed diagnosis);
+> `diagnosisPrepassSeed()` deleted; the rig gained the seed-kind column (wrong-seed
+> scoring), Q-Q's seed-not-gate decision held.
 
 **Verified:** the corpus doc promises a "PLANNER" pre-pass, but code has **one** frame
 seed: `diagnosisPrepassSeed()` returns `LOCALIZATION_PREPASS_TODO` unconditionally, and

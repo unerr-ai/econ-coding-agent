@@ -2,32 +2,43 @@
 
 The evidence-grounded reference for how econ's slicer/orchestration should read a
 prompt and decide **what pre-pass to arm** before executing. Re-read this on every
-change to the arming judge or the doors; it is encoded 1:1 in
+change to the turn-read prompt, the arming decision table, or the doors; it is encoded 1:1 in
 [`packages/opencode/test/arming-rig/corpus.ts`](../../packages/opencode/test/arming-rig/corpus.ts)
 and run as a regression suite (see [Running](#running) at the bottom).
 
 > **Why this doc exists.** The arming decision used to be brittle regex "doors". It is
-> now an evidence-grounded LLM judge ([`arming-judge.ts`](../../packages/opencode/src/session/arming-judge.ts)).
-> To perfect the judge's prompt and the doors, we need a fixed, labeled set of prompts
-> whose *correct* behavior is grounded in external research — not our own guesses — so we
-> can run it over and over and measure over-fire / under-fire after every change.
+> now a single evidence-grounded **turn-read** extraction
+> ([`turn-triage.ts`](../../packages/opencode/src/session/turn-triage.ts) — one temp-0
+> conductor call that reports per-diagnosis-goal facts) plus a **pure decision table**
+> ([`decideArming`, `arming-judge.ts`](../../packages/opencode/src/session/arming-judge.ts))
+> that applies the policy in code. To perfect the extraction prompt and the table, we need
+> a fixed, labeled set of prompts whose *correct* behavior is grounded in external research
+> — not our own guesses — so we can run it over and over and measure over-fire /
+> under-fire / wrong-seed after every change.
 
 ## The model (recap)
 
-- **Shape** (from triage — six in code, `turn-triage.ts`): `diagnosis-grounded` (bug,
-  fix-site known), `diagnosis-vague` (bug, fix-site unknown), `build` (new feature/code),
-  `audit` (review/analyze, no edit), `qa` (question/navigation — answered inline; **no
-  corpus rows yet**, see [Coverage gaps](#coverage-gaps-2026-07-10)), `run-only` (execute
-  & report, no edit).
-- **Pre-pass we may ARM:** `LOCALIZATION` (a find-the-fix-site pass first), `PLANNER`
-  (plan-first), or `NONE` (execute directly). **Code reality (verified 2026-07-10):**
-  there is ONE frame seed — `diagnosisPrepassSeed()` always returns the localization
-  writer todo; "PLANNER" exists only as the `needsPlan`/hardness flag that (a) plants that
-  same seed for non-diagnosis goals and (b) floors its allocation to the reasoner. A hard
-  BUILD therefore receives a diagnosis-worded brief ("own this bug… run the failing
-  test") — a misframed seed; fix proposed as **P12** in
-  [ORCHESTRATION_IMPROVEMENTS.md](../architecture/ORCHESTRATION_IMPROVEMENTS.md). The
-  single-seed rule (never planner AND localization on one turn) is correct and stays.
+- **Shape** (from the turn-read — eight in code, `turn-triage.ts`): `diagnosis-grounded`
+  (bug, fix-site known), `diagnosis-vague` (bug, fix-site unknown), `build` (new
+  feature/code — adds or changes behavior), `refactor` (restructures **without changing
+  behavior**; adds-behavior ⇒ `build` — the crisp P3 discriminator), `audit`
+  (review/analyze, no edit), `qa` (question answerable from THIS repo's code; **no corpus
+  rows yet**, see [Coverage gaps](#coverage-gaps-2026-07-10)), `research` (deliverable
+  needs **external sources** — docs/changelogs/web; repo-answerable ⇒ `qa`), `run-only`
+  (execute & report, no edit).
+- **Constraint kinds** (arm hard gates, not shapes): `no-test-edit`, `no-edits`
+  ("propose, don't code" — a hard deny at the edit/write tool boundary for the turn),
+  `scope-limit`, `no-new-files`, `other`.
+- **Turn role** (P4): `fresh` vs `continuation`. A short code-free ack ("go ahead",
+  "still broken") on a session with prior turns short-circuits pre-LLM; a continuation
+  inherits the stored verdict/arming/pin and **never re-arms** a settled pre-pass.
+- **Pre-pass we may ARM:** `LOCALIZATION` (the localize-fix-verify writer seed,
+  `LOCALIZATION_SLICE_CONTENT` — armed by `decideArming` on diagnosis goals only),
+  `PLAN` (the edit-free decomposition seed, `PLAN_SLICE_CONTENT` — planted on
+  `needsPlan` **non-diagnosis** goals; landed as **P12**, closing the old misframed-seed
+  gap where a hard build received the bug-hunt brief), or `NONE` (execute directly). The
+  single-seed rule per goal holds: a diagnosis goal never plants both — `needsPlan` is
+  ignored on the diagnosis branch (the 12050 double-seed regression).
 - **Doors** (where arming happens): **Door-1** = the triage skeleton at turn-open
   (`buildTriageTodoSkeleton`); **Door-2** = the todowrite net (`autoTypeTodos`) when the
   conductor writes its to-do list.
@@ -41,7 +52,8 @@ and run as a regression suite (see [Running](#running) at the bottom).
 These are derived from the research, not from intuition. Each cites its evidence.
 
 **R1 — Localization is diagnosis-only.** Only `diagnosis-*` shapes may arm `LOCALIZATION`.
-`build` / `audit` / `run-only` arm neither localization nor (by default) planner.
+`build` / `refactor` / `audit` / `qa` / `research` / `run-only` arm neither localization
+nor (by default) the plan seed.
 Localization is the *fix-site-finding* pass for a bug; a feature build with no file named
 is normal, not a reason to hunt. *(SWE-bench taxonomy; SWE-agent user-query analysis —
 localization is "the hard separator" between diagnosis and everything else.)*
@@ -60,19 +72,22 @@ defined/overridden in many files. But that same bare symbol paired with the **sp
 fix** — not just a symptom — is SPECIFIED-FIX, not WEAK: no diagnosis remains, only a
 grep-and-apply, so it does **not** arm.)*
 
-**R3 — Planner is for *hardness*, orthogonal to grounding.** Arm `PLANNER` (→ stronger
-tier) when the task is cross-layer / multi-file (empirical breakeven ≈ **5 files or 3+
-layers**), architectural, ambiguous/underspecified, a novel algorithm, or high-consequence.
-Do **not** plan single-file mechanical changes — "overthinking" a trivial task *degrades*
-output. A hard *vague* bug (e.g. a race condition) arms `PLANNER`, not just localization;
-a simple vague bug arms `LOCALIZATION`. *(Plan-and-execute vs ReAct; test-time-compute /
+**R3 — Planning is for *hardness*, orthogonal to grounding.** Arm the `PLAN` seed
+(`needsPlan` → the reasoner-floored, edit-free design seed) when a **build** task is
+cross-layer / multi-file (empirical breakeven ≈ **5 files or 3+ layers**), architectural,
+ambiguous/underspecified, a novel algorithm, or high-consequence. Do **not** plan
+single-file mechanical changes — "overthinking" a trivial task *degrades* output. On a
+**diagnosis** goal, hardness moves the *tier*, not the seed: a hard vague bug (e.g. a race
+condition) arms the `LOCALIZATION` writer with its generator floored at the reasoner
+(`hardness:"hard"`); the plan seed is build-only — `needsPlan` is ignored on the diagnosis
+branch (the 12050 single-seed rule). *(Plan-and-execute vs ReAct; test-time-compute /
 reasoning-budget routing; CODA/BEST-Route difficulty-aware routing.)*
 
-**R4 — Door-2 sees the to-dos the turn-open judge didn't.** The judge runs once at
+**R4 — Door-2 sees the to-dos the turn-open read didn't.** The turn-read runs once at
 turn-open on the *prompt*. By the time the conductor writes its to-do list, those to-dos
-may already name a file — new **syntactic** grounding the judge never saw. So at Door-2,
-if the active to-dos already name a file target, **suppress** localization even if the
-turn-open judge armed it. This is not regex second-guessing the LLM; it is additive
+may already name a file — new **syntactic** grounding the extraction never saw. So at
+Door-2, if the active to-dos already name a file target, **suppress** localization even if
+the turn-open decision armed it. This is not regex second-guessing the LLM; it is additive
 information the LLM could not have had. *(R2 STRONG: a named file means the site is known.)*
 
 **R5 — Consequence ⟂ difficulty.** A small change can be high-consequence (a security
@@ -80,11 +95,12 @@ validation, a financial calc). Consequence may pull a stronger tier even when th
 tiny. Route by *both* size and impact, not size alone. *(Consequence-aware compute
 allocation, "Not All Errors Are Equal".)*
 
-**The syntactic/semantic split (the governing principle).** The judge makes the *semantic*
-call on the prompt ("is the site known? is this hard?"). String-matchers only supply
-*syntactic* facts the judge cannot see (does a to-do name a file? what shape did triage
-assign?). A matcher may **inform or refine** the decision (R4) but never **override** the
-judge's semantic read of the same text.
+**The syntactic/semantic split (the governing principle).** The turn-read makes the
+*semantic* call on the prompt ("is the site known? is this hard?" — reported as evidence
+facts the `decideArming` table converts into the decision). String-matchers only supply
+*syntactic* facts the extraction cannot see (does a to-do name a file?). A matcher may
+**inform or refine** the decision (R4) but never **override** the semantic read of the
+same text.
 
 ## The corpus
 
@@ -111,14 +127,14 @@ have bitten us — keep them.
 | `vague-component-leak` | "fix the memory leak in the session handler" | LOCALIZATION | R2 WEAK (component, no file) |
 | `vague-why-question` | "why does login fail with special chars but not alphanumeric?" | LOCALIZATION | R2 NONE-grounding, phrased as a question |
 | `vague-import-reject` | "the importer rejects vCard 4.0 files" (no file) | LOCALIZATION | R2 NONE-grounding |
-| `vague-hard-race` ⚑ | "fix the race condition in cache invalidation; concurrent writes corrupt it" | PLANNER | R3 hard vague bug (concurrency, cross-cutting) → plan, not just localize |
+| `vague-hard-race` ⚑ | "fix the race condition in cache invalidation; concurrent writes corrupt it" | LOCALIZATION | R2/R3 hard vague bug — the LOCALIZATION writer, hardness-floored to the reasoner; the plan seed is build-only (12050 single-seed rule) |
 
 ### diagnosis, asymmetric grounding → LOCALIZATION on the vague side (the row-5 flip)
 | id | example prompt | ARM | why (rule) |
 |---|---|---|---|
 | `grounded-cross-layer-file-named` ⚑ | "fix HTTP serialization in `server/api.ts` **and** a query in the database layer" | LOCALIZATION | R2 ASYMMETRIC — the vague DB side still needs localization. **Judge was right to arm; old label was wrong.** (Planner would be over-escalation at 2 layers per R3.) |
 
-### build → NONE, unless multi-file/cross-cutting/ambiguous → PLANNER (R1, R3)
+### build → NONE, unless multi-file/cross-cutting/ambiguous → PLAN seed (R1, R3)
 | id | example prompt | ARM | why (rule) |
 |---|---|---|---|
 | `feature-build` ⚑ | "add a `--json` output flag to the CLI" | NONE | R1 — build never arms localization; single-ish, well-specified |
@@ -126,10 +142,10 @@ have bitten us — keep them.
 | `build-write-tests` | "write tests for the `BankAccount` class covering edge cases" | NONE | R1; scoped test-writing |
 | `build-migration` | "add a migration for a `user_roles` column defaulting to 'user'" | NONE | R1; mechanical DDL |
 | `build-doc-sync` | "update the docs to match the new API schema [provided inline]" | NONE | R1; mechanical, spec inline |
-| `build-refactor-jwt` | "refactor the auth module to use JWT tokens instead of sessions" | PLANNER | R3 cross-cutting (many call sites) |
-| `build-dark-mode` | "add dark mode: navbar toggle + persist in localStorage + all panels" | PLANNER | R3 multi-component |
-| `build-multifile-complex` | "make a coordinated change across several files; fix bugs from the error output" | PLANNER | R3 multi-file coordination + debug |
-| `build-linear-ticket` | "implement: add CSV export to the reports page (button → download)" | PLANNER | R3 multi-step UI→backend→test |
+| `build-refactor-jwt` | "refactor the auth module to use JWT tokens instead of sessions" | PLAN | R3 cross-cutting (many call sites); classifies `build` — swapping sessions for JWT changes behavior, not just structure |
+| `build-dark-mode` | "add dark mode: navbar toggle + persist in localStorage + all panels" | PLAN | R3 multi-component |
+| `build-multifile-complex` | "make a coordinated change across several files; fix bugs from the error output" | PLAN | R3 multi-file coordination + debug |
+| `build-linear-ticket` | "implement: add CSV export to the reports page (button → download)" | PLAN | R3 multi-step UI→backend→test |
 
 ### audit → NONE (no edit, no fix-site)
 | id | example prompt | ARM | why (rule) |
@@ -156,6 +172,30 @@ have bitten us — keep them.
 | `door2-grounded-mechanical-todos` ⚑ | prompt: "fix the trailing commas in the schema import"; to-dos name `database.ts` | NONE | R4 — to-dos name a file → suppress even if turn-open judge armed |
 | `door2-vague-mechanical-todos` ⚑ | prompt: vague perf; to-dos name **no** file | LOCALIZATION | R4 — no file in to-dos → arming stands |
 
+### research → NONE (external-knowledge deliverable; arming N/A) — P3
+| id | example prompt | ARM | why (rule) |
+|---|---|---|---|
+| `research-pure-lookup` | "what breaking changes did zod v4 ship, and do any affect our config validation?" | NONE | R1/P3 — external lookup, not a diagnosis; the qa/research boundary is "needs external sources" |
+| `research-build-compound` | "find out how the new stripe API paginates events, then update our webhook client" | NONE | P3 — research + scoped build, ordered goals; neither is a diagnosis |
+
+### refactor → NONE (behavior-preserving restructure; arming N/A) — P3
+| id | example prompt | ARM | why (rule) |
+|---|---|---|---|
+| `refactor-pure` | "extract the retry logic into a shared helper, no behavior change" | NONE | P3 — suite green + no signature breaks is the safety net; no pre-pass |
+| `refactor-boundary-adds-behavior` | "refactor the export pipeline so it also emits JSON alongside CSV" | NONE | P3 boundary — ADDS behavior ⇒ classifies `build`, never `refactor`, despite the user's verb |
+
+### no-edits constraint — plan-only turns compose, they don't reshape — P3
+| id | example prompt | ARM | why (rule) |
+|---|---|---|---|
+| `no-edits-plan-only` | "plan the migration to the new billing provider — propose the steps, don't write code" | PLAN | P3 — `build` + `no-edits` + `needsPlan`: the P12 plan seed still plants (edit-free by design) while the no-edits gate hard-denies the edit tools |
+
+### continuation turns (P4) — inherit, never re-arm
+| id | example prompt | expected | why (rule) |
+|---|---|---|---|
+| `continuation-go-ahead` | "go ahead" (after a planned build) | short-circuit, continuation, no reseed | P4 case 1 — pure ack skips the turn-read call entirely; arming inherited |
+| `continuation-still-broken-no-rearm` | "still broken" (localization pre-pass already SETTLED on the list) | short-circuit, continuation, nothing new planted | P4 case 2 — re-fired diagnosis language must re-verify (inherited M4 pin + rungs), never re-arm |
+| `continuation-new-goal-fresh` | "now also handle the empty case" | FRESH — goals extracted normally | P4 case 3 — a follow-up carrying a new deliverable must not be swallowed by continuation handling |
+
 ### Genuinely ambiguous (documented, low-weight — flag, don't over-fit)
 | id | example prompt | note |
 |---|---|---|
@@ -174,27 +214,32 @@ diagnosis-gating in `arming-judge.ts`, relabel in `corpus.ts`); offline rig gree
    `run-only` to no-localization before/at the judge — fixes `feature-build`. (Cheaper too:
    don't even ask the judge for a non-diagnosis shape.)
 3. **Asymmetric grounding arms (R2).** `grounded-cross-layer-file-named` is **relabeled to
-   arm** — the judge was correct; the prior hand-label was wrong. Open tuning question:
-   prefer LOCALIZATION (vague side) over PLANNER for a 2-layer case (R3 breakeven ≈ 5 files).
+   arm** — the judge was correct; the prior hand-label was wrong. The then-open tuning
+   question (localization vs planner for a 2-layer case) was settled by the P12/12050
+   rule: a diagnosis goal always gets the LOCALIZATION writer — the plan seed is
+   build-only, and hardness moves the tier, not the seed.
 
 ## Coverage gaps (2026-07-10)
 
 Audited against the current code + the proposal round in
 [ORCHESTRATION_IMPROVEMENTS.md](../architecture/ORCHESTRATION_IMPROVEMENTS.md); the rules
-(R1–R5) and expected labels above all held — these are missing *rows*, not wrong ones:
+(R1–R5) and expected labels above all held — these are missing *rows*, not wrong ones.
+Items 2–4 were **closed by the W1–W3 landings (2026-07-10)**; item 1 stays open:
 
-1. **No `qa` rows.** The shape exists in code; `audit-where-is` / `audit-explain` are
-   question-shaped and may live-classify as `qa`, not `audit` (the rig mocks triage, so it
-   never checks). Add qa rows + verify those two labels with a live run before trusting them.
-2. **No follow-up-turn rows.** A third of real messages continue a prior task (P4's
-   subject); the corpus is 100% first-turn. Add continuation cases (no re-arm expected).
-3. **P3 will relabel/add:** `build-refactor-jwt` becomes shape `refactor` when it lands;
-   `research` needs new rows. Expectations for existing rows are otherwise unchanged.
-4. **The rig is seed-kind-blind.** `run.ts` scores "any pre-pass armed" and only detects
-   the localization content — so the PLANNER rows (`vague-hard-race`, the four hard
-   builds) pass green while actually planting the diagnosis-worded seed (the P12 gap this
-   audit found). When P12 lands, add a seed-kind column assertion so planner-vs-localizer
-   is tested, not assumed.
+1. **No `qa` rows** (still open). The shape exists in code; `audit-where-is` /
+   `audit-explain` are question-shaped and may live-classify as `qa`, not `audit` (the rig
+   mocks the turn-read, so it never checks). Add qa rows + verify those two labels with a
+   live run before trusting them.
+2. ~~No follow-up-turn rows.~~ **Closed (P4, `e372a3c1d`):** three continuation rows landed
+   (see the continuation table above), scored with a `wrong-role` verdict.
+3. ~~P3 will relabel/add.~~ **Closed (P3, `e372a3c1d`):** `research` and `refactor` rows
+   landed with a `wrong-shape` verdict. Note the audit's guess about `build-refactor-jwt`
+   was corrected by the discriminator: swapping sessions for JWT *changes behavior*, so it
+   stays `build` — the pure-restructure case got its own `refactor-pure` row instead.
+4. ~~The rig is seed-kind-blind.~~ **Closed (P12, `229a9303a`):** `run.ts` asserts the
+   seed KIND per row (`wrong-seed` verdict); plan-vs-localization is tested, not assumed —
+   and the corpus relabeled `vague-hard-race` to the localization writer (hardness floors
+   the tier; the plan seed is build-only).
 
 ## Running
 
@@ -208,7 +253,9 @@ set -a; source infra/litellm/.env.local; set +a
 export LITELLM_API_KEY="$LITELLM_MASTER_KEY"
 cd packages/opencode && RIG_LIVE=1 bun run test/arming-rig/run.ts
 ```
-The scorecard prints, per case: expected vs actual arm, the seed (localization/planner/—),
-and `ok` / `over-fire` / `under-fire`. Live mode also prints the judge's `evidence` string
-per row so the grounding can be eyeballed. **Target: 0 over-fire, 0 under-fire.** The live
-run pins to the **conductor tier** (`ECON_TIER_BINDING.conductor`) — never a model name.
+The scorecard prints, per case: expected vs actual arm, the seed (localization/plan/—),
+the turn role, and `ok` / `over-fire` / `under-fire` / `wrong-seed` / `wrong-role` /
+`wrong-shape`. Live mode (which exercises the real turn-read extractor) also prints the
+decision's `evidence` string per row so the grounding can be eyeballed. **Target: 0 on
+every failure column.** The live run pins to the **conductor tier**
+(`ECON_TIER_BINDING.conductor`) — never a model name.

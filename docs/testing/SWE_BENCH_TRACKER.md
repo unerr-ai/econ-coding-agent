@@ -87,8 +87,12 @@ Agent's own suite: `Ran 45 tests OK` → *looked* green.
 **Why it happened — the defect chain:**
 1. **Prompt mis-classified `build`, not `diagnosis`.** The 11885 issue is written in
    spec language ("the collection logic *should* combine such queries … these *should be
-   combined*") with **zero** defect keywords (fix/bug/broken/fails/error). Triage's
-   `PROMPT_DEFECT_EVIDENCE_RE` misses it, so `classifyTurnShape` **defaults to `build`**.
+   combined*") with **zero** defect keywords (fix/bug/broken/fails/error). At the time,
+   triage's `PROMPT_DEFECT_EVIDENCE_RE` missed it, so the then-live regex classifier
+   (`classifyTurnShape`) **defaulted to `build`**. *(Mechanism update 2026-07-10: that
+   regex classifier was deleted in the turn-open rewrite — the shape is now extracted by
+   the temp-0 turn-read LLM; `PROMPT_DEFECT_EVIDENCE_RE` survives only as the
+   governance-regex OR-signal for the no-test-edit gate.)*
 2. **`build` shape ⇒ no-test-edit gate never armed** (`test_edit_gate_armed=0`). The
    agent was free to edit test files.
 3. **The fix over-combines.** The gold fix combines only *related* fast-deletes; the
@@ -216,8 +220,9 @@ sqlite3 ~/.local/share/opencode/opencode-main.db \
 ```
 
 **Step 4 — decode the trace** (tiers used, cost, receipt, triage markers). Grep the run
-log for the stage-1 markers: `triage_vs_heuristic`, `frame_seed_planted`,
-`test_edit_gate_armed`, `stuck_escalate`/`stuck_rethink` (SM backstop), and per-turn
+log for the stage-1 markers: `turn_triage`, `arming_decided`, `frame_seed_planted`,
+`test_edit_gate_armed`, `turn_read_degraded` (neutral degrade — should be rare),
+`turn_continuation`, `stuck_escalate`/`stuck_rethink` (SM backstop), and per-turn
 `turn_phase … agent=<tier>`. Tier-cost from the session SQLite:
 `unerr-benchmarks/e2e/econ/econ-tier-cost.py`.
 
@@ -250,10 +255,24 @@ entries → phantom "errors" that are **not** real regressions. When labels shar
 
 | id | defect | proposed fix | status |
 |---|---|---|---|
-| F-11885a | spec-language bug report ("currently X / should be Y") → shape defaults to `build` → localization pre-pass **and** no-test-edit gate both skip | broaden stage-1 defect detection to treat behavior-discrepancy phrasing as `diagnosis` | 🧠 understood, **not applied** |
-| **D1-12039** | committed round-up over-fires: `isHardDiagnosisPrompt` counts path/URL tokens in issue prose as cross-layer ⇒ arms reasoner localization on trivial single-file bugs (net regression across the set) | **reverted the text-hardness gate** in `roundUpTriageShapes`: a grounded bug that names its file goes direct on the cheap conductor path; only a grounded bug with NO file target rounds up | ✅ **applied — commit `4ec39134f`** (reverts `6b3f50912`'s asymmetric gate); **verified live 2026-07-09** — 12039 now $0.063, 100% conductor, real-grade 12/12 |
+| F-11885a | spec-language bug report ("currently X / should be Y") → shape defaults to `build` → localization pre-pass **and** no-test-edit gate both skip | broaden stage-1 defect detection to treat behavior-discrepancy phrasing as `diagnosis` | 🟡 **superseded in mechanism** by the turn-open rewrite (`48a3499ce`): the shape is now LLM-extracted (no defect-keyword regex to miss); re-fire 11885 to verify the extractor reads behavior-discrepancy phrasing as `diagnosis` |
+| T-graph-gate | pre-existing test failure: `packages/opencode/test/tool/read-entity-graph-gate.test.ts` — the bounded-readiness-gate fallback takes ~44s against the 25s test timeout on this machine; fails on HEAD `e372a3c1d` and predates the W3 diff (verified via stash) | bound the gate (or revisit the test timeout) so the fallback fits the budget | 🧠 root-caused, **not applied** |
+| **D1-12039** | committed round-up over-fires: `isHardDiagnosisPrompt` counts path/URL tokens in issue prose as cross-layer ⇒ arms reasoner localization on trivial single-file bugs (net regression across the set) | **reverted the text-hardness gate** in `roundUpTriageShapes`: a grounded bug that names its file goes direct on the cheap conductor path; only a grounded bug with NO file target rounds up | ✅ **applied — commit `4ec39134f`** (reverts `6b3f50912`'s asymmetric gate); **verified live 2026-07-09** — 12039 now $0.063, 100% conductor, real-grade 12/12. *(The whole round-up mechanism — `roundUpTriageShapes`/`isHardDiagnosisPrompt` — was later deleted outright by the 2026-07-10 turn-open rewrite, `48a3499ce`: hardness is now judged by the turn-read and applied by `decideArming`.)* |
 | **D2-12039** | untestable analysis slice (localization pre-pass) is scored *critical* (graph blast-radius) → M3 floor force-climbs its untestable vacuous-accept reasoner→oracle→oracle, though climbing can't verify analysis | mark the analysis-only pre-pass read-only-for-escalation (or pin it non-critical) so it settles accepted-unverified at its assigned reasoner tier — surgical, no FSM change | 🟡 root-caused, **deferred to its own verified pass** (not exercised after D1 on this set; touches escalation core) |
 
 **Working discipline (per user):** understand the fix first → apply → rerun that one
 instance → re-verify with the real-grader simulation → only then move on. Don't stack
 speculative fixes; each must not regress a ✓ case.
+
+---
+
+## Tuning log
+
+Every **benchmark-driven code modification** gets a row here (per the build directive):
+the instance that motivated it, what was observed, what changed, the files touched, and
+what to watch for regression on later runs. A change that never earns a row here should
+not have been made off a benchmark run. (Backlog items graduate here when applied.)
+
+| date | instance | observation | change | files | watch-for |
+|---|---|---|---|---|---|
+| — | — | *(no benchmark-driven modifications recorded yet in this phase)* | — | — | — |

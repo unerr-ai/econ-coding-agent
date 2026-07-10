@@ -1,14 +1,15 @@
 # The econ Orchestration Mechanism
 
-**Status: v1.6 (2026-07-09) — implemented and always-on: turn triage (U1), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, and the uncertainty-management engine (§8 — arming judge, prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition); live-fire smoked. Wave 4b (#55/#56B/#59/#61) is verified in the working tree. Open work: the §6 SM-series hardening and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5). U5 (cache-aware casting) was CUT 2026-07-10: the helper was deleted unwired — its evaluator input was never populated — and the cache economics stay live via session affinity + per-turn hysteresis.**
+**Status: v1.7 (2026-07-10) — implemented and always-on: the merged turn-read + code-decided arming (U1's successor — one temp-0 extraction call, `decideArming` pure table, neutral degrade, continuation turns; `48a3499ce`, `e372a3c1d`), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, the uncertainty-management engine (§8 — prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition), and the 2026-07-10 improvement round's P6 (blocked slices, scope-overlap serialization, live venue inputs — `229a9303a`, `5ce310868`), P8–P10 and P12 (`229a9303a`), and P3/P4 taxonomy fills (research/refactor shapes, no-edits gate — `e372a3c1d`); live-fire smoked. In progress: P11 (model-initiated tier delegation, W4). Open work: the §6 SM-series hardening and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5). U5 (cache-aware casting) was CUT 2026-07-10: the helper was deleted unwired — its evaluator input was never populated — and the cache economics stay live via session affinity + per-turn hysteresis.**
 This doc also absorbed the still-relevant content of the three retired plan docs
 (DECOMPOSITION_ORCHESTRATION_PLAN, PERSONA_ORCHESTRATION_PLAN, SELF_ORCHESTRATION_PLAN —
 deleted 2026-07-07) into §7 "Inherited foundations".
-Turn triage runs on every root turn open with no feature flag (base-flow features ship enabled;
-mock-provider test harnesses switch the turn-open calls off via the `SessionPrompt.TurnOpenCalls`
-service). Two live-fire fixes landed during the smoke: small (housekeeping) calls skip the
-adaptive reasoning gate (un-muted thinking starved the triage JSON), and the triage cap is 8s
-(a triage-shaped completion measures ~3.7–4.3s through the live gateway). All research
+The turn-read runs on every fresh root turn open with no feature flag (base-flow features ship
+enabled; mock-provider test harnesses switch the turn-open calls off via the
+`SessionPrompt.TurnOpenCalls` service). Two live-fire lessons hold from the smoke: small
+(housekeeping) calls skip the adaptive reasoning gate (un-muted thinking starved the extraction
+JSON), and the merged call's blocking cap is 12s (`TURN_READ_TIMEOUT_MS` — the whole turn-open
+budget now; the old two stacked calls capped at 22s worst-case). All research
 streams are in (Claude Code source recon, econ seam map, routing/triage literature, cache
 economics, hierarchy/fan-out); every §5 decision is closed; §6's U1–U4 + U3 have shipped (always-on), leaving the SM-series as the open build (U5 was cut 2026-07-10). Companion docs:
 [ECON_ARCHITECTURE](./ECON_ARCHITECTURE.md) (whole-system design),
@@ -27,16 +28,16 @@ up when an attempt fails. This doc is the single home for that mechanism's desig
 
 ## 1. The new mechanism — a prompt's journey
 
-The whole pipeline, end to end. Stages tagged **NEW** are the upgrades this doc introduces;
-everything else already runs in production today (§2 has the as-built detail).
+The whole pipeline, end to end. Stages tagged **NEW** were the upgrades this doc introduced
+— all have since shipped (see the status header); §2 has the as-built detail.
 
 ```
  user prompt
     │
     ▼
  ┌─────────────────────────────────────────────────────────────────┐
- │ [1] UNDERSTAND (triage) ── NEW: one cheap LLM call, forced      │
- │     schema → list of goals + constraints + confidence           │
+ │ [1] UNDERSTAND (turn-read) ── ONE merged temp-0 LLM call →      │
+ │     goals + constraints + evidence; arming decided in CODE      │
  └─────────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -89,37 +90,57 @@ consequence); and at [5] VERIFY, a **posterior-uncertainty** gate (§8.4) can es
 that passed but that we were unsure about. Those overlays are documented together in §8; the
 stage descriptions below are unchanged.
 
-### 1.1 Understand: one cheap model reads the prompt properly
+### 1.1 Understand: one merged read of the prompt, judged in code
 
-Today a set of string-matching rules labels each prompt with exactly one category. That
-breaks on compound requests — *"audit these five fixes, fix the profile-name bug users are
-reporting, and don't touch any tests"* has three intents and fits no single label. String
-matching has no answer to compound prompts; goal decomposition does.
+A single label per prompt breaks on compound requests — *"audit these five fixes, fix the
+profile-name bug users are reporting, and don't touch any tests"* has three intents and fits
+no single label. Goal decomposition is the answer — and the whole read happens in **one**
+call.
 
-**The upgrade:** the first act of every turn is one small, fast LLM call (conductor tier,
-its own tiny context, ~1–2s, still well under a cent) that fills a strict form:
+The first act of every fresh turn is the **turn-read** (`runTurnRead`, `turn-triage.ts`):
+one small, fast LLM call (conductor tier, its own tiny context, temperature 0, forced JSON,
+~2s median, still well under a cent) that fills a strict form — the goals, the constraints,
+a confidence, the turn's role (fresh vs continuation), and, per diagnosis-shaped goal, the
+localization **evidence**:
 
 ```
 goals:
   1. "Audit the five fixes…"            → shape: audit
-  2. "fix the profile-name bug…"        → shape: diagnosis-vague, needs a plan first
+  2. "fix the profile-name bug…"        → shape: diagnosis-vague
+     evidence: locationNamed=false, fixSpecified=false, hardness=moderate
 constraints:
   - "don't touch any tests"             → kind: no-test-edit
-confidence: high
+confidence: high    turnRole: fresh
 ```
 
 Three rules keep the cheap model honest (each backed by the research in §3):
 
 - **It can only quote, never invent.** Every goal and constraint must be a verbatim span of
-  the user's prompt, and we validate that the span exists. The triage cannot hallucinate
-  work, and it cannot start planning — extraction only.
-- **It answers a fixed form, not an open question.** The forced schema is what makes the
-  call reliable and cheap — and it's why the conductor tier suffices here without waking a
-  heavyweight reasoner. Note the tier floor runs the other way too: splitting and
-  categorizing a nuanced compound prompt is exactly where small models measurably fail
-  (§3.2, rule 5), which is why this call runs on the conductor, not the executor (§4.1).
-- **If it fails, the old heuristic catches.** Schema-invalid or too slow → fall back to
-  today's regex classifier, and log the disagreement as free evaluation telemetry.
+  the user's prompt, and we validate that the span exists — an evidence claim without its
+  quote degrades to `false`. The turn-read cannot hallucinate work, and it cannot start
+  planning — extraction only.
+- **It reports facts; code makes the decision.** The model answers a fixed form, not an open
+  question — the forced schema is what makes the call reliable and cheap, and why the
+  conductor tier suffices without waking a heavyweight reasoner (the tier floor runs the
+  other way too: splitting a nuanced compound prompt is where small models measurably fail —
+  §3.2 rule 5, so this call runs on the conductor, not the executor; §4.1). The arming call
+  itself — does this turn need a localization pre-pass? — is a **pure code table over the
+  extracted evidence** (`decideArming`, §8.1), never the model's ruling.
+- **If it fails, the turn degrades neutrally.** A completed-but-invalid answer retries once;
+  a still-null verdict re-asks ONCE on the reasoner (a different model family — a genuinely
+  independent failure domain); still null → the turn proceeds with **no preamble, no
+  skeleton, and arming stood down**. There is no regex fallback — a wrong guess steers the
+  conductor worse than no guess (P5) — and a null-rate counter (`turnReadNulls`/`turnReads`)
+  meters the degrade path.
+
+**Follow-up turns are modeled, not re-read (P4).** A short, code-free ack on a session with
+prior turns ("go ahead", "still broken") short-circuits the call entirely; anything longer
+pays the call and the model's `turnRole` decides. A **continuation** inherits the last fresh
+turn's verdict, preamble, arming decision, and pinned reproduction (`turn-read-store.ts`)
+instead of re-deriving them — so re-fired diagnosis language cannot re-arm a settled
+pre-pass; it routes to re-verify — and stands down the resolution gate, the skeleton reseed,
+and the per-turn resolve-budget reset (§8.2). Genuine new work in a follow-up message is
+still fresh: its goals are extracted normally.
 
 ### 1.2 Track: goals become todos before any work starts
 
@@ -129,13 +150,21 @@ wall of text. This finishes a journey we've already been on: live fire proved th
 conductor won't reliably *type* todos (structural nets now do it), and this step stops
 trusting it to *create* them, too.
 
-Each goal also brings its own setup: a symptom-shaped goal seeds a diagnosis pre-pass when the arming judge arms it (§8.1;
-the difficulty-allocated generator localizes *and* fixes — the door that produced the django gold-file fix; it
-owns edit → run → verify per §1.4's correction, rather than handing a plan down),
-a build-list goal arms the mechanical dispatch net, and every extracted constraint arms a
-*hard* gate — "don't touch tests" becomes an edit-time block, not a polite suggestion. The
-negation bug we hand-patched ("Do not modify any test files" accidentally *disarming* the
-gate) becomes structurally impossible: the constraint is understood, not pattern-matched.
+Each goal also brings its own setup, and the seed follows the goal's shape (P12): a
+symptom-shaped goal seeds the **localization writer** pre-pass when the arming decision arms
+it (`decideArming`, §8.1; the difficulty-allocated generator localizes *and* fixes — the
+door that produced the django gold-file fix; it owns edit → run → verify per §1.4's
+correction, rather than handing a plan down); a hard **build** goal (`needsPlan`) seeds the
+**plan** pre-pass instead — a forward-looking, edit-free decomposition brief
+(`PLAN_SLICE_CONTENT`) that delivers a DAG of typed slices, never the bug-hunt (a feature
+with no bug and no failing test must not receive a "run the failing test" brief); a
+build-list goal arms the mechanical dispatch net; and every extracted constraint arms a
+*hard* gate — "don't touch tests" becomes an edit-time block, and "propose, don't code"
+(the `no-edits` kind, P3) becomes a hard deny on **every** edit/write for the turn (children
+inherit it; a continuation disarms it — "go ahead" after a plan-only turn IS the user
+lifting the prohibition). The negation bug we hand-patched ("Do not modify any test files"
+accidentally *disarming* the gate) becomes structurally impossible: the constraint is
+understood, not pattern-matched.
 
 **The list is a tree, executed as a star.** Goals from triage form the top level; each goal
 decomposes into its own child items, and those into sub-items where genuinely needed. Two
@@ -218,7 +247,11 @@ decides which tools are removed. A senior brought in to *decide for a fan-out* (
 build-list, judge/audit someone else's work) physically cannot edit files or run shell
 commands — deciding is the job, grinding is delegated down. A runner brought in to *execute
 a build* cannot edit. Every child gets a lean compiled brief, never the session transcript.
-(Proven live: the zod runner ran the build with edit permissions denied.)
+(Proven live: the zod runner ran the build with edit permissions denied.) Step budgets
+follow difficulty (P8, `sliceStepBudget`): a design-typed slice, a judge-rated-hard turn, or
+an escalated rescue dispatch gets ×1.5 the persona's step cap — exhaustion is not graceful
+(a `[BUDGET EXHAUSTED]` digest fails verification and the ladder double-pays a rescue), so
+the hard tail buys its headroom up front.
 
 **Correction (2026-07-09):** tool-removal is scoped to those *decider* and *build-runner*
 seats — not to every high-tier child. The **diagnosis pre-pass** (§1.2's atomic-insight
@@ -233,11 +266,11 @@ the conductor only when it genuinely cannot localize. Decider and build-runner s
 unchanged.
 
 **Correction (2026-07-10):** the writer-owns-edit→run→verify shape above is unchanged — only
-*how the pre-pass's tier is chosen* changes, on two counts. **(1) The arming judge owns
+*how the pre-pass's tier is chosen* changes, on two counts. **(1) The arming decision owns
 diagnosis-localization; `needsPlan` owns build-planning — cleanly split.** `armLocalization`
 (§8.1) is now the *sole* authority on whether a *diagnosis* bug gets a localization pre-pass;
-the triage `needsPlan` flag decides planning for **build** goals only and no longer OR-bypasses
-the judge to force-plant a pre-pass on a diagnosis goal. **(2) The pre-pass tier is
+the turn-read `needsPlan` flag decides planning for **build** goals only and no longer OR-bypasses
+the decision to force-plant a pre-pass on a diagnosis goal. **(2) The pre-pass tier is
 difficulty-allocated, not reasoner-pinned.** The old `need:"reasoner"` pin is gone: the pre-pass
 now allocates on the generator axis (§8.3, difficulty ← arming `hardness`; §7.2's SM5
 correction) — a mechanical, *already-located* fix goes to the **executor** (the cheap mechanical
@@ -350,14 +383,15 @@ product); the internal trace is what makes a misrouted turn diagnosable after th
 
 | stage | what runs today | where |
 |---|---|---|
-| classify | `classifyTurnShape` regex heuristic → one label + confidence; preamble; gates; frame-slice seed on diagnosis-vague | `packages/opencode/src/session/slice-orchestrator.ts`, step-0 block in `session/prompt.ts` |
+| turn-read | ONE merged temp-0 conductor call → goals + constraints + evidence + turnRole; `decideArming` (pure code) arms the localization pre-pass; preamble; gates (no-test-edit, no-edits); shape-matched frame seed (localization vs plan); continuation short-circuit + inherit | `packages/opencode/src/session/turn-triage.ts`, `arming-judge.ts`, step-0 block in `session/prompt.ts` |
 | decompose | conductor plans; structural nets type todos (`autoTypeTodos`: judgment / diagnosis / `typeBuildPlan`); `shouldOrchestrate` benefit gate | `slice-orchestrator.ts` |
 | probe | coupling / testStrength / verifyCommands probed **once, at decompose time** | `probeSlice*` in `packages/opencode/src/tool/graph-tools.ts` |
 | allocate | static matrix sliceType × coupling × testStrength × need → tier; risk breaks exactly one borderline cell toward oracle (`risk > 70`). U4's `evaluate()` (§4.2) now runs at dispatch and re-dispatch — the earlier "no dispatch-time re-eval" gap is closed | `packages/code-intelligence/src/allocation.ts:147-227` (risk tiebreak `:205-211`); `evaluate()` at `slice-loop.ts:914` (dispatch) + `:599` (escalation re-eval) |
 | execute | seat-scoped child sessions, personas, step budgets, lean briefs | `childSlicePermission`, dispatch site in `session/prompt.ts` |
 | verify | 5 rungs — behavior gate → sound (runs `verifyCommands`; case-count, shrink-reject and skip-flag checks live inside it) → probe (task #7 pinned reproduction — gates sound-accept + untestable paths) → extra/judge rung → QE veto; a terminal flagged unverified-accept when none apply | `packages/code-intelligence/src/verifier.ts:544-562` (probe), `:597-691` (ladder) |
 | escalate | a genuine reject first squeezes the SAME tier while its failure signature keeps changing (M2, ≤2 retries), climbing only on stall — executor → conductor → reasoner → oracle with type ceilings; a CRITICAL slice (high coupling or risk>70) forces a climb at every exhaustion point instead of settling unverified below the oracle (M3, the escalation floor); each hop's escalation brief carries the rejected diff as REVERTED advice (verdict + ≤6k-char digest + files/commands lists, U3 containment); double-pay booked per rung | `slice-loop.ts:1048-1097` (squeeze+climb chain), `:503-539` (brief), `:619-633` (`recordEscalation` booking into `double-pay.ts`) |
-| observe | `turn_shape` / `orchestration_engaged` events; M4's `turn_probe_pinned` / `turn_probe_gate` / `turn_probe_unresolved` (§4.6); `EconReceipt` per-tier drilldown | session logs, receipt |
+| close | outcomes settle todos (a `blocked` slice settles `cancelled` — never attempted ≠ failed — and counts as a re-decomposition coverage gap, P6a); synthesis hop runs on the **reasoner by default**, escalating to the oracle only when MIXED outcomes (an `unverified` or `blocked` slice among the done) need arbitration (P9); M4 turn-close probe gate | `slice-orchestrator.ts` (settle), synthesis dispatch in `session/prompt.ts` (`synthesis_dispatched` logs the tier + reason) |
+| observe | `turn_triage` / `arming_decided` / `turn_continuation` / `turn_read_degraded` / `orchestration_engaged` events (plus `turnReads`/`turnReadNulls`/`turnContinuations` counters); M4's `turn_probe_pinned` / `turn_probe_gate` / `turn_probe_unresolved` (§4.6); `EconReceipt` per-tier drilldown | session logs, receipt |
 
 Live-fire status: diagnosis-planner door FIRED with payoff (django gold-file fix, ~$0.15);
 mechanical-dispatch door FIRED (zod, ~$0.07); escalation ladder FIRED live with double-pay
@@ -536,13 +570,17 @@ star**: the tracker holds the hierarchy, the conductor stays the only spawner.
 
 ## 4. Design details (under the hood)
 
-### 4.1 Turn Triage
+### 4.1 The turn-read
 
-One **conductor-tier** call at turn open; own tiny context (the session's golden cached
-prefix is never touched — this is a separate small request, so model choice doesn't affect
-the warm prefix either way); forced schema; temperature 0; **blocking** — its output gates
-seeds, and the §7-item-3 lesson stands: the pre-pass must exist *before* exploration
-starts. Tier decision (Q1, closed 2026-07-06): the *executor* binding is below the
+One **conductor-tier** call at fresh-turn open (`runTurnRead`, `turn-triage.ts`; the system
+prompt is `TURN_READ_SYSTEM_PROMPT`, `prompts/judges.ts`); own tiny context (the session's
+golden cached prefix is never touched — this is a separate small request, so model choice
+doesn't affect the warm prefix either way); forced schema; temperature 0; **blocking**
+(12s cap, `TURN_READ_TIMEOUT_MS`) — its output gates seeds, and the §7-item-3 lesson
+stands: the pre-pass must exist *before* exploration starts. It merges what used to be two
+stacked calls (triage extraction + arming judgment) into one read (P1-alt): the model
+extracts, and every judgment expressible as a rule over the extracted facts moved into
+code. Tier decision (Q1, closed 2026-07-06): the *executor* binding is below the
 language-competence floor for splitting and categorizing nuanced compound prompts — the
 §3.2 small-model triage numbers are the documented risk — while the conductor is still
 cheap enough that the call costs well under a cent. Capability floor beats the generic
@@ -552,23 +590,45 @@ cheap enough that the call costs well under a cent. Capability floor beats the g
 type TriageVerdict = {
   goals: Array<{
     quote: string          // VERBATIM span of the user prompt — validated; extraction only
-    shape: "diagnosis-vague" | "diagnosis-grounded" | "build" | "audit" | "qa" | "run-only"
+    shape: "diagnosis-vague" | "diagnosis-grounded" | "build" | "refactor" | "audit"
+         | "qa" | "research" | "run-only"
     deliverable: string    // one line: what "done" looks like
     dependsOn?: number[]   // ordering ("apply whichever fixes the audit approves")
-    needsPlan?: boolean    // BUILD goals only: plan a build-list (diagnosis-localization is the arming judge's call, §8.1)
+    needsPlan?: boolean    // BUILD goals only: plan a build-list (diagnosis-localization is decideArming's call, §8.1)
+    evidence?: {           // diagnosis-shaped goals only — facts, never a ruling
+      locationNamed: boolean; locationQuote?: string   // a true claim must carry its verbatim quote
+      fixSpecified: boolean; fixQuote?: string
+      hardness?: "trivial" | "moderate" | "hard"       // the two genuinely judged fields
+      ambiguity?: "clear" | "ambiguous"
+    }
   }>
-  constraints: Array<{ quote: string; kind: "no-test-edit" | "scope-limit" | "no-new-files" | "other" }>
+  constraints: Array<{ quote: string; kind: "no-test-edit" | "no-edits" | "scope-limit" | "no-new-files" | "other" }>
   confidence: "high" | "low"
+  turnRole: "fresh" | "continuation"   // P4 — continuation = pure steering/iteration, may carry zero goals
 }
 ```
 
+The two P3 shape discriminators live in the extraction prompt, not in keywords: `research`
+= the deliverable needs **external sources** (a question this repo's code alone can answer
+is `qa`); `refactor` = restructures **without changing behavior** (anything that adds
+behavior is `build`; a prompt that does both carries both goals).
+
 Hard rules: quotes validated against the prompt (a goal that can't cite its span is
-dropped); ≤7 goals; schema-invalid or >8s → heuristic fallback (`classifyTurnShape`
-demotes to reliability floor + shadow signal; `triage_vs_heuristic` disagreement logged);
-triage never localizes or designs; a low-confidence verdict escalates the triage call to
-the **reasoner** rather than guessing (one tier up from the conductor base). Consumers:
-todo skeleton (§1.2), per-goal frame seeding, constraint→gate arming, `shouldOrchestrate`
-goal count, graph prefetch for named files/symbols.
+dropped; an evidence claim without its quote degrades to `false`); ≤7 goals (zero goals
+valid only on a continuation); the turn-read never localizes or designs. Failure path (P5):
+a completed-but-invalid answer retries ONCE on the same tier; a null verdict then re-asks
+ONCE on the **reasoner** (a different model family — real redundancy); still null →
+**neutral degrade** — no preamble, no skeleton, arming stands down, nothing is planted
+(`turn_read_degraded` + the `turnReadNulls`/`turnReads` null-rate counter, P5's acceptance
+metric: <2% of turns). A *low-confidence* verdict also re-runs on the reasoner, keeping the
+richer of the two verdicts. A short, code-free ack on a session with prior turns
+(`isContinuationShortCircuit`) skips the call entirely (P4 — §1.1). Consumers: todo
+skeleton (§1.2), shape-matched frame seeding (localization vs plan), constraint→gate arming
+(no-test-edit, no-edits), `decideArming`'s evidence (§8.1), the M4 probe pin (a
+diagnosis-shaped goal arms it, §4.6), `shouldOrchestrate` goal count, and the researcher
+auto-cast on research-shaped turns (recon slices run as the web-enabled researcher persona;
+researcher slices pin `testStrength:"untestable"` and verify by citation, never the test
+rung — P3/Q-D).
 
 ### 4.2 Pre-dispatch evaluator
 
@@ -584,7 +644,13 @@ verify strength). Decision rules, in priority order:
    high context overlap (the child's brief would mostly reproduce what the thread already
    holds warm), or a write tightly coupled to work in flight → **inline, no spawn**.
    Delegate when the tier changes, the context diverges (a lean brief suffices), or the
-   work is read-only parallel. One or two small same-tier items: always inline.
+   work is read-only parallel. One or two small same-tier items: always inline. The rule's
+   inputs are live since P6c: `requestingTier` comes from the calling seat and
+   `sameFilesInScope` from the slice's predicted edit scope ∩ the parent thread's scope —
+   but the verdict itself is **honest telemetry** today (P7b): dispatch still spawns, the
+   coarse `autoTypeTodos` stand-down captures small same-tier batches wholesale, and the
+   measured inline-would-have-fired rate is the evidence that will justify (or kill) a real
+   per-slice inline path.
 5. Hysteresis: re-evaluation within a turn needs a signal *delta* (new failure, new
    contradiction, refreshed probe change), not a marginal score wobble.
 
@@ -597,14 +663,30 @@ correction). A plan that fails the gate is re-decomposed *before* the first chil
 this is the anti-"vibes" step for the breakdown itself, mirroring what the rungs are for
 the code.
 
+**Dependency failure & scope overlap (P6, wired 2026-07-10).** Slice relations are
+*derived*, never asked for. A dependency that settles terminal-failed **blocks** its
+dependents before any spend (P6a): they are never dispatched, settle as outcome state
+`"blocked"` (with `blockedBy` naming the failed deps), cascade transitively, land on the
+todo list as `cancelled` (never attempted ≠ failed), and count as re-decomposition coverage
+gaps (Q-J — the re-plan seed owns them). Before waves run, an `editScopeOf` probe (the
+slice text's own path tokens, wired at the conductor seam) predicts each editing slice's
+file scope, and `serializeOverlappingScopes` adds an **implicit later→earlier dep** between
+same-wave slices with intersecting scopes (P6b) — "no concurrent same-file edits" becomes a
+computed fact instead of prompt discipline. Overlap only ever ADDS ordering (declared deps
+are never dropped — they carry information flow via `withUpstreamContext`, and the implicit
+edges feed it too); the check iterates to a fixpoint; read-only slices are exempt; without
+a probe the wave plan is byte-identical. The same scope signal feeds the venue rule's
+`sameFilesInScope` (P6c, rule 4 above).
+
 **Re-decomposition triggers (during execution):** a child running >50% over its budget →
 escalate that slice's tier, don't widen the fan-out; a sibling conflict detected at
 fold-back → stop and re-plan with less parallelism; coverage gaps at synthesis → the
 missing work becomes new tracked items, never silent scope loss; wall-clock ≥2× estimate →
 suspect a hidden sequential dependency and re-order. **(Wired 2026-07-09, #55 — §8.6:**
-`redecompositionCheck` now derives these triggers from a settled run's outcomes and reseeds a
-reasoner-pinned re-decomposition pre-pass on a coverage gap, bounded by the *same* recursion
-counter as the prior-resolution gate.)
+`redecompositionCheck` now derives these triggers from a settled run's outcomes — an
+`unverified` **or** `blocked` slice is a coverage gap — and reseeds a reasoner-pinned
+re-decomposition pre-pass on a coverage gap, bounded by the *same* recursion counter as the
+prior-resolution gate.)
 
 Mid-flight: the convergence-budget and contradiction triggers become evaluator re-entry
 points — a stalled slice is re-classified, not just un-muted.
@@ -685,10 +767,14 @@ re-run the reproduction that proved the bug.
 (`packages/opencode/src/session/prompt.ts`) — always-on (no flag) and root-session-only
 (`!session.parentID`; child slice sessions already have M1's slice-level probe rung):
 
-- **Turn-open pin** (`step === 0`, on a fix-shaped prompt per `isFixShapedPrompt`, `slice-orchestrator.ts:808`, used at `prompt.ts:1599,1604`):
-  `deriveTurnProbe(userText)` (`slice-orchestrator.ts:556-558`) extracts the most-specific
+- **Turn-open pin** (`step === 0`, armed when the turn-read verdict carries a
+  diagnosis-shaped goal — P5 re-homed the trigger off the regex; `isFixShapedPrompt` now
+  only ORs into the no-test-edit governance gate; turn-read failed ⇒ no pin this turn):
+  `deriveTurnProbe(userText)` (`slice-orchestrator.ts:695`) extracts the most-specific
   pinned reproduction COMMAND straight from the prompt text — not from dispatched slices, which
-  are empty on the inline path. Logs `turn_probe_pinned`.
+  are empty on the inline path. Logs `turn_probe_pinned`. The pin is stored per session
+  (`turn-read-store.ts`): a fresh turn clears it at open, and a continuation turn (P4)
+  restores it — the reproduction is still the contract a follow-up is steering toward.
 - **Turn-end gate** (`prompt.ts:1510-1558`, just before the loop's exit `break`): if a probe was
   pinned, `runTurnProbeGate` (`slice-orchestrator.ts:578-610`) runs it. When the turn forbids
   test edits (`testEditGateArmed`), it first re-runs the test-tree guard
@@ -738,12 +824,14 @@ Ordered by dependency; each step is independently shippable and live-fire-testab
 does **not** change: the spine (conductor owns the turn), the structural nets (they remain
 the enforcement layer triage advises), the verifier rungs, and the ladder itself.
 
-**U1 — Turn Triage call** *(unlocks U2; biggest single fix — kills G1)*
-Replace `classifyTurnShape` as the decider (it stays as fallback + shadow signal). New
-triage module + schema-forced **conductor-tier** call (Q1 decided; low-confidence escalates
-to the reasoner); wire into the `prompt.ts` step-0 block.
-Gate before the flip: golden-set eval on the tierfire prompt corpus — goal-split accuracy,
-constraint/negation extraction, p95 latency — plus `triage_vs_heuristic` telemetry.
+**U1 — Turn Triage call** *(unlocks U2; biggest single fix — kills G1)* — **shipped, then
+superseded by the merged turn-read (2026-07-10, `48a3499ce`).** The original build: a
+schema-forced **conductor-tier** triage call (Q1 decided; low-confidence escalates to the
+reasoner) wired into the `prompt.ts` step-0 block, with the regex classifier demoted to
+fallback + shadow signal. The 2026-07-10 rewrite (P1-alt/P2a/P5) then merged triage and the
+arming judgment into ONE temperature-0 turn-read and **deleted the regex shadow taxonomy
+entirely** — failure now degrades neutrally through a reasoner re-ask, metered by the
+null-rate counter that replaced the disagreement telemetry (§4.1).
 
 **U2 — Goal-tracked turn open, tree-shaped** *(kills the compound-prompt gap end-to-end)*
 Multi-goal verdicts materialize the todo skeleton at turn open; per-goal frame seeding
@@ -926,7 +1014,7 @@ reasoning to find, or touch many (high coupling) yet be pure propagation. SM5 ro
 insight-heavy work up regardless of which coupling cell it lands in; the matrix's coupling
 axis governs *wiring strategy* for mechanical work, not whether the executor's reasoning is
 enough. **This is now formalized as the *difficulty axis* of the two-axis allocator (§8.3):**
-the arming judge's `hardness` floors the *generator* independently of the coupling cell, while
+the arming decision's `hardness` floors the *generator* independently of the coupling cell, while
 coupling/consequence governs the *verifier* rung — the SM5 fix expressed as a standing axis,
 not a per-cell patch.
 
@@ -1011,9 +1099,9 @@ Between them sits the allocator, reframed onto **two orthogonal axes** so "how h
 consequential" never collapse into one dial (§8.3).
 
 ```
-                     ┌──────────────── ARMING JUDGE (§8.1) ────────────────┐
-                     │  one conductor-tier call at turn open →             │
-                     │  {armLocalization, hardness, ambiguity, evidence}   │
+                     ┌────────── TURN-READ + decideArming (§8.1) ──────────┐
+                     │  one extraction call at turn open + a pure code     │
+                     │  table → {armLocalization, hardness, ambiguity}     │
                      └──────────────────────┬──────────────────────────────┘
      PRIOR (pre-exec)                       │                    POSTERIOR (post-exec)
      ambiguity → RESOLVABLE                 ▼                    green-but-wrong → TRUSTABLE
@@ -1027,20 +1115,37 @@ consequential" never collapse into one dial (§8.3).
                                         coverage gaps, bounded          ?? verbalized (live)
 ```
 
-### 8.1 The arming judge — one evidence-grounded call, not a wall of regex
+### 8.1 The arming decision — extracted evidence, decided in code
 
-The turn's difficulty/ambiguity read is made by **one conductor-tier LLM call at turn open**
-(`judgeArming`, `arming-judge.ts`; dispatched at the `prompt.ts` step-0 block, root session
-only). It returns an `ArmingVerdict` — `armLocalization` (does this turn need a localization
-pre-pass?), `localized`, `hardness`, `ambiguity`, and the `evidence` spans behind the call —
-stored per-session (`setArmingDecision`) so every downstream door reads the *same* decision. It
-replaces the file-target regex that used to arm the localization pre-pass and over-fired the
-reasoner, and it is now the **sole** authority on whether a *diagnosis* bug gets a
-localization pre-pass — the triage `needsPlan` flag governs **build**-planning only and no
-longer overrides it (§1.4's 2026-07-10 correction). When the call is unavailable it degrades to `heuristicArming` (the triage-shape
-heuristic), never back to the old regex. An offline arming-rig (`corpus.ts` + `run.ts`)
-regression-guards the judge so a prompt change is validated without live-fire spend. The two
-signals it produces — `hardness` and `ambiguity` — are the inputs the rest of this engine reads.
+The turn's difficulty/ambiguity read rides the §4.1 turn-read: the model reports **facts**
+per diagnosis-shaped goal (`locationNamed`/`fixSpecified`, each requiring a verbatim quote,
+plus the judged `hardness`/`ambiguity`), and the decision itself is a **pure code table**
+(`decideArming`, `arming-judge.ts`; applied at the `prompt.ts` step-0 block, root session
+only, P1-alt):
+
+```
+arm = !fixSpecified && (!locationNamed || hardness === "hard")   // OR-ed across diagnosis goals
+```
+
+A handed fix is an executor grep (no pre-pass even with no file named); a named location
+skips the pre-pass unless the bug is judged hard (knowing the file is not knowing the
+mechanism); anything else arms. `localized` = every diagnosis goal names a location;
+turn-level `hardness` is the max judged hardness, floored to `hard` by any `needsPlan` goal;
+`ambiguity` ORs the per-goal judgement with a low-confidence extraction. Missing or invalid
+evidence reads as the conservative posture (unlocated, no handed fix ⇒ arm — a cheap
+pre-pass beats an expensive wrong guess); a **null verdict stands down entirely** — the P5
+neutral degrade never guesses. The resulting `ArmingVerdict` (`armLocalization`,
+`localized`, `hardness`, `ambiguity`, and the `evidence` spans that decided it) is stored
+per-session (`setArmingDecision`) so every downstream door reads the *same* decision. It is
+the **sole** authority on whether a *diagnosis* bug gets a localization pre-pass — the
+turn-read `needsPlan` flag governs **build**-planning only and never overrides it (§1.4's
+2026-07-10 correction). Misapplied prose rules (the django-12039 class: a trivial,
+file-named fix cascading to the oracle) are structurally impossible; policy changes are code
+review; the rig's decision tests are table tests. The offline arming-rig (`corpus.ts` +
+`run.ts`, 41 rows) regression-guards the whole chain — over/under-fire plus wrong-seed,
+wrong-role, and wrong-shape scoring — so a prompt or table change is validated without
+live-fire spend. The two signals the decision produces — `hardness` and `ambiguity` — are
+the inputs the rest of this engine reads.
 
 ### 8.2 Prior uncertainty — resolve the approach, then decompose (#53/#54/#61)
 
@@ -1054,9 +1159,20 @@ immediately before `todosToLoopSlices`, and returns a mode:
   question and returns `{engaged:false}` rather than guessing.
 - **approach settled / plan valid** → **decompose now**.
 
-Resolution is **recursive but bounded**: a per-session counter (`resolution-store.ts`,
-`MAX_RESOLVE_ATTEMPTS`) caps how many times a turn may re-enter resolve→decompose, and #55's
-re-decomposition (§8.6) shares that *same* counter — one unified recursion budget.
+The resolve-first pass's brief follows the turn's shape (P12's residual case): an armed
+vague diagnosis resolves by planting the **localization writer** seed; anything else (an
+ambiguous build/audit) resolves by planting the **plan** seed — never by hunting a bug that
+does not exist.
+
+Resolution is **recursive but bounded — per task, not per session (P10)**: the counter
+(`resolution-store.ts`, `MAX_RESOLVE_ATTEMPTS`) caps how many times a turn may re-enter
+resolve→decompose, and #55's re-decomposition (§8.6) shares that *same* counter — one
+unified recursion budget. Every FRESH turn calls `resetResolveAttempts` at turn open, so an
+ambiguous turn that burned both passes cannot disable resolution for every later turn of a
+long session; a **continuation** turn (P4) skips the reset — the same task is still running,
+and its recursion bound must hold across the follow-up — and stands the whole gate down (the
+fresh turn that started the task already resolved it; a follow-up steers, it doesn't
+restart).
 
 **#61 — the resolution contract.** `validatePlan` (`evaluator.ts`) gained a `requireNodeFields`
 structural-only mode so a free-text, todo-derived plan (no per-node objective/outputShape/
@@ -1086,7 +1202,7 @@ when consequence is high.
 
 ### 8.4 Posterior uncertainty — escalate on green (#48)
 
-Even a **green** sound verdict is not automatically trusted. On a slice the arming judge flagged
+Even a **green** sound verdict is not automatically trusted. On a slice the arming decision flagged
 as ambiguous or hard, the verify ladder's accept-on-green passes through a
 **posterior-uncertainty gate** (`posterior-uncertainty.ts`, wired into the accept path of
 `slice-loop.ts`): if the slice's confidence signal (§8.5) is high-uncertainty, it earns **one**
@@ -1121,9 +1237,10 @@ verbalized confidence as the fallback:
 
 The §4.2 re-decomposition triggers are now live. After a run settles,
 `redecompositionSignalsFromOutcomes` (`slice-orchestrator.ts`) derives the signals from the
-outcome set (`coverageGaps` = count of `unverified` slices; `budgetOverrunPct` from the
-escalated fraction), `redecompositionCheck` maps them to triggers, and the post-settle block in
-`runConductorOrchestration` acts on them:
+outcome set (`coverageGaps` = count of `unverified` **plus `blocked`** slices — a dependent
+that was never dispatched because its dep terminal-failed is work the run did not deliver,
+P6a/Q-J; `budgetOverrunPct` from the escalated fraction), `redecompositionCheck` maps them to
+triggers, and the post-settle block in `runConductorOrchestration` acts on them:
 
 | trigger | condition | action |
 |---|---|---|
