@@ -129,7 +129,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
               { args },
             )
-            const result = yield* item.execute(args, ctx)
+            // L3.1 green-test memo (see the memo block below): a repeat of an
+            // already-green test command short-circuits to a stub; on a miss,
+            // mutating tools/commands drop the session memo before running.
+            const memoStub = greenMemoBefore({ toolID: item.id, sessionID: ctx.sessionID, args })
+            const result = memoStub ?? (yield* item.execute(args, ctx))
+            if (!memoStub)
+              greenMemoAfter({ toolID: item.id, sessionID: ctx.sessionID, messageID: ctx.messageID, args, result })
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -336,6 +342,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       run.promise(
         Effect.gen(function* () {
           const ctx = context(args, opts)
+          // Same memo, invalidation only (toolID is never "bash" here): an MCP tool with an
+          // edit/patch-shaped id (e.g. a server's file_edit) mutates files without passing
+          // through the registry loop above, so it must drop the green-test memo too.
+          greenMemoBefore({ toolID: key, sessionID: ctx.sessionID, args })
           yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
@@ -483,6 +493,109 @@ const withStepBudget = <T extends { output: string }>(
       output: result.output,
     }),
   }) as T
+
+// L3.1 green-test memo (docs/design/turn-cache-economics.md §5-L3 item 1): hard runs spend
+// 12–21 steps re-running test commands that already passed with nothing changed in between
+// (11964 ran the same suite variants 12×, 11885 21×), and most of that re-verification buys
+// nothing. When the model re-issues a test-ish bash command that already exited 0 and no
+// file has been modified since, the wrapper short-circuits execution and returns a stub that
+// is unmistakably a memo — never impersonating fresh output — with the last result's tail.
+// One memo per session; entries persist across steps (that is the point) and the WHOLE
+// session memo drops on any possible mutation (conservative: when unsure, invalidate). Like
+// stepResultTokens above, entries are replaced/deleted lazily — no timers.
+//
+// §7 "Sound-rung verification" hard rule — bypass by construction: OL-7.9 verify commands
+// never route through the session bash tool. They execute via makeShellCommandRunner
+// (slice-orchestrator.ts), which spawns `sh -c <command>` directly through Bun.spawn (wired
+// in prompt.ts as `runner: makeShellCommandRunner({ cwd })`), so the rung's verdict always
+// re-executes; this memo can only ever answer the model's own bash tool calls.
+export const GREEN_MEMO_COMMANDS = /runtests\.py|pytest|bun test|npm (run )?test|yarn test|tsc\b|eslint|ruff|mypy/
+
+// Mutation heuristic for bash text: any hit clears the session memo (and marks the command
+// itself ineligible to memoize — `pytest > out.log` writes a file; `make test` builds).
+// `>(?!&)` catches file redirects (`> out`, `>> log`, `2> err`) while exempting the
+// fd-duplication `2>&1` that test invocations legitimately carry. Read-only bash
+// (grep/cat/ls/git log/git diff/git status/python -c print) must not match.
+export const MUTATING_BASH =
+  /sed\s+-i|>(?!&)|\btee\b|\bmv\b|\brm\b|\bcp\b|\btouch\b|\bgit\s+(checkout|stash|apply|reset|revert|clean|cherry-pick|merge|rebase)\b|\bpip\s+install\b|\bmake\b|python\S*\s+setup\.py/
+
+// File-mutating tools clear the memo BEFORE they execute (strictly more conservative than
+// on-completion: a patch that throws halfway may already have written). `file_edit` is
+// matched loosely so an MCP server's edit tool invalidates too.
+const MEMO_INVALIDATING_TOOLS = /^(edit|write|apply_patch|patch)$|file_edit/
+
+// sessionID → normalized command key → last green result.
+const greenTestMemo = new Map<string, Map<string, { messageID: string; tail: string }>>()
+
+const GREEN_MEMO_TAIL_LINES = 10
+
+// Normalization: collapse whitespace + trim. `workdir` participates in the key when set —
+// the same command in two directories is two different results.
+function greenMemoKey(args: unknown): string | undefined {
+  if (!isRecord(args) || typeof args["command"] !== "string") return undefined
+  const normalized = args["command"].replace(/\s+/g, " ").trim()
+  if (!normalized) return undefined
+  const workdir = args["workdir"]
+  return typeof workdir === "string" && workdir ? `${workdir} ${normalized}` : normalized
+}
+
+// Pre-execution hook, called by every wrapper before the tool runs. Returns a memo stub to
+// short-circuit execution (bash only, exact key hit), or undefined to run the tool. On a
+// miss it applies invalidation: a bash command matching MUTATING_BASH, or any file-mutating
+// tool, drops the whole session memo. Lookup runs first, so a bash command that IS the
+// memoized command never invalidates before its own hit.
+export function greenMemoBefore(input: {
+  toolID: string
+  sessionID: string
+  args: unknown
+}): Tool.ExecuteResult | undefined {
+  if (input.toolID !== "bash") {
+    if (MEMO_INVALIDATING_TOOLS.test(input.toolID)) greenTestMemo.delete(input.sessionID)
+    return undefined
+  }
+  const key = greenMemoKey(input.args)
+  if (!key) return undefined
+  const hit = greenTestMemo.get(input.sessionID)?.get(key)
+  if (hit) {
+    const command = (input.args as Record<string, unknown>)["command"] as string
+    return {
+      title: command,
+      metadata: { green_memo: true, memoStep: hit.messageID },
+      output: `[green-test memo] unchanged since step ${hit.messageID} — this exact command already passed and no file has been modified since. Last result tail:\n${hit.tail}\nTo force a real re-run, change the command text (e.g. add -v).`,
+    }
+  }
+  if (MUTATING_BASH.test(key)) greenTestMemo.delete(input.sessionID)
+  return undefined
+}
+
+// Post-execution hook: memoize a green result. Green means the shell tool reported
+// `metadata.exit === 0` — the exit code the bash tool puts on every result (tool/shell.ts);
+// null (abort/timeout) is not green. Eligibility is a recognized test/check command carrying
+// no mutation shape; anything else is never stored.
+export function greenMemoAfter(input: {
+  toolID: string
+  sessionID: string
+  messageID: string
+  args: unknown
+  result: Pick<Tool.ExecuteResult, "output" | "metadata">
+}): void {
+  if (input.toolID !== "bash") return
+  if (!isRecord(input.args) || typeof input.args["command"] !== "string") return
+  const command = input.args["command"]
+  if (!GREEN_MEMO_COMMANDS.test(command) || MUTATING_BASH.test(command)) return
+  if (input.result.metadata["exit"] !== 0) return
+  const key = greenMemoKey(input.args)
+  if (!key) return
+  let memo = greenTestMemo.get(input.sessionID)
+  if (!memo) {
+    memo = new Map()
+    greenTestMemo.set(input.sessionID, memo)
+  }
+  memo.set(key, {
+    messageID: input.messageID,
+    tail: input.result.output.split("\n").slice(-GREEN_MEMO_TAIL_LINES).join("\n"),
+  })
+}
 
 // Sorts an assembled tool map by id so the same enabled-tool set always serializes to
 // the same key order in the model request, independent of the async resolution order

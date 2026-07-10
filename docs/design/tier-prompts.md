@@ -65,6 +65,17 @@ runs a tool loop reads it:
 Without it, step-granular masking surprises the model into re-reading cleared results —
 spending the steps the eviction saved.
 
+It also carries the **verify-once discipline** (`VERIFY_ONCE`, `prompts/fragments.ts` — L3.3
+of [turn-cache-economics.md](./turn-cache-economics.md) §5-L3, CC's line ported), gated on
+`bash` being in the tool set since only an agent that runs commands can re-verify:
+
+> RULE: verify once, at the finish line. Do not re-run a test suite that already passed
+> unless a file has changed since that run — a second green proves nothing new and wastes a
+> step. One green run of the full relevant suite IS the finish line, not N runs of it.
+
+It is the prompt half of the L3.1 green-test memo (`session/tools.ts`), which short-circuits
+a repeat of an already-green test command into a visible memo stub.
+
 ---
 
 ## 2. Tier deltas (`TIER_DELTA`, `packages/opencode/src/session/prompts/roles.ts:7-48`)

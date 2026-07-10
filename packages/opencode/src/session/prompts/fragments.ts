@@ -14,6 +14,15 @@ export const BATCH_RULE =
 export const EVICTION_RULE =
   "As the session grows, older tool results may be cleared from your context mid-session — replaced by `[Old tool result content cleared]` or a one-line summary. Carry the facts you still need forward in your own words (paths, symbols, key output lines, conclusions) as you work, instead of planning to re-read a result later."
 
+// L3.3 (turn-cache-economics.md §5-L3 item 3) — verify-once discipline, CC's line ported. Hard
+// runs spend 12–21 steps re-running suites that already passed (11964 ran the same variants 12×,
+// 11885 21×), and controlled studies show most re-verification buys nothing. RULE register on
+// purpose: the failure-mode overhaul showed rules steer this tier, advice does not. Gated on
+// `bash` in the tool block below — an agent that cannot run commands has no re-verify failure
+// mode to guard against.
+export const VERIFY_ONCE =
+  "RULE: verify once, at the finish line. Do not re-run a test suite that already passed unless a file has changed since that run — a second green proves nothing new and wastes a step. One green run of the full relevant suite IS the finish line, not N runs of it."
+
 // Generate the authoritative tool-usage section from the live advertised tool set (Sprint 5b §10.1).
 // This is the single source of truth: the prompt can never name a tool the model isn't given, which
 // closes the prompt↔tool drift class (the grep/glob coupling) permanently. The full per-tool schema
@@ -61,6 +70,9 @@ export function toolUsage(toolIds: readonly string[]): string {
   // every independent read became its own round trip. Gated on having more than one tool at all —
   // a single-tool agent has nothing to batch.
   if (ids.length > 1) notes.push(`- ${BATCH_RULE}`)
+  // L3.3 — verify-once rides every bash-holding prompt: only an agent that can run commands
+  // can burn steps re-proving a green result.
+  if (has("bash")) notes.push(`- ${VERIFY_ONCE}`)
   // L2.3 — the eviction contract rides every tool-holding prompt, single-tool agents included:
   // masking clears completed tool results regardless of how many tools the agent holds.
   notes.push(`- ${EVICTION_RULE}`)

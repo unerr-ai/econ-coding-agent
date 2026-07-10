@@ -104,6 +104,19 @@ describe("SystemPrompt.toolUsage", () => {
     )
   })
 
+  test("verify-once rule present when bash is in ids (L3.3 — one green run is the finish line)", () => {
+    const out = toolUsage(["bash"])
+    expect(out).toContain(
+      "- RULE: verify once, at the finish line. Do not re-run a test suite that already passed unless a file has changed since that run — a second green proves nothing new and wastes a step. One green run of the full relevant suite IS the finish line, not N runs of it.",
+    )
+  })
+
+  test("verify-once rule absent when bash is not in ids", () => {
+    // No bash → no way to run a suite → the rule would be noise; it must be gated off.
+    const out = toolUsage(["read", "search", "edit"])
+    expect(out).not.toContain("RULE: verify once, at the finish line")
+  })
+
   test("de-dupes ids — duplicate read counts once", () => {
     const out = toolUsage(["read", "read"])
     // ids after dedup+sort = ["read"], so the enumeration line has exactly "read" (no comma)
