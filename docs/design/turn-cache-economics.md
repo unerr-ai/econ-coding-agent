@@ -237,7 +237,7 @@ Inventory against our engine (all verified in code this session):
 | Observation masking | **present, overflow-only** | `compaction.ts:633` `maskObservations()` | fires only inside `compact()`'s prune-first ladder, which triggers at `isOverflow` — our 524k window never overflowed (peak 124.8k) |
 | Stale-read pruning | **present, overflow-only** | `compaction.ts:578` `pruneStaleReads()` (mtime-based) | same trigger problem |
 | LLM summarize + receipt attribution | **present, overflow-only** | `compaction.ts` compact() ladder, AC-5.1 | same |
-| Per-result caps | **per-tool + aggregate (2026-07-10)** | per-tool: `tool/truncate.ts` (2000 lines / 50KB); aggregate: `session/step-budget.ts` `enforceStepBudget` (~20k tok/step, largest-first trim, visible spill markers), enforced in the step loop before transcript build (`prompt.ts:2229`) | the L1.3 fan-out guardrail is now in place; single-line blobs can't be line-trimmed and rely on the per-tool 50KB cap |
+| Per-result caps | **per-tool + aggregate (2026-07-10)** | per-tool: `tool/truncate.ts` (2000 lines / 50KB); aggregate: `session/step-budget.ts` `enforceStepBudget` (~20k tok/step, largest-first trim, visible spill markers), enforced in the step loop before transcript build (`prompt.ts:2229`) | the L1.3 fan-out guardrail is now in place; single-line blobs can't be line-trimmed and rely on the per-tool 50KB cap. **Consolidation debt (found 2026-07-11):** `session/tools.ts` still carries the original L1.3 `applyStepResultBudget` (same 20k budget, sequential head-cut at tool-result time) — two implementations of one budget; neither fired in the validation wave, so behavior is identical today, but the tools.ts one should be deleted in favor of `enforceStepBudget` (one budget, one enforcement point) |
 | Step budget (inline) | **grind valve live** | `createGrindValve` (`turn-supervisor.ts:190`) — 60-step soft budget, fires on a 15-step no-green-verify stall, plants a reasoner design prepass (the L4.2 transition) | reactive by design: escalation happens on failure evidence, never pre-allocated |
 | Difficulty→tier allocation | **present + degrade-cheap (2026-07-10)** | turn-read → `allocation.ts` two-axis; degraded policy: `DEGRADED_ARMING` (`arming-judge.ts`) | under-called 11885 (tracker tuning log 2026-07-10). A degraded/null turn-read now reads as the cheapest posture AND stands down mid-turn decomposition (gate in `slice-orchestrator.ts` `runConductorOrchestration`; grind valve is the only way up) — the 11964 re-fire's $0.3467-vs-$0.0985 trip was unguided decomposition on timed-out turn-reads, with slices lifted by allocateSlice's *structural* cells, not the difficulty floor |
 
@@ -388,6 +388,13 @@ at $0.7879; decomposition earns its price only after localization evidence exist
 
 Ladder-wide: from 2.1× → **~4–6× cheaper than the frontier baseline** at unchanged pass rate —
 which is the thesis number (`f×(1−1/r)`) actually realized.
+
+**Measured (2026-07-11 validation wave, all REAL PASS on gold tests):** 11964 **$0.0839 /
+25 msgs / batch 1.60** (the table's L1 turn-collapse realized: 46 → 25 messages); 11885
+**$0.2235 / 58 turns / 100% conductor** — under the table's full-stack ~$0.24 target,
+reached via L1 recency watcher + L1.4 probe-scripts (×19) + L2 + the armed-turns-never-
+decompose demotion (`919480c94`) rather than the exact projected lever mix; 11999 $0.0413
+(n=2, at baseline). The grinder's realized ratio vs its own $0.8447 baseline is 3.8×.
 
 ---
 
