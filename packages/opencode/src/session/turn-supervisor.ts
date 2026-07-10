@@ -243,3 +243,68 @@ export function createGrindValve(): GrindValve {
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// L1.2c — the batch-momentum watcher (round-trip economy rung)
+// ---------------------------------------------------------------------------
+
+/**
+ * Consecutive single-call steps before the batch-momentum nudge fires. Three
+ * is the smallest run that reads as a pattern rather than coincidence: the
+ * live probes (fw-batch-probe round 2, 2026-07-10) showed three single-call
+ * history steps already drag the default tier from 3/3 spontaneous batching
+ * to 1/3.
+ */
+export const BATCH_NUDGE_AFTER_SINGLE_STEPS = 3
+
+/** Minimum steps between firings — the reminder is recency-effective for the step right after it; re-nudging every step would pollute the transcript for no marginal effect. */
+export const BATCH_NUDGE_REARM_STEPS = 8
+
+/** The watcher's evidence when it fires — logged verbatim on the `batch_nudge` line. */
+export interface BatchMomentumSignal {
+  /** The observed step index (1-based) at which the nudge fired. */
+  step: number
+  /** Length of the current run of consecutive single-call steps. */
+  consecutiveSingleCalls: number
+}
+
+export interface BatchMomentumWatcher {
+  /** Feed one completed step's tool-call count; returns a fire signal when the nudge should inject, else undefined. */
+  observe(toolCallCount: number): BatchMomentumSignal | undefined
+}
+
+/**
+ * Build the batch-momentum watcher (turn-cache-economics.md §5-L1): the
+ * default tier batches tool calls natively on a clean transcript but imitates
+ * its own history once it carries a run of single-call messages, and a
+ * recency-positioned reminder recovers batching where the system-prompt
+ * BATCH_RULE alone does not (fw-batch-probe rounds 1–3: stack clean 12/12,
+ * poisoned history 2/6 despite the rule, tail reminder 6/6). Fires after
+ * `BATCH_NUDGE_AFTER_SINGLE_STEPS` consecutive single-call steps, re-arming
+ * every `BATCH_NUDGE_REARM_STEPS` steps while the run persists. A multi-call
+ * step resets the run (momentum broken — imitation now works for us); a
+ * zero-call step is neutral (text-only steps neither prove nor disprove
+ * batching).
+ *
+ * @sem domain=routing role=orchestrator
+ */
+export function createBatchMomentumWatcher(): BatchMomentumWatcher {
+  let step = 0
+  let consecutive = 0
+  let lastFiredStep = -BATCH_NUDGE_REARM_STEPS
+  return {
+    observe(toolCallCount) {
+      step += 1
+      if (toolCallCount >= 2) {
+        consecutive = 0
+        return undefined
+      }
+      if (toolCallCount === 1) consecutive += 1
+      if (consecutive >= BATCH_NUDGE_AFTER_SINGLE_STEPS && step - lastFiredStep >= BATCH_NUDGE_REARM_STEPS) {
+        lastFiredStep = step
+        return { step, consecutiveSingleCalls: consecutive }
+      }
+      return undefined
+    },
+  }
+}

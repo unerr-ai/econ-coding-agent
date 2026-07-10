@@ -38,3 +38,17 @@ export const LENGTH_CONTINUATION_NUDGE =
 export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: number }): string {
   return `You have taken ${signal.step} steps this turn and none of the last ${signal.stepsSinceGreen} produced a passing verification — this approach is grinding, not converging. A design pre-pass has been added to your todo list and will run automatically; it returns a concrete fix design (the files to change, the edits, the invariants to preserve, and the verify commands). STOP making code edits until that design comes back, then execute it step by step and verify. Do not remove the design item from the todo list.`
 }
+
+/**
+ * L1.2c — the message injected when the batch-momentum watcher fires
+ * (turn-supervisor.ts `createBatchMomentumWatcher`): the transcript shows a
+ * run of single-call steps, which in-context trains the model out of the
+ * batching it does natively on a clean transcript (fw-batch-probe 2026-07-10:
+ * poisoned history 2/6 batched despite BATCH_RULE, tail reminder 6/6). Recency
+ * does the work the system-prompt rule cannot — this restates the doctrine's
+ * self-check at the moment of choice, not its full definition (BATCH_RULE in
+ * prompts/fragments.ts stays the single source).
+ */
+export function batchMomentumNudgeText(signal: { consecutiveSingleCalls: number }): string {
+  return `ECONOMY CHECK: your last ${signal.consecutiveSingleCalls} messages each carried exactly ONE tool call — that many paid round trips where fewer would do. Apply the BATCH RULE now: name every independent read/search/command you already know you need, then issue them ALL as tool calls in this ONE message; they run together and the results come back together. Only a true dependency chain — the next call needs this call's output — justifies another single-call message.`
+}

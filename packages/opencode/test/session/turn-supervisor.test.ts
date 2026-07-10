@@ -5,6 +5,7 @@ import {
   createGrindValve,
   GRIND_VALVE_STEPS,
   GRIND_VALVE_STALL_WINDOW,
+  createBatchMomentumWatcher,
 } from "../../src/session/turn-supervisor"
 import { stuckNudgeText, grindValveNudgeText } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
@@ -334,5 +335,61 @@ describe("stuckNudgeText", () => {
     const r2 = stuckNudgeText({ reason: "repeated-red", signature: "x", count: 3 }, 2)
     expect(r2.toLowerCase()).toContain("first principles")
     expect(r1).not.toBe(r2)
+  })
+})
+
+// -- L1.2c batch-momentum watcher --------------------------------------------
+// Fires after BATCH_NUDGE_AFTER_SINGLE_STEPS consecutive single-tool-call
+// steps, re-arming every BATCH_NUDGE_REARM_STEPS steps while the run
+// persists. A >=2-call step resets the run; a 0-call step is neutral (neither
+// increments nor resets).
+
+describe("createBatchMomentumWatcher", () => {
+  it("fires on the third consecutive single-call step", () => {
+    const watcher = createBatchMomentumWatcher()
+    expect(watcher.observe(1)).toBeUndefined()
+    expect(watcher.observe(1)).toBeUndefined()
+    expect(watcher.observe(1)).toEqual({ step: 3, consecutiveSingleCalls: 3 })
+  })
+
+  it("a multi-call step resets the run", () => {
+    const watcher = createBatchMomentumWatcher()
+    const counts = [1, 1, 2, 1, 1, 1]
+    const signals = counts.map((c) => watcher.observe(c))
+    expect(signals.slice(0, 5)).toEqual([undefined, undefined, undefined, undefined, undefined])
+    expect(signals[5]).toEqual({ step: 6, consecutiveSingleCalls: 3 })
+  })
+
+  it("a zero-call step is neutral — it neither increments nor resets the run", () => {
+    const watcher = createBatchMomentumWatcher()
+    const counts = [1, 1, 0, 1]
+    const signals = counts.map((c) => watcher.observe(c))
+    expect(signals.slice(0, 3)).toEqual([undefined, undefined, undefined])
+    expect(signals[3]).toEqual({ step: 4, consecutiveSingleCalls: 3 })
+  })
+
+  it("re-arms after BATCH_NUDGE_REARM_STEPS steps while the run persists", () => {
+    const watcher = createBatchMomentumWatcher()
+    const signals: (ReturnType<typeof watcher.observe> | undefined)[] = []
+    for (let i = 1; i <= 12; i++) signals.push(watcher.observe(1))
+    expect(signals[2]).toEqual({ step: 3, consecutiveSingleCalls: 3 }) // step 3
+    for (let i = 4; i <= 10; i++) expect(signals[i - 1]).toBeUndefined()
+    expect(signals[10]).toEqual({ step: 11, consecutiveSingleCalls: 11 }) // step 11
+    expect(signals[11]).toBeUndefined() // step 12: re-armed at 11, only 1 step later
+  })
+
+  it("after a reset mid-run, both the run AND the re-arm cadence must clear before the next fire", () => {
+    const watcher = createBatchMomentumWatcher()
+    expect(watcher.observe(1)).toBeUndefined() // step 1
+    expect(watcher.observe(1)).toBeUndefined() // step 2
+    expect(watcher.observe(1)).toEqual({ step: 3, consecutiveSingleCalls: 3 }) // step 3: fires
+    expect(watcher.observe(2)).toBeUndefined() // step 4: resets the run
+    expect(watcher.observe(1)).toBeUndefined() // step 5: run=1
+    expect(watcher.observe(1)).toBeUndefined() // step 6: run=2
+    expect(watcher.observe(1)).toBeUndefined() // step 7: run=3, but 7-3=4 < 8 — not re-armed yet
+    expect(watcher.observe(1)).toBeUndefined() // step 8: run=4, 8-3=5 < 8
+    expect(watcher.observe(1)).toBeUndefined() // step 9: run=5, 9-3=6 < 8
+    expect(watcher.observe(1)).toBeUndefined() // step 10: run=6, 10-3=7 < 8
+    expect(watcher.observe(1)).toEqual({ step: 11, consecutiveSingleCalls: 7 }) // step 11: run=7, 11-3=8 >= 8 — fires
   })
 })

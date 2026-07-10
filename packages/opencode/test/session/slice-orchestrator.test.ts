@@ -74,6 +74,7 @@ import {
   type TriageTodoRow,
 } from "../../src/session/slice-orchestrator"
 import { triagePreamble } from "../../src/session/prompts/preambles"
+import { batchMomentumNudgeText } from "../../src/session/prompts/nudges"
 import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
@@ -1173,6 +1174,10 @@ describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gat
       for (const [name, value] of Object.entries(mod))
         if (typeof value === "string" && value.length > 40)
           expect(promptAuthorizesTestEdits(value), `${name} must not self-authorize test edits`).toBe(false)
+  })
+
+  it("the batch-momentum nudge (L1.2c) never authorizes test edits", () => {
+    expect(promptAuthorizesTestEdits(batchMomentumNudgeText({ consecutiveSingleCalls: 4 }))).toBe(false)
   })
 })
 

@@ -18,8 +18,8 @@ import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
 import { setTestEditGate, testEditGateArmed, setNoEditsGate, noEditsGateArmed } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { observeStep, createGrindValve } from "./turn-supervisor"
-import { stuckNudgeText, grindValveNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
+import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
+import { stuckNudgeText, grindValveNudgeText, batchMomentumNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
 import { triagePreamble } from "./prompts/preambles"
 import { GRIND_DESIGN_SLICE_CONTENT, LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
 import {
@@ -1472,6 +1472,9 @@ export const layer = Layer.effect(
         // ($0.8447) that never tripped a repeat signal. Root sessions only,
         // fires at most once per turn.
         const grindValve = session.parentID ? undefined : createGrindValve()
+        // L1.2c — root-session-only, same round-trip economy as the valve
+        // above: child slices already run the slice-loop FSM.
+        const batchWatcher = session.parentID ? undefined : createBatchMomentumWatcher()
         let escalatedModelRef: { providerID: string; modelID: string } | undefined
         let stuckEscalations = 0
         const MAX_STUCK_ESCALATIONS = 2
@@ -1618,6 +1621,41 @@ export const layer = Layer.effect(
                 sessionID,
                 type: "text",
                 text: stuckNudgeText(stuckSignal, stuckEscalations),
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
+            // L1.2c — batch-momentum watcher: lowest precedence of the three.
+            // The grind valve and stuck ladder above both change strategy and
+            // `continue` before this runs on their firing steps (missing one
+            // observation here is immaterial at the watcher's re-arm cadence)
+            // — this rung only compresses round trips, it changes nothing else.
+            const toolCallCount =
+              lastAssistantMsg?.parts.filter(
+                (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
+              ).length ?? 0
+            const batchSignal = batchWatcher?.observe(toolCallCount)
+            if (batchSignal) {
+              yield* Effect.logInfo("batch_nudge", {
+                "session.id": sessionID,
+                step: batchSignal.step,
+                consecutiveSingleCalls: batchSignal.consecutiveSingleCalls,
+              })
+              const batchNudge: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(batchNudge)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: batchNudge.id,
+                sessionID,
+                type: "text",
+                text: batchMomentumNudgeText(batchSignal),
                 synthetic: true,
               } satisfies SessionV1.TextPart)
               continue
