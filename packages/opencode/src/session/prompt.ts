@@ -1965,21 +1965,27 @@ export const layer = Layer.effect(
             continue
           }
 
-          // L2.1/L2.2 — in-loop $0 context economy: re-fire the deterministic
-          // passes (mask → stale-read drop → prune) at this clean step
-          // boundary (the previous stream has finished, the next request is
-          // not yet built) every STEP_COMPACT_INTERVAL steps or once the
-          // estimated live context crosses STEP_CTX_ECONOMIC_CEILING. Run
-          // sessions have exactly one user turn and end it when the task is
-          // done, so without this neither the turn-end prune nor the overflow
-          // ladder ever shrinks mid-run context. These passes are $0 and
-          // non-destructive (`time.compacted` tags / masked syntheses; raw
-          // outputs stay in the DB), so no compaction task is created and
-          // AC-1.5's boundary-only deferral below is untouched. Synchronous
-          // on purpose: the request build reads `msgs`, so re-fetch it the
-          // same way the loop top does — the passes write through
-          // updatePart → PartUpdated projection, which commits to the DB
-          // atomically with the publish.
+          // L2.1/L2.2 — in-loop $0 context economy at this clean step boundary
+          // (the previous stream has finished, the next request is not yet
+          // built). Run sessions have exactly one user turn and end it when
+          // the task is done, so without this neither the turn-end prune nor
+          // the overflow ladder ever shrinks mid-run context. Two arms:
+          //  · every STEP_COMPACT_INTERVAL steps — the deterministic,
+          //    model-invisible passes only (window-exact stale-read drop +
+          //    token-tail prune, both floor-guarded);
+          //  · past STEP_CTX_ECONOMIC_CEILING — additionally maskObservations.
+          //    Masking rewrites results the model may still be steering by
+          //    into one-line syntheses; on the lean 11999 L2 probe a %10 mask
+          //    cadence drove repeat searches (+4× turns), so it is reserved
+          //    for runs whose context has actually grown past the economic
+          //    ceiling (the grind case it was designed for).
+          // These passes are $0 and non-destructive (`time.compacted` tags /
+          // masked syntheses; raw outputs stay in the DB), so no compaction
+          // task is created and AC-1.5's boundary-only deferral below is
+          // untouched. Synchronous on purpose: the request build reads
+          // `msgs`, so re-fetch it the same way the loop top does — the
+          // passes write through updatePart → PartUpdated projection, which
+          // commits to the DB atomically with the publish.
           {
             // Live-context estimate mirrors isOverflow's read of the latest
             // finished assistant's tokens; cache.read carries the cached
@@ -1987,11 +1993,9 @@ export const layer = Layer.effect(
             const liveCtx = lastFinished
               ? lastFinished.tokens.input + lastFinished.tokens.cache.read + lastFinished.tokens.output
               : 0
-            if (
-              step % SessionCompaction.STEP_COMPACT_INTERVAL === 0 ||
-              liveCtx > SessionCompaction.STEP_CTX_ECONOMIC_CEILING
-            ) {
-              yield* compaction.maskObservations({ sessionID })
+            const overCeiling = liveCtx > SessionCompaction.STEP_CTX_ECONOMIC_CEILING
+            if (step % SessionCompaction.STEP_COMPACT_INTERVAL === 0 || overCeiling) {
+              if (overCeiling) yield* compaction.maskObservations({ sessionID })
               yield* compaction.pruneStaleReads({ sessionID })
               yield* compaction.prune({ sessionID })
               msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(

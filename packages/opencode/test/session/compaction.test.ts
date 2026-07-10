@@ -845,6 +845,69 @@ describe("session.compaction.prune", () => {
   )
 })
 
+describe("session.compaction.pruneStaleReads — L2.1 window rule", () => {
+  it.live(
+    // 11999 L2-probe regression: path-level read dedupe cleared page N−1 of a
+    // large file whenever page N was read (base.py read 10× in different
+    // windows, 9 cleared → re-read thrash). A later READ supersedes an earlier
+    // one only when it covers the IDENTICAL window; a later WRITE/EDIT of the
+    // path still stales every window of it.
+    "paged reads survive; identical windows dedupe; a write stales all windows",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const user = yield* createUserMessage(info.id, "only turn")
+        const read = (offset: number | undefined, limit: number | undefined) =>
+          Effect.gen(function* () {
+            const msg = yield* createAssistantMessage(info.id, user.id, dir)
+            yield* addCompletedToolPart({
+              sessionID: info.id,
+              messageID: msg.id,
+              tool: "read",
+              output: "body",
+              input: { filePath: `${dir}/big.py`, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) },
+            })
+            return msg.id
+          })
+
+        // Case 1+2: two different windows + one exact repeat of the first.
+        const pageA = yield* read(0, 100)
+        const pageB = yield* read(100, 100)
+        const pageARepeat = yield* read(0, 100)
+
+        yield* compact.pruneStaleReads({ sessionID: info.id })
+
+        let parts = yield* toolPartsByMessage(info.id, [pageA, pageB, pageARepeat])
+        // pageA cleared (identical later window), pageB + the repeat live.
+        if (parts[0]?.state.status === "completed") expect(parts[0].state.time.compacted).toBeNumber()
+        for (const part of [parts[1], parts[2]]) {
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") expect(part.state.time.compacted).toBeUndefined()
+        }
+
+        // Case 3: an edit of the path stales every surviving window.
+        const editMsg = yield* createAssistantMessage(info.id, user.id, dir)
+        yield* addCompletedToolPart({
+          sessionID: info.id,
+          messageID: editMsg.id,
+          tool: "edit",
+          output: "ok",
+          input: { filePath: `${dir}/big.py` },
+        })
+        yield* compact.pruneStaleReads({ sessionID: info.id })
+
+        parts = yield* toolPartsByMessage(info.id, [pageB, pageARepeat])
+        for (const part of parts) {
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") expect(part.state.time.compacted).toBeNumber()
+        }
+      }),
+    ),
+  )
+})
+
 describe("session.compaction.maskObservations", () => {
   it.live(
     "never masks a completed task digest, only its sibling bash output",

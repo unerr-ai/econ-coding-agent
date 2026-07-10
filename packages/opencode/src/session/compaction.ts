@@ -614,8 +614,9 @@ export const layer = Layer.effect(
       const planId = latestPlanPartId(msgs)
 
       // Chronological (oldest→newest) flat list of completed read/write-family tool
-      // parts, each tagged with the file path it touched.
-      const touches: { part: SessionV1.ToolPart; path: string; isRead: boolean }[] = []
+      // parts, each tagged with the file path it touched. Reads also carry their
+      // page window (offset/limit) — see the L2.1 window rule below.
+      const touches: { part: SessionV1.ToolPart; path: string; isRead: boolean; window: string }[] = []
       for (const msg of msgs) {
         for (const part of msg.parts) {
           if (part.type !== "tool") continue
@@ -626,7 +627,8 @@ export const layer = Layer.effect(
           if (!isRead && !isWrite) continue
           const filePath = part.state.input?.filePath
           if (typeof filePath !== "string" || !filePath) continue
-          touches.push({ part, path: filePath, isRead })
+          const window = `${part.state.input?.offset ?? ""}:${part.state.input?.limit ?? ""}`
+          touches.push({ part, path: filePath, isRead, window })
         }
       }
 
@@ -635,10 +637,16 @@ export const layer = Layer.effect(
         const touch = touches[i]!
         if (!touch.isRead) continue
         if (isProtectedToolPart(touch.part, cfg, planId)) continue
-        // Stale (superseded by a later edit/write of the same path) and duplicate
-        // (superseded by a later read of the same path) collapse to the same test:
-        // is there ANY later touch of this path at all.
-        const superseded = touches.slice(i + 1).some((later) => later.path === touch.path)
+        // Stale: a later edit/write of the same path supersedes EVERY earlier read
+        // of it (content changed). Duplicate: a later read supersedes an earlier one
+        // only when it covers the IDENTICAL page window (same offset+limit) — the
+        // L2.1 window rule. Path-level read dedupe is wrong for paged reads of a
+        // large file: it cleared page N−1 whenever page N was read, and the model
+        // re-read the cleared window on the next step (11999 L2 probe: base.py read
+        // 10× in different windows, 9 cleared — pure thrash, +4× turns).
+        const superseded = touches
+          .slice(i + 1)
+          .some((later) => later.path === touch.path && (!later.isRead || later.window === touch.window))
         if (!superseded) continue
         if (touch.part.state.status !== "completed") continue
         touch.part.state.time.compacted = Date.now()
