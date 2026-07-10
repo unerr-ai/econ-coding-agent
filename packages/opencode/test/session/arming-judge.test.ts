@@ -8,7 +8,8 @@
  */
 
 import { describe, test, expect } from "bun:test"
-import { decideArming } from "../../src/session/arming-judge"
+import { allocateSlice, resolutionDecision } from "@opencode-ai/code-intelligence"
+import { decideArming, DEGRADED_ARMING } from "../../src/session/arming-judge"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 
 function verdictOf(goals: TriageGoal[], confidence: "high" | "low" = "high"): TriageVerdict {
@@ -16,12 +17,59 @@ function verdictOf(goals: TriageGoal[], confidence: "high" | "low" = "high"): Tr
 }
 
 describe("decideArming — stand-down cases", () => {
-  test("no verdict at all stands down (the P5 neutral-degrade posture)", () => {
+  test("no verdict at all resolves to DEGRADED_ARMING (the P5 cheapest-degrade posture)", () => {
     const decision = decideArming(null)
+    expect(decision).toEqual(DEGRADED_ARMING)
     expect(decision.armLocalization).toBe(false)
     expect(decision.localized).toBe(true)
-    expect(decision.hardness).toBe("moderate")
+    // The floor, not "moderate": below the hard/ambiguous threshold every lift consumer gates on.
+    expect(decision.hardness).toBe("trivial")
+    expect(decision.ambiguity).toBe("clear")
+    // The inline-stand-down flag the orchestration hook reads — true ONLY here.
+    expect(decision.degraded).toBe(true)
     expect(decision.evidence).toContain("stands down")
+  })
+
+  test("a computed verdict is never flagged degraded (degraded is the null-posture flag only)", () => {
+    const build = decideArming(verdictOf([{ quote: "add a --json flag", shape: "build", deliverable: "flag works" }]))
+    const diagnosis = decideArming(
+      verdictOf([{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }]),
+    )
+    expect(build.degraded).toBeFalsy()
+    expect(diagnosis.degraded).toBeFalsy()
+  })
+
+  test("the degraded posture triggers NO lift — no difficulty floor, no reasoning un-mute, no decompose-from-flag", () => {
+    const degrade = decideArming(null)
+
+    // Reasoning un-mute (llm/request.ts): un-mutes only on ambiguous/hard — the
+    // degrade sits below that threshold, so the conductor stays on its cheap baseline.
+    expect(degrade.ambiguity === "ambiguous" || degrade.hardness === "hard").toBe(false)
+
+    // Per-slice difficulty floor (allocation.ts): a testable, spec-backed mechanical
+    // slice carrying the degrade's difficulty stays on the executor — never floored
+    // to the reasoner (the floor only fires on hard/ambiguous).
+    const alloc = allocateSlice({
+      sliceType: "mechanical",
+      testStrength: "testable",
+      specBacked: true,
+      hardness: degrade.hardness,
+      ambiguity: degrade.ambiguity,
+    })
+    expect(alloc.tier).toBe("executor")
+    expect(alloc.reasonCode).not.toBe("difficulty-floor")
+
+    // Resolution decompose gate (resolution-phase.ts): the degrade is never
+    // "flagged", so the gate never engages a resolve-first/decompose-from-flag pass.
+    const res = resolutionDecision({
+      hardness: degrade.hardness,
+      ambiguity: degrade.ambiguity,
+      armLocalization: degrade.armLocalization,
+      budget: 10_000,
+      interactive: true,
+      resolveAttempts: 0,
+    })
+    expect(res.reason).toBe("approach not uncertain")
   })
 
   test("a build-only turn never arms — localization does not apply", () => {

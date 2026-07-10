@@ -1773,8 +1773,8 @@ export interface ConductorOrchestrationDeps {
   options?: ConductorLoopOptions
   /** U2 — the turn's triage goal count (§1.2), fed into `shouldOrchestrate`'s width check. Absent on a null-verdict (legacy) turn. */
   goalCount?: number
-  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). Absent on a null-verdict (legacy) turn. */
-  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity; armLocalization?: boolean }
+  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). `degraded` (the null turn-read posture, `DEGRADED_ARMING`) holds the conductor inline — mid-turn todos never orchestrate, the grind valve's design prepass excepted. Absent on a null-verdict (legacy) turn. */
+  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity; armLocalization?: boolean; degraded?: boolean }
   /** P4 §4b — this turn is a continuation (steering/iteration on the session's existing work): the resolution gate stands down entirely — a continuation never re-enters resolve-first; the fresh turn that started the task already resolved it. */
   continuation?: boolean
   /** P3/Q-D — the turn-read found a research-shaped goal: recon slices default to the web-enabled researcher persona and research slices verify by citation, never the test rung (threaded to `todosToLoopSlices`). */
@@ -1794,6 +1794,8 @@ export interface ConductorOrchestrationDeps {
     candidatePlanValid?: boolean
     resolveAttempts: number
   }) => void
+  /** L4.2 — degraded stand-down telemetry sink: fires when a degraded (null turn-read) turn holds its conductor-authored mid-turn todos INLINE instead of orchestrating them. `grindEscapeHatch` is true when the grind valve's design prepass is present and still orchestrates. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
+  onDegradedStandDown?: (info: { conductorTodos: number; grindEscapeHatch: boolean }) => void
   /** #55 — mid-flight re-decomposition telemetry sink: fires after every settled run with the §4.2 triggers `redecompositionCheck` returned and the signals behind them, whether or not any trigger was acted on. Same callback-to-caller pattern as `onResolutionGate`. */
   onRedecomposition?: (info: {
     triggers: RedecompositionTrigger[]
@@ -1937,8 +1939,32 @@ export async function runConductorOrchestration(
       }
     }
 
-    const typedIndices = todos.map((t, i) => (isDispatchableSlice(t) ? i : -1)).filter((i) => i >= 0)
-    const slices = await todosToLoopSlices(todos, deps.probes, deps.arming, {
+    // L4.2 degraded stand-down (11964: $0.3467 orchestrated vs $0.0985 the same
+    // ticket conductor-solo): a degraded turn-read (verdict===null →
+    // DEGRADED_ARMING, `degraded:true`) keeps the conductor INLINE for the whole
+    // turn — its own mid-turn todos are tracked but must NOT flow into tiered
+    // slices (the structural-cell allocation design/untestable→reasoner/oracle is
+    // exactly what bought the overrun on an ex-solo ticket). The ONE escape hatch
+    // is the grind valve's planted design prepass (GRIND_DESIGN_SLICE_CONTENT),
+    // which MUST still orchestrate so a stalled degraded turn can escalate on
+    // evidence rather than never being able to at all. Gating on the valve todo's
+    // own content marker, never a copy of the arming policy.
+    const degraded = deps.arming?.degraded === true
+    const orchestratable = (t: OrchestrationTodo): boolean =>
+      isDispatchableSlice(t) && (!degraded || t.content === GRIND_DESIGN_SLICE_CONTENT)
+    if (degraded) {
+      const heldInline = todos.filter((t) => isDispatchableSlice(t) && t.content !== GRIND_DESIGN_SLICE_CONTENT).length
+      if (heldInline > 0)
+        deps.onDegradedStandDown?.({
+          conductorTodos: heldInline,
+          grindEscapeHatch: todos.some((t) => t.content === GRIND_DESIGN_SLICE_CONTENT),
+        })
+    }
+
+    const typedIndices = todos.map((t, i) => (orchestratable(t) ? i : -1)).filter((i) => i >= 0)
+    if (typedIndices.length === 0) return { engaged: false }
+    const engagedTodos = degraded ? todos.filter(orchestratable) : todos
+    const slices = await todosToLoopSlices(engagedTodos, deps.probes, deps.arming, {
       researchShaped: deps.researchShaped,
       fallbackFiles: deps.turnFiles,
     })

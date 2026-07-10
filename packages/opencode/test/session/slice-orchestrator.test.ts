@@ -43,6 +43,7 @@ import {
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
   PLAN_PREPASS_TODO,
+  GRIND_DESIGN_PREPASS_TODO,
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
   deriveTurnProbe,
@@ -79,6 +80,7 @@ import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
+  GRIND_DESIGN_SLICE_CONTENT,
 } from "../../src/session/prompts/seeds"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 import type { ArmingDecision } from "../../src/session/arming-judge"
@@ -1928,6 +1930,88 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     const firstCompleted = statusCalls.findIndex((c) => c.status === "completed")
     const lastInProgress = statusCalls.map((c) => c.status).lastIndexOf("in_progress")
     expect(firstCompleted).toBeGreaterThan(lastInProgress)
+  })
+
+  // L4.2 degraded stand-down (11964): a degraded turn-read (DEGRADED_ARMING,
+  // `degraded:true`) keeps the conductor INLINE — its own mid-turn todos, even a
+  // typed DAG that would otherwise engage, must not orchestrate into tiered
+  // slices (that structural-cell allocation bought a 3.5× overrun on an ex-solo
+  // ticket). The grind valve's design prepass is the sole exception.
+  it("degraded turn: conductor mid-turn todos stay inline — no orchestration, zero dispatch", async () => {
+    let dispatched = 0
+    let standDown: { conductorTodos: number; grindEscapeHatch: boolean } | undefined
+    const res = await runConductorOrchestration({
+      getTodos: async () => [
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+      ],
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      arming: { degraded: true },
+      onDegradedStandDown: (info) => {
+        standDown = info
+      },
+      options: { runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+    })
+    expect(res.engaged).toBe(false)
+    expect(dispatched).toBe(0)
+    expect(standDown).toEqual({ conductorTodos: 2, grindEscapeHatch: false })
+  })
+
+  it("degraded turn: the grind-valve design prepass STILL orchestrates; conductor todos stay inline", async () => {
+    const dispatchedIds: string[] = []
+    let standDown: { conductorTodos: number; grindEscapeHatch: boolean } | undefined
+    const res = await runConductorOrchestration({
+      getTodos: async () => [
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        GRIND_DESIGN_PREPASS_TODO,
+      ],
+      probes: fakeProbes(),
+      dispatch: async (req) => {
+        dispatchedIds.push(req.sliceId)
+        return { text: "design done", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      arming: { degraded: true },
+      onDegradedStandDown: (info) => {
+        standDown = info
+      },
+      options: { runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+    })
+    // The valve's escape hatch orchestrates; the conductor's own todo never does.
+    expect(res.engaged).toBe(true)
+    expect(dispatchedIds).toContain(GRIND_DESIGN_SLICE_CONTENT)
+    expect(dispatchedIds).not.toContain("a")
+    expect(standDown).toEqual({ conductorTodos: 1, grindEscapeHatch: true })
+  })
+
+  it("healthy turn (non-degraded arming): a typed DAG orchestrates unchanged, no stand-down", async () => {
+    let dispatched = 0
+    let stoodDown = false
+    const res = await runConductorOrchestration({
+      getTodos: async () => [
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+      ],
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      arming: { hardness: "trivial", ambiguity: "clear" },
+      onDegradedStandDown: () => {
+        stoodDown = true
+      },
+      options: { runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+    })
+    expect(res.engaged).toBe(true)
+    expect(dispatched).toBeGreaterThanOrEqual(2)
+    expect(stoodDown).toBe(false)
   })
 
   it("dispatch throw → caught at the boundary, metered, falls back (turn survives)", async () => {

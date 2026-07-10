@@ -26,6 +26,14 @@ export interface ArmingVerdict {
   readonly ambiguity: ArmingAmbiguity
   /** The exact evidence spans that decided the call — makes it auditable, never invented. */
   readonly evidence: string
+  /**
+   * True ONLY on `DEGRADED_ARMING` (turn-read verdict === null); absent/false on
+   * every computed verdict. Downstream (runConductorOrchestration) reads it to
+   * hold the conductor INLINE for the whole turn — a degraded turn's mid-turn
+   * todos never orchestrate into tiered slices; the grind valve is the sole
+   * escape hatch. See `DEGRADED_ARMING`.
+   */
+  readonly degraded?: boolean
 }
 
 /**
@@ -34,13 +42,52 @@ export interface ArmingVerdict {
  * floor `todosToLoopSlices` reads). `ambiguity` is optional so an older
  * caller/test double built before it existed still type-checks.
  */
-export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness"> & { ambiguity?: ArmingAmbiguity }
+export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness"> & {
+  ambiguity?: ArmingAmbiguity
+  /** True only on the degraded (null turn-read) posture — the orchestration hook's inline-stand-down flag. See `DEGRADED_ARMING`. */
+  degraded?: boolean
+}
 
 const HARDNESS_RANK: Record<ArmingHardness, number> = { trivial: 0, moderate: 1, hard: 2 }
 
 /** The shapes localization applies to — build/refactor/audit/qa/research/run-only never arm. */
 function isDiagnosisGoal(goal: TriageGoal): boolean {
   return goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
+}
+
+/**
+ * The ONE posture a degraded/absent turn-read resolves to (P5) — the single
+ * source of truth for "no verdict", so no consumer synthesizes its own guess.
+ * The full degraded policy is CHEAPEST POSTURE AND NO MID-TURN DECOMPOSITION:
+ *  - Cheapest posture: localization stands down (`armLocalization:false`) and
+ *    every difficulty signal reads at its FLOOR (`hardness:"trivial"`,
+ *    `ambiguity:"clear"`), below the `hard`/`ambiguous` threshold every lift
+ *    consumer gates on — the per-slice difficulty floor (allocation.ts), the
+ *    turn reasoning un-mute (llm/request.ts), the resolution decompose gate
+ *    (resolution-phase.ts).
+ *  - No decomposition: `degraded:true` flags the turn so runConductorOrchestration
+ *    keeps the conductor INLINE — its own mid-turn todos are tracked but never
+ *    flow through todosToLoopSlices/shouldOrchestrate into tiered slices. On the
+ *    2026-07-10 11964 fire a degraded turn-read decomposed an ex-conductor-solo
+ *    ticket ($0.0985 solo) into reasoner/oracle slices via the allocator's
+ *    structural cells, costing $0.3467 (3.5×) for zero quality gain.
+ * The ONLY way up on a degraded turn is the grind valve (turn-supervisor.ts
+ * createGrindValve): a 60-step stall with no green verify plants a reasoner
+ * design prepass (GRIND_DESIGN_SLICE_CONTENT) that DOES orchestrate — escalation
+ * on OBSERVED evidence, not a turn-open guess. Default-cheap-with-escalation is
+ * the established cascade posture (FrugalGPT / RouteLLM / MinionS): misrouting
+ * easy work to the expensive tier is the 20–100× costlier error versus
+ * escalating on failure evidence.
+ *
+ * @sem domain=routing role=config
+ */
+export const DEGRADED_ARMING: ArmingVerdict = {
+  armLocalization: false,
+  localized: true,
+  hardness: "trivial",
+  ambiguity: "clear",
+  degraded: true,
+  evidence: "no turn-read verdict — degrade to the cheapest posture, localization stands down",
 }
 
 /**
@@ -57,20 +104,14 @@ function isDiagnosisGoal(goal: TriageGoal): boolean {
  * `hardness` is the max judged hardness, floored to "hard" by any needsPlan
  * goal (feeds the per-slice difficulty floor and the reasoning un-mute);
  * `ambiguity` ORs the per-goal judgement with a low-confidence extraction.
- * A null verdict stands down entirely — the P5 neutral degrade never guesses.
+ * A null verdict resolves to `DEGRADED_ARMING` — the cheapest posture
+ * (localization stood down, hardness/ambiguity at the floor), so a missing
+ * turn-read can never lift work off the conductor, never a guess.
  *
  * @sem domain=routing role=router
  */
 export function decideArming(verdict?: TriageVerdict | null): ArmingVerdict {
-  if (!verdict || verdict.goals.length === 0) {
-    return {
-      armLocalization: false,
-      localized: true,
-      hardness: "moderate",
-      ambiguity: "clear",
-      evidence: "no turn-read verdict — arming stands down",
-    }
-  }
+  if (!verdict || verdict.goals.length === 0) return DEGRADED_ARMING
 
   const diagnosis = verdict.goals.filter(isDiagnosisGoal)
   const anyNeedsPlan = verdict.goals.some((g) => g.needsPlan === true)

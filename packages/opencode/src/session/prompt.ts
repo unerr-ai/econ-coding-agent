@@ -102,6 +102,8 @@ import { SessionSummary } from "./summary"
 import { Snapshot } from "@/snapshot"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
+import { enforceStepBudget } from "./step-budget"
+import { recordToolCall } from "@/tool/_shared/meter"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
@@ -2224,6 +2226,47 @@ export const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+            // L1.3 — aggregate per-step tool-result budget. Before the previous
+            // step's tool results enter the model transcript (toModelMessagesEffect
+            // below), cap their COMBINED tokens, trimming the largest first with a
+            // visible recovery marker, so a batched/fan-out step can't stuff the
+            // context it was meant to save. Governance + step observation earlier
+            // this iteration already read the full outputs; the trim is persisted so
+            // every later step keeps the cap. Per-tool caps (tool/truncate.ts) are
+            // orthogonal and stay as-is.
+            const priorAssistant = lastAssistant ? msgs.findLast((m) => m.info.id === lastAssistant.id) : undefined
+            if (priorAssistant) {
+              const stepResults = priorAssistant.parts.flatMap((p) =>
+                p.type === "tool" &&
+                p.state.status === "completed" &&
+                !p.state.time.compacted &&
+                typeof p.state.output === "string"
+                  ? [{ id: p.id, output: p.state.output }]
+                  : [],
+              )
+              const budgetOutcome = enforceStepBudget(stepResults)
+              if (budgetOutcome.reclaimed > 0) {
+                const trims = new Map(
+                  budgetOutcome.results.filter((r) => r.trimmed).map((r) => [r.id, r.output] as const),
+                )
+                for (const part of priorAssistant.parts) {
+                  if (part.type !== "tool" || part.state.status !== "completed") continue
+                  const next = trims.get(part.id)
+                  if (next === undefined) continue
+                  part.state.output = next // mutate the in-memory snapshot for this step's transcript
+                  yield* sessions.updatePart(part) // persist so later steps keep the cap
+                }
+                // [econ:meter] receipt attribution — record the reclaim at the same
+                // seam per-tool compression records its own token accounting.
+                recordToolCall({
+                  tool: "step-budget",
+                  raw_tokens: budgetOutcome.before,
+                  returned_tokens: budgetOutcome.after,
+                  ratio: budgetOutcome.before > 0 ? budgetOutcome.after / budgetOutcome.before : 1,
+                })
+              }
+            }
+
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
@@ -2769,6 +2812,18 @@ export const layer = Layer.effect(
                         mode: info.mode,
                         candidatePlanValid: info.candidatePlanValid,
                         resolveAttempts: info.resolveAttempts,
+                      }),
+                    )
+                  },
+                  // L4.2 — a degraded turn-read holds its conductor todos inline;
+                  // log WHY the turn stayed inline (never a silent stand-down).
+                  onDegradedStandDown: (info) => {
+                    bridge.fork(
+                      Effect.logInfo("orchestration_degraded_stand_down", {
+                        "session.id": sessionID,
+                        reason: "degraded-turn-read",
+                        conductorTodos: info.conductorTodos,
+                        grindEscapeHatch: info.grindEscapeHatch,
                       }),
                     )
                   },
