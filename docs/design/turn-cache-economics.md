@@ -1,6 +1,7 @@
 # Turn & cache economics — closing the realized-savings gap
 
-**Status:** design (research grounded, no code yet) · **Date:** 2026-07-10 · **Owner:** econ core
+**Status:** first implementation wave landed 2026-07-10 (L1.1/L1.2c/L1.3-budget/L1.4 prompt
+shape, degraded-turn stand-down); validation fires pending · **Date:** 2026-07-10 · **Owner:** econ core
 
 **Companions:** [`AUTO_COMPACTION_AND_CONTEXT.md`](./AUTO_COMPACTION_AND_CONTEXT.md) owns the
 compaction machinery this doc re-triggers; [`tooling-context-opt.md`](./tooling-context-opt.md)
@@ -143,6 +144,13 @@ sources. Only findings that change our design are kept.
   fidelity (Moonshot ships a vendor-verifier for exactly this). Health metric: **avg tool_use
   blocks per assistant message, target > 1.0**
   ([Anthropic parallel-tool-use docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use)).
+- **The third silent killer (measured in-house, 2026-07-10, 42 controlled API probes): your
+  own single-call transcript.** M3 batches 3/3 spontaneously on a clean transcript; three
+  single-call steps in carried history drag it to 1–2/3. The system-prompt BATCH_RULE loses
+  that fight (1/3) while a recency-positioned reminder wins it (6/6) — in-context momentum
+  outweighs steering-at-distance, so the fix must ride close to the generation point. This is
+  the primary explanation for the 266/267 baseline (§1), not provider or parser drift (both
+  cleared on our path by the same probe set).
 - **Open-weight support**: MiniMax M2-family output format is parallel-native (one tool_call
   block holds multiple invokes) — so M3's 1-call-per-step behavior is steerable, not
   architectural. Trap: MiniMax is interleaved-thinking; stripping think blocks from carried
@@ -200,12 +208,19 @@ sources. Only findings that change our design are kept.
 - Anthropic's own multi-agent economics: agents ≈ 4× chat tokens, multi-agent ≈ 15× — an
   explicit "only when task value pays" gate. Matches our two-axis allocation philosophy.
 
-**3.5 The read-price axis is a router input we don't use yet.** Cache-read multipliers vary
-~10× across viable tiers: DeepSeek flash **0.02×** ($0.0028/M) vs the 0.1× industry standard
-vs MiniMax M3 / Kimi at 0.17–0.2× (our measured $0.06/M = 0.2× of $0.30 confirms the M3 row).
-For long boring turn-tails, a tier's *cached* input price matters more than its list price —
-worth folding into the tier router's cost model as a follow-up beyond the four levers. Also:
-the OpenRouter cache-accounting bug class (missing cache-write tokens in usage) is confirmed
+**3.5 The read-price axis is a router input we don't use yet.** Verified against provider
+pricing pages 2026-07-10: cache-hit prices spread **~20× across viable coding tiers** —
+DeepSeek flash **$0.0028/M** (0.02×), Qwen3 Coder $0.022/M, MiniMax M3 $0.06/M (0.2×,
+confirms our measured row), Kimi 0.17×, GLM-5.2 $0.26/M — and Chinese providers cache
+implicitly while Claude/Gemini need explicit `cache_control` plus write/storage surcharges.
+Two facts sharpen the lever: (a) the price data already lives in code
+(`ECON_COST_MATRIX`, `packages/code-intelligence/src/econ-cost.ts:49` — per-model
+`cachedInput` rates) but `allocateSlice` never reads it; (b) the price ladder is **not
+monotone with the tier ladder** — our executor's cached read ($0.01/M) is 6× cheaper than
+our conductor's ($0.06/M), so routing the long boring turn-tail into fresh executor slices
+is a compound win (cheaper rate × smaller fresh context × the child-slice batching dividend,
+§7 P11 row). Design + build is tracked as the read-price tail-routing task. Also: the
+OpenRouter cache-accounting bug class (missing cache-write tokens in usage) is confirmed
 current — keeps CLAUDE.md's day-0 verification gate relevant.
 
 ---
@@ -216,15 +231,15 @@ Inventory against our engine (all verified in code this session):
 
 | capability | state | seam | why it doesn't help runs today |
 |---|---|---|---|
-| Batching instruction | **present, ignored** | `session/prompts/fragments.ts:3` (BATCH_RULE), `roles.ts` §1a | advisory-only; M3 emits 1 call/step ~100% (266/267). No provider hint set (`parallel_tool_calls` unset on the litellm path) |
+| Batching instruction | **fires (2026-07-10)** | BATCH_RULE + PROBE_SCRIPT_RULE (`session/prompts/fragments.ts`); batch-momentum watcher `turn-supervisor.ts:291` → recency nudge (`prompts/nudges.ts`, injected `prompt.ts:1642`) | advisory-at-distance alone loses to transcript momentum (§3.1 third killer); the recency watcher moved M3 to **1.19 calls/msg** — first reading >1.0 (11964); fresh child slices batch 1.47/msg. `parallel_tool_calls` IS set on the litellm path (`packages/llm/src/protocols/openai-chat.ts:358`, OL-9.4a) |
 | Multi-call message handling | **works** | processor/tools pipeline | proven by the one observed 2-call message; concurrency of execution unverified (AI-SDK default) |
 | Deterministic prune | **present, never fires in runs** | `session/compaction.ts:518` `prune()` — 40k protected tail, 20k minimum, defaults ON | (a) forked **once at end of user turn** (`prompt.ts:2800`) — after all step cost is paid; (b) `turns < 2` gate walks *user* messages, and a `run` session has exactly one → **nothing is ever eligible. 0 parts pruned in the 179-step 11885 run** |
 | Observation masking | **present, overflow-only** | `compaction.ts:633` `maskObservations()` | fires only inside `compact()`'s prune-first ladder, which triggers at `isOverflow` — our 524k window never overflowed (peak 124.8k) |
 | Stale-read pruning | **present, overflow-only** | `compaction.ts:578` `pruneStaleReads()` (mtime-based) | same trigger problem |
 | LLM summarize + receipt attribution | **present, overflow-only** | `compaction.ts` compact() ladder, AC-5.1 | same |
-| Per-result caps | **partial** | M3 search cap (`TEXT_OCCURRENCE_CAP=50`), ripgrep fallback 100 matches, `[econ:meter]` per-call accounting | shell/read/graph outputs have no unified char/token ceiling comparable to CC's 30k/25k/aggregate-200k |
-| Step budget (inline) | **absent** | `agent.steps` optional → `Infinity` (`prompt.ts:1996`) | 11885 ran 179 steps unbounded; P8 budgets exist only for orchestrated slices |
-| Difficulty→tier allocation | **present** | turn-read → `allocation.ts` two-axis | under-called 11885 (hardness=trivial/shape=build on a design-hard optimization ticket) — tracker tuning log 2026-07-10 |
+| Per-result caps | **per-tool + aggregate (2026-07-10)** | per-tool: `tool/truncate.ts` (2000 lines / 50KB); aggregate: `session/step-budget.ts` `enforceStepBudget` (~20k tok/step, largest-first trim, visible spill markers), enforced in the step loop before transcript build (`prompt.ts:2229`) | the L1.3 fan-out guardrail is now in place; single-line blobs can't be line-trimmed and rely on the per-tool 50KB cap |
+| Step budget (inline) | **grind valve live** | `createGrindValve` (`turn-supervisor.ts:190`) — 60-step soft budget, fires on a 15-step no-green-verify stall, plants a reasoner design prepass (the L4.2 transition) | reactive by design: escalation happens on failure evidence, never pre-allocated |
+| Difficulty→tier allocation | **present + degrade-cheap (2026-07-10)** | turn-read → `allocation.ts` two-axis; degraded policy: `DEGRADED_ARMING` (`arming-judge.ts`) | under-called 11885 (tracker tuning log 2026-07-10). A degraded/null turn-read now reads as the cheapest posture AND stands down mid-turn decomposition (gate in `slice-orchestrator.ts` `runConductorOrchestration`; grind valve is the only way up) — the 11964 re-fire's $0.3467-vs-$0.0985 trip was unguided decomposition on timed-out turn-reads, with slices lifted by allocateSlice's *structural* cells, not the difficulty floor |
 
 The one-line diagnosis: **every context-economy mechanism we own is calibrated to interactive
 chat granularity (user turns, window overflow), while the agentic-run cost accrues at *step*
@@ -273,6 +288,18 @@ The gap is model behavior, not harness capability. Three sub-moves, cheapest fir
 **Sanity math:** 11964's 46 steps were ~33 independent probes + 12 test-runs + 1 edit. At
 batch factor 3 for the probes, ~46 → ~22 messages ⇒ cache reads roughly halve. The quadratic
 term improves too: results arriving earlier means less transcript exists when they arrive.
+
+**Status (2026-07-10):** L1.1 shipped — `parallel_tool_calls` set (`openai-chat.ts:358`) and
+the one-message result shape audited clean (`message-v2.ts`; think blocks preserved). L1.2's
+steering-at-distance was refuted by the 42-probe experiment (§3.1 third killer) and
+superseded by the recency-positioned **batch-momentum watcher** (L1.2c,
+`turn-supervisor.ts:291` + `prompts/nudges.ts`): fires after 3 consecutive single-call
+steps, re-arms every 8 — first M3 reading above the floor (1.19 calls/msg on 11964). L1.3's
+aggregate step budget shipped (`session/step-budget.ts`); the concurrency executor remains
+unbuilt. L1.4 shipped as prompt shape — `PROBE_SCRIPT_RULE` (single source,
+`fragments.ts`) referenced from the bash description, the momentum nudge, and the
+bash-holding personas. The 2–3× cache-read payoff remains unproven until a grind-class
+trace (60+ steps) is re-fired.
 
 ### L2 — Step-granular context economy (expected ~1.5× on grind runs; multiplicative with L1)
 
@@ -333,6 +360,11 @@ trigger shape (§3.4): the *expensive* model decomposes / cheap executes (Minion
 reduction at 97.9% quality; aider: R1-architect+editor beats the editor solo by 12.4pp at
 lower cost), and decompose-**on-failure** (ADaPT) is the published form of the grind valve —
 escalation stays evidence-gated, per the build directive.
+
+**Status (2026-07-10):** live fires revised L4.1 — blind design-slice decomposition on 11885
+went **0/3 at $0.98–1.52**, while localize-inline-first (resolution-gate branch 1b) passed
+at $0.7879; decomposition earns its price only after localization evidence exists. The valve
+(L4.2) is live (`createGrindValve`, `turn-supervisor.ts:190`).
 
 1. **Turn-read calibration:** optimization-phrased tickets ("make X more efficient",
    "combine/reduce/dedupe Y") are *design-shaped*, not build-trivial. One prompt-table row in
@@ -402,7 +434,7 @@ genuine mechanism change. The specific touchpoints, so implementation keeps them
 | P6b scope-overlap serialization | operates at slice level; L1's concurrency-safe fan-out operates *within* a step — orthogonal. Edits stay exclusive in both layers | governance gate (fires at the edit) must still see every edit individually — edits are never batched, so this holds by construction |
 | Sound-rung verification (OL-7.9 verify commands) | **L3 memoization must never satisfy the sound rung.** The rung is the trust anchor (posterior-trustable); a memoized "green" is the agent's memory, and §3.3 shows self-validation is a weak oracle. In practice safe by construction — a fix slice edits files, which invalidates the memo — but the final rung run must bypass the memo explicitly | memo applies to *intermediate* re-verification inside a slice; the rung's verdict always re-executes |
 | P9 synthesis / unverified cascade | fewer wasted verify steps (L3) means outcomes reach synthesis with the same trust labels at lower cost; no logic change | — |
-| P11 delegation (child mini-loops) | children inherit all three substrate levers automatically (same tool layer, same step loop); child transcripts are separate sessions so masking budgets apply per-loop | per-loop, not per-turn, accounting for the keep-last-K window |
+| P11 delegation (child mini-loops) | children inherit all three substrate levers automatically (same tool layer, same step loop); child transcripts are separate sessions so masking budgets apply per-loop. Measured 2026-07-10: fresh child transcripts batch at **1.47 calls/msg** vs the root's momentum-suppressed ~1.0 — decomposition carries a hidden batching dividend (shifts the L1↔L4 break-even) | per-loop, not per-turn, accounting for the keep-last-K window |
 | Turn-read / arming (W2) | **L4.1 is a turn-read calibration** (optimization-phrased tickets → design-shaped). Same evidence-grounded-judge architecture, one more table row; validated on the arming rig (0 over-fires on the nine cheap instances) before live | n=1 guardrail from the tracker tuning log stands |
 | shouldOrchestrate (turn-open) | **L4.2 (grind valve) adds the one new transition**: inline → orchestrated *mid-turn* on step-budget + no-green-progress evidence. Today orchestration is decided only at turn open | this is the only change that needs an ORCHESTRATION_MECHANISM.md update when it ships (new edge in the state machine); L1–L3 need none |
 | Frame seeds / repo primer / turn-read verdict | L2 masking must treat these as protected parts (the AC-6.1 protected-region machinery already covers plan/pins — extend the predicate to seeds + primer) | a masked-away primer would send the model re-deriving repo basics, spending the steps L2 saved |

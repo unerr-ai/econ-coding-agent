@@ -971,6 +971,20 @@ state machine** (`shouldOrchestrate` otherwise decides only at turn open). Obser
 the `grind_valve` log line (step + stall evidence, `mechanism:"sm-backstop"`). Allocation,
 verifier consequence routing, escalation pricing, and the sound rung are untouched.
 
+*Degrade rung — a degraded turn-read stands down decomposition (landed 2026-07-10).* When
+the turn-read verdict is null (timeout / parse failure), the turn carries no skeleton or
+preamble, and the unguided conductor's mid-turn todos historically flowed straight into
+orchestrated slices — `allocateSlice`'s *structural* cells (design→reasoner,
+untestable-mechanical-unbacked→reasoner) then lifted them with no evidence behind the lift
+(11964 re-fire on a gateway-timeout day: $0.3467 vs $0.0985 conductor-solo). Now
+`DEGRADED_ARMING` (`arming-judge.ts`) marks the turn `degraded` and
+`runConductorOrchestration` gates conductor-authored todos out of `todosToLoopSlices`: the
+turn stays inline at the cheapest posture, and the grind valve above is deliberately the
+ONLY way up (its `GRIND_DESIGN_PREPASS_TODO` is excepted by content marker). Observable as
+the `orchestration_degraded_stand_down` log line. Default-cheap-on-degraded-signal is the
+cascade-literature answer (FrugalGPT / RouteLLM / MinionS): sending easy work up on a guess
+is the 20–100× costlier misroute vs escalating on failure evidence.
+
 **SM5 — Allocation-matrix design-bug fix.**
 High coupling + testable does not imply the executor is sufficient: an atomic INSIGHT bug can
 sit in that cell and still exceed executor capability outright, because coupling and
