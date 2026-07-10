@@ -34,3 +34,17 @@ export const REDECOMPOSITION_SLICE_CONTENT =
  */
 export const PLAN_SLICE_CONTENT =
   "Plan this build before any code is written. The work is decided but too large to execute blind — your job is decomposition, not implementation: (1) read just enough of the codebase (graph search, callers, targeted file reads) to anchor the plan in the REAL structure — name the files/modules each change touches and the seams it must respect; (2) break the work into small, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) deliver the implementation plan as an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the plan and DAG only."
+
+/**
+ * L4.2 — content of the design pre-pass the GRIND VALVE (turn-supervisor.ts
+ * `createGrindValve`, wired in prompt.ts's SM4 block) plants mid-turn when an
+ * inline conductor turn crosses its soft step budget with no green verify in
+ * the stall window (django-11885: 179 inline edit-test-edit steps, $0.8447,
+ * that a ~$0.23 reasoner design slice would likely have collapsed). A RESCUE
+ * brief, not a fresh-build plan: the failure evidence exists and the design
+ * must explain WHY the grinding attempts keep failing before deciding the
+ * approach. DELIBERATELY distinct from the three seeds above so
+ * dedup-by-content keeps each kind plantable alongside the others.
+ */
+export const GRIND_DESIGN_SLICE_CONTENT =
+  "The inline attempt on this task has ground past its step budget without a passing verification — stop the edit-test churn and DESIGN the fix. Your deliverable is the algorithmic decision, not code: (1) restate the required end state and the invariants the change must preserve (grouping, ordering, batching, error behavior — whatever the touched code guarantees); (2) read just enough (graph search, callers, targeted file reads, the failing test) to name the exact file(s)/function(s) that must change and WHY the approaches tried so far keep failing — the constraint they violate; (3) deliver a concrete minimal design the conductor can execute mechanically: the edit plan per file (what changes, to what), the invariant each edit must respect, and the exact verify command(s) that prove it. Writing code or diffs is forbidden here — the design only."

@@ -957,6 +957,20 @@ child watchdog (`prompt.ts:2145`). On stuck: rung 1 un-mutes the conductor's own
 **owner**, not an oracle of last resort — the reasoner is the first climb rung here.
 Escalations are capped.
 
+*Budget rung — the grind valve (L4.2, landed 2026-07-10).* The stuck ladder catches
+*repetition* pathology; 11885's honest pass ($0.8447, 179 **diverse** inline
+edit-test-edit steps) never tripped it — the pathology was volume without convergence. The
+grind valve (`createGrindValve`, `turn-supervisor.ts`) rides the same `observeStep` stream
+and opens once per turn when an inline root turn crosses `GRIND_VALVE_STEPS` (60) observed
+steps with no green verify (a command step whose `looksFailed` pool is empty — the existing
+signal, no parallel tracker) in the last `GRIND_VALVE_STALL_WINDOW` (15). On open it
+**proposes, never routes**: it plants the `GRIND_DESIGN_PREPASS_TODO` design seed
+(reasoner-floored, edit-free) which the OL-7.3b slice hook dispatches through the existing
+delegation machinery and folds back — **the one inline→orchestrated mid-turn edge in the
+state machine** (`shouldOrchestrate` otherwise decides only at turn open). Observable as
+the `grind_valve` log line (step + stall evidence, `mechanism:"sm-backstop"`). Allocation,
+verifier consequence routing, escalation pricing, and the sound rung are untouched.
+
 **SM5 — Allocation-matrix design-bug fix.**
 High coupling + testable does not imply the executor is sufficient: an atomic INSIGHT bug can
 sit in that cell and still exceed executor capability outright, because coupling and

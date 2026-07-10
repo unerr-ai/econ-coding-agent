@@ -1,7 +1,20 @@
 import { describe, it, expect } from "bun:test"
-import { observeStep, normalizeResult } from "../../src/session/turn-supervisor"
-import { stuckNudgeText } from "../../src/session/prompts/nudges"
+import {
+  observeStep,
+  normalizeResult,
+  createGrindValve,
+  GRIND_VALVE_STEPS,
+  GRIND_VALVE_STALL_WINDOW,
+} from "../../src/session/turn-supervisor"
+import { stuckNudgeText, grindValveNudgeText } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
+import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
+import {
+  GRIND_DESIGN_SLICE_CONTENT,
+  LOCALIZATION_SLICE_CONTENT,
+  PLAN_SLICE_CONTENT,
+  REDECOMPOSITION_SLICE_CONTENT,
+} from "../../src/session/prompts/seeds"
 
 // SM4 — the root-loop step observer that feeds the stuck supervisor. Pure, so
 // these are table tests over synthetic tool-part arrays (the shape prompt.ts
@@ -202,6 +215,108 @@ describe("observeStep + createStuckSupervisor", () => {
     for (let i = 10; i < 14; i++) {
       expect(sup.observe(observeStep([read("deletion.py", i)]).observation)).toBeUndefined()
     }
+  })
+})
+
+// -- L4.2 grind valve --------------------------------------------------------
+// The once-per-turn budget rung riding SM4's observation stream: opens at
+// GRIND_VALVE_STEPS observed steps when no green verify landed in the last
+// GRIND_VALVE_STALL_WINDOW (the django-11885 grind: 179 DIVERSE inline steps
+// the repetition ladder never caught). Signals are mocked the same way as the
+// supervisor tests above — synthetic tool-part arrays through observeStep.
+
+describe("createGrindValve", () => {
+  // One grinding step: a landed source edit + a red test run (diverse inputs so
+  // the stuck ladder's repeat signatures never collide — the 11885 shape).
+  const grindStep = (i: number) => observeStep([edit(`src/f${i}.ts`, "completed", `a${i}`, `b${i}`), bash(CMD, RED)])
+  const greenStep = () => observeStep([bash(CMD, GREEN)])
+
+  it("does NOT fire below the step budget, however red the run is", () => {
+    const valve = createGrindValve()
+    for (let i = 1; i < GRIND_VALVE_STEPS; i++) {
+      expect(valve.observe(grindStep(i))).toBeUndefined()
+    }
+  })
+
+  it("fires exactly at the budget when no green verify ever happened", () => {
+    const valve = createGrindValve()
+    let signal
+    for (let i = 1; i <= GRIND_VALVE_STEPS; i++) {
+      signal = valve.observe(grindStep(i))
+      if (i < GRIND_VALVE_STEPS) expect(signal).toBeUndefined()
+    }
+    expect(signal).toBeDefined()
+    expect(signal?.step).toBe(GRIND_VALVE_STEPS)
+    expect(signal?.stepsSinceGreen).toBe(GRIND_VALVE_STEPS)
+  })
+
+  it("does NOT fire when a green verify transition happened in-window; fires once the stall completes", () => {
+    const valve = createGrindValve()
+    // red grind up to just before the budget, with a green landing so the
+    // stall window is NOT yet exceeded at the budget crossing…
+    const greenAt = GRIND_VALVE_STEPS - 5
+    for (let i = 1; i <= GRIND_VALVE_STEPS; i++) {
+      const result = i === greenAt ? greenStep() : grindStep(i)
+      expect(valve.observe(result)).toBeUndefined() // at step 60 the stall is only 5 < 15
+    }
+    // …then keeps holding until the stall window is genuinely exceeded.
+    let signal
+    for (let i = GRIND_VALVE_STEPS + 1; i <= greenAt + GRIND_VALVE_STALL_WINDOW; i++) {
+      signal = valve.observe(grindStep(i))
+      if (i < greenAt + GRIND_VALVE_STALL_WINDOW) expect(signal).toBeUndefined()
+    }
+    expect(signal?.step).toBe(greenAt + GRIND_VALVE_STALL_WINDOW)
+    expect(signal?.stepsSinceGreen).toBe(GRIND_VALVE_STALL_WINDOW)
+  })
+
+  it("an edit-only step is never a green verify — it cannot reset the stall", () => {
+    const valve = createGrindValve()
+    let signal
+    for (let i = 1; i <= GRIND_VALVE_STEPS; i++) {
+      // pure landed edits: progressed, but no command ran → no resultSignature
+      signal = valve.observe(observeStep([edit(`src/g${i}.ts`, "completed", `x${i}`, `y${i}`)]))
+    }
+    expect(signal?.step).toBe(GRIND_VALVE_STEPS)
+  })
+
+  it("a red command run is never a green verify", () => {
+    const valve = createGrindValve()
+    let signal
+    for (let i = 1; i <= GRIND_VALVE_STEPS; i++) {
+      signal = valve.observe(observeStep([bash(CMD, RED)]))
+    }
+    expect(signal).toBeDefined()
+  })
+
+  it("fires at most once — a fired valve never re-fires", () => {
+    const valve = createGrindValve()
+    let fired = 0
+    for (let i = 1; i <= GRIND_VALVE_STEPS * 2; i++) {
+      if (valve.observe(grindStep(i))) fired += 1
+    }
+    expect(fired).toBe(1)
+  })
+
+  it("proposes through the existing delegation shape: the reasoner design seed todo", () => {
+    // The valve's proposal IS the injected todo the OL-7.3b slice hook
+    // dispatches — assert its shape, not deep dispatch (the hook, allocation,
+    // and fold-back are existing machinery with their own tests).
+    expect(GRIND_DESIGN_PREPASS_TODO.content).toBe(GRIND_DESIGN_SLICE_CONTENT)
+    expect(GRIND_DESIGN_PREPASS_TODO.status).toBe("pending")
+    expect(GRIND_DESIGN_PREPASS_TODO.sliceType).toBe("design")
+    expect(GRIND_DESIGN_PREPASS_TODO.need).toBe("reasoner")
+    expect(GRIND_DESIGN_PREPASS_TODO.persona).toBe("researcher")
+    // dedup-by-content must keep it plantable alongside every other seed kind
+    for (const other of [LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT]) {
+      expect(GRIND_DESIGN_SLICE_CONTENT).not.toBe(other)
+    }
+  })
+
+  it("the valve nudge names the evidence and holds edits until the design returns", () => {
+    const text = grindValveNudgeText({ step: 60, stepsSinceGreen: 15 })
+    expect(text).toContain("60")
+    expect(text).toContain("15")
+    expect(text.toLowerCase()).toContain("design")
   })
 })
 

@@ -175,3 +175,71 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
     failedCommands,
   }
 }
+
+// ---------------------------------------------------------------------------
+// L4.2 — the grind valve (SM4's step-budget rung)
+// ---------------------------------------------------------------------------
+
+/**
+ * Soft step budget for an INLINE conductor turn before the valve may open.
+ * django-11885 evidence (tracker tuning log 2026-07-10): the honest pass
+ * ground 179 inline edit-test-edit steps ($0.8447) that the stuck supervisor
+ * never caught — the steps were DIVERSE (different edits, different reds), so
+ * no repetition pathology fired; the pathology was volume without convergence.
+ */
+export const GRIND_VALVE_STEPS = 60
+
+/** How many recent steps must lack a green verify for the budget crossing to count as a stall — a run that is still landing green checks past the budget is converging, not grinding. */
+export const GRIND_VALVE_STALL_WINDOW = 15
+
+/** The valve's evidence when it opens — logged verbatim on the `grind_valve` line. */
+export interface GrindValveSignal {
+  /** The observed step index (1-based) at which the valve opened. */
+  step: number
+  /** Steps since the last green verify; equals `step` when no command has ever run green this turn. */
+  stepsSinceGreen: number
+}
+
+export interface GrindValve {
+  /** Feed one step's distilled result; returns the open signal exactly once, else undefined. */
+  observe(step: StepObservationResult): GrindValveSignal | undefined
+}
+
+/**
+ * Build the once-per-turn grind valve that watches the SAME per-step stream
+ * the SM4 stuck supervisor observes (prompt.ts feeds both from one
+ * `observeStep` call — the valve is SM4's budget rung, not a parallel
+ * watcher). It opens when the turn crosses `GRIND_VALVE_STEPS` observed steps
+ * AND no step in the last `GRIND_VALVE_STALL_WINDOW` was a green verify. A
+ * green verify reuses the existing `looksFailed` signal: a step that ran at
+ * least one command (`resultSignature` set) with an EMPTY `failedCommands`
+ * pool — no second green-ness tracker exists. On open, the caller proposes
+ * ONE reasoner design slice through the existing delegation machinery
+ * (`GRIND_DESIGN_PREPASS_TODO` → the OL-7.3b slice hook); a fired valve never
+ * re-fires — `observe` keeps consuming steps but returns undefined forever.
+ *
+ * @sem domain=routing role=orchestrator
+ */
+export function createGrindValve(): GrindValve {
+  let step = 0
+  let lastGreenStep = 0
+  let fired = false
+  return {
+    observe(result) {
+      step += 1
+      // The green-verify signal: ran >=1 command, none looked failed
+      // (looksFailed populated failedCommands above). An edit-only or
+      // read-only step has no resultSignature and can never reset the stall.
+      if (result.observation.resultSignature !== undefined && result.failedCommands.length === 0) {
+        lastGreenStep = step
+      }
+      if (fired) return undefined
+      const stepsSinceGreen = step - lastGreenStep
+      if (step >= GRIND_VALVE_STEPS && stepsSinceGreen >= GRIND_VALVE_STALL_WINDOW) {
+        fired = true
+        return { step, stepsSinceGreen }
+      }
+      return undefined
+    },
+  }
+}

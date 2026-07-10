@@ -18,10 +18,10 @@ import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
 import { setTestEditGate, testEditGateArmed, setNoEditsGate, noEditsGateArmed } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { observeStep } from "./turn-supervisor"
-import { stuckNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
+import { observeStep, createGrindValve } from "./turn-supervisor"
+import { stuckNudgeText, grindValveNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
 import { triagePreamble } from "./prompts/preambles"
-import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
+import { GRIND_DESIGN_SLICE_CONTENT, LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
   STRUCTURED_OUTPUT_SYSTEM_PROMPT,
@@ -38,6 +38,7 @@ import {
   runConductorOrchestration,
   resolveSliceModel,
   hasPendingTypedSlices,
+  GRIND_DESIGN_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   buildTriageTodoSkeleton,
@@ -1463,6 +1464,13 @@ export const layer = Layer.effect(
         // the driving model to the reasoner as edit-and-run owner. Root sessions
         // only — child slices already run the slice-loop FSM.
         const stuckSupervisor = session.parentID ? undefined : createStuckSupervisor()
+        // L4.2 — the grind valve rides the SAME observation stream as SM4's
+        // stuck supervisor (one observeStep call feeds both). The stuck ladder
+        // catches repetition pathology; the valve catches VOLUME without
+        // convergence — django-11885's 179 diverse inline edit-test-edit steps
+        // ($0.8447) that never tripped a repeat signal. Root sessions only,
+        // fires at most once per turn.
+        const grindValve = session.parentID ? undefined : createGrindValve()
         let escalatedModelRef: { providerID: string; modelID: string } | undefined
         let stuckEscalations = 0
         const MAX_STUCK_ESCALATIONS = 2
@@ -1528,6 +1536,49 @@ export const layer = Layer.effect(
               }
             }
             const stuckSignal = stuckSupervisor.observe(stepObs.observation)
+            // L4.2 grind valve — both watchers see every step (tallies stay
+            // honest); the valve's one firing step takes precedence over the
+            // stuck ladder (planting the design pre-pass supersedes a rethink
+            // nudge). On open: plant ONE reasoner design seed (dedup by
+            // content — the OL-7.3b slice hook below dispatches it through the
+            // existing delegation machinery and folds its design back), log
+            // the evidence, and nudge the conductor to hold edits until the
+            // design returns. This is the inline→orchestrated mid-turn
+            // transition; nothing about allocation, verifier routing, or
+            // escalation pricing changes — the valve only PROPOSES the slice.
+            const grindSignal = grindValve?.observe(stepObs)
+            if (grindSignal) {
+              const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+              if (!currentTodos.some((t) => t.content === GRIND_DESIGN_SLICE_CONTENT)) {
+                yield* todoStore
+                  .update({ sessionID, todos: [...currentTodos, GRIND_DESIGN_PREPASS_TODO] })
+                  .pipe(Effect.ignore)
+              }
+              yield* Effect.logWarning("grind_valve", {
+                "session.id": sessionID,
+                mechanism: "sm-backstop",
+                step: grindSignal.step,
+                stepsSinceGreen: grindSignal.stepsSinceGreen,
+              })
+              const valveNudge: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(valveNudge)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: valveNudge.id,
+                sessionID,
+                type: "text",
+                text: grindValveNudgeText(grindSignal),
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
             if (stuckSignal && stuckEscalations < MAX_STUCK_ESCALATIONS) {
               stuckEscalations++
               // A test-edit tell jumps straight to the reasoner (code-wrong vs

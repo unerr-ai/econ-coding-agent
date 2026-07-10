@@ -27,3 +27,14 @@ export function stuckNudgeText(signal: StuckSignal, rung: number): string {
 // OL-9.6b length-continuation nudge — injected when a step is cut off by the output-token limit.
 export const LENGTH_CONTINUATION_NUDGE =
   "Your previous response was cut off by the output-token limit before any tool call or final answer was produced. Continue from where you stopped: re-issue the intended tool calls or give the final answer, and keep any visible reasoning brief."
+
+/**
+ * L4.2 — the message injected when the grind valve opens (turn-supervisor.ts
+ * `createGrindValve`): the turn crossed its soft step budget with no green
+ * verify in the stall window, and a reasoner design pre-pass todo was planted
+ * (the slice hook dispatches it automatically). As a USER message it also
+ * un-mutes the conductor's thinking, same as the stuck-ladder nudge above.
+ */
+export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: number }): string {
+  return `You have taken ${signal.step} steps this turn and none of the last ${signal.stepsSinceGreen} produced a passing verification — this approach is grinding, not converging. A design pre-pass has been added to your todo list and will run automatically; it returns a concrete fix design (the files to change, the edits, the invariants to preserve, and the verify commands). STOP making code edits until that design comes back, then execute it step by step and verify. Do not remove the design item from the todo list.`
+}

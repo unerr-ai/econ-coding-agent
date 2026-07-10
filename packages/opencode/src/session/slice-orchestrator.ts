@@ -17,7 +17,12 @@ import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
 import { detectPythonHarness } from "../tool/graph-tools"
-import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT } from "./prompts/seeds"
+import {
+  GRIND_DESIGN_SLICE_CONTENT,
+  LOCALIZATION_SLICE_CONTENT,
+  PLAN_SLICE_CONTENT,
+  REDECOMPOSITION_SLICE_CONTENT,
+} from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
   runSliceLoop,
@@ -978,6 +983,16 @@ export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
 /** P12 — the plan seed a non-diagnosis `needsPlan` goal plants at turn open: same edit-free `design` shape as the re-plan seed (reasoner-floored by allocation, clears the benefit gate alone), but a forward-looking decomposition brief for fresh build work instead of the diagnosis writer's bug-hunt. */
 export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
   content: PLAN_SLICE_CONTENT,
+  status: "pending",
+  priority: "high",
+  sliceType: "design",
+  need: "reasoner",
+  persona: "researcher",
+}
+
+/** L4.2 — the design seed the GRIND VALVE plants MID-TURN (prompt.ts SM4 block) when an inline conductor turn crosses its soft step budget with no green verify in the stall window (django-11885's 179-step, $0.8447 grind). Same edit-free `design`/reasoner shape as the two seeds above: the OL-7.3b slice hook dispatches it through the EXISTING delegation machinery (a lone design seed clears the shouldOrchestrate benefit gate) and the fold-back relay hands its design back to the conductor — the one inline→orchestrated mid-turn transition. */
+export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
+  content: GRIND_DESIGN_SLICE_CONTENT,
   status: "pending",
   priority: "high",
   sliceType: "design",

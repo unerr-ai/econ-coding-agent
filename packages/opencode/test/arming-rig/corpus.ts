@@ -14,7 +14,7 @@ import type { ArmingScenario, TriageVerdict, TriageGoalShape, OrchestrationTodo 
  * encodes the CORRECT/desired outcome in expect.localizationArmed plus (P12)
  * the expected seed KIND in expect.seedKind — diagnosis rows arm the
  * localization writer, hard-build (needsPlan) rows arm the plan seed.
- * `expect.reason` cites the corpus rule (R1-R4) that decides the case — see
+ * `expect.reason` cites the corpus rule (R1-R6) that decides the case — see
  * the doc for the full rule text.
  */
 export const CORPUS: ArmingScenario[] = [
@@ -205,7 +205,11 @@ export const CORPUS: ArmingScenario[] = [
           quote: "the collection logic should combine these database queries",
           shape: "diagnosis-vague" as TriageGoalShape,
           deliverable: "n+1 query pattern eliminated via combined query logic",
-          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+          // L4.1/R6 — combining queries crosses grouping semantics: hardness
+          // reads at least "hard" (the fix is an algorithmic decision), which
+          // floors the localization writer at the reasoner. Arming outcome is
+          // unchanged from the pre-calibration label (armed, localization).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "hard", ambiguity: "clear" },
         },
       ],
       constraints: [],
@@ -214,9 +218,44 @@ export const CORPUS: ArmingScenario[] = [
     expect: {
       localizationArmed: true,
       seedKind: "localization",
-      reason: "R2 NONE-grounding — symptom described structurally but no file named; needs localization to find the code",
+      reason:
+        "R2 NONE-grounding + R6 — optimization phrasing with no file named: localization armed, hardness-floored at the reasoner",
     },
-    note: "django-11885: performance bug described without file path",
+    note: "django-11885 flavor: performance bug described without file path (R6 hardness calibration)",
+  },
+
+  {
+    id: "optimization-combine-queries",
+    prompt:
+      "the deletion collector emits one fast-delete query per object relationship — combine the fast delete queries so related rows go in one query per table (e.g. a single DELETE with the conditions OR'd together) and avoid the unnecessary round trips",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "combine the fast delete queries",
+          // L4.1/R6 — the django-11885 archetype VERBATIM: optimization-phrased,
+          // zero defect keywords, no file named. The live turn-read used to
+          // read this hardness=trivial/shape=build ("no diagnosis-shaped goal")
+          // → no arming, no decomposition → a 179-step, $0.8447 inline grind
+          // (tracker tuning log 2026-07-10). Under R6 the waste IS the symptom:
+          // diagnosis-vague, and combining queries crosses grouping/ordering
+          // semantics so hardness reads "hard" — the localization writer arms
+          // with its generator floored at the reasoner (the design-shaped read).
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "fast deletes combined into one query per table with delete semantics preserved",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "hard", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      shape: "diagnosis-vague" as TriageGoalShape,
+      localizationArmed: true,
+      seedKind: "localization",
+      reason:
+        "R6 — optimization-phrased goal with no location is design-shaped work: diagnosis-vague, armed, hardness 'hard' floors the fix slice at the reasoner (never 'build'/trivial — the 11885 under-call)",
+    },
+    note: "django-11885 (the real archetype): 'combine fast delete queries' — optimization-phrased, no location, no defect keyword",
   },
 
   {
@@ -1074,6 +1113,240 @@ export const CORPUS: ArmingScenario[] = [
       reason: "P4 guard — a follow-up carrying a new deliverable is FRESH: goals extracted, normal turn open",
     },
     note: "§4b case 3: 'now also handle the empty case' — follow-up handling must not swallow new work",
+  },
+
+  // -------------------------------------------------------------------------
+  // L4.1 ladder negative controls — the nine cheap SWE-mini-10 instances'
+  // prompt shapes (SWE_BENCH_TRACKER.md ladder). HARD GATE: none of these may
+  // change its read under the R6 optimization calibration — 0 over-fires, and
+  // the armed ones stay at their pre-calibration hardness (moderate, never
+  // "hard"). django-12039 is covered by grounded-trivial-central +
+  // door2-grounded-mechanical-todos above; the other eight are encoded here.
+  // -------------------------------------------------------------------------
+  {
+    id: "ladder-11790-form-attr",
+    prompt:
+      "AuthenticationForm's username field doesn't render the maxlength HTML attribute anymore — a regression from an earlier refactor",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "AuthenticationForm's username field doesn't render the maxlength HTML attribute anymore",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "username field renders maxlength again",
+          // Class + field named, no file, no handed fix — R2 WEAK, exactly as
+          // before R6 (a plain defect, not an optimization ask).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "localization",
+      reason: "R2 WEAK — symbol without a file; unchanged by R6 (defect phrasing, not optimization)",
+    },
+    note: "django-11790: missing maxlength attr — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-11815-enum-name",
+    prompt:
+      "generated migrations write the enum's value — Status('Good') — which breaks under translation; the serializer should write the name instead, Status['GOOD']",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "the serializer should write the name instead, Status['GOOD']",
+          shape: "diagnosis-grounded" as TriageGoalShape,
+          deliverable: "migrations serialize enum members by name, not value",
+          // The exact change is handed (value → name, with the target form
+          // spelled out) — R2 SPECIFIED-FIX; the live judge correctly did NOT
+          // arm here (tracker row 9, 2026-07-10).
+          evidence: {
+            locationNamed: false,
+            fixSpecified: true,
+            fixQuote: "should write the name instead, Status['GOOD']",
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: false,
+      reason: "R2 SPECIFIED-FIX — the exact change is stated; no localization (live-validated non-arm, 11815)",
+    },
+    note: "django-11815: enum serialized by value not name — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-11848-http-date",
+    prompt:
+      "django.utils.http.parse_http_date's two-digit year handling is incorrect — RFC 7231 says a date more than 50 years in the future must be read as the most recent past year with those two digits, but the code hardcodes the century split",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "django.utils.http.parse_http_date's two-digit year handling is incorrect",
+          shape: "diagnosis-grounded" as TriageGoalShape,
+          deliverable: "two-digit years parsed per RFC 7231's sliding-century rule",
+          // Dotted module + function names the site — R2 STRONG (symbol+module).
+          evidence: {
+            locationNamed: true,
+            locationQuote: "django.utils.http.parse_http_date",
+            fixSpecified: false,
+            hardness: "moderate",
+            ambiguity: "clear",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: false,
+      reason: "R2 STRONG — dotted module names the site; no localization pre-pass",
+    },
+    note: "django-11848: parse_http_date century bug — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-11880-deepcopy",
+    prompt:
+      "Form Field.__deepcopy__ doesn't deep-copy the error messages — every copy of a field shares one error_messages dict, so customizing one form's message leaks into all the others",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "Form Field.__deepcopy__ doesn't deep-copy the error messages",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "each copied field owns its own error_messages dict",
+          // Bare dunder-method symbol, no file — R2 WEAK, unchanged by R6.
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "localization",
+      reason: "R2 WEAK — method symbol without a file; unchanged by R6 (shared-state defect, not optimization)",
+    },
+    note: "django-11880: __deepcopy__ shares error_messages — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-11951-batch-size",
+    prompt:
+      "bulk_create's batch_size param overrides the compatible batch size calculation — it should take the minimum of batch_size and the max compatible batch size, the way bulk_update already does",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "it should take the minimum of batch_size and the max compatible batch size",
+          shape: "diagnosis-grounded" as TriageGoalShape,
+          deliverable: "bulk_create clamps batch_size to the compatible maximum",
+          // KEY R6 negative control: "batch size" language, but a handed fix
+          // (min of the two, mirroring a named sibling) — R2 SPECIFIED-FIX, a
+          // wrong-logic defect, NOT an optimization ask. Must not read "hard"
+          // and must not arm.
+          evidence: {
+            locationNamed: false,
+            fixSpecified: true,
+            fixQuote: "take the minimum of batch_size and the max compatible batch size",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: false,
+      reason:
+        "R2 SPECIFIED-FIX — exact change handed (clamp to min); 'batch' wording alone never triggers R6",
+    },
+    note: "django-11951: batch_size override — the R6 near-miss negative control",
+  },
+
+  {
+    id: "ladder-11964-choices-type",
+    prompt:
+      "the value of a TextChoices/IntegerChoices field has a differing type — reading the field right after creating the object returns the enum member, so str() gives 'Status.GOOD' instead of 'GOOD'",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "the value of a TextChoices/IntegerChoices field has a differing type",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "field value has the declared str/int type in all read paths",
+          // Class names + symptom, no file — R2 WEAK; live-validated armed
+          // no-location case (tracker row 9's contrast set).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "localization",
+      reason: "R2 WEAK — API classes named, no file; unchanged by R6 (type defect, not optimization)",
+    },
+    note: "django-11964: Choices field type mismatch — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-11999-display-override",
+    prompt:
+      "cannot override get_FOO_display() anymore — defining get_status_display() on the model has no effect now, though the same override worked in the previous release",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "cannot override get_FOO_display() anymore",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "user-defined get_FOO_display overrides take effect again",
+          // Method symbol + regression symptom, no file — R2 WEAK; the live
+          // turn-read armed this at moderate/clear (tracker row 6).
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "localization",
+      reason: "R2 WEAK — method symbol, no file (live-validated arm at moderate/clear, 11999); unchanged by R6",
+    },
+    note: "django-11999: get_FOO_display override regression — cheap-ladder negative control",
+  },
+
+  {
+    id: "ladder-12050-list-coerce",
+    prompt:
+      "Query.resolve_lookup_value coerces a list value to a tuple, which breaks exact-match queries for field types whose matching depends on the input type",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "Query.resolve_lookup_value coerces a list value to a tuple",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "resolved lookup values keep the input's iterable type",
+          // Bare symbol, no file, coercion defect (no exact change handed) —
+          // R2 WEAK; live-validated armed no-location case. "Coerces" is
+          // defect language, never R6 optimization phrasing.
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "localization",
+      reason: "R2 WEAK — symbol without file; unchanged by R6 (wrong-type defect, not optimization)",
+    },
+    note: "django-12050: list→tuple coercion — cheap-ladder negative control",
   },
 
   // -------------------------------------------------------------------------

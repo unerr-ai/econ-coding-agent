@@ -95,6 +95,24 @@ validation, a financial calc). Consequence may pull a stronger tier even when th
 tiny. Route by *both* size and impact, not size alone. *(Consequence-aware compute
 allocation, "Not All Errors Are Equal".)*
 
+**R6 — Optimization/efficiency phrasing is design-shaped, never build-trivial.** Goals
+phrased as optimization asks — "make X more efficient", "combine/reduce/batch/dedupe the Y
+queries/calls", "avoid unnecessary Z" — are **diagnosis-shaped even when no bug is named**:
+the current wasteful behavior is the symptom, and the deliverable is an *algorithmic
+decision* (what may be combined or skipped, and which semantics survive), not a mechanical
+edit. Shape reads `diagnosis-vague` unless a file/module is named; spec verbs ("should
+combine", "could be reduced") do not make waste a feature, and a stated *target* ("into one
+query per table") is a goal, not a handed fix — it never sets `fixSpecified`. **Hardness
+reads at least `hard`** when the change crosses grouping, ordering, batching, or invariant
+semantics — the R3 rule then floors the localization writer's generator at the reasoner.
+Boundary: a wrong-logic defect that merely *mentions* batching/queries (11951's "batch_size
+overrides the compatible calculation" — a handed clamp fix) is R2, not R6. *(Evidence:
+django-11885 "combine fast delete queries" read hardness=trivial/shape=build → no arming,
+no decomposition → a 179-step, $0.8447 inline grind — SWE_BENCH_TRACKER.md tuning log
+2026-07-10; the design-shaped read prices at ~$0.23–0.4 via a reasoner design slice
+(12039 run-1). Survey grounding: MinionS decompose-expensive/execute-cheap, aider
+architect-mode, ADaPT decompose-on-failure — turn-cache-economics §3.4/§5-L4.)*
+
 **The syntactic/semantic split (the governing principle).** The turn-read makes the
 *semantic* call on the prompt ("is the site known? is this hard?" — reported as evidence
 facts the `decideArming` table converts into the decision). String-matchers only supply
@@ -121,7 +139,8 @@ have bitten us — keep them.
 ### diagnosis-vague → LOCALIZATION (site unknown; find it first) — unless hard (R3)
 | id | example prompt | ARM | why (rule) |
 |---|---|---|---|
-| `spec-language-no-file` ⚑ | django-11885: "n+1 when iterating the collection logic" (no file) | LOCALIZATION | R2 NONE-grounding (symptom only) |
+| `spec-language-no-file` ⚑ | django-11885 flavor: "n+1 when iterating the collection logic" (no file) | LOCALIZATION | R2 NONE-grounding + R6 — optimization phrasing: hardness reads `hard` (grouping semantics), flooring the writer at the reasoner |
+| `optimization-combine-queries` ⚑ | django-11885 (the real archetype): "combine the fast delete queries … avoid the unnecessary round trips" (no file, zero defect keywords) | LOCALIZATION | R6 — optimization-phrased = design-shaped: `diagnosis-vague` + hardness `hard` (never build/trivial — the $0.84 under-call) |
 | `vague-crash` ⚑ | "app crashes on startup, first 2–3s of boot" (no file) | LOCALIZATION | R2 NONE-grounding |
 | `entity-name-only` ⚑ | "`QuerySet.delete()` drops related rows" (symbol, **no file**) | LOCALIZATION | R2 WEAK (bare symbol = deferred start) |
 | `vague-component-leak` | "fix the memory leak in the session handler" | LOCALIZATION | R2 WEAK (component, no file) |
@@ -196,6 +215,23 @@ have bitten us — keep them.
 | `continuation-still-broken-no-rearm` | "still broken" (localization pre-pass already SETTLED on the list) | short-circuit, continuation, nothing new planted | P4 case 2 — re-fired diagnosis language must re-verify (inherited M4 pin + rungs), never re-arm |
 | `continuation-new-goal-fresh` | "now also handle the empty case" | FRESH — goals extracted normally | P4 case 3 — a follow-up carrying a new deliverable must not be swallowed by continuation handling |
 
+### Ladder negative controls (L4.1) — the nine cheap instances must not move
+The SWE-mini-10 ladder's nine cheap instances (SWE_BENCH_TRACKER.md) are the R6 regression
+set: **0 over-fires is the hard gate**, and the armed rows stay at their pre-calibration
+hardness (`moderate`, never `hard`). django-12039 is covered by `grounded-trivial-central`
++ `door2-grounded-mechanical-todos` above; the other eight:
+
+| id | example prompt | ARM | why (rule) |
+|---|---|---|---|
+| `ladder-11790-form-attr` | "AuthenticationForm's username field doesn't render maxlength anymore" | LOCALIZATION | R2 WEAK (symbol, no file) — defect phrasing, not optimization |
+| `ladder-11815-enum-name` | migrations write `Status('Good')`; "should write the name instead, `Status['GOOD']`" | NONE | R2 SPECIFIED-FIX — exact change handed (live-validated non-arm, tracker row 9) |
+| `ladder-11848-http-date` | "`django.utils.http.parse_http_date`'s two-digit year handling is incorrect …" | NONE | R2 STRONG — dotted module names the site |
+| `ladder-11880-deepcopy` | "Form `Field.__deepcopy__` doesn't deep-copy the error messages …" | LOCALIZATION | R2 WEAK (method symbol, no file) |
+| `ladder-11951-batch-size` | "`bulk_create`'s batch_size overrides the compatible calculation — should take the minimum …" | NONE | R2 SPECIFIED-FIX — the R6 near-miss: "batch" wording alone never triggers R6 |
+| `ladder-11964-choices-type` | "value of a TextChoices/IntegerChoices field has a differing type …" | LOCALIZATION | R2 WEAK (classes named, no file); live-validated armed case |
+| `ladder-11999-display-override` | "cannot override `get_FOO_display()` anymore …" | LOCALIZATION | R2 WEAK; live-validated arm at moderate/clear (tracker row 6) |
+| `ladder-12050-list-coerce` | "`Query.resolve_lookup_value` coerces a list value to a tuple …" | LOCALIZATION | R2 WEAK; "coerces" is defect language, never R6 |
+
 ### Genuinely ambiguous (documented, low-weight — flag, don't over-fit)
 | id | example prompt | note |
 |---|---|---|
@@ -218,12 +254,19 @@ diagnosis-gating in `arming-judge.ts`, relabel in `corpus.ts`); offline rig gree
    question (localization vs planner for a 2-layer case) was settled by the P12/12050
    rule: a diagnosis goal always gets the LOCALIZATION writer — the plan seed is
    build-only, and hardness moves the tier, not the seed.
+4. **Optimization phrasing is design-shaped (R6, landed 2026-07-10 — L4.1).** The 11885
+   real-graded pass exposed the turn-read under-call (build/trivial on "combine fast
+   delete queries" → $0.8447 inline grind); the rubric row in
+   `prompts/judges.ts` (`TURN_READ_SYSTEM_PROMPT`) teaches the calibration, and the
+   `optimization-combine-queries` row + the eight ladder negative controls above pin it.
+   Rig green 0-over-fire deterministically; the live (RIG_LIVE=1) re-validation of the
+   real extractor on these rows is still pending.
 
 ## Coverage gaps (2026-07-10)
 
 Audited against the current code + the proposal round in
 [ORCHESTRATION_IMPROVEMENTS.md](../architecture/ORCHESTRATION_IMPROVEMENTS.md); the rules
-(R1–R5) and expected labels above all held — these are missing *rows*, not wrong ones.
+(now R1–R6) and expected labels above all held — these are missing *rows*, not wrong ones.
 Items 2–4 were **closed by the W1–W3 landings (2026-07-10)**; item 1 stays open:
 
 1. **No `qa` rows** (still open). The shape exists in code; `audit-where-is` /
