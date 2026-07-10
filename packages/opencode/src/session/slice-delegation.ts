@@ -210,7 +210,11 @@ async function runDelegate(seat: DelegationSeat, params: DelegateParams): Promis
   //     down-only refuse the mechanism on exactly the turns it serves.
   const sliceType = params.sliceType && params.sliceType.trim().length > 0 ? params.sliceType : inferSliceType(content)
   const todo: OrchestrationTodo = { content, status: "pending", sliceType }
-  const [slice] = await todosToLoopSlices([todo], seat.ports.probes)
+  // M2 — a delegate naming no file probes with the parent slice's own scope
+  // (its containment boundary), never with nothing.
+  const [slice] = await todosToLoopSlices([todo], seat.ports.probes, undefined, {
+    fallbackFiles: [...seat.parentScope],
+  })
   if (!slice) {
     return refuse(seat, `the delegate description did not produce a dispatchable slice (sliceType "${sliceType}").`)
   }

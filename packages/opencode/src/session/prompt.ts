@@ -45,6 +45,7 @@ import {
   isDeciderSeat,
   isDelegatingSeat,
   extractSliceFiles,
+  resolveDottedPyModules,
   personaForSlice,
   sliceStepBudget,
   countToolCalls,
@@ -70,7 +71,15 @@ import {
 } from "./turn-triage"
 import { decideArming, type ArmingVerdict } from "./arming-judge"
 import { setArmingDecision, getArmingDecision } from "./arming-store"
-import { setTurnVerdict, getTurnVerdict, setPinnedProbe, getPinnedProbe, researchShapedTurn } from "./turn-read-store"
+import {
+  setTurnVerdict,
+  getTurnVerdict,
+  setPinnedProbe,
+  getPinnedProbe,
+  researchShapedTurn,
+  setTurnFiles,
+  getTurnFiles,
+} from "./turn-read-store"
 import { resetResolveAttempts } from "./resolution-store"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -1838,6 +1847,13 @@ export const layer = Layer.effect(
                 // P4 — the store a later continuation turn inherits the
                 // preamble/goal tree from.
                 setTurnVerdict(sessionID, verdict)
+                // M2 — the turn's file evidence (prompt-named paths +
+                // tree-resolved dotted modules): the probe fallback for
+                // slices whose own text names no file. Continuation turns
+                // inherit it with the verdict.
+                setTurnFiles(sessionID, [
+                  ...new Set([...extractSliceFiles(userText), ...resolveDottedPyModules(userText, ctx.directory)]),
+                ])
 
                 // M4 — the probe pin keys on the VERDICT: a diagnosis-shaped
                 // goal arms the turn-end prove-it gate with the most-specific
@@ -1892,6 +1908,7 @@ export const layer = Layer.effect(
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
                 setNoEditsGate(sessionID, false)
                 setTurnVerdict(sessionID, null)
+                setTurnFiles(sessionID, [])
                 if (turnOpen.triage) {
                   turnReadNulls++
                   yield* Effect.logInfo("turn_read_degraded", {
@@ -2573,6 +2590,9 @@ export const layer = Layer.effect(
                   // P3/Q-D — research turns route slices to the researcher
                   // persona + citation verifier inside todosToLoopSlices.
                   researchShaped: researchShapedTurn(sessionID),
+                  // M2 — the turn's file evidence, the probe fallback for
+                  // slices whose own text names no file.
+                  turnFiles: getTurnFiles(sessionID),
                   // #53/#54 resolution gate — the resolution-store key.
                   sessionID,
                   // #53/#54 "resolve-first" re-seed: append (dedup by

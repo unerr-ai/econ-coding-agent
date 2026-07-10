@@ -626,6 +626,32 @@ export function extractSliceFiles(text: string): string[] {
   return [...seen]
 }
 
+/** Dotted identifier chains (≥3 segments) that MAY be python module paths — resolved against the real tree below. */
+const DOTTED_MODULE_RE = /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}\b/g
+
+/**
+ * 12039 tuning (M2): python prose names code by MODULE path, not file path —
+ * "django.db.backends.ddl_references.Columns" carries the file but
+ * `extractSliceFiles` can't see it. Resolve each dotted chain against the
+ * REAL tree: the longest prefix (≥2 segments) that exists as `<segs>.py`
+ * under `cwd` wins — trailing segments are symbols (Class.method), not path
+ * parts. Existence-checked, so prose dots ("e.g.a.b") resolve to nothing.
+ */
+export function resolveDottedPyModules(text: string, cwd: string = process.cwd()): string[] {
+  const out = new Set<string>()
+  for (const m of text.matchAll(DOTTED_MODULE_RE)) {
+    const segs = m[0].split(".")
+    for (let k = segs.length; k >= 2; k--) {
+      const candidate = `${segs.slice(0, k).join("/")}.py`
+      if (existsSync(join(cwd, candidate))) {
+        out.add(candidate)
+        break
+      }
+    }
+  }
+  return [...out]
+}
+
 /** Injected probe surface — the OL-7.9 coupling/test-strength probes, or test doubles. */
 export interface SliceProbes {
   probeCoupling: (text: string, files: string[]) => Promise<{ coupling: "low" | "high" }>
@@ -1413,7 +1439,7 @@ export async function todosToLoopSlices(
   todos: readonly OrchestrationTodo[],
   probes: SliceProbes,
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity },
-  opts?: { researchShaped?: boolean },
+  opts?: { researchShaped?: boolean; fallbackFiles?: readonly string[] },
 ): Promise<LoopSlice[]> {
   const effectiveTodos = withDerivedTypes(todos)
   const typed = effectiveTodos.filter(isDispatchableSlice)
@@ -1506,7 +1532,13 @@ export async function todosToLoopSlices(
 
   return Promise.all(
     typed.map(async (t, i): Promise<LoopSlice> => {
-      const files = extractSliceFiles(t.content)
+      // M2 — a slice's own text is a stochastic key (run 2 typed "Patch
+      // IndexColumns.__str__..." with no file at all): own path tokens plus
+      // tree-resolved dotted modules, falling back to the TURN's file
+      // evidence (the prompt-named files) when the slice names none. A slice
+      // with no scope anywhere probes with [] exactly as before.
+      const ownFiles = [...new Set([...extractSliceFiles(t.content), ...resolveDottedPyModules(t.content)])]
+      const files = ownFiles.length > 0 ? ownFiles : [...(opts?.fallbackFiles ?? [])]
       // P3/Q-D — the citation-verified research slice, keyed on the resolved
       // persona so an explicit `persona:"researcher"` and the research-turn
       // recon default route identically.
@@ -1713,6 +1745,8 @@ export interface ConductorOrchestrationDeps {
   continuation?: boolean
   /** P3/Q-D — the turn-read found a research-shaped goal: recon slices default to the web-enabled researcher persona and research slices verify by citation, never the test rung (threaded to `todosToLoopSlices`). */
   researchShaped?: boolean
+  /** M2 — the TURN's file evidence (prompt-named paths + tree-resolved dotted modules): the probe fallback for slices whose own text names no file. */
+  turnFiles?: readonly string[]
   /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
   sessionID?: string
   /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLAN_PREPASS_TODO`) carry. */
@@ -1869,6 +1903,7 @@ export async function runConductorOrchestration(
     const typedIndices = todos.map((t, i) => (isDispatchableSlice(t) ? i : -1)).filter((i) => i >= 0)
     const slices = await todosToLoopSlices(todos, deps.probes, deps.arming, {
       researchShaped: deps.researchShaped,
+      fallbackFiles: deps.turnFiles,
     })
     if (!shouldOrchestrate(slices, deps.goalCount)) return { engaged: false }
     const todoIndexOf = (sliceId: string): number | undefined => {

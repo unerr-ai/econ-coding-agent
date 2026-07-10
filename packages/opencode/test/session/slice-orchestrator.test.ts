@@ -58,6 +58,7 @@ import {
   budgetExhaustedMarker,
   buildRepoPrimer,
   extractSliceFiles,
+  resolveDottedPyModules,
   renderSliceDigestLedger,
   orderTriageGoals,
   buildTriageTodoSkeleton,
@@ -2639,6 +2640,78 @@ describe("extractSliceFiles (M1 — bare filenames)", () => {
 
   it("bare names outside the extension whitelist never match", () => {
     expect(extractSliceFiles("see notes.md for the plan")).toEqual([])
+  })
+})
+
+describe("resolveDottedPyModules + turn-file fallback (M2)", () => {
+  const tmpDirs: string[] = []
+  function makePyRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), "slice-m2-"))
+    tmpDirs.push(dir)
+    mkdirSync(join(dir, "pkg", "db"), { recursive: true })
+    writeFileSync(join(dir, "pkg", "db", "ddl_references.py"), "class Columns:\n    pass\n")
+    return dir
+  }
+  afterEach(() => {
+    while (tmpDirs.length > 0) rmSync(tmpDirs.pop()!, { recursive: true, force: true })
+  })
+
+  it("resolves a dotted module chain to the longest existing .py prefix (symbols stripped)", () => {
+    const cwd = makePyRepo()
+    expect(resolveDottedPyModules("col_suffixes passed to pkg.db.ddl_references.Columns would be empty", cwd)).toEqual([
+      "pkg/db/ddl_references.py",
+    ])
+  })
+
+  it("a dotted chain with no existing file resolves to nothing", () => {
+    const cwd = makePyRepo()
+    expect(resolveDottedPyModules("see java.util.concurrent.atomic for details", cwd)).toEqual([])
+  })
+
+  it("todosToLoopSlices probes with the turn's files when a slice names none", async () => {
+    const probed: string[][] = []
+    const probes: SliceProbes = {
+      probeCoupling: async () => ({ coupling: "low" }),
+      probeTestStrength: async (files) => {
+        probed.push(files)
+        return { testStrength: "testable" }
+      },
+    }
+    const todos: OrchestrationTodo[] = [
+      { content: "Patch IndexColumns.__str__ to drop empty col-suffixes", status: "pending", sliceType: "mechanical" },
+    ]
+    await todosToLoopSlices(todos, probes, undefined, { fallbackFiles: ["django/db/backends/ddl_references.py"] })
+    expect(probed).toEqual([["django/db/backends/ddl_references.py"]])
+  })
+
+  it("a slice's own named file wins over the turn fallback", async () => {
+    const probed: string[][] = []
+    const probes: SliceProbes = {
+      probeCoupling: async () => ({ coupling: "low" }),
+      probeTestStrength: async (files) => {
+        probed.push(files)
+        return { testStrength: "testable" }
+      },
+    }
+    const todos: OrchestrationTodo[] = [
+      { content: "Apply the fix to ddl_references.py", status: "pending", sliceType: "mechanical" },
+    ]
+    await todosToLoopSlices(todos, probes, undefined, { fallbackFiles: ["other/file.py"] })
+    expect(probed).toEqual([["ddl_references.py"]])
+  })
+
+  it("the fallback feeds the verify-command probe too (sound rung gets real commands)", async () => {
+    const probes: SliceProbes = {
+      probeCoupling: async () => ({ coupling: "low" }),
+      probeTestStrength: async () => ({ testStrength: "testable" }),
+      probeVerifyCommands: async (files) =>
+        files.length > 0 ? [{ kind: "test", command: `run-tests-for ${files.join(",")}` }] : [],
+    }
+    const todos: OrchestrationTodo[] = [
+      { content: "Patch the __str__ method to drop empty suffixes", status: "pending", sliceType: "mechanical" },
+    ]
+    const [slice] = await todosToLoopSlices(todos, probes, undefined, { fallbackFiles: ["pkg/db/ddl_references.py"] })
+    expect(slice!.verifyCommands?.some((c) => c.command.includes("run-tests-for pkg/db/ddl_references.py"))).toBe(true)
   })
 })
 
