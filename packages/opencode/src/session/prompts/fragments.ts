@@ -5,6 +5,15 @@
 export const BATCH_RULE =
   "RULE: before sending, count your tool calls. If this message has ONE tool call and another independent read/search/command is already known to be needed, you are wasting a full round trip — add it to THIS message. Independent = neither call needs the other's output; example: reading a file AND running its tests = two calls, ONE message. Only a dependency chain — the next call needs this call's output — justifies a single-call message."
 
+// L2.3 (turn-cache-economics.md §5-L2 item 3, §7 protected-region row) — the context-eviction
+// contract, ported from CC: step-granular masking/pruning clears old tool outputs mid-run, and a
+// model that was never told treats a cleared result as a surprise and re-reads the file — spending
+// the steps the eviction saved. Environment fact + one imperative, in the same rule register as
+// BATCH_RULE. Composed into the tool block below so it reaches every tier and persona that runs a
+// tool loop (the conductor included) from the one source.
+export const EVICTION_RULE =
+  "As the session grows, older tool results may be cleared from your context mid-session — replaced by `[Old tool result content cleared]` or a one-line summary. Carry the facts you still need forward in your own words (paths, symbols, key output lines, conclusions) as you work, instead of planning to re-read a result later."
+
 // Generate the authoritative tool-usage section from the live advertised tool set (Sprint 5b §10.1).
 // This is the single source of truth: the prompt can never name a tool the model isn't given, which
 // closes the prompt↔tool drift class (the grep/glob coupling) permanently. The full per-tool schema
@@ -52,6 +61,9 @@ export function toolUsage(toolIds: readonly string[]): string {
   // every independent read became its own round trip. Gated on having more than one tool at all —
   // a single-tool agent has nothing to batch.
   if (ids.length > 1) notes.push(`- ${BATCH_RULE}`)
+  // L2.3 — the eviction contract rides every tool-holding prompt, single-tool agents included:
+  // masking clears completed tool results regardless of how many tools the agent holds.
+  notes.push(`- ${EVICTION_RULE}`)
   return [
     "# Available tools",
     `You have exactly these tools, and no others — call each by its exact id: ${ids.join(", ")}.`,

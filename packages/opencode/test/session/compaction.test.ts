@@ -640,190 +640,207 @@ describe("session.compaction.create", () => {
   )
 })
 
+// L2.1/L2.2 helper — append one completed tool part to a message.
+function addCompletedToolPart(input: {
+  sessionID: SessionID
+  messageID: MessageID
+  tool: string
+  output: string
+  input?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}) {
+  return SessionNs.Service.use((ssn) =>
+    ssn.updatePart({
+      id: PartID.ascending(),
+      messageID: input.messageID,
+      sessionID: input.sessionID,
+      type: "tool",
+      callID: crypto.randomUUID(),
+      tool: input.tool,
+      state: {
+        status: "completed",
+        input: input.input ?? {},
+        output: input.output,
+        title: "done",
+        metadata: input.metadata ?? {},
+        time: { start: Date.now(), end: Date.now() },
+      },
+    }),
+  )
+}
+
+// L2.1 fixture — one user turn, then `steps` assistant messages (steps), each
+// carrying one completed bash tool part of `chars` chars. Mirrors an
+// `opencode run` session: exactly one user message, all context in steps.
+function seedSingleTurnSteps(sessionID: SessionID, dir: string, steps: number, chars: number) {
+  return Effect.gen(function* () {
+    const user = yield* createUserMessage(sessionID, "only turn")
+    const ids: MessageID[] = []
+    for (let i = 0; i < steps; i++) {
+      const msg = yield* createAssistantMessage(sessionID, user.id, dir)
+      yield* addCompletedToolPart({ sessionID, messageID: msg.id, tool: "bash", output: "x".repeat(chars) })
+      ids.push(msg.id)
+    }
+    return ids
+  })
+}
+
+function toolPartsByMessage(sessionID: SessionID, ids: MessageID[]) {
+  return SessionNs.Service.use((ssn) =>
+    Effect.gen(function* () {
+      const msgs = yield* ssn.messages({ sessionID })
+      return ids.map(
+        (id) =>
+          msgs.find((m) => m.info.id === id)?.parts.find((p): p is SessionV1.ToolPart => p.type === "tool"),
+      )
+    }),
+  )
+}
+
 describe("session.compaction.prune", () => {
   it.live(
-    "compacts old completed tool output",
+    // L2.1 regression — the old `turns < 2` user-turn gate meant a run session
+    // (exactly ONE user message) never pruned anything at all.
+    "prunes stale tool output in a single-user-turn run session",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        // 7 steps × 50k tokens: the 2 oldest sit past the 5-step window AND
+        // past PRUNE_PROTECT, and clear PRUNE_MINIMUM together.
+        const ids = yield* seedSingleTurnSteps(info.id, dir, SessionCompaction.PRUNE_PROTECT_STEPS + 2, 200_000)
+
+        yield* compact.prune({ sessionID: info.id })
+
+        const parts = yield* toolPartsByMessage(info.id, ids)
+        for (const part of parts.slice(0, 2)) {
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") expect(part.state.time.compacted).toBeNumber()
+        }
+      }),
+    ),
+  )
+
+  it.live(
+    // L2.1 — step-recency protection: parts inside the most recent
+    // PRUNE_PROTECT_STEPS assistant steps are never pruned, no matter how
+    // large they are.
+    "never prunes parts in the most recent PRUNE_PROTECT_STEPS assistant steps",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        // 6 steps × 50k tokens: only the oldest is outside the window; it
+        // alone exceeds PRUNE_PROTECT and clears PRUNE_MINIMUM.
+        const ids = yield* seedSingleTurnSteps(info.id, dir, SessionCompaction.PRUNE_PROTECT_STEPS + 1, 200_000)
+
+        yield* compact.prune({ sessionID: info.id })
+
+        const parts = yield* toolPartsByMessage(info.id, ids)
+        const oldest = parts[0]
+        if (oldest?.state.status === "completed") expect(oldest.state.time.compacted).toBeNumber()
+        for (const part of parts.slice(-SessionCompaction.PRUNE_PROTECT_STEPS)) {
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") expect(part.state.time.compacted).toBeUndefined()
+        }
+      }),
+    ),
+  )
+
+  it.live(
+    "skips protected skill tool output even outside the step window",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        const user = yield* createUserMessage(info.id, "only turn")
+        // Oldest step: a protected skill part next to a prunable bash sibling.
+        const old = yield* createAssistantMessage(info.id, user.id, dir)
+        yield* addCompletedToolPart({ sessionID: info.id, messageID: old.id, tool: "skill", output: "x".repeat(200_000) })
+        yield* addCompletedToolPart({ sessionID: info.id, messageID: old.id, tool: "bash", output: "x".repeat(200_000) })
+        // Second-oldest step: more prunable bulk so the pass clears its floors.
+        const bulk = yield* createAssistantMessage(info.id, user.id, dir)
+        yield* addCompletedToolPart({ sessionID: info.id, messageID: bulk.id, tool: "bash", output: "x".repeat(200_000) })
+        // Fill the protected step window so both messages above are outside it.
+        for (let i = 0; i < SessionCompaction.PRUNE_PROTECT_STEPS; i++) {
+          yield* createAssistantMessage(info.id, user.id, dir)
+        }
+
+        yield* compact.prune({ sessionID: info.id })
+
+        const msgs = yield* ssn.messages({ sessionID: info.id })
+        const parts = msgs.flatMap((msg) => msg.parts).filter((p): p is SessionV1.ToolPart => p.type === "tool")
+        const skill = parts.find((p) => p.tool === "skill")
+        const bashes = parts.filter((p) => p.tool === "bash")
+        expect(bashes.length).toBe(2)
+        if (skill?.state.status === "completed") expect(skill.state.time.compacted).toBeUndefined()
+        for (const bash of bashes) {
+          if (bash.state.status === "completed") expect(bash.state.time.compacted).toBeNumber()
+        }
+      }),
+    ),
+  )
+
+  it.live(
+    // AC-6.1 — the step-recency gate must not weaken part-level protection:
+    // pinned parts, the active plan, and protected-path reads stay unpruned
+    // even when they sit far outside the protected step window.
+    "never prunes pinned, plan, or protected-path parts outside the step window",
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
           const compact = yield* SessionCompaction.Service
           const ssn = yield* SessionNs.Service
           const info = yield* ssn.create({})
-          const a = yield* ssn.updateMessage({
-            id: MessageID.ascending(),
-            role: "user",
+          const user = yield* createUserMessage(info.id, "only turn")
+          const old = yield* createAssistantMessage(info.id, user.id, dir)
+          yield* addCompletedToolPart({
             sessionID: info.id,
-            agent: "build",
-            model: ref,
-            time: { created: Date.now() },
-          })
-          yield* ssn.updatePart({
-            id: PartID.ascending(),
-            messageID: a.id,
-            sessionID: info.id,
-            type: "text",
-            text: "first",
-          })
-          const b: SessionV1.Assistant = {
-            id: MessageID.ascending(),
-            role: "assistant",
-            sessionID: info.id,
-            mode: "build",
-            agent: "build",
-            path: { cwd: dir, root: dir },
-            cost: 0,
-            tokens: {
-              output: 0,
-              input: 0,
-              reasoning: 0,
-              cache: { read: 0, write: 0 },
-            },
-            modelID: ref.modelID,
-            providerID: ref.providerID,
-            parentID: a.id,
-            time: { created: Date.now() },
-            finish: "end_turn",
-          }
-          yield* ssn.updateMessage(b)
-          yield* ssn.updatePart({
-            id: PartID.ascending(),
-            messageID: b.id,
-            sessionID: info.id,
-            type: "tool",
-            callID: crypto.randomUUID(),
+            messageID: old.id,
             tool: "bash",
-            state: {
-              status: "completed",
-              input: {},
-              output: "x".repeat(200_000),
-              title: "done",
-              metadata: {},
-              time: { start: Date.now(), end: Date.now() },
-            },
+            output: "x".repeat(200_000),
+            metadata: { pinned: true },
           })
-          for (const text of ["second", "third"]) {
-            const msg = yield* ssn.updateMessage({
-              id: MessageID.ascending(),
-              role: "user",
-              sessionID: info.id,
-              agent: "build",
-              model: ref,
-              time: { created: Date.now() },
-            })
-            yield* ssn.updatePart({
-              id: PartID.ascending(),
-              messageID: msg.id,
-              sessionID: info.id,
-              type: "text",
-              text,
-            })
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: old.id, tool: "todowrite", output: "[]" })
+          yield* addCompletedToolPart({
+            sessionID: info.id,
+            messageID: old.id,
+            tool: "read",
+            output: "x".repeat(200_000),
+            input: { filePath: `${dir}/keep.md` },
+          })
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: old.id, tool: "bash", output: "x".repeat(200_000) })
+          const bulk = yield* createAssistantMessage(info.id, user.id, dir)
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: bulk.id, tool: "bash", output: "x".repeat(200_000) })
+          for (let i = 0; i < SessionCompaction.PRUNE_PROTECT_STEPS; i++) {
+            yield* createAssistantMessage(info.id, user.id, dir)
           }
 
           yield* compact.prune({ sessionID: info.id })
 
           const msgs = yield* ssn.messages({ sessionID: info.id })
-          const part = msgs.flatMap((msg) => msg.parts).find((part) => part.type === "tool")
-          expect(part?.type).toBe("tool")
-          expect(part?.state.status).toBe("completed")
-          if (part?.type === "tool" && part.state.status === "completed") {
-            expect(part.state.time.compacted).toBeNumber()
+          const parts = msgs.flatMap((msg) => msg.parts).filter((p): p is SessionV1.ToolPart => p.type === "tool")
+          const pinned = parts.find((p) => p.tool === "bash" && p.state.status !== "pending" && p.state.metadata?.pinned)
+          const plan = parts.find((p) => p.tool === "todowrite")
+          const protectedRead = parts.find((p) => p.tool === "read")
+          const plain = parts.filter((p) => p.tool === "bash" && !(p.state.status !== "pending" && p.state.metadata?.pinned))
+          expect(plain.length).toBe(2)
+          for (const part of [pinned, plan, protectedRead]) {
+            expect(part?.state.status).toBe("completed")
+            if (part?.state.status === "completed") expect(part.state.time.compacted).toBeUndefined()
+          }
+          for (const part of plain) {
+            if (part.state.status === "completed") expect(part.state.time.compacted).toBeNumber()
           }
         }),
-
       {
         config: {
-          compaction: { prune: true },
+          protected: { paths: ["**/keep.md"] },
         },
       },
-    ),
-  )
-
-  it.live(
-    "skips protected skill tool output",
-    provideTmpdirInstance((dir) =>
-      Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
-        const ssn = yield* SessionNs.Service
-        const info = yield* ssn.create({})
-        const a = yield* ssn.updateMessage({
-          id: MessageID.ascending(),
-          role: "user",
-          sessionID: info.id,
-          agent: "build",
-          model: ref,
-          time: { created: Date.now() },
-        })
-        yield* ssn.updatePart({
-          id: PartID.ascending(),
-          messageID: a.id,
-          sessionID: info.id,
-          type: "text",
-          text: "first",
-        })
-        const b: SessionV1.Assistant = {
-          id: MessageID.ascending(),
-          role: "assistant",
-          sessionID: info.id,
-          mode: "build",
-          agent: "build",
-          path: { cwd: dir, root: dir },
-          cost: 0,
-          tokens: {
-            output: 0,
-            input: 0,
-            reasoning: 0,
-            cache: { read: 0, write: 0 },
-          },
-          modelID: ref.modelID,
-          providerID: ref.providerID,
-          parentID: a.id,
-          time: { created: Date.now() },
-          finish: "end_turn",
-        }
-        yield* ssn.updateMessage(b)
-        yield* ssn.updatePart({
-          id: PartID.ascending(),
-          messageID: b.id,
-          sessionID: info.id,
-          type: "tool",
-          callID: crypto.randomUUID(),
-          tool: "skill",
-          state: {
-            status: "completed",
-            input: {},
-            output: "x".repeat(200_000),
-            title: "done",
-            metadata: {},
-            time: { start: Date.now(), end: Date.now() },
-          },
-        })
-        for (const text of ["second", "third"]) {
-          const msg = yield* ssn.updateMessage({
-            id: MessageID.ascending(),
-            role: "user",
-            sessionID: info.id,
-            agent: "build",
-            model: ref,
-            time: { created: Date.now() },
-          })
-          yield* ssn.updatePart({
-            id: PartID.ascending(),
-            messageID: msg.id,
-            sessionID: info.id,
-            type: "text",
-            text,
-          })
-        }
-
-        yield* compact.prune({ sessionID: info.id })
-
-        const msgs = yield* ssn.messages({ sessionID: info.id })
-        const part = msgs.flatMap((msg) => msg.parts).find((part) => part.type === "tool")
-        expect(part?.type).toBe("tool")
-        if (part?.type === "tool" && part.state.status === "completed") {
-          expect(part.state.time.compacted).toBeUndefined()
-        }
-      }),
     ),
   )
 })
@@ -927,6 +944,219 @@ describe("session.compaction.maskObservations", () => {
       {
         config: {
           compaction: { keep_raw_tool_results: 0 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    // L2.2 — MASK_MINIMUM eviction-amortization floor: below the floor the
+    // pass must not touch anything (an eviction costs one suffix re-ingest
+    // at ~5× the cached-read price — only worth it in chunks).
+    "does not mask below the MASK_MINIMUM reclaim floor",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const user = yield* createUserMessage(info.id, "only turn")
+          const msg = yield* createAssistantMessage(info.id, user.id, dir)
+          // 36k chars ≈ 9k tokens < MASK_MINIMUM (10k) — must stay raw.
+          const raw = "x".repeat(36_000)
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: msg.id, tool: "bash", output: raw })
+
+          yield* compact.maskObservations({ sessionID: info.id })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const part = msgs.flatMap((m) => m.parts).find((p): p is SessionV1.ToolPart => p.type === "tool")
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") {
+            expect(part.state.output).toBe(raw)
+            expect(part.state.metadata?.masked).toBeUndefined()
+          }
+        }),
+      {
+        config: {
+          compaction: { keep_raw_tool_results: 0 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "masks once reclaimable clears the MASK_MINIMUM floor",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const user = yield* createUserMessage(info.id, "only turn")
+          const msg = yield* createAssistantMessage(info.id, user.id, dir)
+          // 44k chars ≈ 11k tokens ≥ MASK_MINIMUM (10k) — masks.
+          const raw = "x".repeat(44_000)
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: msg.id, tool: "bash", output: raw })
+
+          yield* compact.maskObservations({ sessionID: info.id })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const part = msgs.flatMap((m) => m.parts).find((p): p is SessionV1.ToolPart => p.type === "tool")
+          expect(part?.state.status).toBe("completed")
+          if (part?.state.status === "completed") {
+            expect(part.state.output).not.toBe(raw)
+            expect(part.state.metadata?.masked).toBeDefined()
+          }
+        }),
+      {
+        config: {
+          compaction: { keep_raw_tool_results: 0 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    // AC-6.1 — the reclaim floor must not weaken part-level protection:
+    // pinned parts, the active plan, and protected-path reads are never
+    // masked, and never counted toward the reclaimable total.
+    "never masks pinned, plan, or protected-path parts",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const user = yield* createUserMessage(info.id, "only turn")
+          const msg = yield* createAssistantMessage(info.id, user.id, dir)
+          const raw = "x".repeat(200_000)
+          yield* addCompletedToolPart({
+            sessionID: info.id,
+            messageID: msg.id,
+            tool: "bash",
+            output: raw,
+            metadata: { pinned: true },
+          })
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: msg.id, tool: "todowrite", output: "[]" })
+          yield* addCompletedToolPart({
+            sessionID: info.id,
+            messageID: msg.id,
+            tool: "read",
+            output: raw,
+            input: { filePath: `${dir}/keep.md` },
+          })
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: msg.id, tool: "grep", output: raw })
+
+          yield* compact.maskObservations({ sessionID: info.id })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const parts = msgs.flatMap((m) => m.parts).filter((p): p is SessionV1.ToolPart => p.type === "tool")
+          const pinned = parts.find((p) => p.tool === "bash")
+          const plan = parts.find((p) => p.tool === "todowrite")
+          const protectedRead = parts.find((p) => p.tool === "read")
+          const plain = parts.find((p) => p.tool === "grep")
+          for (const part of [pinned, plan, protectedRead]) {
+            expect(part?.state.status).toBe("completed")
+            if (part?.state.status === "completed") {
+              expect(part.state.metadata?.masked).toBeUndefined()
+            }
+          }
+          if (pinned?.state.status === "completed") expect(pinned.state.output).toBe(raw)
+          if (protectedRead?.state.status === "completed") expect(protectedRead.state.output).toBe(raw)
+          expect(plain?.state.status).toBe("completed")
+          if (plain?.state.status === "completed") {
+            expect(plain.state.output).not.toBe(raw)
+            expect(plain.state.metadata?.masked).toBeDefined()
+          }
+        }),
+      {
+        config: {
+          compaction: { keep_raw_tool_results: 0 },
+          protected: { paths: ["**/keep.md"] },
+        },
+      },
+    ),
+  )
+})
+
+// §7 protected-region row (turn-cache-economics.md): frame seeds, the repo primer, and the
+// turn-read verdict must survive L2 masking — "a masked-away primer would send the model
+// re-deriving repo basics, spending the steps L2 saved". Grounded finding (2026-07-10): NONE
+// of the three is a tool part, so no isProtectedToolPart extension is needed —
+//   · frame seeds are planted straight into the todo store (prompt.ts turn-open,
+//     `todoStore.update`), echoed in the transcript only via `todowrite` tool parts whose
+//     latest revision the predicate already protects (cfg.protected.plan);
+//   · the repo primer rides the child slice's USER prompt as a `text` part
+//     (prompt.ts `framed` → resolvePromptParts → `{ type: "text" }`);
+//   · the turn-read verdict becomes the turn preamble pushed onto the SYSTEM array
+//     (never a transcript part at all).
+// All three passes skip any part with `type !== "tool"` by construction. This test pins that
+// safety fact with primer-shaped and preamble-shaped text parts sitting right where the passes
+// chew, so a rewrite of the pass bodies cannot silently start eating non-tool parts.
+describe("session.compaction — §7 protected region: primer/seed-shaped text parts survive mask+prune", () => {
+  it.live(
+    "prune and maskObservations touch only completed tool parts, never text parts",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const primerText =
+            "## Repo primer (already established — do NOT re-list directories or re-read package.json for orientation)\nsrc/ test/ package.json"
+          const preambleText = "## This turn\ngoal: fix the reported defect (diagnosis-grounded)"
+          const user = yield* createUserMessage(info.id, primerText)
+          // Oldest step (outside the prune step window): a synthetic text part — the shape
+          // prompt.ts uses for injected turn framing — next to a prunable big bash sibling.
+          const old = yield* createAssistantMessage(info.id, user.id, dir)
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: old.id,
+            sessionID: info.id,
+            type: "text",
+            text: preambleText,
+            synthetic: true,
+          })
+          const raw = "x".repeat(200_000) // ≈50k tokens: clears PRUNE_PROTECT/PRUNE_MINIMUM and MASK_MINIMUM
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: old.id, tool: "bash", output: raw })
+          // Newest window: one maskable big bash inside the prune step window, then empty
+          // steps so `old` sits outside it.
+          const recent = yield* createAssistantMessage(info.id, user.id, dir)
+          yield* addCompletedToolPart({ sessionID: info.id, messageID: recent.id, tool: "bash", output: raw })
+          for (let i = 0; i < SessionCompaction.PRUNE_PROTECT_STEPS - 1; i++) {
+            yield* createAssistantMessage(info.id, user.id, dir)
+          }
+
+          yield* compact.prune({ sessionID: info.id })
+          yield* compact.maskObservations({ sessionID: info.id })
+
+          const msgs = yield* ssn.messages({ sessionID: info.id })
+          const parts = msgs.flatMap((msg) => msg.parts)
+          const oldBash = msgs
+            .find((m) => m.info.id === old.id)!
+            .parts.find((p): p is SessionV1.ToolPart => p.type === "tool")
+          const recentBash = msgs
+            .find((m) => m.info.id === recent.id)!
+            .parts.find((p): p is SessionV1.ToolPart => p.type === "tool")
+
+          // Non-vacuity: each pass ate its legitimate tool-part prey in this exact transcript.
+          if (oldBash?.state.status === "completed") expect(oldBash.state.time.compacted).toBeNumber()
+          expect(recentBash?.state.status).toBe("completed")
+          if (recentBash?.state.status === "completed") {
+            expect(recentBash.state.output).not.toBe(raw)
+            expect(recentBash.state.metadata?.masked).toBeDefined()
+          }
+
+          // The safety fact: every text part — the primer-shaped user text and the synthetic
+          // preamble-shaped text included — survives both passes byte-identical.
+          const textParts = parts.filter((p): p is SessionV1.TextPart => p.type === "text")
+          expect(textParts.map((p) => p.text).sort()).toEqual([primerText, preambleText].sort())
+          const syntheticPart = textParts.find((p) => p.text === preambleText)
+          expect(syntheticPart?.synthetic).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { prune: true, keep_raw_tool_results: 0 },
         },
       },
     ),

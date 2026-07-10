@@ -52,6 +52,19 @@ the `select()` that composes them live together in the **prompt-config registry*
 `fragments.ts` · `assemble.ts`); `request.ts` assembles from `select()` + `toolUsage()` there
 (§7.5). The Wave-2 move changed no emitted bytes — the golden cache-prefix hash is the guard.
 
+The tool-usage block also carries the **context-eviction contract** (`EVICTION_RULE`,
+`prompts/fragments.ts` — L2.3 of [turn-cache-economics.md](./turn-cache-economics.md) §5-L2,
+CC's line ported), unconditionally for any non-empty tool set so every tier and persona that
+runs a tool loop reads it:
+
+> As the session grows, older tool results may be cleared from your context mid-session —
+> replaced by `[Old tool result content cleared]` or a one-line summary. Carry the facts you
+> still need forward in your own words (paths, symbols, key output lines, conclusions) as you
+> work, instead of planning to re-read a result later.
+
+Without it, step-granular masking surprises the model into re-reading cleared results —
+spending the steps the eviction saved.
+
 ---
 
 ## 2. Tier deltas (`TIER_DELTA`, `packages/opencode/src/session/prompts/roles.ts:7-48`)

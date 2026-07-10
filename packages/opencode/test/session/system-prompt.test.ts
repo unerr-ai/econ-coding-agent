@@ -95,6 +95,15 @@ describe("SystemPrompt.toolUsage", () => {
     expect(out).not.toContain("RULE: before sending, count your tool calls")
   })
 
+  test("eviction contract present for ANY non-empty tool set (L2.3 — cleared results announced, carry facts forward)", () => {
+    // Single-tool set on purpose: unlike the batch rule, the eviction contract is not gated on
+    // ids.length > 1 — masking clears completed tool results regardless of toolset size.
+    const out = toolUsage(["read"])
+    expect(out).toContain(
+      "- As the session grows, older tool results may be cleared from your context mid-session — replaced by `[Old tool result content cleared]` or a one-line summary. Carry the facts you still need forward in your own words (paths, symbols, key output lines, conclusions) as you work, instead of planning to re-read a result later.",
+    )
+  })
+
   test("de-dupes ids — duplicate read counts once", () => {
     const out = toolUsage(["read", "read"])
     // ids after dedup+sort = ["read"], so the enumeration line has exactly "read" (no comma)

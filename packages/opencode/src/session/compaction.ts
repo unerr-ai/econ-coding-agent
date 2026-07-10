@@ -41,6 +41,25 @@ export const Event = {
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
+// L2.1 — step-recency protection: prune() never touches parts in the most
+// recent K assistant messages (steps). Replaces the dead user-turn gate
+// (`turns < 2`), which never fired in single-user-turn `opencode run`
+// sessions. Composes with PRUNE_PROTECT (token recency) and PRUNE_MINIMUM
+// (eviction amortization) — gate first, then token budget on the older region.
+export const PRUNE_PROTECT_STEPS = 5
+// L2.2 — mask-eviction amortization floor, same rationale as PRUNE_MINIMUM:
+// implicit caching has $0 writes, so an eviction's only penalty is a one-time
+// re-ingest of the post-edit suffix at ~5× the cached-read price — masking
+// must reclaim at least this many tokens per pass to pay for that re-ingest.
+export const MASK_MINIMUM = 10_000
+// L2.2 — in-loop $0-compaction cadence (prompt.ts step loop): fire the
+// deterministic passes (mask → stale-read drop → prune) every
+// STEP_COMPACT_INTERVAL steps, or as soon as the estimated live context
+// crosses the economic ceiling — whichever comes first. Run sessions have
+// exactly one user turn and end it when the task is done, so the turn-end
+// and 524k-overflow triggers never fire mid-run without this.
+export const STEP_COMPACT_INTERVAL = 10
+export const STEP_CTX_ECONOMIC_CEILING = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 // AC-1.3: canonical single-file read/write tool ids for unerr-graph-aware staleness
@@ -529,14 +548,19 @@ export const layer = Layer.effect(
       let total = 0
       let pruned = 0
       const toPrune: SessionV1.ToolPart[] = []
-      let turns = 0
+      // L2.1 — step-recency protection: count assistant messages (steps)
+      // while walking backwards and protect every part in the most recent
+      // PRUNE_PROTECT_STEPS of them. The old user-turn gate (`turns < 2`)
+      // was dead in single-user-turn run sessions (one user message ⇒ the
+      // gate never opened ⇒ 0 parts ever pruned).
+      let steps = 0
       // AC-6.1: pinned/plan/protected-path parts must never be pruned.
       const planId = latestPlanPartId(msgs)
 
       loop: for (let msgIndex = msgs.length - 1; msgIndex >= 0; msgIndex--) {
         const msg = msgs[msgIndex]
-        if (msg.info.role === "user") turns++
-        if (turns < 2) continue
+        if (msg.info.role === "assistant") steps++
+        if (steps <= PRUNE_PROTECT_STEPS) continue
         if (msg.info.role === "assistant" && msg.info.summary) break loop
         for (let partIndex = msg.parts.length - 1; partIndex >= 0; partIndex--) {
           const part = msg.parts[partIndex]
@@ -645,8 +669,11 @@ export const layer = Layer.effect(
       // AC-6.1: pinned/plan/protected-path parts must never be masked.
       const planId = latestPlanPartId(msgs)
 
+      // L2.2 collect-then-apply: gather the would-be-masked parts first so the
+      // reclaim floor can be checked against the whole batch before any write.
       let seen = 0
-      let masked = 0
+      const toMask: { part: SessionV1.ToolPart; messageID: MessageID }[] = []
+      let reclaimable = 0
       loop: for (let msgIndex = msgs.length - 1; msgIndex >= 0; msgIndex--) {
         const msg = msgs[msgIndex]
         if (msg.info.role === "assistant" && msg.info.summary) break loop
@@ -660,29 +687,41 @@ export const layer = Layer.effect(
           if (part.state.metadata?.masked) continue
           seen++
           if (seen <= keepRaw) continue
-
-          const raw = part.state.output
-          const synthesis = observationSynthesis(part, input.sessionID, msg.info.id)
-          masked++
-          yield* session.updatePart({
-            ...part,
-            state: {
-              ...part.state,
-              output: synthesis,
-              metadata: {
-                ...part.state.metadata,
-                masked: {
-                  at: Date.now(),
-                  rawChars: raw.length,
-                  pointer: { sessionID: input.sessionID, messageID: msg.info.id, partID: part.id },
-                  raw,
-                },
-              },
-            },
-          })
+          reclaimable += Token.estimate(part.state.output)
+          toMask.push({ part, messageID: msg.info.id })
         }
       }
-      if (masked) yield* Effect.logInfo("masked observations", { count: masked, keepRaw })
+
+      // L2.2 — eviction-amortization floor (MASK_MINIMUM, same rationale as
+      // PRUNE_MINIMUM): masking evicts the cached prefix, and with implicit
+      // caching's $0 writes the eviction cost is one re-ingest of the suffix
+      // at ~5× the cached-read price — so evict in chunks, never dribbles.
+      if (reclaimable < MASK_MINIMUM) return
+
+      let masked = 0
+      for (const { part, messageID } of toMask) {
+        if (part.state.status !== "completed") continue
+        const raw = part.state.output
+        const synthesis = observationSynthesis(part, input.sessionID, messageID)
+        masked++
+        yield* session.updatePart({
+          ...part,
+          state: {
+            ...part.state,
+            output: synthesis,
+            metadata: {
+              ...part.state.metadata,
+              masked: {
+                at: Date.now(),
+                rawChars: raw.length,
+                pointer: { sessionID: input.sessionID, messageID, partID: part.id },
+                raw,
+              },
+            },
+          },
+        })
+      }
+      if (masked) yield* Effect.logInfo("masked observations", { count: masked, keepRaw, reclaimable })
     })
 
     // AC-1.7 routing: the compaction summarizer always resolves to the cheap tier —
