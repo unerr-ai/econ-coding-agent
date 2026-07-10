@@ -1,6 +1,6 @@
 # The econ Orchestration Mechanism
 
-**Status: v1.7 (2026-07-10) — implemented and always-on: the merged turn-read + code-decided arming (U1's successor — one temp-0 extraction call, `decideArming` pure table, neutral degrade, continuation turns; `48a3499ce`, `e372a3c1d`), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, the uncertainty-management engine (§8 — prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition), and the 2026-07-10 improvement round's P6 (blocked slices, scope-overlap serialization, live venue inputs — `229a9303a`, `5ce310868`), P8–P10 and P12 (`229a9303a`), and P3/P4 taxonomy fills (research/refactor shapes, no-edits gate — `e372a3c1d`); live-fire smoked. In progress: P11 (model-initiated tier delegation, W4). Open work: the §6 SM-series hardening and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5). U5 (cache-aware casting) was CUT 2026-07-10: the helper was deleted unwired — its evaluator input was never populated — and the cache economics stay live via session affinity + per-turn hysteresis.**
+**Status: v1.7 (2026-07-10) — implemented and always-on: the merged turn-read + code-decided arming (U1's successor — one temp-0 extraction call, `decideArming` pure table, neutral degrade, continuation turns; `48a3499ce`, `e372a3c1d`), goal-tracked open (U2), containment bracket (U3), the pre-dispatch evaluator (U4), the M2/M3/M4 gates, the uncertainty-management engine (§8 — prior-resolution phase, two-axis allocation, posterior-uncertainty gate, wired re-decomposition), and the 2026-07-10 improvement round's P6 (blocked slices, scope-overlap serialization, live venue inputs — `229a9303a`, `5ce310868`), P8–P10 and P12 (`229a9303a`), P3/P4 taxonomy fills (research/refactor shapes, no-edits gate — `e372a3c1d`), and P11 (model-initiated tier delegation: depth-1 reasoner/oracle sub-planner seats + raw-task edit hygiene — `883141bad`); live-fire smoked. Open work: the §6 SM-series hardening and #62 (perplexity activation — blocked on gateway streaming-logprobs support, §8.5). U5 (cache-aware casting) was CUT 2026-07-10: the helper was deleted unwired — its evaluator input was never populated — and the cache economics stay live via session affinity + per-turn hysteresis.**
 This doc also absorbed the still-relevant content of the three retired plan docs
 (DECOMPOSITION_ORCHESTRATION_PLAN, PERSONA_ORCHESTRATION_PLAN, SELF_ORCHESTRATION_PLAN —
 deleted 2026-07-07) into §7 "Inherited foundations".
@@ -178,21 +178,36 @@ caps keep the tree honest — both set by the evidence in §3.4, not by taste:
 
 Unrelated goals run as **parallel instances** — two independent goals can each get their
 own child session at the same time, on the same tier or different tiers (the zod run
-already does this for slices; the tree extends it to whole goals). But the tree is a
-*tracker* structure, not an execution hierarchy: **children never spawn grandchildren.** A
-child that discovers its task needs further splitting returns the sub-plan to the
-conductor, which re-dispatches — recursion happens *through the hub*, never below it. The
-write-heavy-agent evidence is unambiguous that executed depth fragments context (§3.4);
-read-only exploration inside a research child is the one place a second level is allowed.
+already does this for slices; the tree extends it to whole goals). The tree is a
+*tracker* structure, not an execution hierarchy — but the old absolute ("children never
+spawn grandchildren") was **revised by P11** (`883141bad`, ORCHESTRATION_IMPROVEMENTS.md
+§4j): a **reasoner/oracle slice seat is a depth-1 sub-planner**. Mid-slice it can hand
+discovered sub-items down through the `delegate` tool — it names the work
+(content + optional sliceType/files), and *code* picks the tier via the same
+allocator+evaluator every slice rides. The star's two real protections survive as hard
+code gates: **down-only** (work that allocates at-or-above the caller's tier is refused
+— no judgment fragmentation) and **depth-1** (delegate children carry `delegated: true`
+on every hop, get no `delegate`/`task` tools, and can never spawn further — no recursive
+sprawl). Plus: ≤4 accepted delegates per slice, file scope contained to the parent
+slice's own P6b scope, dispatch through the full slice pipeline (persona, step budget,
+verify ladder, snapshot bracket, double-pay ledger), and the child todo written by the
+tool handler under the parent item. Executor seats never delegate — they are the floor,
+and delegation IS decomposition, the skill that tier was measured to lack; their path
+stays report-up: return with the discovery declared → re-decomposition re-plans through
+the hub. The write-heavy-agent evidence that executed depth fragments context (§3.4)
+still caps everything at one delegated level.
 
 ```
-   tracker (tree, depth ≤3)              execution (always a star)
+   tracker (tree, depth ≤3)              execution (star + depth-1 delegation)
    goal A ── task A1                            conductor
           └─ task A2 ── sub A2a                ╱    │    ╲
    goal B ── task B1                     child(A1) child(A2) child(B1)
-                                         parallel, ≤3–5 live at once;
-                                         a child needing a further split
-                                         folds its sub-plan back to the hub
+                                         parallel, ≤3–5 live at once
+                                              │ (reasoner/oracle seat only)
+                                         delegate(≤4, down-only, in-scope)
+                                         — delegates never delegate further;
+                                         an executor child folds its sub-plan
+                                         back to the hub instead
 ```
 
 **Correction (2026-07-08, SM-series):** the tree above governs *mechanical* decomposition —

@@ -1,12 +1,12 @@
 # Orchestration improvements — working proposal
 
-**Status: IMPLEMENTED except P11 (2026-07-10) — all Q-table recommendations accepted by
+**Status: ALL IMPLEMENTED (2026-07-10) — all Q-table recommendations accepted by
 the user ("implement all"); landed wave by wave.** W1: **P6a/b/c + P7(b)** (core
 `229a9303a`, wiring `5ce310868`), **P8, P9, P10, P12** (`229a9303a`, resolve-first
 residual case `5ce310868`). W2: **P1-alt + P2a + P5** — the merged temp-0 turn-read,
 code-decided arming, regex shadow taxonomy deleted (`48a3499ce`). W3: **P3 + P4** —
-research/refactor shapes, no-edits gate, continuation turns (`e372a3c1d`). In progress:
-**P11** (model-initiated tier delegation, W4). The accepted designs are folded into
+research/refactor shapes, no-edits gate, continuation turns (`e372a3c1d`). W4: **P11** —
+delegate tool for reasoner/oracle seats + raw-task edit hygiene (`883141bad`). The accepted designs are folded into
 [ORCHESTRATION_MECHANISM.md](./ORCHESTRATION_MECHANISM.md) — mechanism truth lives there;
 this doc keeps the decision trail. Benchmark-driven tuning is logged in
 [SWE_BENCH_TRACKER.md](../testing/SWE_BENCH_TRACKER.md).
@@ -585,7 +585,17 @@ session each get their own resolution pass.
 
 ## 4j. P11 — Model-initiated tier delegation (user-driven, 2026-07-10)
 
-> **Status: IN PROGRESS (W4)** — the delegate tool is being built now.
+> **Status: IMPLEMENTED (W4, `883141bad`)** — `session/slice-delegation.ts` (policy
+> module: down-only via allocateSlice vs LADDER_RANK, depth-1 via `delegated: true` on
+> every mini-loop hop, ≤4 per slice, P6b scope containment, child todos written by the
+> tool handler with `parentID` threaded — `todosToPlanNodes` no longer drops it) +
+> `tool/delegate.ts`; seats registered in prompt.ts's dispatch for reasoner/oracle
+> slice children. P11a: conductor doctrine 9a. P11c: raw task.ts children are
+> edit/write-denied at the tool boundary (`rawTaskChildGate`); slice dispatch and the
+> escalation ladder spawn via `sessions.create`, never task.ts, so they are untouched.
+> Deliberate deviations: delegate slices skip turn arming (the parent absorbed the
+> turn's difficulty); the synthesis hop is marked `delegated` (writing job, not a
+> seat); @agent-mention subtasks ride task.ts and are now edit-denied too.
 
 **Framing — two orchestration levels** (the organizing idea behind P11):
 
