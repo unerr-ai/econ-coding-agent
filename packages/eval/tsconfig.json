@@ -2,9 +2,12 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "extends": "@tsconfig/bun/tsconfig.json",
   "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "noUncheckedIndexedAccess": false,
     "paths": {
+      "@/*": ["../opencode/src/*"],
       "@opencode-ai/code-intelligence": ["../code-intelligence/src/index.ts"]
     }
-  }
+  },
+  "include": ["**/*", "../opencode/src/audio.d.ts"]
 }
