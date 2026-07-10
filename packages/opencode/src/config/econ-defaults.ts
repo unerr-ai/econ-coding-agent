@@ -177,6 +177,14 @@ export function econDefaultConfig(): ConfigV1.Info {
         env: ["LITELLM_API_KEY"],
         options: {
           baseURL: "https://econ-litellm.fly.dev/v1",
+          // Stall watchdogs (2026-07-10): a fly.dev gateway stall wedged a live
+          // run forever — request accepted, zero bytes, nothing to abort it
+          // (11964 full-stack probe 2; the same stall class nulled turn-read on
+          // the 11999 probe). Both timeouts map to retryable APIErrors upstream
+          // (HeaderTimeoutError / ResponseStreamError), so the session loop's
+          // existing backoff absorbs the blip instead of hanging the run.
+          headerTimeout: 45_000,
+          chunkTimeout: 120_000,
         },
         models: {
           "deepseek/deepseek-v4-flash": econModel("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash (econ conductor)", {
