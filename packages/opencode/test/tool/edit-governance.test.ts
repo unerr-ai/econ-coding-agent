@@ -107,7 +107,15 @@ describe("S6.3 — callersAtRiskWarning", () => {
 // B3 — no-test-edit gate: path classifier, per-session arm/disarm, denial text
 // ---------------------------------------------------------------------------
 
-import { isTestFilePath, setTestEditGate, testEditGateArmed, testEditDenialMessage } from "../../src/tool/edit-governance"
+import {
+  isTestFilePath,
+  setTestEditGate,
+  testEditGateArmed,
+  testEditDenialMessage,
+  setNoEditsGate,
+  noEditsGateArmed,
+  noEditsDenialMessage,
+} from "../../src/tool/edit-governance"
 
 describe("B3 — isTestFilePath", () => {
   it("matches test trees, suffixes, and python conventions", () => {
@@ -171,6 +179,26 @@ describe("B3 — testEditDenialMessage", () => {
     expect(msg).toContain("no-test-edit gate")
     expect(msg).toContain("NEW test file")
     expect(msg).toContain("do not edit it")
+  })
+})
+
+describe("P3 — no-edits gate store + denial message", () => {
+  it("arms, consults, and disarms per session — same lifecycle as the test-edit gate", () => {
+    setNoEditsGate("ses_ne_a", true)
+    setNoEditsGate("ses_ne_b", false)
+    expect(noEditsGateArmed("ses_ne_a")).toBe(true)
+    expect(noEditsGateArmed("ses_ne_b")).toBe(false)
+    expect(noEditsGateArmed("ses_ne_never_set")).toBe(false)
+    setNoEditsGate("ses_ne_a", false) // continuation/next fresh turn disarms
+    expect(noEditsGateArmed("ses_ne_a")).toBe(false)
+  })
+
+  it("the denial message names the file, the plan-only rule, and the text-deliverable out", () => {
+    const msg = noEditsDenialMessage("src/billing/api.ts")
+    expect(msg).toContain("src/billing/api.ts")
+    expect(msg).toContain("no-edits gate")
+    expect(msg).toContain("plan")
+    expect(msg).toContain("as text")
   })
 })
 

@@ -38,3 +38,11 @@ tsconfig.tsbuildinfo
 
 # npm packaging staging output (built by packaging/npm/build-npm-packages.mjs)
 packaging/npm/dist/
+
+# SWE-bench live-fire arenas + instance metadata (docs/testing/SWE_BENCH_TRACKER.md recipe)
+arena-django-*/
+base_commit.txt
+test_patch.diff
+fail_to_pass.txt
+PROMPT.txt
+run-*.log

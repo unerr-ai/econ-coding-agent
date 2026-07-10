@@ -618,6 +618,43 @@ describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
     const preamble = triagePreamble(verdict, { armLocalization: true, hardness: "hard", ambiguity: "ambiguous" })
     expect(preamble).toContain("TURN FLAGGED AMBIGUOUS/HARD")
   })
+
+  it("P3 — a research goal appends the cited-digest playbook; other shapes don't", () => {
+    const research: TriageVerdict = {
+      goals: [{ quote: "what changed in zod v4", shape: "research", deliverable: "a cited digest" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const preamble = triagePreamble(research, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })
+    expect(preamble).toContain("RESEARCH PLAYBOOK")
+    expect(preamble).toContain("CITED digest")
+    expect(preamble).toContain("citation check")
+    expect(preamble).not.toContain("REFACTOR PLAYBOOK")
+
+    const build: TriageVerdict = {
+      goals: [{ quote: "add a flag", shape: "build", deliverable: "flag works" }],
+      constraints: [],
+      confidence: "high",
+    }
+    expect(triagePreamble(build, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })).not.toContain(
+      "PLAYBOOK",
+    )
+  })
+
+  it("P3 — a refactor goal appends the behavior-preserving playbook (mechanical default, suite green, no signature breaks)", () => {
+    const verdict: TriageVerdict = {
+      goals: [
+        { quote: "extract the retry logic into a helper", shape: "refactor", deliverable: "behavior unchanged" },
+      ],
+      constraints: [],
+      confidence: "high",
+    }
+    const preamble = triagePreamble(verdict, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })
+    expect(preamble).toContain("REFACTOR PLAYBOOK")
+    expect(preamble).toContain("behavior must NOT change")
+    expect(preamble).toContain("`mechanical`")
+    expect(preamble).not.toContain("RESEARCH PLAYBOOK")
+  })
 })
 
 describe("orderTriageGoals — §1.2 dependency-ordered write sequence", () => {
@@ -964,6 +1001,67 @@ describe("todosToLoopSlices — conversion", () => {
     const slices = await todosToLoopSlices(todos, probes)
     expect(slices).toHaveLength(1)
     expect(slices[0].id).toBe("still to do")
+  })
+})
+
+// P3/Q-D — the research shape's two policy deltas: the researcher auto-cast
+// on research-shaped turns, and the citation verifier (never the test rung).
+describe("personaForSlice — P3 research-shaped default", () => {
+  it("recon defaults to explorer on an ordinary turn and to the web-enabled researcher on a research-shaped turn", () => {
+    const recon = { sliceType: "recon" } as const
+    expect(personaForSlice(recon)).toBe("explorer")
+    expect(personaForSlice(recon, { researchShaped: false })).toBe("explorer")
+    expect(personaForSlice(recon, { researchShaped: true })).toBe("researcher")
+  })
+
+  it("the research default is recon-scoped: edit-work personas never flip on a research+build compound", () => {
+    expect(personaForSlice({ sliceType: "mechanical" }, { researchShaped: true })).toBe("applier")
+    expect(personaForSlice({ sliceType: "verify" }, { researchShaped: true })).toBe("runner")
+    expect(personaForSlice({ sliceType: "design" }, { researchShaped: true })).toBe("procedure")
+  })
+
+  it("an explicit persona still wins over the research default", () => {
+    expect(personaForSlice({ sliceType: "recon", persona: "explorer" }, { researchShaped: true })).toBe("explorer")
+  })
+})
+
+describe("todosToLoopSlices — P3 research slices verify by citation, never the test rung", () => {
+  it("a research-turn recon slice gets no sound-rung commands and pins testStrength untestable", async () => {
+    const probes = fakeProbes("low", "testable")
+    const slices = await todosToLoopSlices(
+      [{ content: "look up the zod v4 migration guide and run `bun test` afterwards", status: "pending", sliceType: "recon" }],
+      probes,
+      undefined,
+      { researchShaped: true },
+    )
+    expect(slices[0]).toMatchObject({ testStrength: "untestable" })
+    expect(slices[0]!.verifyCommands).toBeUndefined()
+    expect(slices[0]!.probeCommand).toBeUndefined()
+    expect(probes.testStrengthCalls).toBe(0)
+  })
+
+  it("an explicitly researcher-persona slice routes identically even without the turn flag", async () => {
+    const slices = await todosToLoopSlices(
+      [{ content: "digest the changelog", status: "pending", sliceType: "recon", persona: "researcher" }],
+      fakeProbes("low", "testable"),
+    )
+    expect(slices[0]).toMatchObject({ testStrength: "untestable" })
+    expect(slices[0]!.verifyCommands).toBeUndefined()
+  })
+
+  it("a research+build compound keeps the build slice's test rung intact", async () => {
+    const slices = await todosToLoopSlices(
+      [
+        { content: "look up the new API shape", status: "pending", sliceType: "recon" },
+        { content: "apply the rename — verify with `bun test`", status: "pending", sliceType: "mechanical", testStrength: "testable" },
+      ],
+      fakeProbes("low", "testable"),
+      undefined,
+      { researchShaped: true },
+    )
+    const build = slices.find((s) => s.sliceType === "mechanical")!
+    expect(build.testStrength).toBe("testable")
+    expect(build.verifyCommands?.length ?? 0).toBeGreaterThan(0)
   })
 })
 
@@ -1905,6 +2003,31 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
       setTodoStatus: async () => {},
       sessionID: nextSessionID(),
       arming: { hardness: "trivial", ambiguity: "clear" },
+      onResolutionGate: () => {
+        gateCalls++
+      },
+    })
+    expect(gateCalls).toBe(0)
+    expect(dispatched).toBeGreaterThan(0)
+    expect(res.fellBack).toBeUndefined()
+  })
+
+  it("P4 — a continuation turn stands the gate down: flagged inherited arming + invalid plan still decomposes, no resolve-first", async () => {
+    let dispatched = 0
+    let gateCalls = 0
+    const res = await runConductorOrchestration({
+      getTodos: async () => cyclicTodos,
+      probes: fakeProbes(),
+      dispatch: async () => {
+        dispatched++
+        return { text: "ok", parts: [] }
+      },
+      setTodoStatus: async () => {},
+      sessionID: nextSessionID(),
+      // The inherited (stored) arming decision may still read hard/ambiguous —
+      // the continuation flag alone must stand the gate down.
+      arming: { hardness: "hard", ambiguity: "ambiguous" },
+      continuation: true,
       onResolutionGate: () => {
         gateCalls++
       },

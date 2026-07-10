@@ -43,6 +43,35 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
 }
 `;
 
+exports[`tool parameters JSON Schema (wire shape) compaction_refetch 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "endLine": {
+      "description": "Optional 1-indexed end line (inclusive) to slice the retained body instead of returning it whole.",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+    "messageID": {
+      "description": "The messageID from a \`[pointer: session/message/part]\` hint in a masked or compacted tool result. Omit together with partID to fall back to the most recently masked tool output in this session.",
+      "type": "string",
+    },
+    "partID": {
+      "description": "The partID from the same pointer. Omit together with messageID to fall back to the most recently masked tool output in this session.",
+      "type": "string",
+    },
+    "startLine": {
+      "description": "Optional 1-indexed start line (inclusive) to slice the retained body instead of returning it whole.",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
+  },
+  "type": "object",
+}
+`;
+
 exports[`tool parameters JSON Schema (wire shape) edit 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -265,6 +294,10 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
       "description": "The absolute path to the file or directory to read",
       "type": "string",
     },
+    "force": {
+      "description": "Return the full content even if this exact read was already delivered this session.",
+      "type": "boolean",
+    },
     "limit": {
       "description": "The maximum number of lines to read (defaults to 2000)",
       "maximum": 9007199254740991,
@@ -351,8 +384,35 @@ exports[`tool parameters JSON Schema (wire shape) todo 1`] = `
             "description": "Brief description of the task",
             "type": "string",
           },
+          "deps": {
+            "description": "Ids of the slices (other todo items) this one depends on — builds the decomposition DAG. Each id is either the depended-on item's \`content\` string verbatim, or \`todo_N\` with N the 1-based position of that item in this list.",
+            "items": {
+              "type": "string",
+            },
+            "type": "array",
+          },
+          "need": {
+            "description": "Minimum capability tier this slice needs (e.g. executor, oracle, reasoner, conductor) — resolved by the per-slice allocator (OL-7.2).",
+            "type": "string",
+          },
+          "persona": {
+            "description": "Executor persona intern for this slice: one of explorer, runner, applier, author, researcher, procedure. Omit to let sliceType route automatically (recon→explorer, verify→runner, mechanical→applier, else procedure) — set this explicitly only to name 'author' or 'researcher', which are never chosen automatically.",
+            "enum": [
+              "explorer",
+              "runner",
+              "applier",
+              "author",
+              "researcher",
+              "procedure",
+            ],
+            "type": "string",
+          },
           "priority": {
             "description": "Priority level of the task: high, medium, low",
+            "type": "string",
+          },
+          "sliceType": {
+            "description": "Decomposition slice type (OL-7.1): design, mechanical, recon, or verify. Omitted on the trivial/single-slice path.",
             "type": "string",
           },
           "status": {

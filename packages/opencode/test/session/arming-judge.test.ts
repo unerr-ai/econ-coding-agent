@@ -40,6 +40,16 @@ describe("decideArming — stand-down cases", () => {
       expect(decision.armLocalization).toBe(false)
     }
   })
+
+  test("P3 — research and refactor shapes never arm (localization does not apply)", () => {
+    for (const shape of ["research", "refactor"] as const) {
+      const decision = decideArming(
+        verdictOf([{ quote: "look into the library change", shape, deliverable: "done" }]),
+      )
+      expect(decision.armLocalization).toBe(false)
+      expect(decision.evidence).toContain("no diagnosis-shaped goal")
+    }
+  })
 })
 
 describe("decideArming — the per-goal evidence table", () => {

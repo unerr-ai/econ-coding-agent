@@ -18,7 +18,14 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "@/util/bom"
-import { callersAtRiskWarning, isTestFilePath, testEditGateArmed, testEditDenialMessage } from "./edit-governance"
+import {
+  callersAtRiskWarning,
+  isTestFilePath,
+  testEditGateArmed,
+  testEditDenialMessage,
+  noEditsGateArmed,
+  noEditsDenialMessage,
+} from "./edit-governance"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -82,6 +89,12 @@ export const EditTool = Tool.define(
             ? params.filePath
             : path.join(instance.directory, params.filePath)
           yield* assertExternalDirectoryEffect(ctx, filePath)
+
+          // P3 no-edits gate: a plan-only turn ("propose, don't code")
+          // denies every file mutation at the tool boundary.
+          if (noEditsGateArmed(ctx.sessionID)) {
+            throw new Error(noEditsDenialMessage(path.relative(instance.worktree, filePath)))
+          }
 
           // B3 no-test-edit gate: on a fix-shaped turn, modifying an existing
           // test file is denied with the reason — creating a new repro file

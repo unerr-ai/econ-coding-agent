@@ -22,13 +22,24 @@ import { TURN_READ_SYSTEM_PROMPT } from "./prompts/judges"
 // ---------------------------------------------------------------------------
 
 /** One extracted goal's shape — never a task label, always evidence-grounded. */
-export type TriageGoalShape = "diagnosis-vague" | "diagnosis-grounded" | "build" | "audit" | "qa" | "run-only"
+export type TriageGoalShape =
+  | "diagnosis-vague"
+  | "diagnosis-grounded"
+  | "build"
+  | "refactor"
+  | "audit"
+  | "qa"
+  | "research"
+  | "run-only"
 
 /** One extracted constraint's arming category. */
-export type TriageConstraintKind = "no-test-edit" | "scope-limit" | "no-new-files" | "other"
+export type TriageConstraintKind = "no-test-edit" | "no-edits" | "scope-limit" | "no-new-files" | "other"
 
 /** How cleanly the extraction went — a low verdict escalates the turn-read itself one tier up (§4.1). */
 export type TriageConfidence = "high" | "low"
+
+/** P4 §4b — the turn's role: fresh work, or a continuation (steering/iteration on the session's existing deliverable). Absent reads as "fresh". */
+export type TurnRole = "fresh" | "continuation"
 
 /** How hard the fix is once found — judged per diagnosis goal by the turn-read; drives the difficulty floor and seed selection downstream (§1.2). */
 export type ArmingHardness = "trivial" | "moderate" | "hard"
@@ -74,19 +85,24 @@ export interface TriageVerdict {
   readonly goals: readonly TriageGoal[]
   readonly constraints: readonly TriageConstraint[]
   readonly confidence: TriageConfidence
+  /** P4 — "continuation" only on pure steering/iteration messages; absent (older mocks/stubs) reads as "fresh". */
+  readonly turnRole?: TurnRole
 }
 
 const TRIAGE_GOAL_SHAPES: ReadonlySet<TriageGoalShape> = new Set([
   "diagnosis-vague",
   "diagnosis-grounded",
   "build",
+  "refactor",
   "audit",
   "qa",
+  "research",
   "run-only",
 ])
 
 const TRIAGE_CONSTRAINT_KINDS: ReadonlySet<TriageConstraintKind> = new Set([
   "no-test-edit",
+  "no-edits",
   "scope-limit",
   "no-new-files",
   "other",
@@ -186,10 +202,12 @@ function parseConstraint(entry: unknown, userPrompt: string): TriageConstraint |
  * lives entirely here otherwise: a goal or constraint whose `quote` isn't a
  * verbatim, case-sensitive substring of `userPrompt` is dropped, not
  * corrected; an invalid `shape`/`kind` drops the whole entry; zero surviving
- * goals, or more than `TRIAGE_MAX_GOALS`, fails the verdict outright; no
- * balanced JSON object, or malformed JSON, fails outright. The evidence
- * section is partial-accept (Q-B): an invalid evidence object is dropped
- * while its goal survives. Never throws.
+ * goals, or more than `TRIAGE_MAX_GOALS`, fails the verdict outright —
+ * EXCEPT that a "continuation" verdict may carry zero goals (P4: a pure
+ * steering message has nothing to extract); no balanced JSON object, or
+ * malformed JSON, fails outright. The evidence section is partial-accept
+ * (Q-B): an invalid evidence object is dropped while its goal survives.
+ * Never throws.
  *
  * @sem domain=routing role=extractor
  */
@@ -209,6 +227,8 @@ export function parseTurnReadResponse(raw: string, userPrompt: string): TriageVe
   if (typeof parsed !== "object" || parsed === null) return null
   const candidate = parsed as Record<string, unknown>
 
+  const turnRole: TurnRole = candidate.turnRole === "continuation" ? "continuation" : "fresh"
+
   const goals: TriageGoal[] = []
   if (Array.isArray(candidate.goals)) {
     for (const entry of candidate.goals) {
@@ -216,7 +236,8 @@ export function parseTurnReadResponse(raw: string, userPrompt: string): TriageVe
       if (goal) goals.push(goal)
     }
   }
-  if (goals.length === 0 || goals.length > TRIAGE_MAX_GOALS) return null
+  if (goals.length > TRIAGE_MAX_GOALS) return null
+  if (goals.length === 0 && turnRole !== "continuation") return null
 
   const constraints: TriageConstraint[] = []
   if (Array.isArray(candidate.constraints)) {
@@ -228,7 +249,48 @@ export function parseTurnReadResponse(raw: string, userPrompt: string): TriageVe
 
   const confidence: TriageConfidence = candidate.confidence === "high" ? "high" : "low"
 
-  return { goals, constraints, confidence }
+  return { goals, constraints, confidence, turnRole }
+}
+
+// ---------------------------------------------------------------------------
+// P4 §4b — the pre-LLM continuation short-circuit
+// ---------------------------------------------------------------------------
+
+/** Upper bound (exclusive) on a prompt the short-circuit will even consider — real work is longer. */
+export const CONTINUATION_MAX_PROMPT_CHARS = 80
+
+// The anaphora/ack shapes — anchored FULL-message matches, deliberately tiny
+// and conservative: false continuation on real work is the failure to avoid,
+// so anything not on this list pays the turn-read and lets the model's
+// `turnRole` decide. This is a cost optimization, not a taxonomy — it never
+// assigns a shape.
+const CONTINUATION_ACK_RES: readonly RegExp[] = [
+  /^(?:ok(?:ay)?[,.!\s]*)?(?:yes[,.!\s]*)?(?:please\s+)?(?:go ahead|do it|continue|proceed|try again|keep going)[.!\s]*$/i,
+  /^(?:it(?:'s| is)\s+)?still\s+(?:broken|failing|not working|the same)[.!\s]*$/i,
+  /^that didn'?t (?:work|help)[.!\s]*$/i,
+  /^same (?:error|failure|problem)(?:\s+as before)?[.!\s]*$/i,
+]
+
+// Path-shaped or code-shaped tokens — a slash, backtick, brackets, an
+// extension-like dot, a flag, or a snake_case underscore means the message
+// carries concrete work detail and must reach the turn-read.
+const CODE_SHAPED_TOKEN_RE = /[\/\\`(){}\[\];=_]|\.\w|--?\w/
+
+/**
+ * P4 — should this prompt skip the turn-read call entirely and be treated as
+ * a continuation? True only for a short (<`CONTINUATION_MAX_PROMPT_CHARS`),
+ * code-free message that IS one of the anaphora/ack shapes ("go ahead",
+ * "still broken", "that didn't work"). The caller must additionally require
+ * that the session has prior turns — a first message can never continue
+ * anything. When in doubt this returns false: the model call is the arbiter.
+ *
+ * @sem domain=routing role=router
+ */
+export function isContinuationShortCircuit(userPrompt: string): boolean {
+  const prompt = userPrompt.trim()
+  if (prompt.length === 0 || prompt.length >= CONTINUATION_MAX_PROMPT_CHARS) return false
+  if (CODE_SHAPED_TOKEN_RE.test(prompt)) return false
+  return CONTINUATION_ACK_RES.some((re) => re.test(prompt))
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +371,7 @@ export interface TriageTelemetrySummary {
   readonly shapes: readonly TriageGoalShape[]
   readonly constraintKinds: readonly TriageConstraintKind[]
   readonly confidence: TriageConfidence
+  readonly turnRole: TurnRole
 }
 
 /**
@@ -323,5 +386,6 @@ export function triageTelemetry(verdict: TriageVerdict): TriageTelemetrySummary 
     shapes: verdict.goals.map((goal) => goal.shape),
     constraintKinds: verdict.constraints.map((constraint) => constraint.kind),
     confidence: verdict.confidence,
+    turnRole: verdict.turnRole ?? "fresh",
   }
 }

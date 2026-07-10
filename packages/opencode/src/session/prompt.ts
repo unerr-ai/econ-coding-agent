@@ -16,7 +16,7 @@ import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
-import { setTestEditGate, testEditGateArmed } from "../tool/edit-governance"
+import { setTestEditGate, testEditGateArmed, setNoEditsGate, noEditsGateArmed } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep } from "./turn-supervisor"
 import { stuckNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
@@ -56,9 +56,16 @@ import {
   type OrchestrationTodo,
   type SliceDigestEntry,
 } from "./slice-orchestrator"
-import { runTurnRead, triageTelemetry, type TriageComplete, type TriageVerdict } from "./turn-triage"
+import {
+  runTurnRead,
+  triageTelemetry,
+  isContinuationShortCircuit,
+  type TriageComplete,
+  type TriageVerdict,
+} from "./turn-triage"
 import { decideArming, type ArmingVerdict } from "./arming-judge"
 import { setArmingDecision, getArmingDecision } from "./arming-store"
+import { setTurnVerdict, getTurnVerdict, setPinnedProbe, getPinnedProbe, researchShapedTurn } from "./turn-read-store"
 import { resetResolveAttempts } from "./resolution-store"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -202,8 +209,14 @@ export class TurnOpenCalls extends Context.Service<
 // The neutral-degrade rate is P5's acceptance metric (<2% of turns after the
 // cross-tier re-ask); each degrade logs `turn_read_degraded` with the
 // running counts so the number exists before the benchmark phase reads it.
+// P4 rides the same denominator: `turnReads` counts every root turn open
+// (short-circuited continuations included), and each continuation logs
+// `turn_continuation` with the running continuations/turnReads pair — the
+// literature says 33-40% of multi-turn prompts are follow-ups; this counter
+// checks that number on econ's own traffic.
 let turnReads = 0
 let turnReadNulls = 0
+let turnContinuations = 0
 
 export const layer = Layer.effect(
   Service,
@@ -1404,6 +1417,10 @@ export const layer = Layer.effect(
         // the orchestration hook further down this same turn. Undefined on a
         // null-verdict (P5 neutral-degrade) turn.
         let turnGoalCount: number | undefined
+        // P4 §4b — this turn is a continuation (pre-LLM short-circuit or the
+        // turn-read's own turnRole). Threaded into the orchestration hook so
+        // the resolution gate stands down for the rest of the turn.
+        let turnContinuation = false
         // OL-9.6b: finish="length" is an output-cap truncation, not a completed
         // turn (run 9: a 7.9k-token think hit the 8192 cap on the root-cause
         // step, returned zero parts, and the run exited 0 as if finished).
@@ -1486,11 +1503,15 @@ export const layer = Layer.effect(
                   runner: makeShellCommandRunner({ cwd: ctx.directory }),
                 }),
               )
-              if (turnPinnedProbe)
+              if (turnPinnedProbe) {
+                // P4 — a mid-turn pin is part of the contract a continuation
+                // turn inherits too.
+                setPinnedProbe(sessionID, turnPinnedProbe)
                 yield* Effect.logInfo("turn_probe_pinned_from_red", {
                   "session.id": sessionID,
                   probe: turnPinnedProbe.command,
                 })
+              }
             }
             const stuckSignal = stuckSupervisor.observe(stepObs.observation)
             if (stuckSignal && stuckEscalations < MAX_STUCK_ESCALATIONS) {
@@ -1673,13 +1694,10 @@ export const layer = Layer.effect(
               .join("\n")
             if (session.parentID) {
               setTestEditGate(sessionID, testEditGateArmed(session.parentID) && !promptAuthorizesTestEdits(userText))
+              // P3 — a plan-only parent's dispatched slices must not edit
+              // either; children inherit the no-edits gate unconditionally.
+              setNoEditsGate(sessionID, noEditsGateArmed(session.parentID))
             } else {
-              // P10 — the resolution budget is per TURN, not per session: a new
-              // user turn is a new task, so the resolve-attempts counter resets
-              // here with the other turn-open stores. A later turn-open rewrite
-              // must preserve this reset or one ambiguous turn disables the
-              // resolution gate for the rest of the session.
-              resetResolveAttempts(sessionID)
               const regexDenyTestEdits = isFixShapedPrompt(userText) && !promptAuthorizesTestEdits(userText)
 
               // The turn-read runs on every root turn open (always-on, no
@@ -1689,25 +1707,90 @@ export const layer = Layer.effect(
               let arming: ArmingVerdict | undefined
               if (turnOpen.triage) {
                 turnReads++
-                verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
-                if (!verdict) {
-                  // P5 — the cross-tier re-ask: the same reasoner re-run the
-                  // low-confidence path uses, now also covering a null merged
-                  // verdict (extraction flake / timeout / transient error).
-                  verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "reasoner", userPrompt: userText })
-                } else if (verdict.confidence === "low") {
-                  const reasonerVerdict = yield* turnReadDispatch({
-                    sessionID,
-                    lastUser,
-                    tier: "reasoner",
-                    userPrompt: userText,
-                  })
-                  if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length) verdict = reasonerVerdict
+                // P4 §4b — the pre-LLM continuation short-circuit: a short,
+                // code-free ack/anaphora follow-up ("go ahead", "still
+                // broken") on a session with prior turns skips the turn-read
+                // call entirely. Deliberately tiny and conservative — false
+                // continuation on real work is the failure to avoid; anything
+                // else pays the call and the model's turnRole decides.
+                const hasPriorTurns = msgs.some((m) => m.info.role === "assistant")
+                let continuationSource: "short-circuit" | "turn-read" | undefined
+                if (hasPriorTurns && isContinuationShortCircuit(userText)) {
+                  continuationSource = "short-circuit"
+                } else {
+                  verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
+                  if (!verdict) {
+                    // P5 — the cross-tier re-ask: the same reasoner re-run the
+                    // low-confidence path uses, now also covering a null merged
+                    // verdict (extraction flake / timeout / transient error).
+                    verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "reasoner", userPrompt: userText })
+                  } else if (verdict.confidence === "low") {
+                    const reasonerVerdict = yield* turnReadDispatch({
+                      sessionID,
+                      lastUser,
+                      tier: "reasoner",
+                      userPrompt: userText,
+                    })
+                    if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length)
+                      verdict = reasonerVerdict
+                  }
+                  if (hasPriorTurns && verdict?.turnRole === "continuation") continuationSource = "turn-read"
                 }
 
+                if (continuationSource) {
+                  // P4 continuation — the turn continues the last fresh
+                  // turn's goal tree. Inherit, never recompute: the stored
+                  // arming decision stays (no fresh decideArming stand-down
+                  // overwrites it), the preamble is rebuilt from the stored
+                  // verdict (Q-H: unchanged), the M4 probe pin is restored
+                  // (the repro is still the contract), the skeleton never
+                  // reseeds, the resolution gate stands down
+                  // (turnContinuation, threaded to the orchestration hook),
+                  // and the P10 resolve-attempts counter is NOT reset — the
+                  // same task is still running. The no-edits gate is strictly
+                  // turn-scoped and disarms ("go ahead" after a plan-only
+                  // turn IS the user lifting the prohibition); the test-edit
+                  // gate keeps its prior per-session state untouched. With
+                  // the store inherited and the skeleton skipped, a
+                  // continuation re-firing diagnosis language cannot re-arm a
+                  // settled localization pre-pass — it routes to re-verify
+                  // via the restored pin and the existing verify rungs.
+                  turnContinuation = true
+                  turnContinuations++
+                  const stored = getTurnVerdict(sessionID)
+                  const storedArming = getArmingDecision(sessionID)
+                  if (stored && storedArming) {
+                    turnPreamble = triagePreamble(stored, storedArming)
+                    turnGoalCount = stored.goals.length
+                  }
+                  turnPinnedProbe = getPinnedProbe(sessionID)
+                  setNoEditsGate(sessionID, false)
+                  yield* Effect.logInfo("turn_continuation", {
+                    "session.id": sessionID,
+                    source: continuationSource,
+                    turnReads,
+                    turnContinuations,
+                  })
+                }
+              }
+
+              if (!turnContinuation) {
+                // P10 — the resolution budget is per TASK: a FRESH user turn
+                // is a new task, so the resolve-attempts counter resets here
+                // with the other turn-open stores; a continuation turn skips
+                // this (same task, same bounded budget). A later turn-open
+                // rewrite must preserve this reset or one ambiguous turn
+                // disables the resolution gate for the rest of the session.
+                resetResolveAttempts(sessionID)
+                // Fresh turn: the M4 pin store starts empty — a stale pin
+                // from an earlier task must not leak into this one.
+                setPinnedProbe(sessionID, undefined)
+              }
+
+              if (turnOpen.triage && !turnContinuation) {
                 // P1-alt — arming is decided in CODE over the extracted
-                // evidence, never by the model. Stored every turn — the null
-                // verdict's stand-down included — so the todowrite door
+                // evidence, never by the model. Stored every FRESH turn — the
+                // null verdict's stand-down included — so the todowrite door
                 // (autoTypeTodos) and the per-slice difficulty floor never
                 // read a stale decision from an earlier turn.
                 arming = decideArming(verdict)
@@ -1721,7 +1804,10 @@ export const layer = Layer.effect(
                 })
               }
 
-              if (verdict && arming) {
+              if (turnContinuation) {
+                // Continuation: everything below (gates, pin, skeleton) is
+                // inherited state — nothing re-derives.
+              } else if (verdict && arming) {
                 // U1/U2 — a non-null verdict is the decider for this turn's
                 // preamble, gates, and skeleton.
                 turnPreamble = triagePreamble(verdict, arming)
@@ -1736,6 +1822,18 @@ export const layer = Layer.effect(
                 setTestEditGate(sessionID, denyTestEdits)
                 if (denyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
 
+                // P3 — the no-edits constraint ("propose/plan, don't code")
+                // arms a hard deny for every edit/write this turn, mirroring
+                // the no-test-edit seam above. needsPlan composes: the P12
+                // plan seed still plants — it is edit-free by design.
+                const denyEdits = verdict.constraints.some((c) => c.kind === "no-edits")
+                setNoEditsGate(sessionID, denyEdits)
+                if (denyEdits) yield* Effect.logInfo("no_edits_gate_armed", { "session.id": sessionID })
+
+                // P4 — the store a later continuation turn inherits the
+                // preamble/goal tree from.
+                setTurnVerdict(sessionID, verdict)
+
                 // M4 — the probe pin keys on the VERDICT: a diagnosis-shaped
                 // goal arms the turn-end prove-it gate with the most-specific
                 // reproduction the prompt names, so an INLINE fix cannot
@@ -1744,11 +1842,13 @@ export const layer = Layer.effect(
                 // and the slice verify rungs still run.
                 if (verdict.goals.some((g) => g.shape === "diagnosis-vague" || g.shape === "diagnosis-grounded")) {
                   turnPinnedProbe = yield* Effect.promise(() => deriveTurnProbe({ promptText: userText }))
-                  if (turnPinnedProbe)
+                  if (turnPinnedProbe) {
+                    setPinnedProbe(sessionID, turnPinnedProbe)
                     yield* Effect.logInfo("turn_probe_pinned", {
                       "session.id": sessionID,
                       probe: turnPinnedProbe.command,
                     })
+                  }
                 }
 
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
@@ -1778,11 +1878,15 @@ export const layer = Layer.effect(
                 }
               } else {
                 // P5 NEUTRAL DEGRADE — a null turn plants NOTHING: no
-                // preamble, no skeleton, no probe pin. A wrong guess steers
-                // the conductor worse than no guess. Only the governance
-                // regexes still arm the no-test-edit gate.
+                // preamble, no skeleton, no probe pin, no no-edits gate, and
+                // the continuation store CLEARS (a degraded turn has no goal
+                // tree to continue). A wrong guess steers the conductor worse
+                // than no guess. Only the governance regexes still arm the
+                // no-test-edit gate.
                 setTestEditGate(sessionID, regexDenyTestEdits)
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
+                setNoEditsGate(sessionID, false)
+                setTurnVerdict(sessionID, null)
                 if (turnOpen.triage) {
                   turnReadNulls++
                   yield* Effect.logInfo("turn_read_degraded", {
@@ -2190,7 +2294,13 @@ export const layer = Layer.effect(
                     const sourceTodo = pendingTodos.find((t) => t.content === req.sliceId) as
                       | OrchestrationTodo
                       | undefined
-                    const persona = personaForSlice({ sliceType: req.sliceType, persona: sourceTodo?.persona })
+                    // P3/Q-D — on a research-shaped turn (stored verdict; the
+                    // store also covers continuation turns) recon slices
+                    // auto-cast the web-enabled researcher.
+                    const persona = personaForSlice(
+                      { sliceType: req.sliceType, persona: sourceTodo?.persona },
+                      { researchShaped: researchShapedTurn(sessionID) },
+                    )
                     // OL-9.5: an escalation must actually change the brain — run 8's
                     // ladder re-dispatched the same executor persona for every hop
                     // (req.tier was ignored; zero reasoner/oracle children existed in
@@ -2380,6 +2490,11 @@ export const layer = Layer.effect(
                   // every slice todosToLoopSlices builds, so a hard/ambiguous
                   // slice floors its generator tier at the reasoner.
                   arming: getArmingDecision(sessionID),
+                  // P4 — a continuation turn stands the resolution gate down.
+                  continuation: turnContinuation,
+                  // P3/Q-D — research turns route slices to the researcher
+                  // persona + citation verifier inside todosToLoopSlices.
+                  researchShaped: researchShapedTurn(sessionID),
                   // #53/#54 resolution gate — the resolution-store key.
                   sessionID,
                   // #53/#54 "resolve-first" re-seed: append (dedup by

@@ -67,18 +67,24 @@ import {
  * the field may be absent until the todo schema carries it); otherwise the
  * slice's type maps deterministically (recon→explorer, verify→runner,
  * mechanical→applier, design/other→procedure). `author`/`researcher` are
- * therefore only reachable via the explicit field — no sliceType defaults to
- * them. Pure so the dispatch closure and tests share one source of truth.
+ * therefore only reachable via the explicit field — with ONE shape-scoped
+ * exception (P3/Q-D): on a research-shaped turn (`researchShaped`, from the
+ * turn-read verdict) a `recon` slice defaults to the web-enabled `researcher`
+ * instead of the repo-only `explorer` — external sources ARE the deliverable.
+ * Pure so the dispatch closure and tests share one source of truth.
  *
  * @sem domain=routing role=router
  */
-export function personaForSlice(slice: Pick<OrchestrationTodo, "sliceType" | "persona">): EconPersona {
+export function personaForSlice(
+  slice: Pick<OrchestrationTodo, "sliceType" | "persona">,
+  opts?: { researchShaped?: boolean },
+): EconPersona {
   if (typeof slice.persona === "string" && (ECON_PERSONAS as readonly string[]).includes(slice.persona)) {
     return slice.persona as EconPersona
   }
   switch (slice.sliceType) {
     case "recon":
-      return "explorer"
+      return opts?.researchShaped ? "researcher" : "explorer"
     case "verify":
       return "runner"
     case "mechanical":
@@ -1348,7 +1354,11 @@ function withDerivedTypes(todos: readonly OrchestrationTodo[]): readonly Orchest
  * the turn's arming-judge difficulty signals (§1.1b) — goal-level, not
  * per-todo — so every slice built here inherits the same `hardness`/
  * `ambiguity`, letting the two-axis allocator floor a hard/ambiguous slice's
- * generator tier at the reasoner.
+ * generator tier at the reasoner. P3/Q-D: a researcher-persona slice
+ * (explicit, or the research-turn recon default via `opts.researchShaped`)
+ * verifies by CITATION, never the test rung — no sound-rung commands, no
+ * probe pin, `testStrength` pinned untestable so the verify ladder routes to
+ * the judge over the cited digest.
  *
  * @sem domain=routing role=digest
  */
@@ -1356,6 +1366,7 @@ export async function todosToLoopSlices(
   todos: readonly OrchestrationTodo[],
   probes: SliceProbes,
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity },
+  opts?: { researchShaped?: boolean },
 ): Promise<LoopSlice[]> {
   const effectiveTodos = withDerivedTypes(todos)
   const typed = effectiveTodos.filter(isDispatchableSlice)
@@ -1449,11 +1460,17 @@ export async function todosToLoopSlices(
   return Promise.all(
     typed.map(async (t, i): Promise<LoopSlice> => {
       const files = extractSliceFiles(t.content)
+      // P3/Q-D — the citation-verified research slice, keyed on the resolved
+      // persona so an explicit `persona:"researcher"` and the research-turn
+      // recon default route identically.
+      const isResearchSlice = personaForSlice(t, opts) === "researcher"
       const [coupling, testStrength] = await Promise.all([
         t.coupling ? Promise.resolve({ coupling: t.coupling as "low" | "high" }) : probes.probeCoupling(t.content, files),
-        t.testStrength
-          ? Promise.resolve({ testStrength: t.testStrength as "testable" | "untestable" })
-          : probes.probeTestStrength(files),
+        isResearchSlice
+          ? Promise.resolve({ testStrength: "untestable" as const })
+          : t.testStrength
+            ? Promise.resolve({ testStrength: t.testStrength as "testable" | "untestable" })
+            : probes.probeTestStrength(files),
       ])
       const deps = effectiveDeps[i]!.filter((d) => used.has(d))
       const isPatchEmittingSlice =
@@ -1467,7 +1484,7 @@ export async function todosToLoopSlices(
       // probe rung enforces red→green on that exact case. Unset when nothing
       // identifiable exists — never fabricated (the M3 floor covers that case).
       let probeCommand: VerifyCommand | undefined
-      if (isPatchEmittingSlice) {
+      if (isPatchEmittingSlice && !isResearchSlice) {
         probeCommand = mostSpecificRepro(extractVerifyCommands(t.content))
         if (!probeCommand) {
           const upstreamCandidates = deps.flatMap((d) => extractVerifyCommands(contentById.get(d) ?? ""))
@@ -1480,7 +1497,8 @@ export async function todosToLoopSlices(
       // commands win; the repo-script probe fills in when the text names none.
       // The test-tree guard rides FIRST in every command-backed spec.
       const wantsCommands =
-        t.sliceType === "verify" || (t.sliceType === "mechanical" && testStrength.testStrength === "testable")
+        !isResearchSlice &&
+        (t.sliceType === "verify" || (t.sliceType === "mechanical" && testStrength.testStrength === "testable"))
       let verifyCommands: VerifyCommand[] = []
       if (wantsCommands) {
         verifyCommands = extractVerifyCommands(t.content)
@@ -1633,6 +1651,10 @@ export interface ConductorOrchestrationDeps {
   goalCount?: number
   /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). Absent on a null-verdict (legacy) turn. */
   arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity; armLocalization?: boolean }
+  /** P4 §4b — this turn is a continuation (steering/iteration on the session's existing work): the resolution gate stands down entirely — a continuation never re-enters resolve-first; the fresh turn that started the task already resolved it. */
+  continuation?: boolean
+  /** P3/Q-D — the turn-read found a research-shaped goal: recon slices default to the web-enabled researcher persona and research slices verify by citation, never the test rung (threaded to `todosToLoopSlices`). */
+  researchShaped?: boolean
   /** #53/#54 — the live session id, the resolution-store key. Absent (a caller/test double that predates the resolution gate) → a flagged turn skips the gate and decomposes unchanged, same as before the gate existed. */
   sessionID?: string
   /** #53/#54 — plant one diagnosis pre-pass seed onto the session's stored todo list (append, dedup by content) — the "resolve-first" branch's re-seed when `buildTriageTodoSkeleton`'s turn-open seed did not already plant one for this turn's shape. Typed `InjectedSliceTodo` (not the narrower `OrchestrationTodo`) because the live todo store requires `priority`, which only the frame-seed constants (`LOCALIZATION_PREPASS_TODO`/`PLAN_PREPASS_TODO`) carry. */
@@ -1729,7 +1751,11 @@ export async function runConductorOrchestration(
     // deps.sessionID (the resolution-store key); absent it — a caller/test
     // double that predates this gate — a flagged turn falls straight through
     // to the decompose path below, unchanged from before the gate existed.
-    if (deps.sessionID !== undefined) {
+    // P4: a continuation turn stands the gate down — the inherited arming may
+    // still read hard/ambiguous, but the task already passed resolution on
+    // the fresh turn that started it; re-entering resolve-first would re-pay
+    // a pass the user's follow-up is steering, not restarting.
+    if (deps.sessionID !== undefined && deps.continuation !== true) {
       const flagged = deps.arming?.ambiguity === "ambiguous" || deps.arming?.hardness === "hard"
       if (flagged) {
         const sessionID = deps.sessionID
@@ -1783,7 +1809,9 @@ export async function runConductorOrchestration(
     }
 
     const typedIndices = todos.map((t, i) => (isDispatchableSlice(t) ? i : -1)).filter((i) => i >= 0)
-    const slices = await todosToLoopSlices(todos, deps.probes, deps.arming)
+    const slices = await todosToLoopSlices(todos, deps.probes, deps.arming, {
+      researchShaped: deps.researchShaped,
+    })
     if (!shouldOrchestrate(slices, deps.goalCount)) return { engaged: false }
     const todoIndexOf = (sliceId: string): number | undefined => {
       const k = slices.findIndex((s) => s.id === sliceId)

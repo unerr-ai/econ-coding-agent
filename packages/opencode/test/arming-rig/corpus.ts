@@ -1,3 +1,4 @@
+import { LOCALIZATION_SLICE_CONTENT } from "../../src/session/prompts/seeds"
 import type { ArmingScenario, TriageVerdict, TriageGoalShape, OrchestrationTodo } from "./types"
 
 /**
@@ -839,6 +840,240 @@ export const CORPUS: ArmingScenario[] = [
       reason: "R4 — mechanical todos exist but name no file; arming still stands (Door-2 backstop)",
     },
     note: "todos alone don't ground vague diagnosis if no file is named",
+  },
+
+  // -------------------------------------------------------------------------
+  // P3 research -> NONE (external-knowledge deliverable; arming N/A)
+  // -------------------------------------------------------------------------
+  {
+    id: "research-pure-lookup",
+    prompt: "what breaking changes did zod v4 ship, and do any of them affect how we validate configs?",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "what breaking changes did zod v4 ship",
+          shape: "research" as TriageGoalShape,
+          deliverable: "a cited digest of zod v4 breaking changes and their impact on our validators",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      shape: "research" as TriageGoalShape,
+      localizationArmed: false,
+      reason: "R1/P3 — research shape is an external lookup, not a diagnosis; arming N/A",
+    },
+    note: "pure external lookup — the qa/research boundary is 'needs external sources'",
+  },
+
+  {
+    id: "research-build-compound",
+    prompt: "find out how the new stripe billing API paginates events, then update our webhook client to use it",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "find out how the new stripe billing API paginates events",
+          shape: "research" as TriageGoalShape,
+          deliverable: "cited digest of the new pagination contract",
+        },
+        {
+          quote: "update our webhook client to use it",
+          shape: "build" as TriageGoalShape,
+          deliverable: "webhook client paginates via the new API",
+          dependsOn: [0],
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: false,
+      reason: "P3 — research + scoped build compound: neither goal is a diagnosis, nothing arms",
+    },
+    note: "research feeding a build — two goals, ordered, no pre-pass",
+  },
+
+  // -------------------------------------------------------------------------
+  // P3 refactor -> NONE (behavior-preserving restructure; arming N/A)
+  // -------------------------------------------------------------------------
+  {
+    id: "refactor-pure",
+    prompt: "restructure the session module: extract the retry logic into a shared helper, no behavior change",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "extract the retry logic into a shared helper",
+          shape: "refactor" as TriageGoalShape,
+          deliverable: "retry logic shared; suite green; no public-signature breaks",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      shape: "refactor" as TriageGoalShape,
+      localizationArmed: false,
+      reason: "P3 — refactor restructures without changing behavior; the suite is the safety net, no pre-pass",
+    },
+    note: "pure behavior-preserving restructure",
+  },
+
+  {
+    id: "refactor-boundary-adds-behavior",
+    prompt: "refactor the export pipeline so it also emits JSON alongside CSV",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "refactor the export pipeline so it also emits JSON alongside CSV",
+          // "refactor" in the user's words, but it ADDS behavior — THE
+          // discriminator says build. The mock encodes the correct answer;
+          // live mode (RIG_LIVE=1) scores the real extractor on it.
+          shape: "build" as TriageGoalShape,
+          deliverable: "export pipeline emits JSON in addition to CSV",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      shape: "build" as TriageGoalShape,
+      localizationArmed: false,
+      reason: "P3 boundary — adds behavior ⇒ build, never refactor, despite the user's verb",
+    },
+    note: "adds-behavior 'refactor' must classify build (the crisp discriminator)",
+  },
+
+  // -------------------------------------------------------------------------
+  // P3 no-edits constraint -> plan-only turn (build + no-edits + needsPlan)
+  // -------------------------------------------------------------------------
+  {
+    id: "no-edits-plan-only",
+    prompt: "plan the migration to the new billing provider — propose the steps, don't write code",
+    mockVerdict: {
+      goals: [
+        {
+          quote: "plan the migration to the new billing provider",
+          shape: "build" as TriageGoalShape,
+          deliverable: "a migration plan the team can execute",
+          needsPlan: true,
+        },
+      ],
+      constraints: [{ quote: "don't write code", kind: "no-edits" }],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: true,
+      seedKind: "plan",
+      reason:
+        "P3 — 'propose, don't code' composes: build + no-edits + needsPlan; the P12 plan seed still plants (edit-free by design) while the no-edits gate blocks the edit tools",
+    },
+    note: "plan-only turn: the constraint gates edits, the plan seed still plants",
+  },
+
+  // -------------------------------------------------------------------------
+  // P4 continuation — §4b's three cases
+  // -------------------------------------------------------------------------
+  {
+    id: "continuation-go-ahead",
+    prompt: "go ahead",
+    // The session's prior fresh turn: a planned build (its arming decision is
+    // what the continuation inherits — no fresh stand-down overwrite).
+    priorMockVerdict: {
+      goals: [
+        {
+          quote: "add dark mode: a navbar toggle, persisted in localStorage, applied across all panels",
+          shape: "build" as TriageGoalShape,
+          deliverable: "dark mode everywhere",
+          needsPlan: true,
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    expect: {
+      localizationArmed: false,
+      shortCircuit: true,
+      turnRole: "continuation",
+      reason: "P4 — pure ack short-circuits pre-LLM: no turn-read call, no reseed, arming inherited",
+    },
+    note: "§4b case 1: 'go ahead' — the wasteful null-triage LLM call is skipped entirely",
+  },
+
+  {
+    id: "continuation-still-broken-no-rearm",
+    prompt: "still broken",
+    // Prior fresh turn: a vague diagnosis that ARMED localization…
+    priorMockVerdict: {
+      goals: [
+        {
+          quote: "the app sometimes crashes on startup",
+          shape: "diagnosis-vague" as TriageGoalShape,
+          deliverable: "crash root-caused and fixed",
+          evidence: { locationNamed: false, fixSpecified: false, hardness: "moderate", ambiguity: "clear" },
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    // …and the session already ran it: the localization pre-pass is SETTLED
+    // on the todo list. The continuation must not plant a second one — it
+    // routes to re-verify (the inherited M4 pin + existing verify rungs).
+    todos: [
+      { content: "Fix the crash on startup", status: "pending" },
+      {
+        content: LOCALIZATION_SLICE_CONTENT,
+        status: "completed",
+        sliceType: "mechanical",
+        testStrength: "testable",
+        persona: "applier",
+      },
+    ],
+    expect: {
+      localizationArmed: false,
+      shortCircuit: true,
+      turnRole: "continuation",
+      reason:
+        "P4 no-re-arm — continuation with re-fired diagnosis language + a SETTLED localization pre-pass plants nothing new; the one-shot content check holds with the inherited armLocalization=true",
+    },
+    note: "§4b case 2: 'still broken' after a settled localization — re-verify, never re-arm",
+  },
+
+  {
+    id: "continuation-new-goal-fresh",
+    prompt: "now also handle the empty case",
+    priorMockVerdict: {
+      goals: [
+        {
+          quote: "add a --json output flag to the CLI",
+          shape: "build" as TriageGoalShape,
+          deliverable: "CLI supports --json",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    },
+    // Genuine NEW work in a follow-up message: the short-circuit must NOT
+    // catch it, and the turn-read extracts it as a fresh goal.
+    mockVerdict: {
+      goals: [
+        {
+          quote: "now also handle the empty case",
+          shape: "build" as TriageGoalShape,
+          deliverable: "empty input handled",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+      turnRole: "fresh",
+    },
+    expect: {
+      localizationArmed: false,
+      shortCircuit: false,
+      turnRole: "fresh",
+      reason: "P4 guard — a follow-up carrying a new deliverable is FRESH: goals extracted, normal turn open",
+    },
+    note: "§4b case 3: 'now also handle the empty case' — follow-up handling must not swallow new work",
   },
 
   // -------------------------------------------------------------------------

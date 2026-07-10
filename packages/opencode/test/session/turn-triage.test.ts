@@ -12,6 +12,7 @@ import {
   parseTurnReadResponse,
   runTurnRead,
   triageTelemetry,
+  isContinuationShortCircuit,
   TRIAGE_MAX_GOALS,
   type TriageComplete,
 } from "../../src/session/turn-triage"
@@ -551,6 +552,152 @@ describe("triageTelemetry", () => {
       shapes: ["audit", "diagnosis-grounded"],
       constraintKinds: ["no-test-edit"],
       confidence: "low",
+      turnRole: "fresh",
     })
+  })
+})
+
+// P3 — the taxonomy additions: research/refactor shapes and the no-edits
+// constraint kind ride the same parse/validate pipeline.
+describe("parseTurnReadResponse — P3 shapes and constraints", () => {
+  test("a research-shaped goal parses (external-sources deliverable)", () => {
+    const userPrompt = "What breaking changes did zod v4 ship, and do any affect our validators?"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "What breaking changes did zod v4 ship",
+          shape: "research",
+          deliverable: "a cited digest of zod v4 breaking changes",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].shape).toBe("research")
+  })
+
+  test("a refactor-shaped goal parses (restructure, no behavior change)", () => {
+    const userPrompt = "extract the retry logic into a shared helper without changing behavior"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "extract the retry logic into a shared helper",
+          shape: "refactor",
+          deliverable: "retry logic shared, behavior unchanged, suite green",
+        },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.goals[0].shape).toBe("refactor")
+  })
+
+  test('"plan the migration, don\'t code it" extracts a no-edits constraint', () => {
+    const userPrompt = "plan the migration to the new billing API, don't code it"
+    const raw = JSON.stringify({
+      goals: [
+        {
+          quote: "plan the migration to the new billing API",
+          shape: "build",
+          deliverable: "a migration plan",
+          needsPlan: true,
+        },
+      ],
+      constraints: [{ quote: "don't code it", kind: "no-edits" }],
+      confidence: "high",
+    })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.constraints[0].kind).toBe("no-edits")
+    expect(verdict!.goals[0].needsPlan).toBe(true)
+  })
+})
+
+// P4 — the turnRole field and the pre-LLM continuation short-circuit.
+describe("parseTurnReadResponse — P4 turnRole", () => {
+  test("turnRole absent defaults to fresh (older mocks/stubs keep working)", () => {
+    const userPrompt = "Fix the profile-name bug."
+    const raw = JSON.stringify({
+      goals: [
+        { quote: "Fix the profile-name bug.", shape: "diagnosis-grounded", deliverable: "profile name displays" },
+      ],
+      constraints: [],
+      confidence: "high",
+    })
+    expect(parseTurnReadResponse(raw, userPrompt)!.turnRole).toBe("fresh")
+  })
+
+  test("a continuation verdict may carry ZERO goals — a pure steering message extracts nothing", () => {
+    const userPrompt = "hmm, that approach still seems to produce the same failure as before somehow"
+    const raw = JSON.stringify({ goals: [], constraints: [], confidence: "high", turnRole: "continuation" })
+
+    const verdict = parseTurnReadResponse(raw, userPrompt)
+
+    expect(verdict).not.toBeNull()
+    expect(verdict!.turnRole).toBe("continuation")
+    expect(verdict!.goals).toHaveLength(0)
+  })
+
+  test("zero goals on a FRESH verdict still fails outright", () => {
+    const raw = JSON.stringify({ goals: [], constraints: [], confidence: "high", turnRole: "fresh" })
+    expect(parseTurnReadResponse(raw, "Fix the profile-name bug.")).toBeNull()
+  })
+
+  test("an invalid turnRole value reads as fresh", () => {
+    const userPrompt = "Fix the profile-name bug."
+    const raw = JSON.stringify({
+      goals: [
+        { quote: "Fix the profile-name bug.", shape: "diagnosis-grounded", deliverable: "profile name displays" },
+      ],
+      constraints: [],
+      confidence: "high",
+      turnRole: "followup",
+    })
+    expect(parseTurnReadResponse(raw, userPrompt)!.turnRole).toBe("fresh")
+  })
+})
+
+describe("isContinuationShortCircuit — the pre-LLM ack/anaphora net", () => {
+  test("the canonical ack/steering messages short-circuit", () => {
+    for (const prompt of [
+      "go ahead",
+      "yes, do it",
+      "continue",
+      "proceed",
+      "try again",
+      "keep going",
+      "still broken",
+      "it's still failing",
+      "still not working",
+      "that didn't work",
+      "same error",
+      "ok go ahead!",
+    ]) {
+      expect(isContinuationShortCircuit(prompt)).toBe(true)
+    }
+  })
+
+  test("real work never short-circuits — when in doubt, call the model", () => {
+    for (const prompt of [
+      "now also handle the empty case", // new deliverable — must reach the turn-read
+      "go ahead and rewrite the auth module to use JWT", // ack prefix but carries work
+      "still broken in src/parser.ts", // path-shaped token
+      "try again with `--force`", // code-shaped token
+      "fix the memory leak in the session handler",
+      "continue the migration by porting the billing module and its tests over too", // ≥80 chars of real work
+      "",
+    ]) {
+      expect(isContinuationShortCircuit(prompt)).toBe(false)
+    }
   })
 })

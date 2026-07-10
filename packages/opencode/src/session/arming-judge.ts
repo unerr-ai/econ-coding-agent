@@ -38,7 +38,7 @@ export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness">
 
 const HARDNESS_RANK: Record<ArmingHardness, number> = { trivial: 0, moderate: 1, hard: 2 }
 
-/** The shapes localization applies to — build/audit/qa/run-only never arm. */
+/** The shapes localization applies to — build/refactor/audit/qa/research/run-only never arm. */
 function isDiagnosisGoal(goal: TriageGoal): boolean {
   return goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
 }

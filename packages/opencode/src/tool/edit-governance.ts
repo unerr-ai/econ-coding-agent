@@ -71,6 +71,33 @@ export function isTestFilePath(filePath: string): boolean {
 
 const testEditGate = new Set<string>()
 
+// P3 no-edits gate — the "propose/plan, don't code" constraint (turn-read
+// kind "no-edits"), same per-session pattern as the test-edit gate but
+// broader: it denies EVERY edit/write for the turn, not just test files.
+// Strictly turn-scoped: a fresh turn re-arms from its own constraints and a
+// continuation turn disarms it — a follow-up "go ahead" after a plan-only
+// turn IS the user lifting the prohibition.
+const noEditsGate = new Set<string>()
+
+/** Arm or disarm the no-edits gate for a session — set every turn at turn open (root: from the turn-read's `no-edits` constraint; child: inherited from the parent). */
+export function setNoEditsGate(sessionID: string, deny: boolean): void {
+  if (deny) noEditsGate.add(sessionID)
+  else noEditsGate.delete(sessionID)
+}
+
+/** Is the no-edits gate armed for this session? */
+export function noEditsGateArmed(sessionID: string): boolean {
+  return noEditsGate.has(sessionID)
+}
+
+/** The reason string thrown at the edit/write boundary when a plan-only turn tries to mutate a file. */
+export function noEditsDenialMessage(relPath: string): string {
+  return (
+    `Edit denied by the no-edits gate: this turn asked for a proposal/plan only ("don't code" was an explicit constraint), so "${relPath}" must not be modified. ` +
+    `Deliver the plan or analysis as text; the user will ask for the implementation when they accept it.`
+  )
+}
+
 /**
  * Arm or disarm the no-test-edit gate for a session. Called once per turn at
  * turn open (root sessions decide from the user prompt; child sessions

@@ -15,7 +15,14 @@ import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { seedReadDedup } from "./_shared"
-import { callersAtRiskWarning, isTestFilePath, testEditGateArmed, testEditDenialMessage } from "./edit-governance"
+import {
+  callersAtRiskWarning,
+  isTestFilePath,
+  testEditGateArmed,
+  testEditDenialMessage,
+  noEditsGateArmed,
+  noEditsDenialMessage,
+} from "./edit-governance"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -46,6 +53,12 @@ export const WriteTool = Tool.define(
           yield* assertExternalDirectoryEffect(ctx, filepath)
 
           const exists = yield* fs.existsSafe(filepath)
+
+          // P3 no-edits gate: a plan-only turn ("propose, don't code")
+          // denies every file write at the tool boundary.
+          if (noEditsGateArmed(ctx.sessionID)) {
+            throw new Error(noEditsDenialMessage(path.relative(instance.worktree, filepath)))
+          }
 
           // B3 no-test-edit gate: on a fix-shaped turn, overwriting an
           // existing test file is denied with the reason — writing a NEW
