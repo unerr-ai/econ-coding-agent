@@ -57,6 +57,7 @@ import {
   countToolCalls,
   budgetExhaustedMarker,
   buildRepoPrimer,
+  extractSliceFiles,
   renderSliceDigestLedger,
   orderTriageGoals,
   buildTriageTodoSkeleton,
@@ -2620,6 +2621,27 @@ describe("todosToPlanNodes — P11b parentID threading (goal-tree structure reac
   })
 })
 
+describe("extractSliceFiles (M1 — bare filenames)", () => {
+  it("captures a bare source filename with no directory prefix", () => {
+    expect(extractSliceFiles("Apply the fix to ddl_references.py")).toEqual(["ddl_references.py"])
+  })
+
+  it("still captures slash-qualified paths of any short extension", () => {
+    expect(extractSliceFiles("edit docs/notes.md and src/session/prompt.ts")).toEqual([
+      "docs/notes.md",
+      "src/session/prompt.ts",
+    ])
+  })
+
+  it("prose abbreviations and version numbers never match", () => {
+    expect(extractSliceFiles("e.g. bump to v1.2, i.e. the 3.9 runtime")).toEqual([])
+  })
+
+  it("bare names outside the extension whitelist never match", () => {
+    expect(extractSliceFiles("see notes.md for the plan")).toEqual([])
+  })
+})
+
 describe("buildRepoPrimer (OL-9.4b)", () => {
   const tmpDirs: string[] = []
   function makeTmpRepo(): string {
@@ -2689,6 +2711,26 @@ describe("buildRepoPrimer (OL-9.4b)", () => {
 
   it("never throws on an unreadable/nonexistent cwd", () => {
     expect(() => buildRepoPrimer({ cwd: join(tmpdir(), "does-not-exist-econ-primer-test") })).not.toThrow()
+  })
+
+  it("M1: names a django-runtests harness so slices never guess pytest", () => {
+    const cwd = makeTmpRepo()
+    writeFileSync(join(cwd, "setup.py"), "from setuptools import setup\nsetup()\n")
+    mkdirSync(join(cwd, "tests"))
+    writeFileSync(join(cwd, "tests", "runtests.py"), "#!/usr/bin/env python\n")
+
+    const primer = buildRepoPrimer({ cwd })
+    expect(primer).toContain("Test harness (detected)")
+    expect(primer).toContain("tests/runtests.py <dotted.test.label>")
+    expect(primer).toContain("does NOT use pytest")
+  })
+
+  it("M1: no python markers ⇒ no harness line", () => {
+    const cwd = makeTmpRepo()
+    writeFileSync(join(cwd, "index.js"), "")
+
+    const primer = buildRepoPrimer({ cwd })
+    expect(primer).not.toContain("Test harness (detected)")
   })
 })
 

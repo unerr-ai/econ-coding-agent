@@ -16,6 +16,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
+import { detectPythonHarness } from "../tool/graph-tools"
 import { LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
@@ -607,8 +608,16 @@ export function hasPendingTypedSlices(todos: readonly OrchestrationTodo[]): bool
   return todos.some((t) => isTypedSlice(t) && t.status === "pending")
 }
 
-/** Path-shaped tokens (a `/` and a source extension) a slice's text names — fed to the probes. */
-const SLICE_FILE_RE = /[\w./-]+\/[\w.-]+\.[a-z]{1,5}\b/gi
+/**
+ * Path-shaped tokens a slice's text names — fed to the probes. Two forms: a
+ * `/`-qualified path with any short extension, or a BARE filename with a known
+ * source extension (12039 tuning, M1: the conductor typed "Apply the fix to
+ * ddl_references.py" — no slash, so the slice probed with zero files, landed
+ * untestable, and a handed fix authored at the reasoner). Bare matching stays
+ * extension-whitelisted so prose abbreviations ("e.g.", "v1.2") never match.
+ */
+const SLICE_FILE_RE =
+  /[\w./-]+\/[\w.-]+\.[a-z]{1,5}\b|\b[\w-]+\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|java|rb|c|h|cc|cpp|hpp|cs|php|swift|kt|scala|sql|sh|json|yaml|yml|toml)\b/gi
 
 /** Path-shaped tokens a slice's text names — the shared scope extraction the probes, the P6b edit-scope probe, and the P11b delegate scope-containment gate all read. */
 export function extractSliceFiles(text: string): string[] {
@@ -2013,6 +2022,16 @@ export function buildRepoPrimer(opts?: RepoPrimerOptions): string {
   if (tree.length > 0) sections.push(tree.join("\n"))
   const manifest = summarizePackageJson(cwd)
   if (manifest) sections.push(manifest)
+  // 12039 tuning (M1): name the repo's REAL test harness so no slice guesses
+  // one (the live failure: a runner guessed `pytest` on a django checkout and
+  // the whole DAG settled unverified).
+  const harness = detectPythonHarness(cwd)
+  if (harness)
+    sections.push(
+      `Test harness (detected): \`${harness.template}\` — run tests ONLY through this harness${
+        harness.kind === "django-runtests" ? "; this repo does NOT use pytest" : ""
+      }.`,
+    )
   if (sections.length === 0) return ""
   return [
     "## Repo primer (already established — do NOT re-list directories or re-read package.json for orientation)",

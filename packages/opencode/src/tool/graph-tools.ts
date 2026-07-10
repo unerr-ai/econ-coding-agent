@@ -508,6 +508,92 @@ function findPackageRoot(fromFile: string): string | undefined {
   return undefined
 }
 
+/** Python project markers that anchor a repo/package root for the python probes. */
+const PYTHON_ROOT_MARKERS = ["pyproject.toml", "setup.py", "setup.cfg", "tox.ini"]
+/** Max python test files one verify command targets — bounded runtime, never a whole unknown suite. */
+const PYTHON_VERIFY_TARGET_CAP = 3
+
+function findPythonProjectRoot(fromFile: string): string | undefined {
+  let dir = path.dirname(fromFile)
+  for (let i = 0; i < TEST_STRENGTH_PKG_ROOT_DEPTH; i++) {
+    if (PYTHON_ROOT_MARKERS.some((marker) => existsSync(path.join(dir, marker)))) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return undefined
+}
+
+/**
+ * Python test files under `root` whose content references any of `stems`
+ * (module basenames only — python symbol names like `Columns` are too generic
+ * for content matching). Candidates whose own filename carries a stem sort
+ * first so the scan cap cannot skip a module's dedicated test file inside a
+ * large suite (django's tests/ holds ~1000 files against a 50-file cap).
+ */
+function pythonTestFilesReferencing(root: string, stems: string[]): string[] {
+  const suffixNamed = Glob.scanSync("**/{test_*,*_test}.py", { cwd: root, absolute: true, dot: false })
+  const testDirNamed = Glob.scanSync("{test,tests}/**/*.py", { cwd: root, absolute: true, dot: false })
+  const candidates = [...new Set([...suffixNamed, ...testDirNamed])]
+  const nameCarriesStem = (file: string) => stems.some((stem) => path.basename(file).includes(stem))
+  candidates.sort((a, b) => Number(nameCarriesStem(b)) - Number(nameCarriesStem(a)))
+  const hits: string[] = []
+  for (const testFile of candidates.slice(0, TEST_STRENGTH_TEST_SCAN_LIMIT)) {
+    try {
+      const content = readFileSync(testFile, "utf8")
+      if (stems.some((stem) => content.includes(stem))) hits.push(testFile)
+    } catch {
+      /* unreadable test file contributes nothing */
+    }
+  }
+  return hits
+}
+
+function hasPytestConfig(root: string): boolean {
+  if (existsSync(path.join(root, "pytest.ini"))) return true
+  const fileCarries = (file: string, marker: string) => {
+    try {
+      return readFileSync(path.join(root, file), "utf8").includes(marker)
+    } catch {
+      return false
+    }
+  }
+  return (
+    fileCarries("pyproject.toml", "[tool.pytest") ||
+    fileCarries("setup.cfg", "[tool:pytest]") ||
+    fileCarries("tox.ini", "[pytest]")
+  )
+}
+
+/** A detected python test harness: which runner this repo actually uses, and the interpreter that reaches its installed deps. */
+export interface PythonHarness {
+  /** `./.venv/bin/python` when the project venv exists at the root, else `python`. */
+  readonly python: string
+  readonly kind: "django-runtests" | "pytest"
+  /** Prompt-facing invocation template (primer/briefs) so slices run tests through the real harness instead of guessing one. */
+  readonly template: string
+}
+
+/**
+ * 12039 tuning (M1): detect the python repo's REAL test harness from its own
+ * files. The live failure this grounds: a runner slice on a django checkout
+ * guessed `pytest` (which django does not use, under whatever python was on
+ * PATH), every slice settled unverified, and the unverified cascade tripled
+ * the turn's cost. Detection order: a django-style `tests/runtests.py` beats
+ * pytest config (a django checkout may carry tox.ini too); no marker ⇒
+ * undefined and the caller stays silent.
+ *
+ * @sem domain=routing role=analysis
+ */
+export function detectPythonHarness(root: string): PythonHarness | undefined {
+  if (!PYTHON_ROOT_MARKERS.some((marker) => existsSync(path.join(root, marker)))) return undefined
+  const python = existsSync(path.join(root, ".venv/bin/python")) ? "./.venv/bin/python" : "python"
+  if (existsSync(path.join(root, "tests/runtests.py")))
+    return { python, kind: "django-runtests", template: `${python} tests/runtests.py <dotted.test.label>` }
+  if (hasPytestConfig(root)) return { python, kind: "pytest", template: `${python} -m pytest -q <test-file>` }
+  return undefined
+}
+
 /** Exported symbol names declared in a source file — a lightweight regex scan, no graph needed. */
 function exportedSymbolNames(content: string): string[] {
   const names: string[] = []
@@ -529,6 +615,11 @@ function exportedSymbolNames(content: string): string[] {
 }
 
 function fileHasTests(absFile: string): boolean {
+  if (/\.pyi?$/i.test(absFile)) {
+    const stem = path.basename(absFile).replace(/\.pyi?$/i, "")
+    const root = findPythonProjectRoot(absFile) ?? path.dirname(absFile)
+    return pythonTestFilesReferencing(root, [stem]).length > 0
+  }
   const stem = path.basename(absFile).replace(/\.[tj]sx?$/, "")
   const pkgRoot = findPackageRoot(absFile) ?? path.dirname(absFile)
   // Suffix-named tests anywhere, plus suffix-LESS files under conventional test
@@ -678,7 +769,13 @@ export async function probeSliceVerifyCommands(files: string[]): Promise<VerifyC
       const root = findPackageRoot(absFile)
       if (root && !roots.includes(root)) roots.push(root)
     }
-    if (roots.length === 0 && existsSync(path.join(process.cwd(), "package.json"))) roots.push(process.cwd())
+    // F2 cwd fallback — but never for a purely-python slice (M1): a slice
+    // naming only .py files must not "verify" via the cwd's npm scripts (in
+    // production the cwd IS the python repo and has no package.json; anywhere
+    // else the scripts exercise the wrong codebase entirely).
+    const purelyPython = (files ?? []).length > 0 && (files ?? []).every((f) => /\.pyi?$/i.test(f))
+    if (roots.length === 0 && !purelyPython && existsSync(path.join(process.cwd(), "package.json")))
+      roots.push(process.cwd())
     for (const root of roots) {
       try {
         const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as {
@@ -702,6 +799,39 @@ export async function probeSliceVerifyCommands(files: string[]): Promise<VerifyC
         if (commands.length > 0) return commands
       } catch {
         /* this root contributes nothing */
+      }
+    }
+
+    // Python fallback (12039 tuning, M1): no JS package root produced
+    // commands. Detect the repo's real harness and target ONLY the test files
+    // whose content references the slice's own modules — evidence, never a
+    // guess. No referencing test file ⇒ no command: the sound rung must never
+    // run a whole unknown suite.
+    const pyFiles = (files ?? []).filter((f) => /\.pyi?$/i.test(f))
+    if (pyFiles.length > 0) {
+      const absPyFiles = pyFiles.map((f) => (path.isAbsolute(f) ? f : path.join(process.cwd(), f)))
+      const root =
+        absPyFiles.map((f) => findPythonProjectRoot(f)).find((r): r is string => r !== undefined) ??
+        (PYTHON_ROOT_MARKERS.some((m) => existsSync(path.join(process.cwd(), m))) ? process.cwd() : undefined)
+      const harness = root ? detectPythonHarness(root) : undefined
+      if (root && harness) {
+        const stems = absPyFiles.map((f) => path.basename(f).replace(/\.pyi?$/i, ""))
+        const targets = pythonTestFilesReferencing(root, stems).slice(0, PYTHON_VERIFY_TARGET_CAP)
+        if (targets.length > 0) {
+          if (harness.kind === "django-runtests") {
+            const testsDir = path.join(root, "tests")
+            const labels = targets
+              .filter((t) => t.startsWith(testsDir + path.sep))
+              .map((t) => path.relative(testsDir, t).replace(/\.py$/i, "").split(path.sep).join("."))
+            if (labels.length > 0)
+              return [
+                { kind: "test", command: `cd "${root}" && ${harness.python} tests/runtests.py ${labels.join(" ")}` },
+              ]
+          } else {
+            const rel = targets.map((t) => path.relative(root, t))
+            return [{ kind: "test", command: `cd "${root}" && ${harness.python} -m pytest -q ${rel.join(" ")}` }]
+          }
+        }
       }
     }
     return []
