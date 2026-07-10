@@ -377,3 +377,30 @@ Guardrails (standing, from the build directive):
 - Watch-fors carried from M3: truncation markers must steer the model to *narrow*, not to
   trust partial data; batching must not revive the uncapped-blob problem (aggregate step
   budget is mandatory before executor fan-out ships).
+
+---
+
+## 7. Interaction with the orchestration machinery
+
+Levers 1–3 sit **below** the orchestration layer
+([`../architecture/ORCHESTRATION_MECHANISM.md`](../architecture/ORCHESTRATION_MECHANISM.md));
+they change what a step costs, not which steps the machinery decides to take. L4 is the one
+genuine mechanism change. The specific touchpoints, so implementation keeps them honest:
+
+| mechanism | interaction | rule to preserve |
+|---|---|---|
+| Two-axis allocation (P-series, `allocation.ts`) | none functionally — but L1–L3 cut the *conductor's* step cost, which shifts the L4 break-even (a cheaper grind weakens the case for escalating a given ticket) | re-derive the L4 step-budget threshold **after** L1–L3 land, not before |
+| P8 step budgets (slices) / 25-tool slice cap | budgets count **tool calls**, batching only reduces *messages* — cap semantics unchanged; a batched slice finishes the same work in fewer round trips | do not convert caps to message counts; calls stay the unit |
+| P6b scope-overlap serialization | operates at slice level; L1's concurrency-safe fan-out operates *within* a step — orthogonal. Edits stay exclusive in both layers | governance gate (fires at the edit) must still see every edit individually — edits are never batched, so this holds by construction |
+| Sound-rung verification (OL-7.9 verify commands) | **L3 memoization must never satisfy the sound rung.** The rung is the trust anchor (posterior-trustable); a memoized "green" is the agent's memory, and §3.3 shows self-validation is a weak oracle. In practice safe by construction — a fix slice edits files, which invalidates the memo — but the final rung run must bypass the memo explicitly | memo applies to *intermediate* re-verification inside a slice; the rung's verdict always re-executes |
+| P9 synthesis / unverified cascade | fewer wasted verify steps (L3) means outcomes reach synthesis with the same trust labels at lower cost; no logic change | — |
+| P11 delegation (child mini-loops) | children inherit all three substrate levers automatically (same tool layer, same step loop); child transcripts are separate sessions so masking budgets apply per-loop | per-loop, not per-turn, accounting for the keep-last-K window |
+| Turn-read / arming (W2) | **L4.1 is a turn-read calibration** (optimization-phrased tickets → design-shaped). Same evidence-grounded-judge architecture, one more table row; validated on the arming rig (0 over-fires on the nine cheap instances) before live | n=1 guardrail from the tracker tuning log stands |
+| shouldOrchestrate (turn-open) | **L4.2 (grind valve) adds the one new transition**: inline → orchestrated *mid-turn* on step-budget + no-green-progress evidence. Today orchestration is decided only at turn open | this is the only change that needs an ORCHESTRATION_MECHANISM.md update when it ships (new edge in the state machine); L1–L3 need none |
+| Frame seeds / repo primer / turn-read verdict | L2 masking must treat these as protected parts (the AC-6.1 protected-region machinery already covers plan/pins — extend the predicate to seeds + primer) | a masked-away primer would send the model re-deriving repo basics, spending the steps L2 saved |
+| Escalation briefs (cross-tier) | briefs are built from structured state (todos, slice outcomes, receipts), not raw transcript — masking old tool outputs doesn't degrade them | keep briefs sourced from state, never from raw transcript spans |
+
+Net: the orchestration *decisions* (what to decompose, which tier authors, what verifies)
+are untouched by L1–L3; the *economics under* those decisions improve on both sides of every
+comparison the allocator makes. The savings model `f×(1−1/r)` is unchanged — these levers
+raise the realized fraction of `r` that survives harness overhead.
