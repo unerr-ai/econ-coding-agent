@@ -59,6 +59,10 @@ seam table: [features/README.md](./features/README.md).
   read/stream layer to reach parity: `session show`, JSONL export, live `session tail`.
 - [tooling-context-opt.md](./design/tooling-context-opt.md) — collapsing the native tool
   surface + the unerr-cli port backlog that makes tool output lean.
+- [turn-cache-economics.md](./design/turn-cache-economics.md) — why realized savings are ~2×
+  when the price ratio says ~10× (73% of the bill is cache re-reads), and the four levers:
+  batched tool calls per step, step-granular pruning, verify-loop dedup, design-escalation
+  for grinder tickets. Grounded in the Claude Code source + the SWE-mini-10 receipts.
 - [models.md](./design/models.md) — the open-weight model facts and the per-role selection.
 - [tier-prompts.md](./design/tier-prompts.md) — the grounded reference for every tier/persona
   system prompt (verbatim, `file:line`-anchored) and all ~25 runtime prompt-mutation surfaces

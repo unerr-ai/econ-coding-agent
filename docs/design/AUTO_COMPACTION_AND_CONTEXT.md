@@ -24,6 +24,12 @@ short stint" behaviour, adapted to econ's multi-tier cost thesis.
 > tier's window; the companion handles context *across* tiers. Phase 8 below tracks the
 > cross-tier tasks that interlock with compaction; the full `CTX-*` tracker lives there.
 
+> **Companion (2026-07-10):** [`turn-cache-economics.md`](./turn-cache-economics.md) found that
+> in single-turn agentic runs this machinery never fires — the per-turn prune fork runs at
+> end-of-user-turn behind a `turns < 2` gate, and the overflow trigger sits far above real run
+> peaks (124.8k vs 524k) — and owns the re-triggering design (step-granular, economically
+> thresholded). The mechanisms themselves stay owned here.
+
 ---
 
 ## 1. Why this matters for econ
