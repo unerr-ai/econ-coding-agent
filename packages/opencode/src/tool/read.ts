@@ -421,8 +421,10 @@ export const ReadTool = Tool.define<
       // Freshness is the whole-file content hash — strictly stronger than mtime; a
       // changed file naturally misses the stored fileHash and re-arms per file.
       // Errored reads never reach this point, so they are never recorded; a prior
-      // result cut by the L2.4 ceiling / L1.3 step budget is un-recorded by the
-      // session wrapper (dropReadDedup in session/tools.ts), so it never stubs.
+      // result cut by the L2.4 ceiling is un-recorded by the session wrapper
+      // (dropReadDedup in session/tools.ts), so it never stubs. (An L1.3
+      // water-filling cut in step-budget.ts happens outside the wrapper and is
+      // not un-recorded — known, accepted gap.)
       // `force` bypasses and refreshes the memo.
       const dedup = checkReadDedup({
         sessionID: ctx.sessionID,

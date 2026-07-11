@@ -253,10 +253,12 @@ export function checkReadDedup(input: {
  * Drop every stored range for one file in one session. L3.2 guard
  * (docs/design/turn-cache-economics.md §5-L3 item 2): the session wrapper
  * (session/tools.ts) calls this when a read result was cut by the per-result
- * ceiling (L2.4) or the aggregate step budget (L1.3) AFTER the memo had
- * already recorded its range as delivered — the model never saw the full
- * range, so a later identical read must re-deliver, never stub toward
- * truncated data. Per-file and implicit; the rest of the session memo stands.
+ * ceiling (L2.4) AFTER the memo had already recorded its range as delivered —
+ * the model never saw the full range, so a later identical read must
+ * re-deliver, never stub toward truncated data. (The aggregate L1.3 cut now
+ * happens later, in step-budget.ts's water-filling pass, outside this
+ * wrapper's visibility — a known, accepted gap.) Per-file and implicit; the
+ * rest of the session memo stands.
  */
 export function dropReadDedup(sessionID: string, filePath: string): void {
   const sessionMemo = sessions.get(sessionID)
