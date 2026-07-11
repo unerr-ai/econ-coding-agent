@@ -257,6 +257,17 @@ describe("createStuckSupervisor", () => {
     expect(signal).toEqual({ reason: "repeated-red", signature: "1|fail", count: 3 })
   })
 
+  it("reclassifies repeated-red as environment-slow when any run in the streak carries the slow-command signal", () => {
+    const sup = createStuckSupervisor(DEFAULT)
+
+    // only the 1st and 3rd runs are flagged slow — one slow run in the streak is enough
+    expect(sup.observe({ toolSignature: "t1", resultSignature: "1|fail", slowCommand: true })).toBeUndefined()
+    expect(sup.observe({ toolSignature: "t2", resultSignature: "1|fail" })).toBeUndefined()
+
+    const signal = sup.observe({ toolSignature: "t3", resultSignature: "1|fail", slowCommand: true })
+    expect(signal).toEqual({ reason: "environment-slow", signature: "1|fail", count: 3 })
+  })
+
   it("the same toolSignature repeated repeatThreshold times fires repeated-tool", () => {
     const sup = createStuckSupervisor(DEFAULT)
 

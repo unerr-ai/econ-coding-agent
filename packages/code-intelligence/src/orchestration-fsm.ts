@@ -222,11 +222,20 @@ export type TurnStep =
  * normal work (diverse exploration or progressive edits to one file).
  *   - test-edit        the model edited a test (the fake-green cheat)
  *   - repeated-red     the same failing command result, over and over
+ *   - environment-slow repeated-red where the streak also ran a command
+ *                      >= SLOW_COMMAND_MS — a CPU-starved/timeout-killed
+ *                      shell, not model stuckness
  *   - repeated-tool    the EXACT same call (tool + args) re-issued verbatim
  *   - no-op            steps that perform no operation at all
  *   - excessive-reread the same file pulled up many times without acting on it
  */
-export type StuckReason = "repeated-red" | "repeated-tool" | "test-edit" | "no-op" | "excessive-reread"
+export type StuckReason =
+  | "repeated-red"
+  | "environment-slow"
+  | "repeated-tool"
+  | "test-edit"
+  | "no-op"
+  | "excessive-reread"
 
 export interface StuckSignal {
   reason: StuckReason
@@ -245,6 +254,7 @@ export interface StepObservation {
   editedTestFile?: string // the model edited a test file this step (the fake-green tell), with its path
   readFiles?: readonly string[] // file paths this step read — feeds the excessive-reread tally
   progressed?: boolean // the step ran a command or landed an edit — a productive action that clears the reread tally
+  slowCommand?: boolean // a command this step ran took >= SLOW_COMMAND_MS (or was timeout-killed) — reclassifies a repeated-red streak as environment-slow instead of model stuckness
 }
 
 export interface StuckSupervisorConfig {
@@ -271,7 +281,11 @@ export interface StuckSupervisor {
  * (diverse exploration or several different edits to one file). Priority order:
  *   1. test-edit        — editing a test file (the fake-green cheat), immediate.
  *   2. excessive-reread — one file read `rereadThreshold` times without acting on it.
- *   3. repeated-red     — the same failing command result `repeatThreshold` times.
+ *   3. repeated-red     — the same failing command result `repeatThreshold` times;
+ *                         reclassified as environment-slow when any run in the
+ *                         streak carried a slow-command signal (CPU-starved or
+ *                         timeout-killed shell — an environment cause, not model
+ *                         stuckness, so it must never drive escalation).
  *   4. no-op            — `noopThreshold` steps in a row that perform no operation.
  *   5. repeated-tool    — the EXACT same call (tool + args) re-issued verbatim
  *                         `repeatThreshold` times; the signature hashes the full
@@ -282,7 +296,7 @@ export interface StuckSupervisor {
 export function createStuckSupervisor(
   config: StuckSupervisorConfig = DEFAULT_STUCK_CONFIG,
 ): StuckSupervisor {
-  let redRun = { sig: "", count: 0 }
+  let redRun = { sig: "", count: 0, slow: false }
   let dupRun = { sig: "", count: 0 }
   let noopRun = 0
   const rereads = new Map<string, number>()
@@ -323,11 +337,25 @@ export function createStuckSupervisor(
       // Its tally only advances on result steps, so it tolerates interleaved
       // reads/edits (the django-11885 12x-thrash caught at the 3rd). A command step
       // ends here: its progress IS its result, never the verbatim-repeat check below.
+      // Reclassifies as environment-slow the moment any run in the streak carried
+      // the slow-command signal — a CPU-starved/timeout-killed shell producing the
+      // identical failure is an environment signature, not model stuckness.
       if (step.resultSignature !== undefined) {
         noopRun = 0
-        const n = tally(redRun, step.resultSignature)
-        if (n >= config.repeatThreshold) {
-          return { reason: "repeated-red", signature: step.resultSignature, count: n }
+        if (step.resultSignature === redRun.sig) {
+          redRun.count += 1
+          redRun.slow = redRun.slow || Boolean(step.slowCommand)
+        } else {
+          redRun.sig = step.resultSignature
+          redRun.count = 1
+          redRun.slow = Boolean(step.slowCommand)
+        }
+        if (redRun.count >= config.repeatThreshold) {
+          return {
+            reason: redRun.slow ? "environment-slow" : "repeated-red",
+            signature: step.resultSignature,
+            count: redRun.count,
+          }
         }
         return undefined
       }
@@ -355,7 +383,7 @@ export function createStuckSupervisor(
       return undefined
     },
     reset() {
-      redRun = { sig: "", count: 0 }
+      redRun = { sig: "", count: 0, slow: false }
       dupRun = { sig: "", count: 0 }
       noopRun = 0
       rereads.clear()

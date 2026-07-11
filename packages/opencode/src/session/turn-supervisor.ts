@@ -1,11 +1,12 @@
 /**
  * Root-turn step observation for the inline-loop stuck supervisor: distils one
  * completed assistant step's tool parts into the StepObservation the supervisor
- * keys on (a re-issued call, a repeated failing result, a test-file edit) plus
- * the shell commands that appear to have failed — the probe-from-red pool the
- * turn-end gate pins a reproduction from. Pure: no Effect, no shell, no session,
- * so it is table-testable; mirrors extractTrajectory's completed-part reading so
- * the two seams agree on what a step is.
+ * keys on (a re-issued call, a repeated failing result, a test-file edit, a
+ * slow/timeout-killed command) plus the shell commands that appear to have
+ * failed — the probe-from-red pool the turn-end gate pins a reproduction from.
+ * Pure: no Effect, no shell, no session, so it is table-testable; mirrors
+ * extractTrajectory's completed-part reading so the two seams agree on what a
+ * step is.
  *
  * @sem domain=routing role=digest
  */
@@ -56,11 +57,11 @@ function actionKey(tool: string, input: Record<string, unknown>): string {
   return `${tool}:${identifyingInput(input)}#${hashString(payload)}`
 }
 
-/** Minimal structural view of a completed tool part — mirrors slice-orchestrator's ToolPartLike, plus the result output. */
+/** Minimal structural view of a completed tool part — mirrors slice-orchestrator's ToolPartLike, plus the result output and timing (state.time is populated by the processor on every completed/error tool part). */
 interface ToolPartLike {
   type: string
   tool?: string
-  state?: { status?: string; input?: Record<string, unknown>; output?: string }
+  state?: { status?: string; input?: Record<string, unknown>; output?: string; time?: { start: number; end?: number } }
 }
 
 // A command "failed" when the tool errored or its output carries a failure
@@ -104,6 +105,15 @@ export interface StepObservationResult {
 }
 
 /**
+ * A command running at or beyond this duration is slow enough to be an
+ * environment signal — a CPU-starved shared host or a timeout-killed shell —
+ * rather than genuine model stuckness. The stuck supervisor's repeated-red
+ * rung reclassifies to `environment-slow` when the identical-failure streak
+ * carries this signal.
+ */
+export const SLOW_COMMAND_MS = 60_000
+
+/**
  * Distil one completed assistant step's parts into a StepObservation plus the
  * shell commands that looked like failures. `isTestSlice` suppresses the
  * test-file-edit tell for a turn where editing tests is legitimate (the gate is
@@ -117,6 +127,7 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
   let editedTestFile: string | undefined
   let ranCommand = false
   let progressed = false
+  let slowCommand = false
 
   for (const raw of parts) {
     const part = raw as ToolPartLike
@@ -146,6 +157,13 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
       toolTokens.push(`${part.tool}:${command}`)
       resultTokens.push(`${status}|${normalizeResult(output)}`)
       if (looksFailed(status, output)) failedCommands.push(command)
+      // Duration is the environment signal: a timeout-killed command runs ≈ the
+      // bash timeout, so it qualifies here the same as a genuinely slow one —
+      // both mean the shell, not the model, is the bottleneck.
+      const time = part.state?.time
+      if (time?.start !== undefined && time?.end !== undefined && time.end - time.start >= SLOW_COMMAND_MS) {
+        slowCommand = true
+      }
     } else {
       // Any other tool (read/grep/glob/list/task/webfetch/…) still distinguishes
       // the step: actionKey tracks it by tool + a hash of its full input, so a burst
@@ -171,6 +189,10 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
       // A landed edit or a run command is progress — it resets the reread tally,
       // so a read that follows real work reads as re-verification, not circling.
       progressed,
+      // At least one command this step ran took >= SLOW_COMMAND_MS (or was
+      // timeout-killed) — the stuck supervisor's repeated-red rung reads this
+      // to reclassify as environment-slow instead of escalating the model.
+      slowCommand,
     },
     failedCommands,
   }

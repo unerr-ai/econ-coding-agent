@@ -6,6 +6,7 @@ import {
   GRIND_VALVE_STEPS,
   GRIND_VALVE_STALL_WINDOW,
   createBatchMomentumWatcher,
+  SLOW_COMMAND_MS,
 } from "../../src/session/turn-supervisor"
 import { stuckNudgeText, grindValveNudgeText } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
@@ -24,8 +25,13 @@ import {
 
 // -- test doubles -----------------------------------------------------------
 
-function bash(command: string, output: string, status: "completed" | "error" = "completed") {
-  return { type: "tool", tool: "bash", state: { status, input: { command }, output } }
+function bash(
+  command: string,
+  output: string,
+  status: "completed" | "error" = "completed",
+  time?: { start: number; end?: number },
+) {
+  return { type: "tool", tool: "bash", state: { status, input: { command }, output, time } }
 }
 function edit(filePath: string, status: "completed" | "error" = "completed", oldString = "a", newString = "b") {
   return { type: "tool", tool: "edit", state: { status, input: { filePath, oldString, newString } } }
@@ -112,6 +118,25 @@ describe("observeStep", () => {
     // a denied edit never modified anything → not progress
     expect(observeStep([edit("src/foo.ts", "error")]).observation.progressed).toBe(false)
   })
+
+  it("does NOT mark slowCommand when state.time is missing", () => {
+    expect(observeStep([bash(CMD, GREEN)]).observation.slowCommand).toBe(false)
+  })
+
+  it("does NOT mark slowCommand for a command under SLOW_COMMAND_MS", () => {
+    const fast = observeStep([bash(CMD, GREEN, "completed", { start: 0, end: 500 })])
+    expect(fast.observation.slowCommand).toBe(false)
+  })
+
+  it("marks slowCommand when a completed command ran >= SLOW_COMMAND_MS", () => {
+    const slow = observeStep([bash(CMD, GREEN, "completed", { start: 0, end: SLOW_COMMAND_MS })])
+    expect(slow.observation.slowCommand).toBe(true)
+  })
+
+  it("marks slowCommand for a timeout-killed command (status error, duration ≈ the bash timeout)", () => {
+    const killed = observeStep([bash(CMD, "", "error", { start: 0, end: SLOW_COMMAND_MS })])
+    expect(killed.observation.slowCommand).toBe(true)
+  })
 })
 
 // -- normalizeResult --------------------------------------------------------
@@ -145,6 +170,24 @@ describe("observeStep + createStuckSupervisor", () => {
     // step 4: re-run RED (3rd identical red) → repeated-red fires
     const signal = sup.observe(observeStep([bash(CMD, RED)]).observation)
     expect(signal?.reason).toBe("repeated-red")
+  })
+
+  it("a FAST identical red 3x stays repeated-red (no environment signal)", () => {
+    const sup = createStuckSupervisor()
+    const fastTime = { start: 0, end: 500 }
+    expect(sup.observe(observeStep([bash(CMD, RED, "completed", fastTime)]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([bash(CMD, RED, "completed", fastTime)]).observation)).toBeUndefined()
+    const signal = sup.observe(observeStep([bash(CMD, RED, "completed", fastTime)]).observation)
+    expect(signal?.reason).toBe("repeated-red")
+  })
+
+  it("a SLOW identical red 3x reclassifies as environment-slow (CPU-starved/timeout-killed shell, not model stuckness)", () => {
+    const sup = createStuckSupervisor()
+    const slowTime = { start: 0, end: SLOW_COMMAND_MS }
+    expect(sup.observe(observeStep([bash(CMD, RED, "completed", slowTime)]).observation)).toBeUndefined()
+    expect(sup.observe(observeStep([bash(CMD, RED, "completed", slowTime)]).observation)).toBeUndefined()
+    const signal = sup.observe(observeStep([bash(CMD, RED, "completed", slowTime)]).observation)
+    expect(signal?.reason).toBe("environment-slow")
   })
 
   it("a genuinely progressing run (red → different red → green) never fires", () => {
