@@ -721,6 +721,12 @@ const REPRO_SCRIPT_RE = /(?:^|[\s/])(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|
 /** Specificity score for a repro candidate (0 disqualifies it — not a repro). */
 function reproSpecificity(cmd: VerifyCommand): number {
   if (cmd.kind !== "test") return 0
+  // A multi-line compound command (a batched probe script) is a PROBE, not a
+  // contract: pinning one wedges the turn on every section it bundles —
+  // including self-invented edge asserts stricter than the issue (observed on
+  // the first strict 11790 run, which timed out gate-locked on one). Only a
+  // single runnable command may become the turn's pinned reproduction.
+  if (cmd.command.includes("\n")) return 0
   const named = (REPRO_FILE_RE.test(cmd.command) ? 2 : 0) + (REPRO_FILTER_RE.test(cmd.command) ? 1 : 0)
   return named > 0 ? named : REPRO_SCRIPT_RE.test(cmd.command) ? 1 : 0
 }
