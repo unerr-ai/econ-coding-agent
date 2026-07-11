@@ -36,6 +36,19 @@ export const PLAN_SLICE_CONTENT =
   "Plan this build before any code is written. The work is decided but too large to execute blind — your job is decomposition, not implementation: (1) read just enough of the codebase (graph search, callers, targeted file reads) to anchor the plan in the REAL structure — name the files/modules each change touches and the seams it must respect; (2) break the work into small, INDEPENDENTLY CHECKABLE slices, each with a concrete success check; (3) deliver the implementation plan as an execution DAG of typed slices (content, sliceType, need, deps) for the conductor to dispatch. Writing code or diffs is forbidden here — the plan and DAG only."
 
 /**
+ * S2 — content of the repro-authoring pre-pass: manufacture executed-red
+ * evidence BEFORE any fix pre-pass runs (repro-first sequencing — a repro
+ * authored after the fix can only ever run green). Untyped/inline by design
+ * (see REPRO_PREPASS_TODO in slice-orchestrator.ts) so the ROOT conductor
+ * observes the red run itself via the existing probe-from-red pin — a
+ * dispatched child's red would be invisible to the root. DELIBERATELY
+ * distinct from the seeds above so dedup-by-content keeps each kind
+ * plantable alongside the others.
+ */
+export const REPRO_SLICE_CONTENT =
+  "Manufacture the evidence BEFORE any fix: this turn diagnoses a bug, and a described fix with no red repro proves nothing. (1) Prefer a targeted EXISTING test the issue names — run it as-is. If none is named, author a minimal repro script at the repo root (e.g. `repro_issue.py`, or the language-appropriate equivalent) from the issue text, asserting the EXPECTED behavior so it exits non-zero on the current (unpatched) code and 0 once fixed. (2) RUN it and confirm it fails FOR THE ISSUE'S REASON — not an import error, a missing fixture, or an unrelated setup failure; a repro that is green on unpatched code proves nothing (fix the repro, not the code, until it genuinely reproduces). (3) Never `git add` the repro script — it is scratch evidence, not part of the patch. If, after at most 2 distinct approaches, you genuinely cannot get a repro to fail for the right reason, STOP: mark this item cancelled with a one-line reason and proceed to the fix with explicit caution — do not keep burning budget on the repro alone."
+
+/**
  * L4.2 — content of the design pre-pass the GRIND VALVE (turn-supervisor.ts
  * `createGrindValve`, wired in prompt.ts's SM4 block) plants mid-turn when an
  * inline conductor turn crosses its soft step budget with no green verify in

@@ -39,6 +39,7 @@ import {
   autoTypeTodos,
   reconcileSettledSlices,
   LOCALIZATION_PREPASS_TODO,
+  REPRO_PREPASS_TODO,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
@@ -81,6 +82,7 @@ import {
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
   GRIND_DESIGN_SLICE_CONTENT,
+  REPRO_SLICE_CONTENT,
 } from "../../src/session/prompts/seeds"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 import type { ArmingDecision } from "../../src/session/arming-judge"
@@ -859,6 +861,53 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toBe(false)
     expect(todos.every((t) => t.parentID === undefined)).toBe(true)
   })
+
+  it("S2 — repro seeds INSTEAD of localization when armReproduction is true and no pin exists yet", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: true, hardness: "moderate" })
+    expect(todos).toHaveLength(2)
+    expect(todos[1]!.content).toBe(REPRO_SLICE_CONTENT)
+    expect(todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toBe(false)
+  })
+
+  it("S2 — hasPinnedProbe:true restores today's behavior (localization, not repro) even when armReproduction is true", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(
+      verdict,
+      { armLocalization: true, armReproduction: true, hardness: "moderate" },
+      { hasPinnedProbe: true },
+    )
+    expect(todos).toHaveLength(2)
+    expect(todos[1]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
+  })
+
+  it("S2 — armReproduction absent (an older ArmingDecision literal) never seeds repro — today's behavior is preserved by default", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, hardness: "moderate" })
+    expect(todos[1]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
+  })
+
+  it("S2 — a build goal's PLAN seed is unaffected by armReproduction (repro applies to diagnosis goals only)", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "add dark mode across all panels", shape: "build", deliverable: "dark mode works", needsPlan: true }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: false, armReproduction: true, hardness: "hard" })
+    expect(todos[1]!.content).toBe(PLAN_SLICE_CONTENT)
+  })
 })
 
 describe("autoTypeTodos — bracket-tagged audit lists (case-2 tierfire3 decode)", () => {
@@ -1088,6 +1137,24 @@ describe("LOCALIZATION_PREPASS_TODO (the one diagnosis frame-seed constant)", ()
   })
 })
 
+describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", () => {
+  it("is deliberately UNTYPED so it never dispatches as a child slice — it runs inline on the conductor", () => {
+    expect(REPRO_PREPASS_TODO).toMatchObject({ content: REPRO_SLICE_CONTENT, status: "pending", priority: "high" })
+    expect("sliceType" in REPRO_PREPASS_TODO).toBe(false)
+    expect("need" in REPRO_PREPASS_TODO).toBe(false)
+    // Untyped ⇒ hasPendingTypedSlices never sees it as a dispatchable DAG node.
+    expect(hasPendingTypedSlices([{ ...REPRO_PREPASS_TODO }])).toBe(false)
+  })
+
+  it("the content demands executed, right-reason red evidence and forbids git-adding the scratch script", () => {
+    expect(REPRO_SLICE_CONTENT).toMatch(/RUN it/i)
+    expect(REPRO_SLICE_CONTENT).toMatch(/EXPECTED behavior/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/FOR THE ISSUE'S REASON/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never `git add`/i)
+    expect(REPRO_SLICE_CONTENT).not.toBe(LOCALIZATION_SLICE_CONTENT)
+  })
+})
+
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
   it("fix-shaped fires on defect evidence, WITH or without a file target", () => {
     expect(isFixShapedPrompt("the login page crashes when the session expires")).toBe(true)
@@ -1281,8 +1348,7 @@ Repro:
 Expected: str() on a Choices member returns its human label, not the raw value.
 `
     expect(await deriveTurnProbe({ promptText: prompt })).toEqual({
-      kind: "test",
-      command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str",
+      probe: { kind: "test", command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str" },
     })
   })
 
@@ -1305,8 +1371,7 @@ But the actual repro is:
 \`bun test packages/foo/bar.test.ts -t "handles retry"\`
 `
     expect(await deriveTurnProbe({ promptText: prompt })).toEqual({
-      kind: "test",
-      command: 'bun test packages/foo/bar.test.ts -t "handles retry"',
+      probe: { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
     })
   })
 
@@ -1321,8 +1386,7 @@ But the actual repro is:
       runner,
     })
     expect(result).toEqual({
-      kind: "test",
-      command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str",
+      probe: { kind: "test", command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str" },
     })
   })
 
@@ -1339,8 +1403,8 @@ But the actual repro is:
     const runner: CommandRunner = async (cmd) => results[cmd.command]!
     const result = await deriveTurnProbe({ promptText: prompt, candidateTests: candidates, runner })
     expect(result).toEqual({
-      kind: "test",
-      command: 'bun test packages/foo/bar.test.ts -t "handles retry"',
+      probe: { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
+      redEvidence: { exitCode: 1, outputTail: "" },
     })
   })
 
@@ -1355,6 +1419,63 @@ But the actual repro is:
     const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }]
     const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates })
     expect(result).toBeUndefined()
+  })
+})
+
+describe("reproSpecificity via deriveTurnProbe (S1 — authored repro scripts qualify as pins)", () => {
+  it("an authored repro script (`repro_issue.py`) pins RED, carrying redEvidence", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]
+    const runner: CommandRunner = async () => ({
+      exitCode: 1,
+      stdout: "AssertionError: expected 255, got 254",
+      stderr: "",
+    })
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(result).toEqual({
+      probe: { kind: "test", command: "python repro_issue.py" },
+      redEvidence: { exitCode: 1, outputTail: "AssertionError: expected 255, got 254" },
+    })
+  })
+
+  it("a repro script GREEN on unpatched code cannot pin (the 11964 false-green shape)", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]
+    const runner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" })
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  it("a bare whole-suite command never qualifies as a repro, script name or not", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test" }]
+    const runner: CommandRunner = async () => {
+      throw new Error("should never run — a whole-suite command scores 0, never a repro candidate")
+    }
+    const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates, runner })
+    expect(result).toBeUndefined()
+  })
+
+  it("a named test file still outranks a repro script when both are RED candidates", async () => {
+    const candidates: VerifyCommand[] = [
+      { kind: "test", command: "python repro_issue.py" },
+      { kind: "test", command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str" },
+    ]
+    const results: Record<string, CommandResult> = {
+      "python repro_issue.py": { exitCode: 1, stdout: "", stderr: "" },
+      "python tests/runtests.py model_enums.tests.ChoicesTests.test_str": { exitCode: 1, stdout: "", stderr: "" },
+    }
+    const runner: CommandRunner = async (cmd) => results[cmd.command]!
+    const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates, runner })
+    expect(result).toEqual({
+      probe: { kind: "test", command: "python tests/runtests.py model_enums.tests.ChoicesTests.test_str" },
+      redEvidence: { exitCode: 1, outputTail: "" },
+    })
   })
 })
 
@@ -1378,7 +1499,7 @@ describe("runTurnProbeGate (M4)", () => {
       [probe.command]: { exitCode: 0, stdout: "", stderr: "" },
     })
     const result = await runTurnProbeGate({ probe, noTestEdit: false, runner })
-    expect(result).toEqual({ reject: false })
+    expect(result).toEqual({ reject: false, outputTail: "" })
   })
 
   it("rejects at the probe rung when the probe still fails", async () => {
@@ -1410,7 +1531,7 @@ describe("runTurnProbeGate (M4)", () => {
       [probe.command]: { exitCode: 0, stdout: "", stderr: "" },
     })
     const result = await runTurnProbeGate({ probe, noTestEdit: true, runner })
-    expect(result).toEqual({ reject: false })
+    expect(result).toEqual({ reject: false, outputTail: "" })
     expect(calls).toEqual([TEST_TREE_GUARD_COMMAND.command, probe.command])
   })
 })

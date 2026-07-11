@@ -256,3 +256,64 @@ describe("decideArming — turn-level hardness and ambiguity", () => {
     expect(clear.ambiguity).toBe("clear")
   })
 })
+
+describe("decideArming — armReproduction (S2 repro-first gate)", () => {
+  test("DEGRADED_ARMING never arms reproduction", () => {
+    expect(DEGRADED_ARMING.armReproduction).toBe(false)
+  })
+
+  test("any diagnosis-shaped goal arms reproduction — even a fully handed fix (repro-first: a post-fix repro can only ever run green)", () => {
+    const handedFix = decideArming(
+      verdictOf([
+        {
+          quote: "use request.form.get() instead of request.args.get()",
+          shape: "diagnosis-grounded",
+          deliverable: "endpoint reads the POST body",
+          evidence: {
+            locationNamed: false,
+            fixSpecified: true,
+            fixQuote: "use request.form.get() instead",
+            hardness: "trivial",
+            ambiguity: "clear",
+          },
+        },
+      ]),
+    )
+    expect(handedFix.armLocalization).toBe(false) // localization does not need to arm...
+    expect(handedFix.armReproduction).toBe(true) // ...but reproduction still does
+
+    const located = decideArming(
+      verdictOf([
+        {
+          quote: "fix the indentation in ddl_references.py",
+          shape: "diagnosis-grounded",
+          deliverable: "indentation fixed",
+          evidence: { locationNamed: true, locationQuote: "ddl_references.py", fixSpecified: false, hardness: "trivial", ambiguity: "clear" },
+        },
+      ]),
+    )
+    expect(located.armReproduction).toBe(true)
+
+    const vague = decideArming(
+      verdictOf([{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }]),
+    )
+    expect(vague.armReproduction).toBe(true)
+  })
+
+  test("build/refactor/audit/qa/research/run-only shapes never arm reproduction — it applies to diagnosis goals only", () => {
+    for (const shape of ["build", "refactor", "audit", "qa", "research", "run-only"] as const) {
+      const decision = decideArming(verdictOf([{ quote: "do the thing", shape, deliverable: "done" }]))
+      expect(decision.armReproduction).toBe(false)
+    }
+  })
+
+  test("a mixed turn (one build goal + one diagnosis goal) arms reproduction — OR-ed the same way armLocalization is", () => {
+    const decision = decideArming(
+      verdictOf([
+        { quote: "add a --json flag", shape: "build", deliverable: "flag works" },
+        { quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" },
+      ]),
+    )
+    expect(decision.armReproduction).toBe(true)
+  })
+})

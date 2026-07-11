@@ -20,6 +20,13 @@ import type { ArmingAmbiguity, ArmingHardness, TriageGoal, TriageVerdict } from 
 export interface ArmingVerdict {
   /** THE decision — plant a localization pre-pass before any fix is attempted. */
   readonly armLocalization: boolean
+  /**
+   * S2 — plant the repro-authoring pre-pass before any fix pre-pass runs: true
+   * whenever the turn carries ANY diagnosis-shaped goal, regardless of
+   * `armLocalization` (repro-first sequencing — a post-fix repro can only ever
+   * run green, so it must precede localization even on an already-located bug).
+   */
+  readonly armReproduction: boolean
   /** Do we already know WHERE to fix — every diagnosis goal names a concrete location? */
   readonly localized: boolean
   readonly hardness: ArmingHardness
@@ -44,6 +51,8 @@ export interface ArmingVerdict {
  */
 export type ArmingDecision = Pick<ArmingVerdict, "armLocalization" | "hardness"> & {
   ambiguity?: ArmingAmbiguity
+  /** S2 — the repro-pre-pass gate `buildTriageTodoSkeleton` reads; optional (like `ambiguity`) so an older caller/test double built before it existed still type-checks — treated as `false` when absent. */
+  armReproduction?: boolean
   /** True only on the degraded (null turn-read) posture — the orchestration hook's inline-stand-down flag. See `DEGRADED_ARMING`. */
   degraded?: boolean
 }
@@ -59,7 +68,8 @@ function isDiagnosisGoal(goal: TriageGoal): boolean {
  * The ONE posture a degraded/absent turn-read resolves to (P5) — the single
  * source of truth for "no verdict", so no consumer synthesizes its own guess.
  * The full degraded policy is CHEAPEST POSTURE AND NO MID-TURN DECOMPOSITION:
- *  - Cheapest posture: localization stands down (`armLocalization:false`) and
+ *  - Cheapest posture: localization AND the repro pre-pass stand down
+ *    (`armLocalization:false`, `armReproduction:false`) and
  *    every difficulty signal reads at its FLOOR (`hardness:"trivial"`,
  *    `ambiguity:"clear"`), below the `hard`/`ambiguous` threshold every lift
  *    consumer gates on — the per-slice difficulty floor (allocation.ts), the
@@ -83,6 +93,7 @@ function isDiagnosisGoal(goal: TriageGoal): boolean {
  */
 export const DEGRADED_ARMING: ArmingVerdict = {
   armLocalization: false,
+  armReproduction: false,
   localized: true,
   hardness: "trivial",
   ambiguity: "clear",
@@ -107,6 +118,12 @@ export const DEGRADED_ARMING: ArmingVerdict = {
  * A null verdict resolves to `DEGRADED_ARMING` — the cheapest posture
  * (localization stood down, hardness/ambiguity at the floor), so a missing
  * turn-read can never lift work off the conductor, never a guess.
+ *
+ * S2 — `armReproduction` is broader than `armLocalization`: true whenever ANY
+ * diagnosis goal exists, independent of `arm`. Repro-first sequencing needs
+ * this: even an already-located, non-arming bug must still manufacture and
+ * confirm red evidence before a fix lands, because a repro authored AFTER the
+ * fix can only ever run green (11964's false-green shape).
  *
  * @sem domain=routing role=router
  */
@@ -145,6 +162,7 @@ export function decideArming(verdict?: TriageVerdict | null): ArmingVerdict {
 
   return {
     armLocalization: arm,
+    armReproduction: diagnosis.length > 0,
     localized,
     hardness: anyNeedsPlan ? "hard" : (maxHardness ?? (arm ? "moderate" : "trivial")),
     ambiguity: judgedAmbiguous || verdict.confidence === "low" ? "ambiguous" : "clear",

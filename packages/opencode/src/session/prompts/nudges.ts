@@ -54,3 +54,13 @@ export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: num
 export function batchMomentumNudgeText(signal: { consecutiveSingleCalls: number }): string {
   return `ECONOMY CHECK: your last ${signal.consecutiveSingleCalls} messages each carried exactly ONE tool call — that many paid round trips where fewer would do. Apply the BATCH RULE now: name every independent read/search/command you already know you need, then issue them ALL as tool calls in this ONE message; they run together and the results come back together — or better: one read-only bash script that runs every known probe with labeled sections, if what you know you need is 3+ shell probes (tests, git, builds, file stats) rather than reads. Only a true dependency chain — the next call needs this call's output — justifies another single-call message.`
 }
+
+/**
+ * S5 — the message injected when the stuck supervisor reclassifies a
+ * repeated-red streak as environment slowness (a command ran >=60s each time,
+ * the shared-CPU starvation signature). The machine is slow, not the
+ * approach wrong — steer toward narrower, cheaper commands instead of
+ * escalating models.
+ */
+export const ENVIRONMENT_SLOW_NUDGE =
+  "This machine is running commands SLOWLY (the same command failed repeatedly, each run taking 60s+). Treat it as environment slowness, not a wrong approach: run the single NARROWEST test target (one test method, not a suite), raise the per-command timeout, and never re-run a command whose output you already have."

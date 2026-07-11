@@ -16,12 +16,29 @@ import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
-import { setTestEditGate, testEditGateArmed, setNoEditsGate, noEditsGateArmed } from "../tool/edit-governance"
+import {
+  setTestEditGate,
+  testEditGateArmed,
+  setNoEditsGate,
+  noEditsGateArmed,
+  isTestFilePath,
+} from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
-import { stuckNudgeText, grindValveNudgeText, batchMomentumNudgeText, LENGTH_CONTINUATION_NUDGE } from "./prompts/nudges"
+import {
+  stuckNudgeText,
+  grindValveNudgeText,
+  batchMomentumNudgeText,
+  LENGTH_CONTINUATION_NUDGE,
+  ENVIRONMENT_SLOW_NUDGE,
+} from "./prompts/nudges"
 import { triagePreamble } from "./prompts/preambles"
-import { GRIND_DESIGN_SLICE_CONTENT, LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT } from "./prompts/seeds"
+import {
+  GRIND_DESIGN_SLICE_CONTENT,
+  LOCALIZATION_SLICE_CONTENT,
+  PLAN_SLICE_CONTENT,
+  REPRO_SLICE_CONTENT,
+} from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
   STRUCTURED_OUTPUT_SYSTEM_PROMPT,
@@ -39,6 +56,8 @@ import {
   resolveSliceModel,
   hasPendingTypedSlices,
   GRIND_DESIGN_PREPASS_TODO,
+  LOCALIZATION_PREPASS_TODO,
+  extractTrajectory,
   isFixShapedPrompt,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
@@ -81,6 +100,10 @@ import {
   researchShapedTurn,
   setTurnFiles,
   getTurnFiles,
+  recordGateBlock,
+  clearGateBlock,
+  getGateBlocks,
+  clearGateBlocks,
 } from "./turn-read-store"
 import { resetResolveAttempts } from "./resolution-store"
 import { Instruction } from "./instruction"
@@ -166,6 +189,42 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
+}
+
+const GATE_BLOCK_TOOLS = new Set(["edit", "write", "apply_patch"])
+// The reason guardrail.ts throws on a block starts "[econ-gate] BLOCKED: ... in <file>. " on
+// its own first line (see packages/code-intelligence/src/guardrail.ts) — captures the file.
+const GATE_BLOCK_RE = /\[econ-gate\]\s*BLOCKED:[^\n]*?\bin\s+(\S+?)\.\s/i
+
+/**
+ * S4 — scan a completed step's parts for an econ-gate governance BLOCK on an
+ * edit/write tool (an errored tool part whose output carries the
+ * `[econ-gate] BLOCKED` reason) so the turn-store ledger can track it and the
+ * S3 done-time nudge can flag an abandoned block (django-12039: blocked
+ * twice, never re-landed, shipped an empty patch).
+ */
+// S2 — how many SM4-observed steps (assistant steps with tool calls) the
+// repro pre-pass gets before abstaining — plant localization anyway and
+// nudge once, never blocking the turn on an unpinnable repro forever.
+// Tuned from fly traces (see the plan doc).
+export const REPRO_PIN_DEADLINE_STEPS = 12
+
+function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: string }[] {
+  const found: { file: string; reason: string }[] = []
+  for (const raw of parts) {
+    const part = raw as { type?: string; tool?: string; state?: { status?: string; output?: string; error?: string } }
+    if (part?.type !== "tool" || !part.tool || !GATE_BLOCK_TOOLS.has(part.tool)) continue
+    if (part.state?.status !== "error") continue
+    // An errored tool part carries the reason in `state.error` (verified on
+    // django-12039's live transcript: the [econ-gate] BLOCKED text is the
+    // error field, and there is no output field on the error state).
+    const output = part.state?.error ?? part.state?.output ?? ""
+    const m = GATE_BLOCK_RE.exec(output)
+    if (!m) continue
+    const nl = output.indexOf("\n")
+    found.push({ file: m[1]!, reason: (nl === -1 ? output : output.slice(0, nl)).trim() })
+  }
+  return found
 }
 
 /**
@@ -1454,6 +1513,36 @@ export const layer = Layer.effect(
         let turnPinnedProbe: Awaited<ReturnType<typeof deriveTurnProbe>>
         let probeGateRetries = 0
         const MAX_PROBE_GATE_RETRIES = 3
+        // S3 — the done-time fallback bar's own bounded retry: exactly ONE
+        // reject-with-nudge cycle for a bug-shaped turn finishing with no
+        // verified reproduction/source edit, then a loud break (never a loop).
+        let unverifiedFinishNudged = false
+        // The turn's OPENING user message id, captured once at step 0 before
+        // any synthetic nudge (stuck/grind/batch/probe-gate/S2/S3) can shift
+        // `lastUser` forward — the stable anchor S3 scans "this turn's"
+        // assistant messages from (`m.info.id > turnOpenUserID`).
+        let turnOpenUserID: string | undefined
+        // S2 — repro-first mid-turn hand-off/abstention state: whether the
+        // turn-open skeleton seeded the repro pre-pass, whether the hand-off
+        // (pin landed) or the abstention (deadline/cancel, no pin) already
+        // fired — bounded to ONE of either, never a loop — and how many
+        // observed steps have passed with the repro still unresolved.
+        let reproSeededThisTurn = false
+        let reproHandoffDone = false
+        let reproObservedSteps = 0
+        // S3 — whether this turn's pin came from the P4 continuation store
+        // (restored at turn open) rather than being authored/observed this
+        // turn. An inherited pin + no new source edits is a legitimate
+        // confirm/report continuation, NOT an unverified finish.
+        let pinInheritedFromStore = false
+        // S5b — sticky-escalation decay: consecutive productive, signal-free
+        // steps while escalated; at ESCALATION_DECAY_STEPS the turn is handed
+        // back to its own bound model (the stuck window is over — the 2/turn
+        // escalation cap is NOT refunded, so no oscillation). Plus the
+        // once-per-turn environment-slow nudge guard.
+        const ESCALATION_DECAY_STEPS = 4
+        let productiveSinceEscalation = 0
+        let envSlowNudged = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // SM4 — root-loop stuck supervisor. The inline path (this loop) had no
@@ -1537,11 +1626,150 @@ export const layer = Layer.effect(
                 setPinnedProbe(sessionID, turnPinnedProbe)
                 yield* Effect.logInfo("turn_probe_pinned_from_red", {
                   "session.id": sessionID,
-                  probe: turnPinnedProbe.command,
+                  probe: turnPinnedProbe.probe.command,
+                  redExit: turnPinnedProbe.redEvidence?.exitCode ?? null,
+                  redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                 })
               }
             }
+
+            // S4 — governance-gate BLOCK ledger: record any new block this
+            // step surfaced, and clear any previously-blocked file a completed
+            // edit/write just re-landed. Root sessions only (this whole
+            // observation gate already implies !session.parentID).
+            const stepParts = lastAssistantMsg?.parts ?? []
+            for (const block of scanGateBlocks(stepParts)) recordGateBlock(sessionID, block.file, block.reason)
+            for (const event of extractTrajectory(stepParts).events) {
+              if (event.kind === "file-edit") clearGateBlock(sessionID, event.filePath)
+            }
+
+            // S2 — repro-first mid-turn hand-off/abstention. Only while the
+            // turn-open skeleton actually seeded the repro pre-pass and
+            // neither branch has fired yet this turn.
+            if (reproSeededThisTurn && !reproHandoffDone) {
+              reproObservedSteps++
+              if (turnPinnedProbe) {
+                // (a) hand-off: the repro pinned red — plant localization
+                // (if armed), dedup-by-content (the grind-valve plant
+                // pattern above). No nudge: the planted todo is enough for
+                // the existing typed-slice dispatch to pick it up.
+                reproHandoffDone = true
+                const armed = getArmingDecision(sessionID)
+                if (armed?.armLocalization) {
+                  const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                  if (!currentTodos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
+                    yield* todoStore
+                      .update({ sessionID, todos: [...currentTodos, LOCALIZATION_PREPASS_TODO] })
+                      .pipe(Effect.ignore)
+                  }
+                }
+                yield* Effect.logInfo("repro_handoff", {
+                  "session.id": sessionID,
+                  probe: turnPinnedProbe.probe.command,
+                  reproObservedSteps,
+                })
+              } else {
+                const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
+                const reproSettled =
+                  reproTodo !== undefined && reproTodo.status !== "pending" && reproTodo.status !== "in_progress"
+                // A conductor todowrite rewrite can DROP the (untyped, so
+                // unprotected by the frame-seed re-append) repro item
+                // entirely — after the first observed step, absence means
+                // dropped, and waiting out the deadline just burns steps.
+                const reproDropped = reproTodo === undefined && reproObservedSteps > 1 && currentTodos.length > 0
+                if (reproSettled || reproDropped || reproObservedSteps >= REPRO_PIN_DEADLINE_STEPS) {
+                  // (b) abstention: the repro was abandoned/cancelled, or the
+                  // deadline passed, with no pin — plant localization anyway
+                  // (degrade to today's behavior) and nudge ONCE.
+                  reproHandoffDone = true
+                  const armed = getArmingDecision(sessionID)
+                  if (armed?.armLocalization && !currentTodos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
+                    yield* todoStore
+                      .update({ sessionID, todos: [...currentTodos, LOCALIZATION_PREPASS_TODO] })
+                      .pipe(Effect.ignore)
+                  }
+                  yield* Effect.logWarning("repro_unresolved", {
+                    "session.id": sessionID,
+                    reproObservedSteps,
+                    reproSettled,
+                  })
+                  const reproNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(reproNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: reproNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: "No reproduction could be pinned — state what you verified and double-check the fix against the issue's exact expected values.",
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+              }
+            }
+
             const stuckSignal = stuckSupervisor.observe(stepObs.observation)
+            // S5b — escalation decay: once escalated, N consecutive productive
+            // signal-free steps hand the turn back to its own bound model. The
+            // stuck window is over; paying reasoner rates for the REST of the
+            // turn was the shared-CPU A/B's 75%-of-cost failure. The 2/turn
+            // escalation cap is never refunded, so decay cannot oscillate.
+            if (escalatedModelRef) {
+              if (stuckSignal) {
+                productiveSinceEscalation = 0
+              } else if (stepObs.observation.progressed) {
+                productiveSinceEscalation++
+                if (productiveSinceEscalation >= ESCALATION_DECAY_STEPS) {
+                  escalatedModelRef = undefined
+                  productiveSinceEscalation = 0
+                  yield* Effect.logInfo("stuck_deescalate", {
+                    "session.id": sessionID,
+                    mechanism: "sm-backstop",
+                    afterProductiveSteps: ESCALATION_DECAY_STEPS,
+                  })
+                }
+              }
+            }
+            // S5b — environment slowness is not model stuckness: never sets
+            // escalatedModelRef, never consumes a stuckEscalations rung. One
+            // steering nudge per turn (narrowest target, higher timeout),
+            // then the signal is inert.
+            if (stuckSignal?.reason === "environment-slow") {
+              if (!envSlowNudged) {
+                envSlowNudged = true
+                yield* Effect.logWarning("stuck_environment", {
+                  "session.id": sessionID,
+                  mechanism: "sm-backstop",
+                  count: stuckSignal.count,
+                })
+                const envNudge: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(envNudge)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: envNudge.id,
+                  sessionID,
+                  type: "text",
+                  text: ENVIRONMENT_SLOW_NUDGE,
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+                continue
+              }
+            }
             // L4.2 grind valve — both watchers see every step (tallies stay
             // honest); the valve's one firing step takes precedence over the
             // stuck ladder (planting the design pre-pass supersedes a rethink
@@ -1585,7 +1813,7 @@ export const layer = Layer.effect(
               } satisfies SessionV1.TextPart)
               continue
             }
-            if (stuckSignal && stuckEscalations < MAX_STUCK_ESCALATIONS) {
+            if (stuckSignal && stuckSignal.reason !== "environment-slow" && stuckEscalations < MAX_STUCK_ESCALATIONS) {
               stuckEscalations++
               // A test-edit tell jumps straight to the reasoner (code-wrong vs
               // test-stale is a reasoning call); otherwise rung 1 rethinks on the
@@ -1731,7 +1959,7 @@ export const layer = Layer.effect(
             if (turnPinnedProbe && !session.parentID) {
               const gate = yield* Effect.promise(() =>
                 runTurnProbeGate({
-                  probe: turnPinnedProbe!,
+                  probe: turnPinnedProbe!.probe,
                   noTestEdit: testEditGateArmed(sessionID),
                 }),
               )
@@ -1765,11 +1993,100 @@ export const layer = Layer.effect(
                 }
                 yield* Effect.logWarning("turn_probe_unresolved", {
                   "session.id": sessionID,
-                  probe: turnPinnedProbe.command,
+                  probe: turnPinnedProbe.probe.command,
                   retries: probeGateRetries,
+                })
+              } else {
+                // S1 — the accept fall-through: the pin's red evidence (logged
+                // at pin time) and this green run's output tail form the
+                // done-time evidence pair.
+                yield* Effect.logInfo("turn_probe_green", {
+                  "session.id": sessionID,
+                  probe: turnPinnedProbe.probe.command,
+                  outputTail: gate.outputTail ?? null,
                 })
               }
             }
+
+            // S3 — done-time fallback bar: a bug-shaped turn (a diagnosis-*
+            // goal in the turn-read verdict, or the no-test-edit gate armed)
+            // reaching done with NO verified reproduction OR ZERO landed
+            // source (non-test) edits gets ONE reject-with-nudge cycle before
+            // a loud, never-deadlocked break. Catches the shapes the M4 pin
+            // never sees: 11964 (test-only false-green — a pin existed and
+            // went green, but nothing source-side landed) and 12039 (empty
+            // patch — nothing pinnable was ever authored/run).
+            if (!session.parentID) {
+              const storedVerdict = getTurnVerdict(sessionID)
+              const bugShaped =
+                (storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
+                testEditGateArmed(sessionID)
+              if (bugShaped) {
+                const turnStartID = turnOpenUserID ?? lastUser.id
+                const turnAssistantParts = msgs
+                  .filter((m) => m.info.role === "assistant" && m.info.id > turnStartID)
+                  .flatMap((m) => m.parts)
+                const landedSourceEdits = extractTrajectory(turnAssistantParts).events.some(
+                  (e) => e.kind === "file-edit" && !isTestFilePath(e.filePath),
+                )
+                // Fire when there is no pin at all, OR when the pin was
+                // authored THIS turn yet no source edit landed (a red repro
+                // cannot legitimately flip green with zero source changes —
+                // that is repro/environment tampering, the 11964 shape). An
+                // INHERITED pin with no new edits is a confirm/report
+                // continuation turn and passes (the M4 gate above already
+                // re-ran it green).
+                if (!turnPinnedProbe || (!landedSourceEdits && !pinInheritedFromStore)) {
+                  if (!unverifiedFinishNudged) {
+                    unverifiedFinishNudged = true
+                    // S4 — fold any still-unresolved governance-gate block
+                    // into the same nudge (django-12039: blocked twice,
+                    // never re-landed).
+                    const unresolvedBlocks = [...getGateBlocks(sessionID)]
+                    const blockLines = unresolvedBlocks
+                      .map(
+                        ([file, reason]) =>
+                          `Your edit to \`${file}\` was blocked (${reason}) and never re-landed — re-apply it, updating the listed callers in the same change.`,
+                      )
+                      .join("\n")
+                    yield* Effect.logWarning("turn_completed_unverified_nudge", {
+                      "session.id": sessionID,
+                      hadPin: turnPinnedProbe !== undefined,
+                      landedSourceEdits,
+                      unresolvedBlocks: unresolvedBlocks.length,
+                    })
+                    const finishNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(finishNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: finishNudge.id,
+                      sessionID,
+                      type: "text",
+                      text:
+                        "You are finishing a bug-fix task with NO verified reproduction / NO source change. Author a minimal repro script asserting the issue's EXPECTED behavior, RUN it, and report the result. If it fails, your fix is incomplete." +
+                        (blockLines ? `\n${blockLines}` : ""),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                  // Second finish attempt still unresolved — loud, never a
+                  // second nudge and never a deadlock; the break below fires.
+                  yield* Effect.logWarning("turn_completed_unverified", {
+                    "session.id": sessionID,
+                    hadPin: turnPinnedProbe !== undefined,
+                    landedSourceEdits,
+                  })
+                }
+              }
+            }
+
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
             break
           }
@@ -1794,6 +2111,7 @@ export const layer = Layer.effect(
           // test-work-shaped (the repro/test-authoring slice stays free).
           if (step === 0 && !prepassSeeded) {
             prepassSeeded = true
+            turnOpenUserID = lastUser.id
             const userText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
               .map((p) => (p.type === "text" ? p.text : ""))
               .filter(Boolean)
@@ -1870,6 +2188,11 @@ export const layer = Layer.effect(
                     turnGoalCount = stored.goals.length
                   }
                   turnPinnedProbe = getPinnedProbe(sessionID)
+                  // S3 — an inherited pin marks this as a mid-task
+                  // continuation: the done-time bar must not demand fresh
+                  // source edits from a confirm/report turn whose contract
+                  // was already proven (the M4 gate still re-runs the pin).
+                  pinInheritedFromStore = turnPinnedProbe !== undefined
                   setNoEditsGate(sessionID, false)
                   yield* Effect.logInfo("turn_continuation", {
                     "session.id": sessionID,
@@ -1891,6 +2214,9 @@ export const layer = Layer.effect(
                 // Fresh turn: the M4 pin store starts empty — a stale pin
                 // from an earlier task must not leak into this one.
                 setPinnedProbe(sessionID, undefined)
+                // S4 — likewise the governance-gate block ledger: a new task
+                // starts with a clean slate, not a prior task's abandonment.
+                clearGateBlocks(sessionID)
               }
 
               if (turnOpen.triage && !turnContinuation) {
@@ -1967,14 +2293,21 @@ export const layer = Layer.effect(
                     setPinnedProbe(sessionID, turnPinnedProbe)
                     yield* Effect.logInfo("turn_probe_pinned", {
                       "session.id": sessionID,
-                      probe: turnPinnedProbe.command,
+                      probe: turnPinnedProbe.probe.command,
+                      redExit: turnPinnedProbe.redEvidence?.exitCode ?? null,
+                      redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                     })
                   }
                 }
 
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0) {
-                  const skeleton = buildTriageTodoSkeleton(verdict, arming)
+                  const skeleton = buildTriageTodoSkeleton(verdict, arming, {
+                    hasPinnedProbe: turnPinnedProbe !== undefined,
+                  })
+                  // S2 — did the skeleton seed the repro pre-pass? Gates the
+                  // mid-turn hand-off/abstention logic in the SM4 block above.
+                  reproSeededThisTurn = skeleton.some((t) => t.content === REPRO_SLICE_CONTENT)
                   // Owner-decision trace: which goals seeded a reasoner pre-pass
                   // (the diagnosis writer) and the shapes that drove it — the
                   // stage-1 routing decision, logged with mechanism:"orchestrator"
@@ -1982,11 +2315,13 @@ export const layer = Layer.effect(
                   // cast as RECOVERY by the SM backstop (stuck_escalate below).
                   const seeds = skeleton
                     .map((t) =>
-                      t.content === LOCALIZATION_SLICE_CONTENT
-                        ? "localization"
-                        : t.content === PLAN_SLICE_CONTENT
-                          ? "plan"
-                          : undefined,
+                      t.content === REPRO_SLICE_CONTENT
+                        ? "repro"
+                        : t.content === LOCALIZATION_SLICE_CONTENT
+                          ? "localization"
+                          : t.content === PLAN_SLICE_CONTENT
+                            ? "plan"
+                            : undefined,
                     )
                     .filter((s) => s !== undefined)
                   yield* Effect.logInfo("frame_seed_planted", {

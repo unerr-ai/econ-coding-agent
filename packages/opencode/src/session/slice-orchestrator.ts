@@ -22,6 +22,7 @@ import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
+  REPRO_SLICE_CONTENT,
 } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
@@ -710,11 +711,18 @@ export function extractVerifyCommands(text: string): VerifyCommand[] {
 // as a generic verifyCommands entry, just never as probeCommand.
 const REPRO_FILE_RE = /\.(?:test|spec)\.[a-zA-Z]+\b|(?:^|[\s/])(?:tests?|specs?)\/[^\s`]+/i
 const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
+// S1 — an AUTHORED repro script (django-11964/12039: no existing test names
+// the bug) qualifies as a pin too: `repro`/`reproduce`-named source file, any
+// language. Scored below a named test file/filter (2-3) so a real test still
+// outranks a synthetic script when both are on offer; a bare whole-suite
+// command (neither RE matches) still scores 0 — never a repro.
+const REPRO_SCRIPT_RE = /(?:^|[\s/])(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
 
 /** Specificity score for a repro candidate (0 disqualifies it — not a repro). */
 function reproSpecificity(cmd: VerifyCommand): number {
   if (cmd.kind !== "test") return 0
-  return (REPRO_FILE_RE.test(cmd.command) ? 2 : 0) + (REPRO_FILTER_RE.test(cmd.command) ? 1 : 0)
+  const named = (REPRO_FILE_RE.test(cmd.command) ? 2 : 0) + (REPRO_FILTER_RE.test(cmd.command) ? 1 : 0)
+  return named > 0 ? named : REPRO_SCRIPT_RE.test(cmd.command) ? 1 : 0
 }
 
 /**
@@ -759,6 +767,17 @@ export const TEST_TREE_GUARD_COMMAND: VerifyCommand = {
 // ---------------------------------------------------------------------------
 
 /**
+ * M4/S1 — the turn-end pinned reproduction: the command itself, plus (only
+ * for a runner-confirmed red) the exit code and output tail that proved it
+ * red. A prompt-text-named pin carries no `redEvidence` — it was never
+ * executed to confirm, just extracted.
+ */
+export interface TurnProbePin {
+  readonly probe: VerifyCommand
+  readonly redEvidence?: { readonly exitCode: number; readonly outputTail: string }
+}
+
+/**
  * The pinned reproduction for the turn-end prove-it gate, from the best
  * available source: a command the turn's prompt names wins when present
  * (the turn-level analogue of a slice's probeCommand); otherwise, given
@@ -767,7 +786,9 @@ export const TEST_TREE_GUARD_COMMAND: VerifyCommand = {
  * a pinned probe the turn-end gate can require go green. Lets the turn-end
  * gate re-run the exact failing case even when the conductor fixed the bug
  * inline and dispatched no slices, where the slice-level probe rung never
- * engages.
+ * engages. S1 — the red-state fallback's confirming run is captured as
+ * `redEvidence` (exit code + ≤20-line output tail) so the pin carries its own
+ * evidence, not just an assertion.
  *
  * @sem domain=routing role=repro-pin
  */
@@ -777,13 +798,14 @@ export async function deriveTurnProbe(opts: {
   candidateTests?: readonly VerifyCommand[]
   /** Injected runner for the red-state fallback; omit to skip it (prompt-text-only, as before). */
   runner?: CommandRunner
-}): Promise<VerifyCommand | undefined> {
+}): Promise<TurnProbePin | undefined> {
   const named = mostSpecificRepro(extractVerifyCommands(opts.promptText))
-  if (named) return named
+  if (named) return { probe: named }
   if (!opts.runner || !opts.candidateTests?.length) return undefined
 
   let best: VerifyCommand | undefined
   let bestScore = 0
+  let bestRed: { exitCode: number; outputTail: string } | undefined
   for (const candidate of opts.candidateTests) {
     const score = reproSpecificity(candidate)
     if (score === 0 || score <= bestScore) continue // can't beat the current pin — skip the run
@@ -791,9 +813,13 @@ export async function deriveTurnProbe(opts: {
     if (result.exitCode !== 0) {
       bestScore = score
       best = candidate
+      bestRed = {
+        exitCode: result.exitCode,
+        outputTail: (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n"),
+      }
     }
   }
-  return best
+  return best ? { probe: best, redEvidence: bestRed } : undefined
 }
 
 /** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */
@@ -802,15 +828,19 @@ export interface TurnProbeGateResult {
   rung?: "probe" | "test-tree"
   exitCode?: number
   reason?: string
+  /** S1 — the accepting (green) run's output tail (≤20 lines), evidence-as-artifact alongside the red pin. Present only when `reject` is false. */
+  outputTail?: string
 }
 
 /**
  * The turn-end backstop: a fix-shaped turn that pinned a reproduction may not
  * conclude while a tracked test was edited on a no-test-edit turn, or while the
  * pinned reproduction is still red. A reject carries the continue-message the
- * caller re-injects; a clean test tree AND green repro returns accept. Runs in
- * the session cwd via the same bounded shell runner the sound rung uses, so a
- * hung command can never wedge the turn.
+ * caller re-injects; a clean test tree AND green repro returns accept, with
+ * the green run's output tail attached (S1 — the pin's red evidence and this
+ * accept's green evidence form the done-time pair). Runs in the session cwd
+ * via the same bounded shell runner the sound rung uses, so a hung command
+ * can never wedge the turn.
  *
  * @sem domain=routing role=repro-gate
  */
@@ -836,7 +866,11 @@ export async function runTurnProbeGate(opts: {
     }
   }
   const result = await runner(opts.probe)
-  if (result.exitCode === 0) return { reject: false }
+  if (result.exitCode === 0)
+    return {
+      reject: false,
+      outputTail: (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n"),
+    }
   const detail = (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n")
   return {
     reject: true,
@@ -968,6 +1002,23 @@ export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
   sliceType: "mechanical",
   testStrength: "testable",
   persona: "applier",
+}
+
+/**
+ * S2 — the repro-authoring pre-pass. DELIBERATELY UNTYPED (no `sliceType`) so
+ * `isTypedSlice`/`hasPendingTypedSlices` never see it as a dispatchable DAG
+ * node — it runs INLINE on the conductor in the ROOT session, the only place
+ * that can observe its red run itself (a dispatched child's red is invisible
+ * to the root's M4 pin; the existing probe-from-red path at prompt.ts's SM4
+ * block is what actually pins it). Plants FIRST, before localization:
+ * `buildTriageTodoSkeleton` withholds the localization seed while this one is
+ * needed, and the mid-turn hand-off (prompt.ts SM4 block) plants localization
+ * once the repro pins or the abstention deadline passes.
+ */
+export const REPRO_PREPASS_TODO: InjectedSliceTodo = {
+  content: REPRO_SLICE_CONTENT,
+  status: "pending",
+  priority: "high",
 }
 
 /** #55 — the re-plan seed (§4.2 `new-items`): a `design` slice, so allocateSlice floors it to the reasoner (design-insight) and a lone re-plan seed still clears the shouldOrchestrate benefit gate (which keys on the ALLOCATED tier) on the hook re-fire. */
@@ -1181,11 +1232,21 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * cross-goal content dedup plants at most ONE pre-pass per kind, parented to
  * the first qualifying goal in dependency order; a single diagnosis goal never
  * plants both (needsPlan is ignored on the diagnosis branch — the 12050
- * double-seed regression).
+ * double-seed regression). S2 — repro-first sequencing: on a diagnosis goal
+ * that still needs a reproduction (`arming.armReproduction` and no pin has
+ * landed yet, `opts.hasPinnedProbe`), the REPRO seed plants INSTEAD of
+ * localization — a post-fix repro can only ever run green, so localization is
+ * WITHHELD until the mid-turn hand-off (prompt.ts SM4 block) plants it once
+ * the repro pins (or the abstention deadline passes). `hasPinnedProbe:true`
+ * (the prompt already named a pinnable command) restores today's behavior.
  *
  * @sem domain=routing role=router
  */
-export function buildTriageTodoSkeleton(verdict: TriageVerdict, arming: ArmingDecision): TriageTodoRow[] {
+export function buildTriageTodoSkeleton(
+  verdict: TriageVerdict,
+  arming: ArmingDecision,
+  opts?: { hasPinnedProbe?: boolean },
+): TriageTodoRow[] {
   const order = orderTriageGoals(verdict.goals)
   const positionOf = new Map<number, number>()
   const todos: TriageTodoRow[] = []
@@ -1194,14 +1255,17 @@ export function buildTriageTodoSkeleton(verdict: TriageVerdict, arming: ArmingDe
     const goal = verdict.goals[origIdx]!
     todos.push({ content: goal.quote, status: "pending", priority: "medium" })
   }
+  const needsRepro = (arming.armReproduction ?? false) && !opts?.hasPinnedProbe
   const plantedSeedContent = new Set<string>()
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
     const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
     const seed = isDiagnosis
-      ? arming.armLocalization
-        ? LOCALIZATION_PREPASS_TODO
-        : undefined
+      ? needsRepro
+        ? REPRO_PREPASS_TODO
+        : arming.armLocalization
+          ? LOCALIZATION_PREPASS_TODO
+          : undefined
       : (goal.needsPlan ?? false)
         ? PLAN_PREPASS_TODO
         : undefined
