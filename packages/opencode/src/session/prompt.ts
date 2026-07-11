@@ -33,6 +33,7 @@ import {
   ENVIRONMENT_SLOW_NUDGE,
   reproDriftNudgeText,
   REPRO_DRIFT_ESCALATION_NUDGE,
+  convergeNowNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, type ReproDriftKind } from "./repro-drift"
 import { triagePreamble } from "./prompts/preambles"
@@ -79,6 +80,8 @@ import {
   deriveTurnProbe,
   runTurnProbeGate,
   makeShellCommandRunner,
+  reproSpecificity,
+  isReproScratchPath,
   type ConductorLoopOptions,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
@@ -211,6 +214,14 @@ const GATE_BLOCK_RE = /\[econ-gate\]\s*BLOCKED:[^\n]*?\bin\s+(\S+?)\.\s/i
 // nudge once, never blocking the turn on an unpinnable repro forever.
 // Tuned from fly traces (see the plan doc).
 export const REPRO_PIN_DEADLINE_STEPS = 12
+
+// S8 — how many SM4-observed steps a bug-shaped turn may spend verifying
+// AFTER a source edit has landed with still no reproduction pinned before
+// the converge-now nudge pre-arms the S3 exit ramp (django-11790 strict run
+// #3: a step-21 finish rejection was followed by 38 more minutes of tool
+// calls and no second finish attempt — every done-time bar lives in the
+// !hasToolCalls exit path, which a tool-calling agent can evade forever).
+export const POST_FIX_CONVERGE_STEPS = 8
 
 function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: string }[] {
   const found: { file: string; reason: string }[] = []
@@ -1542,6 +1553,16 @@ export const layer = Layer.effect(
         let reproDriftEvents = 0
         const REPRO_DRIFT_ESCALATION_THRESHOLD = 3
         let reproDriftTier2Fired = false
+        // S8 — converge-now deadline state: how many SM4-observed steps have
+        // passed with a source (non-test) edit already on the board but no
+        // repro pin, whether that source edit has landed at all this turn
+        // (a cheap running flag, updated from the SAME extractTrajectory pass
+        // the S4 gate-block ledger already does — never a second full-turn
+        // trajectory scan), and whether the nudge already fired (at most
+        // once per turn).
+        let postFixNoPinSteps = 0
+        let landedSourceEditThisTurn = false
+        let convergeNudgeFired = false
         // S3 — whether this turn's pin came from the P4 continuation store
         // (restored at turn open) rather than being authored/observed this
         // turn. An inherited pin + no new source edits is a legitimate
@@ -1642,6 +1663,19 @@ export const layer = Layer.effect(
                   redExit: turnPinnedProbe.redEvidence?.exitCode ?? null,
                   redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                 })
+              } else {
+                // S8 — pin-miss observability: django-11790 strict run #3 hit
+                // a red run of a named repro file that did NOT pin, and the
+                // pin path had no logging to say why (all candidates scored
+                // 0, or deriveTurnProbe's own re-run disagreed). Cheap: only
+                // reached when a pin was attempted and missed, no throttling.
+                yield* Effect.logInfo("turn_probe_pin_miss", {
+                  "session.id": sessionID,
+                  candidates: candidateTests.map((c) => ({
+                    command: c.command.slice(0, 160),
+                    specificity: reproSpecificity(c),
+                  })),
+                })
               }
             }
 
@@ -1653,6 +1687,14 @@ export const layer = Layer.effect(
             for (const block of scanGateBlocks(stepParts)) recordGateBlock(sessionID, block.file, block.reason)
             for (const event of extractTrajectory(stepParts).events) {
               if (event.kind === "file-edit") clearGateBlock(sessionID, event.filePath)
+              // S8 — cheap running flag for the converge-now check below:
+              // has a source (non-test, non-scratch-repro) edit landed yet
+              // this turn? Reuses this SAME extractTrajectory pass rather
+              // than a second scan. A repro_issue.py write is evidence, not
+              // a fix — counting it would let the converge nudge push a
+              // fixless finish (the empty-patch shape).
+              if (event.kind === "file-edit" && !isTestFilePath(event.filePath) && !isReproScratchPath(event.filePath))
+                landedSourceEditThisTurn = true
             }
 
             // S2 — repro-first mid-turn hand-off/abstention. Only while the
@@ -1681,68 +1723,15 @@ export const layer = Layer.effect(
                   reproObservedSteps,
                 })
               } else {
-                // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
-                // once-per-kind steer, fired BEFORE the settled/dropped/deadline
-                // abstention check below so there is still runway left in the
-                // pin-deadline budget to redirect the conductor toward a
-                // pinnable file. Tier-2 takes precedence once the running drift
-                // count crosses the threshold (one stronger combined reminder
-                // beats another per-kind nudge); each kind nudges at most once
-                // per turn, silent otherwise. Never fires once handoff/
-                // abstention has landed (this whole branch is skipped then).
-                const driftKinds = classifyReproDrift({ failedCommands: stepObs.failedCommands, parts: stepParts })
-                if (driftKinds.length > 0) {
-                  reproDriftEvents += driftKinds.length
-                  const freshKind = driftKinds.find((k) => !reproDriftKindsNudged.has(k))
-                  if (!reproDriftTier2Fired && reproDriftEvents >= REPRO_DRIFT_ESCALATION_THRESHOLD) {
-                    reproDriftTier2Fired = true
-                    yield* Effect.logWarning("repro_drift_escalation", {
-                      "session.id": sessionID,
-                      reproDriftEvents,
-                      kinds: driftKinds,
-                    })
-                    const escalationNudge: SessionV1.User = {
-                      id: MessageID.ascending(),
-                      sessionID,
-                      role: "user",
-                      time: { created: Date.now() },
-                      agent: lastUser.agent,
-                      model: lastUser.model,
-                    }
-                    yield* sessions.updateMessage(escalationNudge)
-                    yield* sessions.updatePart({
-                      id: PartID.ascending(),
-                      messageID: escalationNudge.id,
-                      sessionID,
-                      type: "text",
-                      text: REPRO_DRIFT_ESCALATION_NUDGE,
-                      synthetic: true,
-                    } satisfies SessionV1.TextPart)
-                    continue
-                  } else if (freshKind) {
-                    reproDriftKindsNudged.add(freshKind)
-                    yield* Effect.logInfo("repro_drift", { "session.id": sessionID, kind: freshKind })
-                    const driftNudge: SessionV1.User = {
-                      id: MessageID.ascending(),
-                      sessionID,
-                      role: "user",
-                      time: { created: Date.now() },
-                      agent: lastUser.agent,
-                      model: lastUser.model,
-                    }
-                    yield* sessions.updateMessage(driftNudge)
-                    yield* sessions.updatePart({
-                      id: PartID.ascending(),
-                      messageID: driftNudge.id,
-                      sessionID,
-                      type: "text",
-                      text: reproDriftNudgeText(freshKind),
-                      synthetic: true,
-                    } satisfies SessionV1.TextPart)
-                    continue
-                  }
-                }
-
+                // (b) abstention: the repro was abandoned/cancelled, or the
+                // deadline passed, with no pin — plant localization anyway
+                // (degrade to today's behavior) and nudge ONCE. The drift
+                // nudge that used to live in this branch moved OUT to right
+                // after this whole S2 if/else (see below): django-11790
+                // strict run #3 showed every actual drift signal (inline
+                // python -c probes, a denied suite edit, a broken repro
+                // file) landing AFTER this abstention had already fired, so
+                // gating the nudge on !reproHandoffDone meant it never ran.
                 const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
                 const reproSettled =
@@ -1753,9 +1742,6 @@ export const layer = Layer.effect(
                 // dropped, and waiting out the deadline just burns steps.
                 const reproDropped = reproTodo === undefined && reproObservedSteps > 1 && currentTodos.length > 0
                 if (reproSettled || reproDropped || reproObservedSteps >= REPRO_PIN_DEADLINE_STEPS) {
-                  // (b) abstention: the repro was abandoned/cancelled, or the
-                  // deadline passed, with no pin — plant localization anyway
-                  // (degrade to today's behavior) and nudge ONCE.
                   reproHandoffDone = true
                   const armed = getArmingDecision(sessionID)
                   if (armed?.armLocalization && !currentTodos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)) {
@@ -1787,6 +1773,116 @@ export const layer = Layer.effect(
                   } satisfies SessionV1.TextPart)
                   continue
                 }
+              }
+            }
+
+            // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
+            // once-per-kind steer. Deliberately OUTSIDE the reproHandoffDone
+            // gate above, re-armed on !turnPinnedProbe instead: django-11790
+            // strict run #3 showed every actual drift signal (inline
+            // python -c probes, a denied suite edit, a broken repro file)
+            // landing AFTER the step-12 deadline abstention had already set
+            // reproHandoffDone — gating the nudge on that flag meant it never
+            // fired. It now survives abstention deliberately and stays live
+            // until a pin lands or the turn ends. Tier-2 takes precedence
+            // once the running drift count crosses the threshold (one
+            // stronger combined reminder beats another per-kind nudge); each
+            // kind nudges at most once per turn, silent otherwise.
+            if (reproSeededThisTurn && !turnPinnedProbe) {
+              const driftKinds = classifyReproDrift({ failedCommands: stepObs.failedCommands, parts: stepParts })
+              if (driftKinds.length > 0) {
+                reproDriftEvents += driftKinds.length
+                const freshKind = driftKinds.find((k) => !reproDriftKindsNudged.has(k))
+                if (!reproDriftTier2Fired && reproDriftEvents >= REPRO_DRIFT_ESCALATION_THRESHOLD) {
+                  reproDriftTier2Fired = true
+                  yield* Effect.logWarning("repro_drift_escalation", {
+                    "session.id": sessionID,
+                    reproDriftEvents,
+                    kinds: driftKinds,
+                  })
+                  const escalationNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(escalationNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: escalationNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: REPRO_DRIFT_ESCALATION_NUDGE,
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                } else if (freshKind) {
+                  reproDriftKindsNudged.add(freshKind)
+                  yield* Effect.logInfo("repro_drift", { "session.id": sessionID, kind: freshKind })
+                  const driftNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(driftNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: driftNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: reproDriftNudgeText(freshKind),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+              }
+            }
+
+            // S8 — converge-now deadline: a bug-shaped turn whose fix has
+            // already landed (a source edit is on the board) but never gets
+            // pinned keeps "verifying" broadly forever — run #3's step-21
+            // finish rejection was followed by 38 more minutes of tool calls
+            // and no second finish attempt, because every done-time bar (S3
+            // below) lives in the !hasToolCalls exit path a tool-calling
+            // agent never enters. Count observed post-fix, no-pin steps; at
+            // the deadline, pre-arm unverifiedFinishNudged so the S3 bar
+            // treats the NEXT finish attempt as its one-nudge-then-loud-pass
+            // exit ramp instead of rejecting forever.
+            if (
+              !convergeNudgeFired &&
+              !turnPinnedProbe &&
+              landedSourceEditThisTurn &&
+              ((getTurnVerdict(sessionID)?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
+                testEditGateArmed(sessionID))
+            ) {
+              postFixNoPinSteps++
+              if (postFixNoPinSteps >= POST_FIX_CONVERGE_STEPS) {
+                convergeNudgeFired = true
+                unverifiedFinishNudged = true
+                yield* Effect.logWarning("turn_converge_nudge", { "session.id": sessionID, postFixNoPinSteps })
+                const convergeNudge: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(convergeNudge)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: convergeNudge.id,
+                  sessionID,
+                  type: "text",
+                  text: convergeNowNudgeText(postFixNoPinSteps),
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+                continue
               }
             }
 
@@ -2101,7 +2197,10 @@ export const layer = Layer.effect(
                   .filter((m) => m.info.role === "assistant" && m.info.id > turnStartID)
                   .flatMap((m) => m.parts)
                 const landedSourceEdits = extractTrajectory(turnAssistantParts).events.some(
-                  (e) => e.kind === "file-edit" && !isTestFilePath(e.filePath),
+                  // Scratch repro scripts are evidence, not fixes — counting
+                  // one here would blind both the zero-source-edit arm and
+                  // the repro-tamper arm to a repro-only turn.
+                  (e) => e.kind === "file-edit" && !isTestFilePath(e.filePath) && !isReproScratchPath(e.filePath),
                 )
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro

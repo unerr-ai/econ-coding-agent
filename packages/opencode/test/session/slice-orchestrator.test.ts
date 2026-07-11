@@ -68,6 +68,7 @@ import {
   logprobTokensFromParts,
   uncertaintyFromParts,
   redecompositionSignalsFromOutcomes,
+  isReproScratchPath,
   type ConductorSliceDispatch,
   type SliceProbes,
   type OrchestrationTodo,
@@ -1153,6 +1154,15 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
     expect(REPRO_SLICE_CONTENT).toMatch(/never `git add`/i)
     expect(REPRO_SLICE_CONTENT).not.toBe(LOCALIZATION_SLICE_CONTENT)
   })
+
+  // S8 (django-11790 strict run #3): the repro died on `ImportError: cannot
+  // import name 'CustomEmailField'` — it imported from a tests module and
+  // was placed inside tests/auth_tests/.
+  it("the template places the repro at the repo ROOT and forbids importing from a tests module", () => {
+    expect(REPRO_SLICE_CONTENT).toMatch(/repo ROOT \(never inside tests\/\)/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/importing ONLY from the installed package/i)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never from tests\.\* or a test module/i)
+  })
 })
 
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
@@ -1419,6 +1429,19 @@ But the actual repro is:
     const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }]
     const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates })
     expect(result).toBeUndefined()
+  })
+})
+
+describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixes)", () => {
+  it("matches agent-authored scratch repro scripts, at root or nested", () => {
+    expect(isReproScratchPath("repro_issue.py")).toBe(true)
+    expect(isReproScratchPath("tests/auth_tests/repro_maxlength_regression.py")).toBe(true)
+    expect(isReproScratchPath("reproduce-crash.sh")).toBe(true)
+  })
+  it("does not match product source or ordinary test files", () => {
+    expect(isReproScratchPath("django/contrib/auth/forms.py")).toBe(false)
+    expect(isReproScratchPath("src/session/prompt.ts")).toBe(false)
+    expect(isReproScratchPath("tests/auth_tests/test_forms.py")).toBe(false)
   })
 })
 

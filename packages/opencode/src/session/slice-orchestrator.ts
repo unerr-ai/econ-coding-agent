@@ -719,6 +719,18 @@ const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
 const REPRO_SCRIPT_RE = /(?:^|[\s/])(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
 
 /**
+ * Whether a file path is an agent-authored scratch reproduction script rather
+ * than product source — writing one must not count as "a source fix landed"
+ * anywhere done-time evidence is weighed (S3's zero-source-edit bar, S8's
+ * converge-now counter), or a repro-only turn looks fixed.
+ *
+ * @sem domain=routing role=repro-specificity
+ */
+export function isReproScratchPath(filePath: string): boolean {
+  return REPRO_SCRIPT_RE.test(filePath)
+}
+
+/**
  * Specificity score for a repro candidate (0 disqualifies it — not a repro).
  * Exported so the repro-drift classifier (repro-drift.ts) agrees on the same
  * pinnability rule when it flags a step's failed commands as unpinnable.

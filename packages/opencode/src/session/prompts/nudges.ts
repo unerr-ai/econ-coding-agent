@@ -78,7 +78,7 @@ export function reproDriftNudgeText(kind: ReproDriftKind): string {
     case "inline-repro":
       return "You ran an inline `python -c`/heredoc command carrying an assertion instead of a file. An inline command cannot be pinned as this turn's verification contract — the turn-end gate has nothing to re-run. Write that exact assertion into a file named `repro_issue.py` at the repo root and run `python repro_issue.py` as its own single command."
     case "suite-edit-denied":
-      return "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root, asserting the issue's expected behavior and run it standalone as `python repro_issue.py`."
+      return "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root (never inside the tests/ tree), importing ONLY from the installed package (never from a tests.* module — define minimal stand-in classes inline if you need one), asserting the issue's expected behavior and run it standalone as `python repro_issue.py`."
     case "unpinnable-red":
       return "Your failing command was a whole-suite run or a multi-line/batched script. Neither can be pinned as this turn's reproduction — the gate needs one single, targeted command to re-run. Isolate the same failure into a single-command file, `repro_issue.py` at the repo root, and run it alone as `python repro_issue.py`."
   }
@@ -93,3 +93,16 @@ export const REPRO_DRIFT_ESCALATION_NUDGE =
   "You have drifted from the repro contract three times without pinning a reproduction — inline commands, a denied suite edit, or an unpinnable run, never a file. " +
   "Write the exact assertion into `repro_issue.py` at the repo root and run it ALONE as `python repro_issue.py`, confirming it is RED before any fix. " +
   "This is the last reminder on this turn."
+
+/**
+ * S8 — converge-now nudge: prompt.ts's SM4 block injects this when a
+ * bug-shaped turn has landed a source fix but never pinned a reproduction
+ * for POST_FIX_CONVERGE_STEPS observed steps — broad "verification" that
+ * never converges (django-11790 strict run #3: 38 more minutes of tool calls
+ * after a rejected finish, no second finish attempt). Names both concrete
+ * exits — a single-file repro run, or an honest finish — rather than another
+ * open-ended "keep verifying."
+ */
+export function convergeNowNudgeText(steps: number): string {
+  return `Your source fix landed ${steps} steps ago and no reproduction has been pinned — continued broad verification is not converging. Do ONE of these now: (a) make a single-file repro run — \`repro_issue.py\` at the repo ROOT, one command, \`python repro_issue.py\` — confirming your fix (it must fail on the pre-fix code for the issue's reason); or (b) FINISH: give your final answer now, stating plainly what you verified and what you could not. Do not start any new investigation.`
+}

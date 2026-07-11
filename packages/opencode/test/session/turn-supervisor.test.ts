@@ -8,7 +8,7 @@ import {
   createBatchMomentumWatcher,
   SLOW_COMMAND_MS,
 } from "../../src/session/turn-supervisor"
-import { stuckNudgeText, grindValveNudgeText } from "../../src/session/prompts/nudges"
+import { stuckNudgeText, grindValveNudgeText, reproDriftNudgeText, convergeNowNudgeText } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
 import {
@@ -434,5 +434,32 @@ describe("createBatchMomentumWatcher", () => {
     expect(watcher.observe(1)).toBeUndefined() // step 9: run=5, 9-3=6 < 8
     expect(watcher.observe(1)).toBeUndefined() // step 10: run=6, 10-3=7 < 8
     expect(watcher.observe(1)).toEqual({ step: 11, consecutiveSingleCalls: 7 }) // step 11: run=7, 11-3=8 >= 8 — fires
+  })
+})
+
+// -- S8 convergeNowNudgeText --------------------------------------------------
+
+describe("convergeNowNudgeText", () => {
+  it("names the elapsed step count and both concrete exits", () => {
+    const text = convergeNowNudgeText(8)
+    expect(text).toContain("8 steps ago")
+    expect(text).toContain("repro_issue.py")
+    expect(text.toLowerCase()).toContain("finish")
+  })
+
+  it("interpolates a different step count", () => {
+    const text = convergeNowNudgeText(12)
+    expect(text).toContain("12 steps ago")
+  })
+})
+
+// -- S8 reproDriftNudgeText suite-edit-denied clause -------------------------
+
+describe("reproDriftNudgeText (suite-edit-denied)", () => {
+  it("names the repo root and forbids importing from a tests module (django-11790 strict run #3)", () => {
+    const text = reproDriftNudgeText("suite-edit-denied")
+    expect(text.toLowerCase()).toContain("repo root")
+    expect(text.toLowerCase()).toContain("never inside")
+    expect(text.toLowerCase()).toContain("tests.*")
   })
 })
