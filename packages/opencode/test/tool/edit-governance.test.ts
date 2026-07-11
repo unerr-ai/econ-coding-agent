@@ -179,6 +179,7 @@ describe("B3 — testEditDenialMessage", () => {
     expect(msg).toContain("no-test-edit gate")
     expect(msg).toContain("NEW test file")
     expect(msg).toContain("do not edit it")
+    expect(msg).toContain("repro_issue.py")
   })
 })
 

@@ -164,7 +164,8 @@ export function testEditDenialMessage(relPath: string): string {
     `Changing tests to match a patch invalidates the only oracle that can catch a wrong fix. ` +
     `If a test contradicts your patch, treat that as evidence about the patch: re-check the localization and change source code instead. ` +
     `If you believe the test itself encodes the bug, state that in your final answer with the evidence — do not edit it. ` +
-    `Writing a NEW test file that reproduces the reported defect is allowed.`
+    `Writing a NEW test file that reproduces the reported defect is allowed. ` +
+    `Author a NEW scratch repro file instead (e.g. \`repro_issue.py\` at the repo root) and run it — new files are allowed; editing the committed suite is not.`
   )
 }
 

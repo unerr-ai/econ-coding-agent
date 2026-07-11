@@ -1,5 +1,6 @@
 // Mid-turn corrective nudges the turn driver injects as synthetic user messages.
 import type { StuckSignal } from "../../../../code-intelligence/src/orchestration-fsm"
+import type { ReproDriftKind } from "../repro-drift"
 
 /**
  * The rethink message injected when the supervisor flags a stuck loop. As a
@@ -64,3 +65,31 @@ export function batchMomentumNudgeText(signal: { consecutiveSingleCalls: number 
  */
 export const ENVIRONMENT_SLOW_NUDGE =
   "This machine is running commands SLOWLY (the same command failed repeatedly, each run taking 60s+). Treat it as environment slowness, not a wrong approach: run the single NARROWEST test target (one test method, not a suite), raise the per-command timeout, and never re-run a command whose output you already have."
+
+/**
+ * Repro-drift nudge (NUDGE_V2 port) — the targeted, once-per-kind steer
+ * prompt.ts's SM4 block injects when `classifyReproDrift` (repro-drift.ts)
+ * flags a step during the repro pre-pass window. Each names the CONCRETE
+ * alternative — a standalone `repro_issue.py` run as its own command — rather
+ * than restating the seed's full instructions.
+ */
+export function reproDriftNudgeText(kind: ReproDriftKind): string {
+  switch (kind) {
+    case "inline-repro":
+      return "You ran an inline `python -c`/heredoc command carrying an assertion instead of a file. An inline command cannot be pinned as this turn's verification contract — the turn-end gate has nothing to re-run. Write that exact assertion into a file named `repro_issue.py` at the repo root and run `python repro_issue.py` as its own single command."
+    case "suite-edit-denied":
+      return "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root, asserting the issue's expected behavior and run it standalone as `python repro_issue.py`."
+    case "unpinnable-red":
+      return "Your failing command was a whole-suite run or a multi-line/batched script. Neither can be pinned as this turn's reproduction — the gate needs one single, targeted command to re-run. Isolate the same failure into a single-command file, `repro_issue.py` at the repo root, and run it alone as `python repro_issue.py`."
+  }
+}
+
+/**
+ * Tier-2 repro-drift escalation — fires once per turn when total drift
+ * events reach the threshold with still no pin, restating the contract as
+ * one stronger combined reminder instead of another per-kind nudge.
+ */
+export const REPRO_DRIFT_ESCALATION_NUDGE =
+  "You have drifted from the repro contract three times without pinning a reproduction — inline commands, a denied suite edit, or an unpinnable run, never a file. " +
+  "Write the exact assertion into `repro_issue.py` at the repo root and run it ALONE as `python repro_issue.py`, confirming it is RED before any fix. " +
+  "This is the last reminder on this turn."

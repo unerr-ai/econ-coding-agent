@@ -31,7 +31,10 @@ import {
   batchMomentumNudgeText,
   LENGTH_CONTINUATION_NUDGE,
   ENVIRONMENT_SLOW_NUDGE,
+  reproDriftNudgeText,
+  REPRO_DRIFT_ESCALATION_NUDGE,
 } from "./prompts/nudges"
+import { classifyReproDrift, type ReproDriftKind } from "./repro-drift"
 import { triagePreamble } from "./prompts/preambles"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
@@ -1530,6 +1533,15 @@ export const layer = Layer.effect(
         let reproSeededThisTurn = false
         let reproHandoffDone = false
         let reproObservedSteps = 0
+        // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
+        // once-per-kind steer while the repro pre-pass is still unresolved:
+        // which kinds have already nudged this turn, the running total of
+        // drift events across all kinds (Tier-2 escalates once this crosses
+        // the threshold), and whether that escalation already fired.
+        const reproDriftKindsNudged = new Set<ReproDriftKind>()
+        let reproDriftEvents = 0
+        const REPRO_DRIFT_ESCALATION_THRESHOLD = 3
+        let reproDriftTier2Fired = false
         // S3 — whether this turn's pin came from the P4 continuation store
         // (restored at turn open) rather than being authored/observed this
         // turn. An inherited pin + no new source edits is a legitimate
@@ -1669,6 +1681,68 @@ export const layer = Layer.effect(
                   reproObservedSteps,
                 })
               } else {
+                // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
+                // once-per-kind steer, fired BEFORE the settled/dropped/deadline
+                // abstention check below so there is still runway left in the
+                // pin-deadline budget to redirect the conductor toward a
+                // pinnable file. Tier-2 takes precedence once the running drift
+                // count crosses the threshold (one stronger combined reminder
+                // beats another per-kind nudge); each kind nudges at most once
+                // per turn, silent otherwise. Never fires once handoff/
+                // abstention has landed (this whole branch is skipped then).
+                const driftKinds = classifyReproDrift({ failedCommands: stepObs.failedCommands, parts: stepParts })
+                if (driftKinds.length > 0) {
+                  reproDriftEvents += driftKinds.length
+                  const freshKind = driftKinds.find((k) => !reproDriftKindsNudged.has(k))
+                  if (!reproDriftTier2Fired && reproDriftEvents >= REPRO_DRIFT_ESCALATION_THRESHOLD) {
+                    reproDriftTier2Fired = true
+                    yield* Effect.logWarning("repro_drift_escalation", {
+                      "session.id": sessionID,
+                      reproDriftEvents,
+                      kinds: driftKinds,
+                    })
+                    const escalationNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(escalationNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: escalationNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: REPRO_DRIFT_ESCALATION_NUDGE,
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  } else if (freshKind) {
+                    reproDriftKindsNudged.add(freshKind)
+                    yield* Effect.logInfo("repro_drift", { "session.id": sessionID, kind: freshKind })
+                    const driftNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(driftNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: driftNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: reproDriftNudgeText(freshKind),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                }
+
                 const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
                 const reproSettled =

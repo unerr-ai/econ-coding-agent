@@ -718,8 +718,14 @@ const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
 // command (neither RE matches) still scores 0 — never a repro.
 const REPRO_SCRIPT_RE = /(?:^|[\s/])(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
 
-/** Specificity score for a repro candidate (0 disqualifies it — not a repro). */
-function reproSpecificity(cmd: VerifyCommand): number {
+/**
+ * Specificity score for a repro candidate (0 disqualifies it — not a repro).
+ * Exported so the repro-drift classifier (repro-drift.ts) agrees on the same
+ * pinnability rule when it flags a step's failed commands as unpinnable.
+ *
+ * @sem domain=routing role=repro-specificity
+ */
+export function reproSpecificity(cmd: VerifyCommand): number {
   if (cmd.kind !== "test") return 0
   // A multi-line compound command (a batched probe script) is a PROBE, not a
   // contract: pinning one wedges the turn on every section it bundles —
