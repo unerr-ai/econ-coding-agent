@@ -2,7 +2,6 @@ export * as Session from "./session"
 
 import { Effect, Stream } from "effect"
 import { SessionV2 } from "../session"
-import { MessageDecodeError } from "../session/error"
 import { SessionEvent } from "../session/event"
 import { SessionInput } from "../session/input"
 import { SessionMessage } from "../session/message"
@@ -39,8 +38,6 @@ export type NotFoundError = SessionV2.NotFoundError
 
 export const PromptConflictError = SessionV2.PromptConflictError
 export type PromptConflictError = SessionV2.PromptConflictError
-
-export { MessageDecodeError }
 
 export interface CreateInput {
   readonly id?: ID
@@ -89,8 +86,8 @@ export interface Interface {
   readonly switchModel: (input: SwitchModelInput) => Effect.Effect<void, NotFoundError>
   /** Interrupt the active V2 execution chain for one Session on this process. Interrupting an idle or missing Session is a no-op. */
   readonly interrupt: (sessionID: ID) => Effect.Effect<void>
-  readonly messages: (input: MessagesInput) => Effect.Effect<Message[], NotFoundError | MessageDecodeError>
+  readonly messages: (input: MessagesInput) => Effect.Effect<Message[], NotFoundError>
   readonly message: (input: MessageInput) => Effect.Effect<Message | undefined>
-  readonly context: (sessionID: ID) => Effect.Effect<Message[], NotFoundError | MessageDecodeError>
+  readonly context: (sessionID: ID) => Effect.Effect<Message[], NotFoundError>
   readonly events: (input: EventsInput) => Stream.Stream<Event, NotFoundError>
 }

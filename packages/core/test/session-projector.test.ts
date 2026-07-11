@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { DateTime, Effect, Layer, Schema } from "effect"
+import * as TestConsole from "effect/testing/TestConsole"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -483,6 +484,109 @@ describe("SessionProjector", () => {
           time: { created },
         }),
       ])
+    }),
+  )
+
+  it.effect("drops an unencodable content part, persists the rest, and logs the failure", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      // insertMessage only reads event.durable.seq and event.data.sessionID; a
+      // published event would double-insert via the projector's own live listener.
+      const event = { durable: { seq: 0 }, data: { sessionID } } as unknown as SessionEvent.Event
+
+      const id = SessionMessage.ID.make("msg_assistant_salvage")
+      const message = new SessionMessage.Assistant({
+        id,
+        type: "assistant",
+        agent: "build",
+        model,
+        content: [new SessionMessage.AssistantText({ type: "text", id: "good-1", text: "hello" })],
+        time: { created },
+      })
+      // Simulates a model/gateway writing a content shape the schema rejects
+      // straight into the array, the way an unvalidated draft would.
+      ;(message.content as unknown as SessionMessage.AssistantContent[]).push({
+        type: "not-a-real-part-type",
+        id: "bad-1",
+      } as unknown as SessionMessage.AssistantContent)
+
+      yield* SessionProjector.insertMessage(db, event, message)
+
+      expect((yield* TestConsole.logLines).length).toBeGreaterThan(0)
+
+      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, id)).get().pipe(Effect.orDie)
+      if (!row) return yield* Effect.die("Expected the salvaged message to be persisted")
+      const persisted = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
+      expect(persisted).toMatchObject({
+        type: "assistant",
+        content: [{ type: "text", id: "good-1", text: "hello" }],
+      })
+    }),
+  )
+
+  it.effect("skips an unsalvageable message without the projector dying", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const event = { durable: { seq: 0 }, data: { sessionID } } as unknown as SessionEvent.Event
+
+      const id = SessionMessage.ID.make("msg_assistant_unsalvageable")
+      const message = new SessionMessage.Assistant({
+        id,
+        type: "assistant",
+        agent: "build",
+        model,
+        content: [],
+        time: { created },
+      })
+      // Bad content part AND a bad `model` field smuggled in post-construction:
+      // dropping the part is not enough, so this must fall through the salvage
+      // path entirely and skip persisting instead of dying.
+      ;(message.content as unknown as SessionMessage.AssistantContent[]).push({
+        type: "not-a-real-part-type",
+        id: "bad-1",
+      } as unknown as SessionMessage.AssistantContent)
+      ;(message as unknown as { model: unknown }).model = "not-a-model"
+
+      yield* SessionProjector.insertMessage(db, event, message)
+
+      expect((yield* TestConsole.logLines).length).toBeGreaterThan(0)
+
+      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, id)).get().pipe(Effect.orDie)
+      expect(row).toBeUndefined()
     }),
   )
 })

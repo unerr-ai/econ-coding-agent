@@ -20,6 +20,7 @@ type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
+const encodeAssistantContent = Schema.encodeSync(SessionMessage.AssistantContent)
 
 export class SessionAlreadyProjected extends Error {}
 
@@ -109,26 +110,125 @@ function applyUsage(
     .pipe(Effect.orDie)
 }
 
+// Effect Schema's throwing Sync codecs raise a bare SchemaError for any shape a
+// model/gateway emits that this message schema rejects. A defect here would kill
+// the whole projection run, so every codec call site below treats encode/decode
+// failure as data to log and route around, never as a crash.
+function formatSchemaFailure(cause: unknown): string {
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "message" in cause &&
+    typeof (cause as { message: unknown }).message === "string"
+  )
+    return (cause as { message: string }).message
+  return String(cause)
+}
+
+function salvageMessage(event: SessionEvent.Event, message: SessionMessage.Message) {
+  if (message.type === "assistant" && message.content.length > 0) {
+    const originalLength = message.content.length
+    const kept = message.content.filter((part) => {
+      try {
+        encodeAssistantContent(part)
+        return true
+      } catch {
+        return false
+      }
+    })
+    if (kept.length < originalLength) {
+      // Reassign in place rather than `{ ...message, content: kept }`: the encoder
+      // dispatches on class identity, and spreading a Schema.Class instance into a
+      // plain object loses the `instanceof` it needs, failing encode all over again.
+      ;(message as unknown as { content: typeof kept }).content = kept
+      try {
+        const encoded = encodeMessage(message)
+        return Effect.logError("session message salvaged by dropping unencodable content parts").pipe(
+          Effect.annotateLogs({
+            sessionID: event.data.sessionID,
+            messageID: message.id,
+            type: message.type,
+            dropped: originalLength - kept.length,
+          }),
+          Effect.as(encoded),
+        )
+      } catch (cause) {
+        return Effect.logError(
+          "session message unsalvageable even with unencodable content parts dropped, skipping persist",
+        ).pipe(
+          Effect.annotateLogs({
+            sessionID: event.data.sessionID,
+            messageID: message.id,
+            type: message.type,
+            reason: formatSchemaFailure(cause),
+          }),
+          Effect.as(undefined),
+        )
+      }
+    }
+  }
+  return Effect.logError("session message unsalvageable, skipping persist").pipe(
+    Effect.annotateLogs({ sessionID: event.data.sessionID, messageID: message.id, type: message.type }),
+    Effect.as(undefined),
+  )
+}
+
+function encodeMessageSafe(event: SessionEvent.Event, message: SessionMessage.Message) {
+  return Effect.suspend(() => {
+    try {
+      return Effect.succeed(encodeMessage(message))
+    } catch (cause) {
+      return Effect.logError("session message failed to encode, attempting salvage").pipe(
+        Effect.annotateLogs({
+          sessionID: event.data.sessionID,
+          messageID: message.id,
+          type: message.type,
+          reason: formatSchemaFailure(cause),
+        }),
+        Effect.andThen(() => salvageMessage(event, message)),
+      )
+    }
+  })
+}
+
+function decodeRowSafe(event: SessionEvent.Event, row: typeof SessionMessageTable.$inferSelect) {
+  return Effect.suspend(() => {
+    try {
+      return Effect.succeed(decodeMessage({ ...row.data, id: row.id, type: row.type }))
+    } catch (cause) {
+      return Effect.logError("session message row failed to decode, skipping row").pipe(
+        Effect.annotateLogs({
+          sessionID: event.data.sessionID,
+          messageID: row.id,
+          type: row.type,
+          reason: formatSchemaFailure(cause),
+        }),
+        Effect.as(undefined),
+      )
+    }
+  })
+}
+
 function run(db: DatabaseService, event: SessionEvent.Event) {
   return Effect.gen(function* () {
-    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
-      decodeMessage({ ...row.data, id: row.id, type: row.type })
-    const updateMessage = (message: SessionMessage.Message) => {
-      if (event.durable === undefined) return Effect.die("Durable Session event is missing aggregate sequence")
-      const encoded = encodeMessage(message)
-      const { id, type, ...data } = encoded
-      return db
-        .update(SessionMessageTable)
-        .set({ type, time_created: DateTime.toEpochMillis(message.time.created), data })
-        .where(
-          and(
-            eq(SessionMessageTable.id, SessionMessage.ID.make(id)),
-            eq(SessionMessageTable.session_id, event.data.sessionID),
-          ),
-        )
-        .run()
-        .pipe(Effect.orDie)
-    }
+    const updateMessage = (message: SessionMessage.Message) =>
+      Effect.gen(function* () {
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        const encoded = yield* encodeMessageSafe(event, message)
+        if (!encoded) return
+        const { id, type, ...data } = encoded
+        yield* db
+          .update(SessionMessageTable)
+          .set({ type, time_created: DateTime.toEpochMillis(message.time.created), data })
+          .where(
+            and(
+              eq(SessionMessageTable.id, SessionMessage.ID.make(id)),
+              eq(SessionMessageTable.session_id, event.data.sessionID),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+      })
     const appendMessage = (message: SessionMessage.Message) => insertMessage(db, event, message)
     const adapter: SessionMessageUpdater.Adapter = {
       getCurrentAssistant() {
@@ -145,8 +245,8 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             .get()
             .pipe(Effect.orDie)
           if (!row) return
-          const message = decodeRow(row)
-          return message.type === "assistant" && !message.time.completed ? message : undefined
+          const message = yield* decodeRowSafe(event, row)
+          return message?.type === "assistant" && !message.time.completed ? message : undefined
         })
       },
       getAssistant(messageID) {
@@ -164,8 +264,8 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             .get()
             .pipe(Effect.orDie)
           if (!row) return
-          const message = decodeRow(row)
-          return message.type === "assistant" ? message : undefined
+          const message = yield* decodeRowSafe(event, row)
+          return message?.type === "assistant" ? message : undefined
         })
       },
       getCurrentShell(callID) {
@@ -177,9 +277,10 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             .orderBy(desc(SessionMessageTable.seq))
             .all()
             .pipe(Effect.orDie)
-          return rows
-            .map(decodeRow)
-            .find((message): message is SessionMessage.Shell => message.type === "shell" && message.callID === callID)
+          const messages = yield* Effect.forEach(rows, (row) => decodeRowSafe(event, row))
+          return messages.find(
+            (message): message is SessionMessage.Shell => message?.type === "shell" && message.callID === callID,
+          )
         })
       },
       updateAssistant: updateMessage,
@@ -190,22 +291,25 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
   })
 }
 
-function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: SessionMessage.Message) {
-  if (event.durable === undefined) return Effect.die("Durable Session event is missing aggregate sequence")
-  const encoded = encodeMessage(message)
-  const { id, type, ...data } = encoded
-  return db
-    .insert(SessionMessageTable)
-    .values({
-      id: SessionMessage.ID.make(id),
-      session_id: event.data.sessionID,
-      type,
-      seq: event.durable.seq,
-      time_created: DateTime.toEpochMillis(message.time.created),
-      data,
-    })
-    .run()
-    .pipe(Effect.orDie)
+export function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: SessionMessage.Message) {
+  return Effect.gen(function* () {
+    if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
+    const encoded = yield* encodeMessageSafe(event, message)
+    if (!encoded) return
+    const { id, type, ...data } = encoded
+    yield* db
+      .insert(SessionMessageTable)
+      .values({
+        id: SessionMessage.ID.make(id),
+        session_id: event.data.sessionID,
+        type,
+        seq: event.durable.seq,
+        time_created: DateTime.toEpochMillis(message.time.created),
+        data,
+      })
+      .run()
+      .pipe(Effect.orDie)
+  })
 }
 
 export const layer = Layer.effectDiscard(

@@ -66,5 +66,8 @@ export abstract class NamedError extends Error {
   public static readonly Unknown = NamedError.create("UnknownError", {
     message: Schema.String,
     ref: Schema.optional(Schema.String),
+    // Bounded diagnostic summary ("<name>: <first message line>", ~200 chars) of the defect that
+    // produced this envelope — populated by the httpapi error middleware, never a stack trace.
+    cause: Schema.optional(Schema.String),
   })
 }

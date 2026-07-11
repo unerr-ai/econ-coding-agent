@@ -386,6 +386,85 @@ describe("session.llm.ai-sdk adapter", () => {
     expect(stepFinish.usage).toBeUndefined()
   })
 
+  test("drops null and non-finite usage fields instead of persisting them (wire-derived gateway noise)", async () => {
+    // LiteLLM and similar gateways fronting OSS models can hand back null,
+    // NaN, or ±Infinity for a usage field. The persisted session schema
+    // requires NonNegativeInt, so those must be dropped (treated as
+    // "unknown"), never coerced to 0 or left as null/NaN/Infinity.
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "gpt-test" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: null,
+          outputTokens: 5,
+          totalTokens: Number.NaN,
+          reasoningTokens: Number.POSITIVE_INFINITY,
+          cachedInputTokens: Number.NEGATIVE_INFINITY,
+        },
+      }),
+    ])
+
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.inputTokens).toBeUndefined()
+    expect(stepFinish.usage?.outputTokens).toBe(5)
+    expect(stepFinish.usage?.totalTokens).toBeUndefined()
+    expect(stepFinish.usage?.reasoningTokens).toBeUndefined()
+    expect(stepFinish.usage?.cacheReadInputTokens).toBeUndefined()
+  })
+
+  test("clamps negative usage counts to zero", async () => {
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "gpt-test" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: -12,
+          outputTokens: 5,
+          totalTokens: -0.5,
+          reasoningTokens: -3,
+        },
+      }),
+    ])
+
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.inputTokens).toBe(0)
+    expect(stepFinish.usage?.outputTokens).toBe(5)
+    expect(stepFinish.usage?.totalTokens).toBe(0)
+    expect(stepFinish.usage?.reasoningTokens).toBe(0)
+  })
+
+  test("rounds float usage counts to the nearest integer", async () => {
+    const events = await adapt([
+      uncheckedAdapterEvent({
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "gpt-test" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 12.4,
+          outputTokens: 12.6,
+          totalTokens: 25,
+        },
+      }),
+    ])
+
+    const stepFinish = events[0]
+    if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
+    expect(stepFinish.usage?.inputTokens).toBe(12)
+    expect(stepFinish.usage?.outputTokens).toBe(13)
+    expect(stepFinish.usage?.totalTokens).toBe(25)
+  })
+
   // W8 (2026-07-06): the reasoner/oracle tiers were marked cacheAccounting
   // "nonstream-only" because the AI SDK's normalized usage fields were assumed
   // to omit prompt-cache hits on some transports. This raw-payload fallback

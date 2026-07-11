@@ -19,9 +19,9 @@ function expectUnknownErrorBody(body: unknown) {
 }
 
 describe("HttpApi error middleware", () => {
-  it.live("returns a safe body for unknown 500 defects", () =>
+  it.live("returns a safe, diagnosable body for unknown 500 defects", () =>
     Effect.gen(function* () {
-      yield* HttpRouter.add("GET", "/boom", Effect.die(new Error("secret stack marker"))).pipe(
+      yield* HttpRouter.add("GET", "/boom", Effect.die(new Error("bad input: expected a positive integer"))).pipe(
         Layer.provide(errorLayer),
         HttpRouter.serve,
         Layer.build,
@@ -32,16 +32,17 @@ describe("HttpApi error middleware", () => {
 
       expect(response.status).toBe(500)
       expectUnknownErrorBody(body)
-      expect(JSON.stringify(body)).not.toContain("secret stack marker")
+      expect((body as { data?: { cause?: unknown } }).data?.cause).toBe("Error: bad input: expected a positive integer")
+      expect(JSON.stringify(body)).not.toContain(" at ")
     }),
   )
 
-  it.live("returns a safe body for named defects", () =>
+  it.live("returns a safe, diagnosable body for named defects", () =>
     Effect.gen(function* () {
       yield* HttpRouter.add(
         "GET",
         "/named",
-        Effect.die(new NamedError.Unknown({ message: "secret named marker" })),
+        Effect.die(new NamedError.Unknown({ message: "config value out of range" })),
       ).pipe(Layer.provide(errorLayer), HttpRouter.serve, Layer.build)
 
       const response = yield* HttpClientRequest.get("/named").pipe(HttpClient.execute)
@@ -49,7 +50,7 @@ describe("HttpApi error middleware", () => {
 
       expect(response.status).toBe(500)
       expectUnknownErrorBody(body)
-      expect(JSON.stringify(body)).not.toContain("secret named marker")
+      expect((body as { data?: { cause?: unknown } }).data?.cause).toBe("UnknownError: config value out of range")
     }),
   )
 

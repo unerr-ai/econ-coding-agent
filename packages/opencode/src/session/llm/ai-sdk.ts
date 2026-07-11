@@ -41,44 +41,58 @@ function copilotTotalNanoAiu(value: unknown) {
   return total
 }
 
+// Wire-derived usage numbers (gateways fronting many OSS models, e.g.
+// LiteLLM) can arrive as floats, null, negative, or otherwise inconsistent.
+// The persisted session schema requires NonNegativeInt, so every value this
+// module emits is coerced here at the boundary: non-number/NaN/±Infinity/
+// null drops the entry entirely (treated as "unknown", not zero), negative
+// clamps to 0, and a float rounds to the nearest integer.
+function sanitizeTokenCount(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+  if (value < 0) return 0
+  return Math.round(value)
+}
+
 // W8: some gateways surface prompt-cache hits only in the raw provider usage
 // JSON (the nested OpenAI/Fireworks `prompt_tokens_details.cached_tokens`, or
 // the flat OpenAI-compat `cache_read_input_tokens`) without the AI SDK having
 // normalized it into `inputTokenDetails.cacheReadTokens` / `cachedInputTokens`
 // for that particular transport. Reads the raw payload as a last-resort
 // fallback so reasoner/oracle turns still report a real cache-read count on
-// whichever path (streamed or non-streamed) the usage arrived on.
+// whichever path (streamed or non-streamed) the usage arrived on. Runs
+// through the same sanitize guard as every other usage field.
 function rawCacheReadTokens(raw: unknown): number | undefined {
   if (!raw || typeof raw !== "object") return undefined
   const item = raw as {
-    prompt_tokens_details?: { cached_tokens?: number }
-    cache_read_input_tokens?: number
+    prompt_tokens_details?: { cached_tokens?: unknown }
+    cache_read_input_tokens?: unknown
   }
-  const nested = item.prompt_tokens_details?.cached_tokens
-  if (typeof nested === "number") return nested
-  return typeof item.cache_read_input_tokens === "number" ? item.cache_read_input_tokens : undefined
+  const nested = sanitizeTokenCount(item.prompt_tokens_details?.cached_tokens)
+  if (nested !== undefined) return nested
+  return sanitizeTokenCount(item.cache_read_input_tokens)
 }
 
 function usage(value: unknown) {
   if (!value || typeof value !== "object") return undefined
   const item = value as {
-    inputTokens?: number
-    outputTokens?: number
-    totalTokens?: number
-    reasoningTokens?: number
-    cachedInputTokens?: number
-    inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }
-    outputTokenDetails?: { reasoningTokens?: number }
+    inputTokens?: unknown
+    outputTokens?: unknown
+    totalTokens?: unknown
+    reasoningTokens?: unknown
+    cachedInputTokens?: unknown
+    inputTokenDetails?: { cacheReadTokens?: unknown; cacheWriteTokens?: unknown }
+    outputTokenDetails?: { reasoningTokens?: unknown }
     raw?: unknown
   }
   const entries = Object.entries({
-    inputTokens: item.inputTokens,
-    outputTokens: item.outputTokens,
-    totalTokens: item.totalTokens,
-    reasoningTokens: item.outputTokenDetails?.reasoningTokens ?? item.reasoningTokens,
-    cacheReadInputTokens:
+    inputTokens: sanitizeTokenCount(item.inputTokens),
+    outputTokens: sanitizeTokenCount(item.outputTokens),
+    totalTokens: sanitizeTokenCount(item.totalTokens),
+    reasoningTokens: sanitizeTokenCount(item.outputTokenDetails?.reasoningTokens ?? item.reasoningTokens),
+    cacheReadInputTokens: sanitizeTokenCount(
       item.inputTokenDetails?.cacheReadTokens ?? item.cachedInputTokens ?? rawCacheReadTokens(item.raw),
-    cacheWriteInputTokens: item.inputTokenDetails?.cacheWriteTokens,
+    ),
+    cacheWriteInputTokens: sanitizeTokenCount(item.inputTokenDetails?.cacheWriteTokens),
   }).filter((entry) => entry[1] !== undefined)
   return entries.length === 0 ? undefined : Object.fromEntries(entries)
 }

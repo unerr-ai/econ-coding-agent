@@ -25,7 +25,7 @@ import { fromRow } from "./session/info"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
-import { MessageDecodeError } from "./session/error"
+import { SessionHistory } from "./session/history"
 import { SessionEvent } from "./session/event"
 import { SessionInput } from "./session/input"
 
@@ -92,14 +92,14 @@ export class OperationUnavailableError extends Schema.TaggedErrorClass<Operation
   },
 ) {}
 
-export { ContextSnapshotDecodeError, MessageDecodeError } from "./session/error"
+export { ContextSnapshotDecodeError } from "./session/error"
 
 export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictError>()("Session.PromptConflictError", {
   sessionID: SessionSchema.ID,
   messageID: SessionMessage.ID,
 }) {}
 
-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
+export type Error = NotFoundError | OperationUnavailableError | PromptConflictError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -113,14 +113,14 @@ export interface Interface {
       id: SessionMessage.ID
       direction: "previous" | "next"
     }
-  }) => Effect.Effect<SessionMessage.Message[], NotFoundError | MessageDecodeError>
+  }) => Effect.Effect<SessionMessage.Message[], NotFoundError>
   readonly message: (input: {
     sessionID: SessionSchema.ID
     messageID: SessionMessage.ID
   }) => Effect.Effect<SessionMessage.Message | undefined>
   readonly context: (
     sessionID: SessionSchema.ID,
-  ) => Effect.Effect<SessionMessage.Message[], NotFoundError | MessageDecodeError>
+  ) => Effect.Effect<SessionMessage.Message[], NotFoundError>
   readonly events: (input: {
     sessionID: SessionSchema.ID
     after?: number
@@ -165,18 +165,7 @@ export const layer = Layer.effect(
     const projects = yield* ProjectV2.Service
     const execution = yield* SessionExecution.Service
     const store = yield* SessionStore.Service
-    const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
-    const decode = (row: typeof SessionMessageTable.$inferSelect) =>
-      decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(
-        Effect.mapError(
-          () =>
-            new MessageDecodeError({
-              sessionID: SessionSchema.ID.make(row.session_id),
-              messageID: SessionMessage.ID.make(row.id),
-            }),
-        ),
-      )
 
     const result = Service.of({
       create: Effect.fn("V2Session.create")(function* (input) {
@@ -307,7 +296,11 @@ export const layer = Layer.effect(
         const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
           Effect.orDie,
         )
-        return yield* Effect.forEach(direction === "previous" ? rows.toReversed() : rows, decode)
+        const decoded = yield* Effect.forEach(
+          direction === "previous" ? rows.toReversed() : rows,
+          SessionHistory.decodeMessageRow,
+        )
+        return decoded.filter((message): message is SessionMessage.Message => message !== undefined)
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
         const stored = yield* store.message(input.messageID)

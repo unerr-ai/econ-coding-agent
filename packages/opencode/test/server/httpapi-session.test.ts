@@ -657,36 +657,27 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
-    "returns safe v2 unknown errors for corrupt projected messages",
+    "skips corrupt projected messages and serves the remaining rows",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const session = yield* createSession({ title: "v2 corrupt message" })
-        yield* insertCorruptV2Message(session.id)
+        const valid = yield* insertLegacyAssistantMessage(session.id, 1, 1)
+        yield* insertCorruptV2Message(session.id, 2)
 
         const messages = yield* request(`/api/session/${session.id}/message`, {
           headers: { "x-opencode-directory": test.directory },
         })
         const messagesBody = yield* responseJson(messages)
-        expect(messages.status).toBe(500)
-        expect(messagesBody).toMatchObject({
-          _tag: "UnknownError",
-          message: "Unexpected server error. Check server logs for details.",
-        })
-        expect((messagesBody as { ref?: unknown }).ref).toMatch(/^err_[0-9a-f-]{8}$/)
-        expect(JSON.stringify(messagesBody)).not.toContain("assistant")
+        expect(messages.status).toBe(200)
+        expect((messagesBody as { data: Array<{ id: string }> }).data.map((m) => m.id)).toEqual([valid.id])
 
         const context = yield* request(`/api/session/${session.id}/context`, {
           headers: { "x-opencode-directory": test.directory },
         })
         const contextBody = yield* responseJson(context)
-        expect(context.status).toBe(500)
-        expect(contextBody).toMatchObject({
-          _tag: "UnknownError",
-          message: "Unexpected server error. Check server logs for details.",
-        })
-        expect((contextBody as { ref?: unknown }).ref).toMatch(/^err_[0-9a-f-]{8}$/)
-        expect(JSON.stringify(contextBody)).not.toContain("assistant")
+        expect(context.status).toBe(200)
+        expect((contextBody as { data: Array<{ id: string }> }).data.map((m) => m.id)).toEqual([valid.id])
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

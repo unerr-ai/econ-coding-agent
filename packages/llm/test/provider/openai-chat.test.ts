@@ -548,6 +548,31 @@ describe("OpenAI Chat route", () => {
     }),
   )
 
+  it.effect("clamps nonCachedInputTokens to zero when a hostile provider reports cached_tokens > prompt_tokens", () =>
+    Effect.gen(function* () {
+      // Wire-derived usage from gateways fronting many OSS models (LiteLLM, etc.)
+      // can be internally inconsistent. `mapUsage` derives `nonCachedInputTokens`
+      // by subtraction (via ProviderShared.subtractTokens) — assert the full SSE
+      // parse produces a clamped zero, not a negative that would later crash the
+      // strict NonNegativeInt session schema.
+      const body = sseEvents(
+        deltaChunk({ role: "assistant", content: "Hi" }),
+        deltaChunk({}, "stop"),
+        usageChunk({
+          prompt_tokens: 5,
+          completion_tokens: 2,
+          total_tokens: 7,
+          prompt_tokens_details: { cached_tokens: 10 },
+        }),
+      )
+      const response = yield* LLMClient.generate(request).pipe(Effect.provide(fixedResponse(body)))
+
+      expect(response.usage?.inputTokens).toBe(5)
+      expect(response.usage?.cacheReadInputTokens).toBe(10)
+      expect(response.usage?.nonCachedInputTokens).toBe(0)
+    }),
+  )
+
   it.effect("parses OpenAI-compatible reasoning content deltas", () =>
     Effect.gen(function* () {
       const body = sseEvents(
