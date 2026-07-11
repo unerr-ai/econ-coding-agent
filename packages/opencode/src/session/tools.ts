@@ -149,7 +149,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             const nudged = yield* nudgeStandaloneTodowrite(item.id, ctx, output)
             const decorated = withStepBudget(item.id, ctx, nudged)
             // L3.2 guard (docs/design/turn-cache-economics.md §5-L3 item 2): if the
-            // ceiling/step budget above cut a read result, the read-dedup memo's
+            // L2.4 ceiling above cut a read result, the read-dedup memo's
             // just-recorded range no longer matches what the model actually saw —
             // drop the file's ranges so the next identical read re-delivers instead
             // of stubbing toward truncated data. metadata.display.path is the
@@ -454,40 +454,30 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   return tools
 })
 
-// L1.3 guardrail (docs/design/turn-cache-economics.md §5-L1 sub-move 3): aggregate
-// tool-result token budget per assistant message (step), so a batched fan-out cannot
-// stuff the context it was meant to save. Once a step's combined results exceed the
-// budget, each SUBSEQUENT result in the same message is cut to its first
-// STEP_RESULT_TRUNCATE_LINES lines with a self-describing marker — truncation is
-// visible, never silent. The call that crosses the boundary is kept whole; only later
-// calls are cut. Exempt tools (mutating/bookkeeping) are never truncated — governance
-// fires at the edit and plan state must stay intact — but their tokens still count
-// toward the step total.
-export const STEP_RESULT_BUDGET = 20_000
-const STEP_RESULT_TRUNCATE_LINES = 40
+// Exempt tools (mutating/bookkeeping) are never truncated by the per-result ceiling
+// below — governance fires at the edit and plan state must stay intact.
 const STEP_BUDGET_EXEMPT = new Set(["edit", "write", "skill", "todowrite", "todoread"])
-
-// One accumulator per session, pinned to that session's current assistant message; a
-// new messageID replaces the old entry, so stale steps drop without timers.
-const stepResultTokens = new Map<string, { messageID: string; tokens: number }>()
 
 // L2.4 unified per-RESULT ceiling (docs/design/turn-cache-economics.md §5-L2 item 4):
 // finishes what M3's per-tool search caps started — one hard token ceiling on EVERY
-// individual tool result at the same wrapper sites the L1.3 aggregate covers, applied
-// BEFORE the aggregate accounting so a single 70k blob enters the step ledger at ≤6k
-// instead of instantly breaching it. Grounded decision on oversize handling: the
-// design doc's "spills to cache_ref pagination" path was checked and NOT taken —
-// graph-tools/webfetch/websearch page *arrays of items* (tool/_shared/cache.ts
-// put/getSlice) behind each tool's own `cache_ref` parameter; there is no generic
-// paging entry point at this layer, and withStepBudget is the last transform before
-// the part is persisted, so the full output is not retrievable later either. Reusing
-// it would mean new pagination infrastructure (a paging tool or a cache_ref param on
-// every tool), so oversize results are cut at a line boundary with a self-describing
-// marker steering the model to narrow — the M3/L1.3 pattern.
+// individual tool result at the same wrapper sites, applied before the result is
+// persisted so a single 70k blob is capped at ≤6k at the source. (The aggregate
+// per-step guard that used to sit here — an order-dependent inline cut to the first
+// 40 lines of each post-breach result — was deleted; step-budget.ts's water-filling
+// pass now owns the aggregate 20k cap, applied once the request assembles, with full
+// failure output intact for anything downstream that keys on it.) Grounded decision
+// on oversize handling: the design doc's "spills to cache_ref pagination" path was
+// checked and NOT taken — graph-tools/webfetch/websearch page *arrays of items*
+// (tool/_shared/cache.ts put/getSlice) behind each tool's own `cache_ref` parameter;
+// there is no generic paging entry point at this layer, and withStepBudget is the
+// last transform before the part is persisted, so the full output is not retrievable
+// later either. Reusing it would mean new pagination infrastructure (a paging tool or
+// a cache_ref param on every tool), so oversize results are cut at a line boundary
+// with a self-describing marker steering the model to narrow — the M3 pattern.
 export const RESULT_TOKEN_CEILING = 6_000
 
 export function applyResultCeiling(input: { toolID: string; output: string }): string {
-  // Same exempt set as L1.3: mutating/bookkeeping results are never cut.
+  // Mutating/bookkeeping results are never cut.
   if (STEP_BUDGET_EXEMPT.has(input.toolID)) return input.output
   const raw = Token.estimate(input.output)
   if (raw <= RESULT_TOKEN_CEILING) return input.output
@@ -499,50 +489,23 @@ export function applyResultCeiling(input: { toolID: string; output: string }): s
   return `${kept}\n[result ceiling: ~${Math.round(raw / 1000)}k-token output truncated to ~${Math.round(RESULT_TOKEN_CEILING / 1000)}k. This is a partial view — do not treat it as complete; narrow the call (tighter pattern, smaller range, offset/limit) to see the rest.]`
 }
 
-export function applyStepResultBudget(input: {
-  sessionID: string
-  messageID: string
-  toolID: string
-  output: string
-}): string {
-  let entry = stepResultTokens.get(input.sessionID)
-  if (!entry || entry.messageID !== input.messageID) {
-    entry = { messageID: input.messageID, tokens: 0 }
-    stepResultTokens.set(input.sessionID, entry)
-  }
-  const breached = entry.tokens > STEP_RESULT_BUDGET
-  entry.tokens += Token.estimate(input.output)
-  if (!breached || STEP_BUDGET_EXEMPT.has(input.toolID)) return input.output
-  const lines = input.output.split("\n")
-  if (lines.length <= STEP_RESULT_TRUNCATE_LINES) return input.output
-  const kept = lines.slice(0, STEP_RESULT_TRUNCATE_LINES).join("\n")
-  const total = Math.round(entry.tokens / 1000)
-  return `${kept}\n[step result budget reached — output truncated to ${STEP_RESULT_TRUNCATE_LINES} lines. Total this step: ~${total}k tokens. Re-run narrower, or continue in the next message.]`
-}
-
 // Last transform on every wrapper's result, so the persisted part, the after-hook
-// payload, and the model all see the same value. Compose order is ceiling-first
-// (L2.4), then the L1.3 aggregate ledger sees the post-ceiling size. The markers
-// never stack: a post-breach aggregate cut keeps only the first 40 lines, which
-// drops a trailing ceiling marker, and a ceiling-cut result short enough to survive
-// the 40-line rule keeps only its own marker — exactly one marker per result. The
-// L3.1 green-memo stub (metadata.green_memo) is already a tiny self-describing
-// marker and skips the ceiling outright; its tokens still count in the ledger.
+// payload, and the model all see the same value. Applies the L2.4 per-result ceiling
+// only — the aggregate per-step budget that used to run here was deleted (see the
+// RESULT_TOKEN_CEILING comment above); step-budget.ts's water-filling pass now owns
+// that job later, once the request assembles, with full failure output intact for
+// anything downstream that keys on it (`ctx` is kept for call-site parity with the
+// other wrapper sites). The L3.1 green-memo stub (metadata.green_memo) is already a
+// tiny self-describing marker and skips the ceiling outright.
 const withStepBudget = <T extends { output: string; metadata?: unknown }>(
   toolID: string,
   ctx: Pick<Tool.Context, "sessionID" | "messageID">,
   result: T,
 ): T => {
   const memoStub = isRecord(result.metadata) && result.metadata["green_memo"] === true
-  const ceiled = memoStub ? result.output : applyResultCeiling({ toolID, output: result.output })
   return {
     ...result,
-    output: applyStepResultBudget({
-      sessionID: ctx.sessionID,
-      messageID: ctx.messageID,
-      toolID,
-      output: ceiled,
-    }),
+    output: memoStub ? result.output : applyResultCeiling({ toolID, output: result.output }),
   } as T
 }
 
@@ -553,8 +516,8 @@ const withStepBudget = <T extends { output: string; metadata?: unknown }>(
 // file has been modified since, the wrapper short-circuits execution and returns a stub that
 // is unmistakably a memo — never impersonating fresh output — with the last result's tail.
 // One memo per session; entries persist across steps (that is the point) and the WHOLE
-// session memo drops on any possible mutation (conservative: when unsure, invalidate). Like
-// stepResultTokens above, entries are replaced/deleted lazily — no timers.
+// session memo drops on any possible mutation (conservative: when unsure, invalidate).
+// Entries are replaced/deleted lazily — no timers.
 //
 // §7 "Sound-rung verification" hard rule — bypass by construction: OL-7.9 verify commands
 // never route through the session bash tool. They execute via makeShellCommandRunner
