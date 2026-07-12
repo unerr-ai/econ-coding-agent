@@ -715,8 +715,10 @@ const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
 // the bug) qualifies as a pin too: `repro`/`reproduce`-named source file, any
 // language. Scored below a named test file/filter (2-3) so a real test still
 // outranks a synthetic script when both are on offer; a bare whole-suite
-// command (neither RE matches) still scores 0 — never a repro.
-const REPRO_SCRIPT_RE = /(?:^|[\s/])(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
+// command (neither RE matches) still scores 0 — never a repro. Captures the
+// matched filename (group 1) so F10's canonicalScriptProbeCommand can pin the
+// FILE without a second, driftable copy of this pattern.
+const REPRO_SCRIPT_RE = /(?:^|[\s/])((?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb))\b/i
 
 /**
  * Whether a file path is an agent-authored scratch reproduction script rather
@@ -782,6 +784,60 @@ export function normalizeProbeCommand(command: string): string {
   }
 }
 
+// F10 — canonical extension→runner map for an authored repro script: once
+// REPRO_SCRIPT_RE finds one, the runner invocation is derived deterministically
+// from its extension, never copied off whatever runner token (or none) the
+// model's command line happened to use.
+const RUNNER_BY_SCRIPT_EXT: Record<string, string> = {
+  py: "python",
+  js: "node",
+  mjs: "node",
+  ts: "bun",
+  sh: "sh",
+  rb: "ruby",
+}
+
+// A `cd <dir> && ...` prefix relocates the shell's cwd before the script runs
+// — the script may only resolve relative to that cwd, so it is the one piece
+// of surrounding decoration canonicalScriptProbeCommand keeps.
+const LEADING_CD_RE = /^cd\s+(\S+)\s*&&\s*/
+
+/**
+ * The canonical runner invocation for an authored repro script named in
+ * `command` — python/node/bun/sh/ruby dispatched off the script's OWN
+ * extension, dropping every other decoration (env vars, `timeout N`, pipes,
+ * `; echo`, `git stash` wrapping) the model's command line happened to carry.
+ * Pins the FILE as the contract rather than the command LINE it arrived in,
+ * so a wrapper shape F8's enumerated `normalizeProbeCommand` doesn't yet know
+ * about can never mask the script's own exit code again. A leading
+ * `cd <dir> && ` is preserved (the script may only exist relative to that
+ * cwd); `undefined` when the command names no repro/reproduce-shaped script
+ * (REPRO_SCRIPT_RE).
+ *
+ * @sem domain=routing role=repro-pin
+ */
+export function canonicalScriptProbeCommand(command: string): string | undefined {
+  const trimmed = command.trim()
+  const cdMatch = trimmed.match(LEADING_CD_RE)
+  const rest = cdMatch ? trimmed.slice(cdMatch[0].length) : trimmed
+  let scriptPath: string | undefined
+  for (const token of rest.split(/\s+/)) {
+    if (REPRO_SCRIPT_RE.test(token)) {
+      // Keep the WHOLE token, not just the captured filename — an absolute or
+      // dir-qualified path (`/testbed/repro_issue.py`) must survive, or the
+      // canonical re-run resolves against the wrong cwd and a file-not-found
+      // exit could pin as a false red.
+      scriptPath = token.replace(/^["']|["';]+$/g, "")
+      break
+    }
+  }
+  if (!scriptPath) return undefined
+  const runner = RUNNER_BY_SCRIPT_EXT[scriptPath.slice(scriptPath.lastIndexOf(".") + 1).toLowerCase()]
+  if (!runner) return undefined
+  const canonical = `${runner} ${scriptPath}`
+  return cdMatch ? `cd ${cdMatch[1]} && ${canonical}` : canonical
+}
+
 /**
  * The most-specific pinned reproduction among a slice's extracted verify
  * commands (task #7 probe rung) — reuses `extractVerifyCommands`'s output,
@@ -845,11 +901,12 @@ export interface TurnProbePin {
  * inline and dispatched no slices, where the slice-level probe rung never
  * engages. S1 — the red-state fallback's confirming run is captured as
  * `redEvidence` (exit code + ≤20-line output tail) so the pin carries its own
- * evidence, not just an assertion. F8 — each candidate is re-run and pinned
- * in its NORMALIZED form (normalizeProbeCommand strips display-only
- * `| tail`/`echo`/`|| true` wrapping) so the turn-end gate's re-run reads the
- * repro's own exit code, never a masked one; specificity is still scored on
- * the raw candidate.
+ * evidence, not just an assertion. F10 — a candidate naming an authored repro
+ * script is re-run and pinned in its CANONICAL form (canonicalScriptProbeCommand
+ * derives the runner invocation from the filename itself, by construction
+ * immune to any decoration); F8's enumerated normalizeProbeCommand remains the
+ * fallback for everything else (a named-test command, e.g. `runtests.py … |
+ * tail -50`). Specificity is still scored on the raw candidate.
  *
  * @sem domain=routing role=repro-pin
  */
@@ -870,9 +927,11 @@ export async function deriveTurnProbe(opts: {
   for (const candidate of opts.candidateTests) {
     const score = reproSpecificity(candidate)
     if (score === 0 || score <= bestScore) continue // can't beat the current pin — skip the run
-    // F8 — re-run the NORMALIZED command so the exit code checked below is
-    // the repro's own, never a `| tail`/`echo`/`|| true` wrapper's.
-    const normalized: VerifyCommand = { ...candidate, command: normalizeProbeCommand(candidate.command) }
+    // F10 — an authored repro script pins its CANONICAL runner invocation
+    // (by construction immune to decoration); F8's enumerated strip list is
+    // the fallback for everything else the raw candidate could still mask.
+    const pinnedCommand = canonicalScriptProbeCommand(candidate.command) ?? normalizeProbeCommand(candidate.command)
+    const normalized: VerifyCommand = { ...candidate, command: pinnedCommand }
     const result = await opts.runner(normalized)
     if (result.exitCode !== 0) {
       bestScore = score

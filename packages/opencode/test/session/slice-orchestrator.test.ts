@@ -49,6 +49,7 @@ import {
   TEST_TREE_GUARD_COMMAND,
   deriveTurnProbe,
   normalizeProbeCommand,
+  canonicalScriptProbeCommand,
   runTurnProbeGate,
   childSlicePermission,
   isDeciderSeat,
@@ -1403,6 +1404,37 @@ describe("normalizeProbeCommand (F8 — exit-masking-proof probe pinning)", () =
   })
 })
 
+describe("canonicalScriptProbeCommand (F10 — decoration-immune canonical pinning)", () => {
+  it("pins the canonical runner invocation, dropping a trailing display-only pipe", () => {
+    expect(canonicalScriptProbeCommand("python repro_issue.py 2>&1 | tail -30")).toBe("python repro_issue.py")
+  })
+
+  it("keeps a leading `cd <dir> && ` prefix but drops env vars, timeout, and a trailing echo", () => {
+    expect(
+      canonicalScriptProbeCommand('cd /testbed && PYTHONPATH=/testbed timeout 60 python repro_issue.py; echo "exit=$?"'),
+    ).toBe("cd /testbed && python repro_issue.py")
+  })
+
+  it("drops git-stash wrapping decoration entirely", () => {
+    expect(
+      canonicalScriptProbeCommand("git -C /testbed stash && python repro_issue.py 2>&1 | tail -8 ; git -C /testbed stash pop"),
+    ).toBe("python repro_issue.py")
+  })
+
+  it("returns undefined for a named-test command — not a repro script", () => {
+    expect(canonicalScriptProbeCommand("python tests/runtests.py auth_tests -k max_length")).toBeUndefined()
+  })
+
+  it("dispatches .mjs to node", () => {
+    expect(canonicalScriptProbeCommand("node reproduce_bug.mjs | head -5")).toBe("node reproduce_bug.mjs")
+    // A dir-qualified path must survive whole — pinning just the basename
+    // would resolve against the wrong cwd and false-red on file-not-found
+    expect(canonicalScriptProbeCommand("python /testbed/repro_issue.py 2>&1 | tail -3")).toBe(
+      "python /testbed/repro_issue.py",
+    )
+  })
+})
+
 describe("deriveTurnProbe (M4)", () => {
   it("extracts the most-specific pinned reproduction from a bug prompt", async () => {
     const prompt = `
@@ -1489,10 +1521,13 @@ But the actual repro is:
     expect(result).toBeUndefined()
   })
 
-  // F8 — the raw candidate as typed masks its own exit code (`| tail -30`
-  // always exits 0); the runner must see the NORMALIZED command, and the pin
-  // it confirms red on must carry that same normalized form.
-  it("re-runs and pins the NORMALIZED command, not the raw exit-masking candidate", async () => {
+  // F10 — a candidate naming an authored repro script now pins its CANONICAL
+  // runner invocation (canonicalScriptProbeCommand), which drops the
+  // exit-masking `2>&1 | tail -30` decoration entirely rather than merely
+  // stripping the trailing pipe (F8's `normalizeProbeCommand`); the runner
+  // must see the canonical command, and the pin it confirms red on must
+  // carry that same canonical form.
+  it("re-runs and pins the CANONICAL command, not the raw exit-masking candidate", async () => {
     const receivedCommands: string[] = []
     const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py 2>&1 | tail -30" }]
     const runner: CommandRunner = async (cmd) => {
@@ -1504,9 +1539,49 @@ But the actual repro is:
       candidateTests: candidates,
       runner,
     })
-    expect(receivedCommands).toEqual(["python repro_issue.py 2>&1"])
+    expect(receivedCommands).toEqual(["python repro_issue.py"])
     expect(result).toEqual({
-      probe: { kind: "test", command: "python repro_issue.py 2>&1" },
+      probe: { kind: "test", command: "python repro_issue.py" },
+      redEvidence: { exitCode: 1, outputTail: "AssertionError" },
+    })
+  })
+
+  it("pins the canonical command for a `| tail`-decorated repro-script candidate", async () => {
+    const receivedCommands: string[] = []
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py | tail -3" }]
+    const runner: CommandRunner = async (cmd) => {
+      receivedCommands.push(cmd.command)
+      return { exitCode: 1, stdout: "", stderr: "AssertionError" }
+    }
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(receivedCommands).toEqual(["python repro_issue.py"])
+    expect(result).toEqual({
+      probe: { kind: "test", command: "python repro_issue.py" },
+      redEvidence: { exitCode: 1, outputTail: "AssertionError" },
+    })
+  })
+
+  // F8 fallback — a named-test candidate (not a repro script) still goes
+  // through normalizeProbeCommand's enumerated strip list, unchanged by F10.
+  it("falls back to the F8-normalized command for a named-test candidate", async () => {
+    const receivedCommands: string[] = []
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python tests/runtests.py x.y -k z | tail -20" }]
+    const runner: CommandRunner = async (cmd) => {
+      receivedCommands.push(cmd.command)
+      return { exitCode: 1, stdout: "", stderr: "AssertionError" }
+    }
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(receivedCommands).toEqual(["python tests/runtests.py x.y -k z"])
+    expect(result).toEqual({
+      probe: { kind: "test", command: "python tests/runtests.py x.y -k z" },
       redEvidence: { exitCode: 1, outputTail: "AssertionError" },
     })
   })
