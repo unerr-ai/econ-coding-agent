@@ -1177,6 +1177,14 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
     expect(REPRO_SLICE_CONTENT).toMatch(/assert EVERY one of them/)
     expect(REPRO_SLICE_CONTENT).toMatch(/one assert per symptom/)
   })
+
+  // django-11964: the issue text literally quoted `str(self.my_str_value)` but
+  // the repro asserted a downstream model-field effect instead of that exact
+  // expression — half-verified fix.
+  it("demands asserting the issue's own literal quoted expression, not a downstream effect of it", () => {
+    expect(REPRO_SLICE_CONTENT).toMatch(/assert THAT EXACT expression called on the exact object it names/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/not a downstream\/derived effect of it/)
+  })
 })
 
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
@@ -1287,6 +1295,10 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     // No trace of the old read-only shackle.
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/Do not write code/i)
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/deliver targets, mechanism, and strategy only/i)
+    // django-11848: the fix used datetime.now() where the surrounding module's
+    // idiom (and the hidden grader's mock) was datetime.utcnow() — copy the
+    // module's existing environment-read idiom, never introduce a new one.
+    expect(LOCALIZATION_SLICE_CONTENT).toMatch(/COPY the exact idiom the surrounding module already uses/i)
   })
 
   it("the seed is a WRITER seat: mechanical/applier is not a decider seat and keeps edit+bash ALLOWED at the reasoner", () => {
