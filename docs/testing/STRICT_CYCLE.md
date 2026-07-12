@@ -134,6 +134,51 @@ Verdicts: **KEEP** (evidence it earns its keep) · **SUSPECT** (unproven either 
 - **Iteration 2 plan:** land wave → rebuild → re-run 11885 + 11848 + one passer
   (regression sentinel) strict. Phase-1 exit needs the difficult 5 green twice in a row.
 
+### Iteration 2 — 2026-07-13 — validate the five-knob wave
+
+- **HEAD:** `e756be7df` (five-knob wave), binary `202607122309`. Runs: 11885, 11848,
+  11790 (sentinel).
+
+| Instance | Verdict | Cost / turns | Notes |
+|---|---|---|---|
+| 11885 | ✅ **REAL PASS** (`delete.tests` 45 ran OK, incl. both `test_large_delete*` on ORIGINAL expectations) | $0.5581 / 112 turns, 94.6% cache, 0 escalations | **First-ever pass; the wave's headline validation.** ZERO test-file edits this run (iter-1: 8 edit calls, rewrote expectations) — the broadened gate arming + upfront rule + tests-are-spec seed closed the laundering hole, and the agent converged on a combining design that preserves the batched query counts gold pins. |
+| 11848 | ❌ **REAL FAIL** (2 F2P: 2070≠1970, 2071≠1971 — opposite side of iter-1's boundary) | $0.1452 / 38 turns, 93.6% cache | Boundary logic now CORRECT (`>50 → past`, gold's semantics) — but the clock is read via a NEW `import time` + `time.gmtime()`, bypassing the gold test's mock of `django.utils.http.datetime.datetime`. Autopsy below: a seed-delivery gap, not a wording gap. |
+
+**11848 iter-2 autopsy (the priors exist but structurally couldn't reach the turn):**
+
+1. The FIX seed literally names this anti-pattern ("if the module reads utcnow(), never
+   introduce now(); never introduce a new import for functionality an already-imported
+   module provides — tests mock the module's existing imports"). The model never saw it.
+2. Telemetry: `arming_decided … armLocalization=false` (correct — the issue names
+   `parse_http_date`), `frame_seed_planted … seeds=["repro"]`. In
+   `buildTriageTodoSkeleton` the seed ladder is either/or: repro takes precedence, else
+   localization if armed, else nothing — and ALL fix-discipline priors (existing-idiom/
+   mock rule, minimal typed change, root-most layer, tests-are-spec) live only inside
+   `LOCALIZATION_SLICE_CONTENT`. **Location-known instances never receive the fix
+   discipline.**
+3. The pinned repro went green over the wrong fix because it asserted under the REAL
+   clock only — under 2026, every case the agent checked agrees with its `time.gmtime()`
+   read; only a repro that patches the module's own `datetime` (as the gold test does)
+   stays red against a mock-bypassing fix.
+
+**Wave-2 knobs queued:** (K1) put a compact fix-discipline core (environment reads copy
+the module's existing import idiom — tests mock those imports; minimal change at the
+root-most cause in existing types) into the conductor's permanent role delta — delivery
+decoupled from arming/triage entirely, the mini-swe-agent way; (K2) strengthen REPRO
+seed item (8): when the issue's stated rule references the current time/date, patch the
+module's own clock import inside the repro and assert the spec boundary under that
+patched clock — a fix reading the clock through any other import then stays red
+in-loop.
+
+| 11790 | ✅ **REAL PASS** (79/79) — sentinel | $0.0691 / 25 turns, 88.8% cache, 0 escalations | No regression from the wave; consistent with iter-1 ($0.0736/31t). **Green twice consecutively.** |
+
+**Iteration 2 closing verdict:** the wave's headline knob is PROVEN — 11885 (the
+test-edit launderer) passed first-ever with zero test edits, and the sentinel held. The
+one failure (11848) moved from a wrong boundary to a right-boundary-wrong-clock-idiom
+miss and exposed a structural delivery gap (fix-discipline priors coupled to
+localization arming). Consecutive-green status: 11790 ✅✅ · 11885 ✅ · 11964 ✅ ·
+12039 ✅ · 11848 ❌. Iteration 3 (on the wave-2 binary): 11848 + 11885 + 11964 + 12039.
+
 **11885 autopsy (root cause chain, fully evidenced from the session store):**
 
 1. The prompt ("Combine fast delete queries") is an **enhancement ticket with zero defect
