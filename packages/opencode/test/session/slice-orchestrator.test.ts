@@ -40,7 +40,6 @@ import {
   reconcileSettledSlices,
   LOCALIZATION_PREPASS_TODO,
   REPRO_PREPASS_TODO,
-  isFixShapedPrompt,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
   PLAN_PREPASS_TODO,
@@ -1198,16 +1197,26 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
   })
 })
 
-describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
-  it("fix-shaped fires on defect evidence, WITH or without a file target", () => {
-    expect(isFixShapedPrompt("the login page crashes when the session expires")).toBe(true)
-    expect(isFixShapedPrompt("fix the off-by-one in django/utils/timesince.py")).toBe(true)
+describe("promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
+  // ROOT arming (prompt.ts) is `!promptAuthorizesTestEdits(userText)` — no
+  // fix-shape gate: an enhancement-shaped prompt with zero defect words still
+  // arms unless the user explicitly asked for test work (the 11885 "Combine
+  // fast delete queries" gap — isFixShapedPrompt never fired, so the gate
+  // never armed and the agent laundered a design divergence through the
+  // test). isFixShapedPrompt and PROMPT_DEFECT_EVIDENCE_RE are deleted.
+  it("an enhancement-shaped prompt with no defect words still arms — every turn is denied by default", () => {
+    expect(promptAuthorizesTestEdits("add a --json flag to the export command")).toBe(false)
+    expect(promptAuthorizesTestEdits("how does the session compaction ladder work?")).toBe(false)
+    expect(
+      promptAuthorizesTestEdits(
+        "Combine fast delete queries. When emulating ON DELETE CASCADE via on_delete=models.CASCADE the deletion.Collector will try to perform fast queries which are DELETE FROM table WHERE table.pk IN .... There are cases where the query isn't fast.",
+      ),
+    ).toBe(false)
+    expect(promptAuthorizesTestEdits("")).toBe(false)
   })
 
-  it("fix-shaped stays quiet on build and Q&A prompts", () => {
-    expect(isFixShapedPrompt("add a --json flag to the export command")).toBe(false)
-    expect(isFixShapedPrompt("how does the session compaction ladder work?")).toBe(false)
-    expect(isFixShapedPrompt("")).toBe(false)
+  it("an explicit test-work ask disarms — the release valve", () => {
+    expect(promptAuthorizesTestEdits("update the flaky test in tests/foo")).toBe(true)
   })
 
   it("authorization: tests as the verb's object disarms; tests as acceptance criteria does not", () => {

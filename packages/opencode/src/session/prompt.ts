@@ -50,7 +50,7 @@ import {
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
-import { triagePreamble } from "./prompts/preambles"
+import { triagePreamble, TEST_EDIT_GATE_RULE } from "./prompts/preambles"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
@@ -85,7 +85,6 @@ import {
   GRIND_DESIGN_PREPASS_TODO,
   LOCALIZATION_PREPASS_TODO,
   extractTrajectory,
-  isFixShapedPrompt,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
   buildTriageTodoSkeleton,
@@ -3135,12 +3134,19 @@ export const layer = Layer.effect(
           // NEUTRAL DEGRADE: no preamble, no skeleton, arming stands down,
           // the turn proceeds unguided. No regex shape-guessing.
           //
-          // B3 — the same turn-open point arms the no-test-edit gate: on a
-          // fix-shaped turn with no explicit test-work ask, modifying an
-          // existing test file is denied at the edit/write boundary
-          // (governance regexes, independent of the turn-read). Child slice
-          // sessions inherit the parent's gate unless their own task is
-          // test-work-shaped (the repro/test-authoring slice stays free).
+          // B3 — the same turn-open point arms the no-test-edit gate: by
+          // default, EVERY turn denies edits to an EXISTING test file at the
+          // edit/write boundary (governance regexes, independent of the
+          // turn-read) — the existing suite is the spec unless the user
+          // explicitly asked for test work (promptAuthorizesTestEdits is the
+          // release valve). Narrowing this to fix-shaped prompts only left an
+          // enhancement-shaped ask with zero defect words ("Combine fast
+          // delete queries") unarmed, and the agent rewrote an existing
+          // test's expectations to launder a design divergence — arming is
+          // no longer conditioned on the prompt looking like a bug report.
+          // Child slice sessions inherit the parent's gate unless their own
+          // task is test-work-shaped (the repro/test-authoring slice stays
+          // free).
           if (step === 0 && !prepassSeeded) {
             prepassSeeded = true
             turnOpenUserID = lastUser.id
@@ -3154,7 +3160,7 @@ export const layer = Layer.effect(
               // either; children inherit the no-edits gate unconditionally.
               setNoEditsGate(sessionID, noEditsGateArmed(session.parentID))
             } else {
-              const regexDenyTestEdits = isFixShapedPrompt(userText) && !promptAuthorizesTestEdits(userText)
+              const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
 
               // The turn-read runs on every root turn open (always-on, no
               // feature flag); TurnOpenCalls is the test-only off switch so
@@ -3645,7 +3651,17 @@ export const layer = Layer.effect(
             // system array, never a prefix swap: byte-stable across this
             // turn's steps (they cache against each other), and the shared
             // prefix above it never varies.
-            if (turnPreamble) system.push(turnPreamble)
+            // B3 — whenever the no-test-edit gate is armed for this session,
+            // TEST_EDIT_GATE_RULE is the FIRST line the model sees, on BOTH
+            // the triage-verdict path (prefixed onto turnPreamble) and the P5
+            // neutral-degrade path (turnPreamble is undefined there — the
+            // rule alone still reaches the model, gated only on the store,
+            // never on triage having run).
+            if (testEditGateArmed(sessionID)) {
+              system.push(turnPreamble ? `${TEST_EDIT_GATE_RULE}\n${turnPreamble}` : TEST_EDIT_GATE_RULE)
+            } else if (turnPreamble) {
+              system.push(turnPreamble)
+            }
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

@@ -1,6 +1,9 @@
 // The turn-scoped preamble the turn driver rides on the system-array tail,
 // built from the §1.1/§4.1 turn-read verdict. A null-verdict turn rides NO
-// preamble (P5 neutral degrade) — a wrong guess steers worse than no guess.
+// triage preamble (P5 neutral degrade — a wrong guess steers worse than no
+// guess), but still rides TEST_EDIT_GATE_RULE alone when the no-test-edit
+// gate is armed (prompt.ts guards the injection on testEditGateArmed, not on
+// triage having run).
 import type { TriageVerdict } from "../turn-triage"
 import type { ArmingDecision } from "../arming-judge"
 
@@ -17,6 +20,21 @@ const REFACTOR_PLAYBOOK = [
   "REFACTOR PLAYBOOK: behavior must NOT change — done when the existing suite is green and no public signature breaks (the edit-time governance gate flags callers at risk).",
   "Type refactor slices `mechanical` (the suite is the safety net); if the work adds behavior, that is a separate build goal — never smuggle it into the refactor.",
 ].join("\n")
+
+/**
+ * B3 — the no-test-edit gate's upfront rule, printed as the FIRST line of the
+ * turn's model-visible preamble whenever `testEditGateArmed` is true for the
+ * session. Injected on BOTH the triage-verdict path (prefixed onto
+ * `triagePreamble`'s output) and the P5 neutral-degrade (null-verdict) path,
+ * where no other preamble text reaches the model at all — an enhancement-shaped
+ * prompt with zero defect words ("Combine fast delete queries") armed the
+ * structural gate but the model never saw the rule stated, and rewrote an
+ * existing test's expectations to launder a design divergence.
+ *
+ * @sem domain=routing role=config
+ */
+export const TEST_EDIT_GATE_RULE =
+  "Do not modify existing test files — the grader runs the original tests; fix the source instead. Leave unrelated config files (package manifests, lockfiles, CI configs) alone unless the task itself is about them."
 
 /**
  * §1.1/§4.1 — the turn-scoped preamble built from a non-null turn-read

@@ -681,6 +681,12 @@ export const ShellTool = Tool.define(
       const nudge = noteVerifyCommand(ctx.sessionID, ctx.agent, input.command)
       if (nudge) output += "\n\n" + nudge
 
+      // econ: surface the exit code in the model-visible text on every observation (mirrors
+      // mini-swe-agent's observation format) — previously it only lived in result.metadata.exit,
+      // invisible to the model. Prepended last so it lands above the truncation prefix too.
+      const returncode = code === null ? "none (killed or timed out)" : String(code)
+      output = `<returncode>${returncode}</returncode>\n` + output
+
       return {
         title: input.command,
         metadata: {

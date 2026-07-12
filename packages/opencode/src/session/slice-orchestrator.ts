@@ -1250,26 +1250,6 @@ export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
   persona: "researcher",
 }
 
-// B3 — defect evidence in the USER prompt: repair verbs or symptom language.
-// Serves the no-test-edit GOVERNANCE gate (isFixShapedPrompt) only — the
-// turn's shape itself comes from the turn-read verdict. Deliberately requires
-// defect words — a build prompt's "should return X" spec language must not match.
-const PROMPT_DEFECT_EVIDENCE_RE =
-  /\b(?:fix|debug|resolve|repair|diagnose|bug|broken|wrong(?:ly)?|incorrect(?:ly)?|fails?|failing|failure|error|exception|crash(?:es|ing)?|regression|instead of|unexpected(?:ly)?|doesn'?t work|not working|misbehav\w*)\b/i
-
-/**
- * B3 — is this turn fix-shaped for the no-test-edit gate? Broader than the
- * pre-pass trigger on purpose: a grounded fix prompt that names the file is
- * still a fix turn (aligning tests to the patch is equally invalid there),
- * so no FILE_TARGET suppression here.
- *
- * @sem domain=routing role=router
- */
-export function isFixShapedPrompt(userPrompt: string): boolean {
-  if (!userPrompt) return false
-  return PROMPT_DEFECT_EVIDENCE_RE.test(userPrompt)
-}
-
 // B3 — explicit test-work authorization: an authoring verb with tests as its
 // NEAR object ("update the tests", "fix the flaky test"). The short span plus
 // the trailing negative lookahead keep tests-as-acceptance-criteria phrasing

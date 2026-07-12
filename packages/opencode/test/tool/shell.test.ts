@@ -1100,6 +1100,30 @@ describe("tool.shell abort", () => {
     ),
   )
 
+  it.live("prefixes output with the exit code on failure", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({
+          command: `exit 42`,
+        })
+        expect(result.output.startsWith("<returncode>42</returncode>\n")).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("prefixes output with <returncode>0</returncode> on success", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({
+          command: "echo ok",
+        })
+        expect(result.output.startsWith("<returncode>0</returncode>\n")).toBe(true)
+      }),
+    ),
+  )
+
   it.live("streams metadata updates progressively", () =>
     runIn(
       projectRoot,
