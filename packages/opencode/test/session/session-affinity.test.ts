@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { ModelMessage } from "ai"
-import { LLMRequestPrep } from "@/session/llm/request"
+import { ECON_EXECUTION_TEMPERATURE, LLMRequestPrep } from "@/session/llm/request"
 import { ECON_TIER_BINDING } from "@opencode-ai/code-intelligence"
 
 const sessionID = "test-session-affinity"
@@ -115,5 +115,49 @@ describe("LLMRequestPrep.prepare — x-session-affinity (OL-9.2b)", () => {
   test("withholds x-session-affinity for the reasoner model (registry sessionAffinity: false — W8 probe)", async () => {
     const result = await prepare("litellm", "@ai-sdk/openai-compatible", ECON_TIER_BINDING.reasoner)
     expect(result.headers["x-session-affinity"]).toBeUndefined()
+  })
+})
+
+/**
+ * F12 — explicit deterministic-leaning sampling for non-reasoner tiers.
+ * No temperature was ever set, so every tier sampled at the provider default
+ * (≈1.0); live benchmark evidence showed identical binary + instance flips
+ * pass/fail across runs. Verifies the executor tier gets the execution
+ * floor, the reasoner tier stays untouched, and an explicit agent-configured
+ * temperature always wins over the floor.
+ */
+describe("LLMRequestPrep.prepare — execution temperature (F12)", () => {
+  function prepareWithAgent(modelID: string, agentOverrides: Record<string, unknown> = {}) {
+    return Effect.runPromise(
+      LLMRequestPrep.prepare({
+        user: mockUser("litellm", modelID),
+        sessionID,
+        model: mockModel("litellm", "@ai-sdk/openai-compatible", modelID),
+        agent: { ...mockAgent, ...agentOverrides },
+        system: ["You are a helpful assistant."],
+        messages: [{ role: "user", content: "Hello" }] as ModelMessage[],
+        tools: {},
+        provider: { id: "litellm", options: {} } as any,
+        auth: undefined,
+        plugin: mockPlugin,
+        flags: mockFlags,
+        isWorkflow: false,
+      }),
+    )
+  }
+
+  test("non-reasoner tier (executor) gets the execution temperature when nothing else sets one", async () => {
+    const result = await prepare("litellm", "@ai-sdk/openai-compatible", ECON_TIER_BINDING.executor)
+    expect(result.params.temperature).toBe(ECON_EXECUTION_TEMPERATURE)
+  })
+
+  test("reasoner tier stays untouched (no temperature forced)", async () => {
+    const result = await prepare("litellm", "@ai-sdk/openai-compatible", ECON_TIER_BINDING.reasoner)
+    expect(result.params.temperature).toBeUndefined()
+  })
+
+  test("an explicit agent-configured temperature is not overridden", async () => {
+    const result = await prepareWithAgent(ECON_TIER_BINDING.executor, { temperature: 0.7 })
+    expect(result.params.temperature).toBe(0.7)
   })
 })

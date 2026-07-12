@@ -16,9 +16,20 @@ import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import { applyAdaptiveReasoning } from "./reasoning-gate"
 import { getArmingDecision } from "../arming-store"
-import { sessionAffinityFor } from "@opencode-ai/code-intelligence"
+import { sessionAffinityFor, tiersForModel } from "@opencode-ai/code-intelligence"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
+
+/**
+ * Left unset, a request samples at the provider's own default (commonly
+ * ≈1.0), so an identical prompt can flip pass/fail across runs (live
+ * benchmark evidence, F12). Non-reasoner tiers do patch-style edit work,
+ * where repeatable, near-greedy sampling is wanted over creative variance —
+ * so every such request gets this floor unless config already set one.
+ *
+ * @sem domain=routing role=config
+ */
+export const ECON_EXECUTION_TEMPERATURE = 0.1
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -182,7 +193,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
     {
       temperature: input.model.capabilities.temperature
-        ? (input.agent.temperature ?? ProviderTransform.temperature(input.model))
+        ? (input.agent.temperature ??
+            ProviderTransform.temperature(input.model) ??
+            (tiersForModel(input.model.id).includes("reasoner") ? undefined : ECON_EXECUTION_TEMPERATURE))
         : undefined,
       topP: input.agent.topP ?? ProviderTransform.topP(input.model),
       topK: ProviderTransform.topK(input.model),
