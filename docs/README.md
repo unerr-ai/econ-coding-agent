@@ -85,6 +85,8 @@ seam table: [features/README.md](./features/README.md).
 - [REFERENCE_APPROACHES.md](./testing/REFERENCE_APPROACHES.md) — per benchmark case, the reference
   approach (gold patch + how a strong agent independently decomposes/verifies it), used to audit the
   orchestration *expectation* separately from econ's actual outcome.
+- [STRICT_CYCLE.md](./testing/STRICT_CYCLE.md) — the build→run→forensic→fix→verify iteration log
+  (strict mode, local runs); the mechanism suspect list and per-iteration root-cause verdicts
 - [SWE_BENCH_TRACKER.md](./testing/SWE_BENCH_TRACKER.md) — the working tracker for the SWE-mini-10
   django set: per-instance benchmark verdict + local triage status + root-cause, the laptop run
   recipe, and the real-grader-simulation rule that keeps local runs honest (local "N tests OK" ≠ pass).
