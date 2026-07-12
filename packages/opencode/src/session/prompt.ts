@@ -43,6 +43,7 @@ import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "
 import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
+  applyAssertionTeethGap,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
 import { triagePreamble } from "./prompts/preambles"
@@ -65,7 +66,7 @@ import {
   runRegressionGate,
   type RmClient,
 } from "@opencode-ai/code-intelligence"
-import { discoverNeighborTests } from "./regression-neighbors"
+import { discoverNeighborTests, discoverProjectInterpreter, rewriteInterpreter, projectInterpreterCandidateCount } from "./regression-neighbors"
 import {
   runConductorOrchestration,
   resolveSliceModel,
@@ -1666,6 +1667,12 @@ export const layer = Layer.effect(
         // unverifiedFinishNudged exactly: ONE reject-with-continue cycle
         // naming the neighbor test(s) that turned red, then a loud break.
         let turnRegressionGateNudged = false
+        // F14a — the interpreter discovered for this turn's regression-gate
+        // neighbor commands, cached so discovery (it shells out) runs at
+        // most once even if the gate block below is revisited within the
+        // same turn. undefined = not yet probed; null = probed, none found
+        // (the gate is skipped for the rest of the turn in that case).
+        let turnDiscoveredInterpreter: string | null | undefined = undefined
         // The turn's OPENING user message id, captured once at step 0 before
         // any synthetic nudge (stuck/grind/batch/probe-gate/S2/S3) can shift
         // `lastUser` forward — the stable anchor S3 scans "this turn's"
@@ -1717,6 +1724,75 @@ export const layer = Layer.effect(
         // F9a — repro-fidelity judge fires at most once per turn, right at
         // the pin-from-red site below.
         let reproFidelityJudgedThisTurn = false
+
+        /**
+         * F14b — the shared fidelity-check dispatch for BOTH probe-pin
+         * sites: the SM4 probe-from-red site and the F13d engine-initiated
+         * pin (a live run showed the engine pin emitted ZERO fidelity
+         * markers because it never called this at all). Reads the pinned
+         * repro file, runs `reproFidelityDispatch`'s judge, forces a gap
+         * via `applyAssertionTeethGap` when the script has no assertion
+         * teeth regardless of the judge's verdict, and emits exactly one
+         * `repro_fidelity_*` marker plus the existing gap-nudge message.
+         * Fires at most once per turn — `reproFidelityJudgedThisTurn`
+         * guards re-entry from either call site. The caller `continue`s the
+         * step loop when this returns `{ gap: true }`, exactly like the
+         * original inline site did.
+         *
+         * @sem domain=routing role=repro-judge
+         */
+        const dispatchPinnedReproFidelity = Effect.fn("SessionPrompt.dispatchPinnedReproFidelity")(function* (input: {
+          sessionID: SessionID
+          cwd: string
+          probeCommand: string
+          issueText: string
+          lastUser: SessionV1.User
+        }) {
+          if (reproFidelityJudgedThisTurn) return { gap: false }
+          reproFidelityJudgedThisTurn = true
+          const { sessionID, cwd, probeCommand, issueText, lastUser } = input
+          const fidelityScriptFilename = extractScriptFilename(probeCommand)
+          if (!fidelityScriptFilename) {
+            yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: "no-script-filename" })
+            return { gap: false }
+          }
+          const reproContent = readPinnedReproFile(cwd, fidelityScriptFilename)
+          if (reproContent === undefined) {
+            yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: "file-missing" })
+            return { gap: false }
+          }
+          const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent })
+          const verdict = applyAssertionTeethGap(fidelityOutcome.verdict, reproContent)
+          const degradedReason = verdict === fidelityOutcome.verdict ? fidelityOutcome.degradedReason : undefined
+          if (degradedReason) {
+            yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: degradedReason })
+            return { gap: false }
+          }
+          if (!verdict.faithful) {
+            yield* Effect.logInfo("repro_fidelity_gap", { "session.id": sessionID, gaps: verdict.gaps })
+            const fidelityNudge: SessionV1.User = {
+              id: MessageID.ascending(),
+              sessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: lastUser.agent,
+              model: lastUser.model,
+            }
+            yield* sessions.updateMessage(fidelityNudge)
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: fidelityNudge.id,
+              sessionID,
+              type: "text",
+              text: reproFidelityNudgeText([...verdict.gaps]),
+              synthetic: true,
+            } satisfies SessionV1.TextPart)
+            return { gap: true }
+          }
+          yield* Effect.logInfo("repro_fidelity_ok", { "session.id": sessionID })
+          return { gap: false }
+        })
+
         // S3 — whether this turn's pin came from the P4 continuation store
         // (restored at turn open) rather than being authored/observed this
         // turn. An inherited pin + no new source edits is a legitimate
@@ -1817,72 +1893,30 @@ export const layer = Layer.effect(
                   redExit: turnPinnedProbe.redEvidence?.exitCode ?? null,
                   redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                 })
-                // F9a — repro-fidelity judge: fires at most once per turn,
-                // right here at pin time. F13c — a live 10-instance run
-                // emitted ZERO fidelity markers, indistinguishable from a
-                // silent degrade: this now ALWAYS logs exactly one marker
-                // after the judge (or its bail branches) resolve —
+                // F9a/F14b — repro-fidelity judge + static assert-presence
+                // check: fires at most once per turn, right here at pin
+                // time. Shared with the F13d engine-pin site below via
+                // `dispatchPinnedReproFidelity`, which logs exactly one
+                // marker after the judge (or its bail branches) resolve —
                 // `repro_fidelity_ok` (faithful), `repro_fidelity_gap`
-                // (faithful:false — existing nudge behavior, unchanged), or
-                // `repro_fidelity_degraded` naming which bail fired
+                // (faithful:false, or a toothless script per F14b's
+                // `hasAssertionTeeth` — existing nudge behavior, unchanged),
+                // or `repro_fidelity_degraded` naming which bail fired
                 // ("no-script-filename" | "file-missing" | the dispatch's
                 // own "model-unresolved" | "judge-degraded"). Never blocks
                 // the pin, never re-fires.
-                if (!reproFidelityJudgedThisTurn) {
-                  reproFidelityJudgedThisTurn = true
-                  const fidelityScriptFilename = extractScriptFilename(turnPinnedProbe.probe.command)
-                  if (!fidelityScriptFilename) {
-                    yield* Effect.logInfo("repro_fidelity_degraded", {
-                      "session.id": sessionID,
-                      reason: "no-script-filename",
-                    })
-                  } else {
-                    const reproContent = readPinnedReproFile(ctx.directory, fidelityScriptFilename)
-                    if (reproContent === undefined) {
-                      yield* Effect.logInfo("repro_fidelity_degraded", {
-                        "session.id": sessionID,
-                        reason: "file-missing",
-                      })
-                    } else {
-                      const issueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
-                        .map((p) => (p.type === "text" ? p.text : ""))
-                        .filter(Boolean)
-                        .join("\n")
-                      const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent })
-                      if (fidelityOutcome.degradedReason) {
-                        yield* Effect.logInfo("repro_fidelity_degraded", {
-                          "session.id": sessionID,
-                          reason: fidelityOutcome.degradedReason,
-                        })
-                      } else if (!fidelityOutcome.verdict.faithful) {
-                        yield* Effect.logInfo("repro_fidelity_gap", {
-                          "session.id": sessionID,
-                          gaps: fidelityOutcome.verdict.gaps,
-                        })
-                        const fidelityNudge: SessionV1.User = {
-                          id: MessageID.ascending(),
-                          sessionID,
-                          role: "user",
-                          time: { created: Date.now() },
-                          agent: lastUser.agent,
-                          model: lastUser.model,
-                        }
-                        yield* sessions.updateMessage(fidelityNudge)
-                        yield* sessions.updatePart({
-                          id: PartID.ascending(),
-                          messageID: fidelityNudge.id,
-                          sessionID,
-                          type: "text",
-                          text: reproFidelityNudgeText([...fidelityOutcome.verdict.gaps]),
-                          synthetic: true,
-                        } satisfies SessionV1.TextPart)
-                        continue
-                      } else {
-                        yield* Effect.logInfo("repro_fidelity_ok", { "session.id": sessionID })
-                      }
-                    }
-                  }
-                }
+                const fidelityIssueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                  .map((p) => (p.type === "text" ? p.text : ""))
+                  .filter(Boolean)
+                  .join("\n")
+                const fidelityResult = yield* dispatchPinnedReproFidelity({
+                  sessionID,
+                  cwd: ctx.directory,
+                  probeCommand: turnPinnedProbe.probe.command,
+                  issueText: fidelityIssueText,
+                  lastUser,
+                })
+                if (fidelityResult.gap) continue
               } else {
                 // S8 — pin-miss observability: django-11790 strict run #3 hit
                 // a red run of a named repro file that did NOT pin, and the
@@ -2133,6 +2167,22 @@ export const layer = Layer.effect(
                       redExit: engineResult.exitCode,
                       redTail: engineOutputTail,
                     })
+                    // F14b — this engine-initiated pin skipped the fidelity
+                    // dispatch entirely (a live run showed both engine pins
+                    // firing zero fidelity markers): share the same
+                    // dispatch the SM4 probe-from-red site uses above.
+                    const engineFidelityIssueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                      .map((p) => (p.type === "text" ? p.text : ""))
+                      .filter(Boolean)
+                      .join("\n")
+                    const engineFidelityResult = yield* dispatchPinnedReproFidelity({
+                      sessionID,
+                      cwd: ctx.directory,
+                      probeCommand: enginePin.probe.command,
+                      issueText: engineFidelityIssueText,
+                      lastUser,
+                    })
+                    if (engineFidelityResult.gap) continue
                   }
                 }
               }
@@ -2678,62 +2728,96 @@ export const layer = Layer.effect(
                   cwd: process.cwd(),
                 })
                 if (neighbors.length > 0) {
-                  const regression = yield* Effect.promise(() =>
-                    runRegressionGate({
-                      neighbors,
-                      runner: makeShellCommandRunner({
-                        timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / neighbors.length),
+                  // F14a — discover an interpreter that can actually import
+                  // the touched package BEFORE running the neighbor
+                  // commands: a containerized project image's PATH `python`
+                  // is often a base interpreter with no project install, so
+                  // running the gate unmodified would surface a
+                  // ModuleNotFoundError instead of a real regression. Cached
+                  // per turn (discovery shells out, at most once); a miss
+                  // logs one marker and skips the gate entirely rather than
+                  // reject-nudging on a false-red environment failure.
+                  if (turnDiscoveredInterpreter === undefined) {
+                    const firstEditSegments = landedSourceEditFiles[0].split("/")
+                    const topLevelPackage = firstEditSegments[0] === "src" ? firstEditSegments[1] ?? firstEditSegments[0] : firstEditSegments[0]
+                    turnDiscoveredInterpreter = yield* Effect.promise(() =>
+                      discoverProjectInterpreter({
+                        cwd: process.cwd(),
+                        topLevelPackage,
+                        runner: makeShellCommandRunner({ timeoutMs: 5000 }),
                       }),
-                    }),
-                  )
-                  if (regression.regressed) {
-                    // F13a — env-red vs assertion-red was previously
-                    // indistinguishable from the bare command name alone;
-                    // each failure's exit code + a ~15-line output tail
-                    // rides the marker and the reject nudge so the model
-                    // (and a live triage reading the log) can see WHY the
-                    // neighbor failed.
-                    const failingNeighbors = regression.failures.map((f) => ({
-                      command: f.command.command,
-                      exitCode: f.exitCode,
-                      outputTail: (f.stderr.trim() || f.stdout.trim() || "").split("\n").slice(-15).join("\n"),
-                    }))
-                    if (!turnRegressionGateNudged) {
-                      turnRegressionGateNudged = true
-                      yield* Effect.logWarning("turn_regression_gate", {
+                    )
+                    if (turnDiscoveredInterpreter === null) {
+                      yield* Effect.logWarning("turn_regression_env", {
+                        "session.id": sessionID,
+                        package: topLevelPackage,
+                        probed: projectInterpreterCandidateCount(process.cwd()),
+                      })
+                    }
+                  }
+                  if (turnDiscoveredInterpreter !== null) {
+                    const rewrittenCommands = rewriteInterpreter(
+                      neighbors.map((n) => n.command),
+                      turnDiscoveredInterpreter,
+                    )
+                    const rewrittenNeighbors = neighbors.map((n, i) => ({ ...n, command: rewrittenCommands[i] }))
+                    const regression = yield* Effect.promise(() =>
+                      runRegressionGate({
+                        neighbors: rewrittenNeighbors,
+                        runner: makeShellCommandRunner({
+                          timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length),
+                        }),
+                      }),
+                    )
+                    if (regression.regressed) {
+                      // F13a — env-red vs assertion-red was previously
+                      // indistinguishable from the bare command name alone;
+                      // each failure's exit code + a ~15-line output tail
+                      // rides the marker and the reject nudge so the model
+                      // (and a live triage reading the log) can see WHY the
+                      // neighbor failed.
+                      const failingNeighbors = regression.failures.map((f) => ({
+                        command: f.command.command,
+                        exitCode: f.exitCode,
+                        outputTail: (f.stderr.trim() || f.stdout.trim() || "").split("\n").slice(-15).join("\n"),
+                      }))
+                      if (!turnRegressionGateNudged) {
+                        turnRegressionGateNudged = true
+                        yield* Effect.logWarning("turn_regression_gate", {
+                          "session.id": sessionID,
+                          failing: failingNeighbors,
+                        })
+                        const regressionNudge: SessionV1.User = {
+                          id: MessageID.ascending(),
+                          sessionID,
+                          role: "user",
+                          time: { created: Date.now() },
+                          agent: lastUser.agent,
+                          model: lastUser.model,
+                        }
+                        yield* sessions.updateMessage(regressionNudge)
+                        yield* sessions.updatePart({
+                          id: PartID.ascending(),
+                          messageID: regressionNudge.id,
+                          sessionID,
+                          type: "text",
+                          text: `Your fix regressed ${failingNeighbors.length === 1 ? "a previously-passing test" : "previously-passing tests"} that were untouched by your change:\n${failingNeighbors.map((f) => `\`${f.command}\` (exit ${f.exitCode}):\n${f.outputTail}`).join("\n\n")}\nFix the regression WITHOUT weakening the fix you already landed.`,
+                          synthetic: true,
+                        } satisfies SessionV1.TextPart)
+                        continue
+                      }
+                      // Second arrival still regressed — loud, never a second
+                      // nudge and never a deadlock; the break below fires.
+                      yield* Effect.logWarning("turn_regression_unresolved", {
                         "session.id": sessionID,
                         failing: failingNeighbors,
                       })
-                      const regressionNudge: SessionV1.User = {
-                        id: MessageID.ascending(),
-                        sessionID,
-                        role: "user",
-                        time: { created: Date.now() },
-                        agent: lastUser.agent,
-                        model: lastUser.model,
-                      }
-                      yield* sessions.updateMessage(regressionNudge)
-                      yield* sessions.updatePart({
-                        id: PartID.ascending(),
-                        messageID: regressionNudge.id,
-                        sessionID,
-                        type: "text",
-                        text: `Your fix regressed ${failingNeighbors.length === 1 ? "a previously-passing test" : "previously-passing tests"} that were untouched by your change:\n${failingNeighbors.map((f) => `\`${f.command}\` (exit ${f.exitCode}):\n${f.outputTail}`).join("\n\n")}\nFix the regression WITHOUT weakening the fix you already landed.`,
-                        synthetic: true,
-                      } satisfies SessionV1.TextPart)
-                      continue
+                    } else {
+                      yield* Effect.logInfo("turn_regression_green", {
+                        "session.id": sessionID,
+                        neighbors: rewrittenNeighbors.map((n) => n.command),
+                      })
                     }
-                    // Second arrival still regressed — loud, never a second
-                    // nudge and never a deadlock; the break below fires.
-                    yield* Effect.logWarning("turn_regression_unresolved", {
-                      "session.id": sessionID,
-                      failing: failingNeighbors,
-                    })
-                  } else {
-                    yield* Effect.logInfo("turn_regression_green", {
-                      "session.id": sessionID,
-                      neighbors: neighbors.map((n) => n.command),
-                    })
                   }
                 }
               }

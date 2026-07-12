@@ -5,12 +5,25 @@
  * `complete` is a plain mocked callback, never a real provider. Table:
  * faithful verdict -> no nudge; gaps verdict -> nudge text contains each gap;
  * malformed LLM output -> faithful no-op; LLM throw -> faithful no-op.
+ *
+ * F14b adds the deterministic assert-teeth backstop: `hasAssertionTeeth`'s
+ * truth table, and `applyAssertionTeethGap`'s gap-merge behavior (forces a
+ * gap verdict even when the judge said faithful/degraded). The
+ * `dispatchPinnedReproFidelity` wiring in prompt.ts (the shared dispatch
+ * both pin sites call) is an Effect-generator closure over turn-loop state
+ * (sessionID, sessions, lastUser, the per-turn `reproFidelityJudgedThisTurn`
+ * flag) — not practical to unit test in isolation here; its two exported
+ * building blocks (`hasAssertionTeeth`, `applyAssertionTeethGap`) are
+ * covered directly below instead.
  */
 
 import { describe, test, expect } from "bun:test"
 import {
   parseReproFidelityResponse,
   runReproFidelityJudge,
+  hasAssertionTeeth,
+  applyAssertionTeethGap,
+  ASSERTION_TEETH_GAP,
   DEGRADED_REPRO_FIDELITY,
   REPRO_FIDELITY_MAX_GAPS,
   REPRO_FIDELITY_MAX_GAP_CHARS,
@@ -133,5 +146,74 @@ describe("reproFidelityNudgeText", () => {
     const gaps = ["gap one here", "gap two here"]
     const text = reproFidelityNudgeText(gaps)
     for (const gap of gaps) expect(text).toContain(gap)
+  })
+})
+
+describe("hasAssertionTeeth", () => {
+  test.each([
+    ["assert response.status_code == 200", true],
+    ["raise ValueError('mismatch')", true],
+    ["sys.exit(1)", true],
+    ["exit(2)", true],
+    ["process.exit(1)", true],
+    ["exit 1", true],
+    ["throw new Error('mismatch')", true],
+    ["os._exit(3)", true],
+  ])("%s -> %s", (content, expected) => {
+    expect(hasAssertionTeeth(content)).toBe(expected)
+  })
+
+  test.each([
+    ['print(f"EXPECTED {expected} ACTUAL {actual}")', false],
+    ["exit(0)", false],
+    ["sys.exit()", false],
+    ["sys.exit(0)", false],
+    ["# this needs an assertion eventually", false],
+    ["", false],
+  ])("%s -> %s", (content, expected) => {
+    expect(hasAssertionTeeth(content)).toBe(expected)
+  })
+
+  test("a bare word boundary means 'assertion' (not 'assert') does not count — documented limitation", () => {
+    // Plain word-boundary regex is intentional (F14b spec): \bassert\b does
+    // not match inside "assertion" (no boundary between "assert" and "ion").
+    expect(hasAssertionTeeth("# add an assertion here later")).toBe(false)
+  })
+
+  test("shell exit with a multi-digit nonzero code counts", () => {
+    expect(hasAssertionTeeth("exit 10")).toBe(true)
+  })
+})
+
+describe("applyAssertionTeethGap", () => {
+  const faithfulVerdict = { faithful: true, gaps: [] }
+
+  test("toothless content forces a gap verdict even when the judge said faithful", () => {
+    const merged = applyAssertionTeethGap(faithfulVerdict, 'print("EXPECTED 1 ACTUAL 2")')
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toEqual([ASSERTION_TEETH_GAP])
+  })
+
+  test("toothless content forces a gap verdict even when the judge already reported other gaps", () => {
+    const judgeVerdict = { faithful: false, gaps: ["asserts the wrong field"] }
+    const merged = applyAssertionTeethGap(judgeVerdict, 'print("EXPECTED 1 ACTUAL 2")')
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toEqual(["asserts the wrong field", ASSERTION_TEETH_GAP])
+  })
+
+  test("content with real assertion teeth is a no-op — same verdict reference returned", () => {
+    const verdict = faithfulVerdict
+    const merged = applyAssertionTeethGap(verdict, "assert response.status_code == 200")
+    expect(merged).toBe(verdict)
+  })
+
+  test("the merged gap list is reclamped to REPRO_FIDELITY_MAX_GAPS", () => {
+    const judgeVerdict = {
+      faithful: false,
+      gaps: Array.from({ length: REPRO_FIDELITY_MAX_GAPS }, (_, i) => `gap ${i}`),
+    }
+    const merged = applyAssertionTeethGap(judgeVerdict, 'print("no teeth here")')
+    expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
+    expect(merged.gaps).not.toContain(ASSERTION_TEETH_GAP)
   })
 })

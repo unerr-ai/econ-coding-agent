@@ -1187,6 +1187,13 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
     expect(REPRO_SLICE_CONTENT).toMatch(/assert THAT EXACT expression called on the exact object it names/)
     expect(REPRO_SLICE_CONTENT).toMatch(/not a downstream\/derived effect of it/)
   })
+
+  // F14c — a repro for date-relative behavior could not go red because the
+  // behavior only diverges under a mocked clock; control ambient inputs
+  // (clock, timezone, locale, randomness) inside the repro itself.
+  it("demands controlling ambient-environment inputs inside the repro so it fails deterministically today", () => {
+    expect(REPRO_SLICE_CONTENT).toMatch(/ambient environment/i)
+  })
 })
 
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
@@ -1308,6 +1315,13 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(
       /never add an explicit type conversion \(str\(\)\/int\(\)\/float\(\)\/bytes\(\)\) or reformatting the issue did not ask for/i,
     )
+    // F14c — a fix introduced `import time` alongside a module that already
+    // imports `datetime`; the hidden test mocked the existing import, so the
+    // new equivalent bypassed the mock and failed under test.
+    expect(LOCALIZATION_SLICE_CONTENT).toMatch(/already-imported/i)
+    // F14c — a fix deleted an existing `self.username_field` attribute while
+    // fixing an unrelated line; five other methods read it, causing regressions.
+    expect(LOCALIZATION_SLICE_CONTENT).toMatch(/scope-minimal/i)
   })
 
   it("the seed is a WRITER seat: mechanical/applier is not a decider seat and keeps edit+bash ALLOWED at the reasoner", () => {

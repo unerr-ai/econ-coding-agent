@@ -1,15 +1,23 @@
 /**
- * Tests for discoverNeighborTests (packages/opencode/src/session/regression-neighbors.ts,
- * F11): Django-style tests/runtests.py + tests/<dir> matching, the pytest-style filename
- * fallback under tests/** and the source file's own directory, the no-match empty-array
- * case, and the 3-command cap.
+ * Tests for regression-neighbors.ts (packages/opencode/src/session/regression-neighbors.ts):
+ * F11's discoverNeighborTests — Django-style tests/runtests.py + tests/<dir> matching, the
+ * pytest-style filename fallback under tests/** and the source file's own directory, the
+ * no-match empty-array case, and the 3-command cap — and F14a's project-interpreter
+ * discovery: discoverProjectInterpreter's candidate ordering (repo-local venv, then conda
+ * env, then PATH), first-success-wins, the none-found null case, the exact cwd-stripping
+ * probe one-liner, and rewriteInterpreter's leading-token swap.
  */
 
 import { describe, it, expect, afterEach } from "bun:test"
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { discoverNeighborTests } from "../../src/session/regression-neighbors"
+import {
+  discoverNeighborTests,
+  discoverProjectInterpreter,
+  projectInterpreterCandidateCount,
+  rewriteInterpreter,
+} from "../../src/session/regression-neighbors"
 
 const dirs: string[] = []
 
@@ -115,5 +123,128 @@ describe("discoverNeighborTests — pytest-style fallback (no tests/runtests.py)
     const cwd = makeFixture()
     const result = discoverNeighborTests({ touchedSourceFiles: [], cwd })
     expect(result).toEqual([])
+  })
+})
+
+describe("discoverProjectInterpreter", () => {
+  const originalHome = process.env.HOME
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME
+    else process.env.HOME = originalHome
+  })
+
+  it("probes repo-local venv before a conda env before PATH", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, ".venv", "bin"), { recursive: true })
+    writeFileSync(join(cwd, ".venv", "bin", "python"), "")
+
+    const home = makeFixture()
+    process.env.HOME = home
+    mkdirSync(join(home, "miniconda3", "envs", "proj", "bin"), { recursive: true })
+    writeFileSync(join(home, "miniconda3", "envs", "proj", "bin", "python"), "")
+
+    const probed: string[] = []
+    const result = await discoverProjectInterpreter({
+      cwd,
+      topLevelPackage: "django",
+      runner: async (command) => {
+        probed.push(command.command)
+        return { exitCode: 1, stdout: "", stderr: "ModuleNotFoundError: No module named 'django'" }
+      },
+    })
+
+    expect(result).toBeNull()
+    const venvIndex = probed.findIndex((p) => p.startsWith(join(cwd, ".venv", "bin", "python")))
+    const condaIndex = probed.findIndex((p) => p.includes("miniconda3"))
+    const pathIndex = probed.findIndex((p) => p.startsWith("python3 ") || p.startsWith("python "))
+    expect(venvIndex).toBeGreaterThanOrEqual(0)
+    expect(condaIndex).toBeGreaterThan(venvIndex)
+    expect(pathIndex).toBeGreaterThan(condaIndex)
+  })
+
+  it("returns the first candidate whose probe exits 0", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, ".venv", "bin"), { recursive: true })
+    writeFileSync(join(cwd, ".venv", "bin", "python"), "")
+
+    const result = await discoverProjectInterpreter({
+      cwd,
+      topLevelPackage: "django",
+      runner: async (command) => ({ exitCode: command.command.includes(".venv") ? 0 : 1, stdout: "", stderr: "" }),
+    })
+
+    expect(result).toBe(join(cwd, ".venv", "bin", "python"))
+  })
+
+  it("returns null when every candidate's probe fails", async () => {
+    const cwd = makeFixture()
+
+    const result = await discoverProjectInterpreter({
+      cwd,
+      topLevelPackage: "django",
+      runner: async () => ({ exitCode: 1, stdout: "", stderr: "ModuleNotFoundError: No module named 'django'" }),
+    })
+
+    expect(result).toBeNull()
+  })
+
+  it("probes with a one-liner that strips '' / cwd sys.path entries before importing", async () => {
+    const cwd = makeFixture()
+    let probedCommand = ""
+
+    await discoverProjectInterpreter({
+      cwd,
+      topLevelPackage: "django",
+      runner: async (command) => {
+        probedCommand = command.command
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(probedCommand).toBe(
+      `python3 -c "import sys; sys.path = [p for p in sys.path if p not in ('', '.', sys.path[0] if sys.path else '')]; import django"`,
+    )
+  })
+
+  it("projectInterpreterCandidateCount matches the number of candidates actually probed", async () => {
+    const cwd = makeFixture()
+    const probed: string[] = []
+
+    await discoverProjectInterpreter({
+      cwd,
+      topLevelPackage: "django",
+      runner: async (command) => {
+        probed.push(command.command)
+        return { exitCode: 1, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(projectInterpreterCandidateCount(cwd)).toBe(probed.length)
+  })
+})
+
+describe("rewriteInterpreter", () => {
+  it("replaces the leading python token of a plain command", () => {
+    const result = rewriteInterpreter(["python tests/runtests.py auth_tests --parallel 1"], "/repo/.venv/bin/python")
+    expect(result).toEqual(["/repo/.venv/bin/python tests/runtests.py auth_tests --parallel 1"])
+  })
+
+  it("replaces a leading python3 token the same way", () => {
+    const result = rewriteInterpreter(["python3 -m pytest tests/test_http.py -x -q"], "/repo/.venv/bin/python")
+    expect(result).toEqual(["/repo/.venv/bin/python -m pytest tests/test_http.py -x -q"])
+  })
+
+  it("replaces the token after a `cd <dir> && ` prefix", () => {
+    const result = rewriteInterpreter(
+      ["cd django && python tests/runtests.py auth_tests --parallel 1"],
+      "/repo/.venv/bin/python",
+    )
+    expect(result).toEqual(["cd django && /repo/.venv/bin/python tests/runtests.py auth_tests --parallel 1"])
+  })
+
+  it("leaves a non-python command untouched", () => {
+    const result = rewriteInterpreter(["bun test packages/foo"], "/repo/.venv/bin/python")
+    expect(result).toEqual(["bun test packages/foo"])
   })
 })
