@@ -839,6 +839,21 @@ export function canonicalScriptProbeCommand(command: string): string | undefined
 }
 
 /**
+ * F13d — the canonical runner invocation for a script path already known on
+ * disk (not extracted from a raw command line) — same RUNNER_BY_SCRIPT_EXT
+ * mapping as `canonicalScriptProbeCommand`, exported so the engine-initiated
+ * canonical probe (prompt.ts's SM4 drift block, fired when the model itself
+ * cannot produce a pinnable command) doesn't carry a second copy of the
+ * extension→runner map. `undefined` when the extension has no known runner.
+ *
+ * @sem domain=routing role=repro-pin
+ */
+export function canonicalCommandForScript(scriptPath: string): string | undefined {
+  const runner = RUNNER_BY_SCRIPT_EXT[scriptPath.slice(scriptPath.lastIndexOf(".") + 1).toLowerCase()]
+  return runner ? `${runner} ${scriptPath}` : undefined
+}
+
+/**
  * The most-specific pinned reproduction among a slice's extracted verify
  * commands (task #7 probe rung) — reuses `extractVerifyCommands`'s output,
  * only ranks it; `undefined` when nothing extracted qualifies as a targeted
@@ -906,7 +921,11 @@ export interface TurnProbePin {
  * derives the runner invocation from the filename itself, by construction
  * immune to any decoration); F8's enumerated normalizeProbeCommand remains the
  * fallback for everything else (a named-test command, e.g. `runtests.py … |
- * tail -50`). Specificity is still scored on the raw candidate.
+ * tail -50`). Specificity is still scored on the raw candidate. F13f — a
+ * non-zero exit whose output matches the shell's own file-not-found
+ * signature (`MISSING_FILE_RE`) is a phantom red, not a confirmed one: the
+ * candidate is skipped rather than pinned, so a script that was never
+ * actually executed can't become the turn's verification contract.
  *
  * @sem domain=routing role=repro-pin
  */
@@ -934,12 +953,14 @@ export async function deriveTurnProbe(opts: {
     const normalized: VerifyCommand = { ...candidate, command: pinnedCommand }
     const result = await opts.runner(normalized)
     if (result.exitCode !== 0) {
+      const outputTail = (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n")
+      // F13f — a phantom red: the script doesn't exist where expected, so
+      // this exit proves nothing about the issue. Never pin a contract
+      // nothing can meet.
+      if (MISSING_FILE_RE.test(outputTail)) continue
       bestScore = score
       best = normalized
-      bestRed = {
-        exitCode: result.exitCode,
-        outputTail: (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n"),
-      }
+      bestRed = { exitCode: result.exitCode, outputTail }
     }
   }
   return best ? { probe: best, redEvidence: bestRed } : undefined
@@ -951,8 +972,11 @@ export async function deriveTurnProbe(opts: {
 // a probe re-run failing this way names the real cause (the pinned repro
 // file was deleted post-pin — django-11790 strict run #4) rather than the
 // generic "STILL FAILING" reason, which reads as an unfixed bug instead of a
-// tampered contract.
-const MISSING_FILE_RE = /No such file or directory|can't open file/i
+// tampered contract. F13f — also reused by deriveTurnProbe (above) and
+// prompt.ts's engine-initiated probe to reject a phantom red before it
+// pins, not just to explain one after the fact. Exported so both sites
+// stay byte-identical rather than carrying a second copy of the pattern.
+export const MISSING_FILE_RE = /No such file or directory|can't open file/i
 const PROBE_SCRIPT_FILE_RE = /[\w./-]+\.(?:py|js|ts|mjs|sh|rb)\b/
 
 /** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */

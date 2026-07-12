@@ -147,7 +147,28 @@ describe("runRegressionGate", () => {
         : { exitCode: 1, stdout: "", stderr: "regressed" }
     const result = await runRegressionGate({ neighbors, runner })
     expect(result.regressed).toBe(true)
-    expect(result.failures.map((f) => f.command)).toEqual(["bun test packages/a.test.ts", "bun test packages/c.test.ts"])
+    expect(result.failures.map((f) => f.command.command)).toEqual([
+      "bun test packages/a.test.ts",
+      "bun test packages/c.test.ts",
+    ])
+  })
+
+  it("F13a — threads each failure's exit code and output alongside its command", async () => {
+    const neighbors: VerifyCommand[] = [{ kind: "test", command: "bun test packages/a.test.ts" }]
+    const runner: CommandRunner = async (): Promise<CommandResult> => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "AssertionError: expected 1 to be 2",
+    })
+    const result = await runRegressionGate({ neighbors, runner })
+    expect(result.failures).toEqual([
+      {
+        command: { kind: "test", command: "bun test packages/a.test.ts" },
+        exitCode: 1,
+        stdout: "",
+        stderr: "AssertionError: expected 1 to be 2",
+      },
+    ])
   })
 
   it("is vacuously regressed:false on an empty neighbor set", async () => {

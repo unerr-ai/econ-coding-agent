@@ -50,6 +50,7 @@ import {
   deriveTurnProbe,
   normalizeProbeCommand,
   canonicalScriptProbeCommand,
+  canonicalCommandForScript,
   runTurnProbeGate,
   childSlicePermission,
   isDeciderSeat,
@@ -1300,6 +1301,13 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     // idiom (and the hidden grader's mock) was datetime.utcnow() — copy the
     // module's existing environment-read idiom, never introduce a new one.
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(/COPY the exact idiom the surrounding module already uses/i)
+    // a fix byte-identical to the gold patch except for one added str()
+    // wrapper failed the hidden grader three runs in a row — the issue never
+    // asked for a type conversion and the gold fix has none; forbid gratuitous
+    // conversions/reformatting and require passing values through unchanged.
+    expect(LOCALIZATION_SLICE_CONTENT).toMatch(
+      /never add an explicit type conversion \(str\(\)\/int\(\)\/float\(\)\/bytes\(\)\) or reformatting the issue did not ask for/i,
+    )
   })
 
   it("the seed is a WRITER seat: mechanical/applier is not a decider seat and keeps edit+bash ALLOWED at the reasoner", () => {
@@ -1584,6 +1592,68 @@ But the actual repro is:
       probe: { kind: "test", command: "python tests/runtests.py x.y -k z" },
       redEvidence: { exitCode: 1, outputTail: "AssertionError" },
     })
+  })
+
+  // F13f — a non-zero exit whose output is the shell's own file-not-found
+  // signature is a phantom red: the script was never actually executed
+  // against real logic, so the candidate must be skipped, never pinned.
+  it("skips (never pins) a candidate whose non-zero exit is a phantom file-not-found, not a real red", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]
+    const runner: CommandRunner = async () => ({
+      exitCode: 2,
+      stdout: "",
+      stderr: "python: can't open file '/testbed/repro_issue.py': [Errno 2] No such file or directory",
+    })
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  it("still pins a non-phantom non-zero exit (a real AssertionError) alongside a phantom candidate", async () => {
+    const candidates: VerifyCommand[] = [
+      { kind: "test", command: "python repro_issue.py" },
+      { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
+    ]
+    const results: Record<string, CommandResult> = {
+      "python repro_issue.py": {
+        exitCode: 2,
+        stdout: "",
+        stderr: "python: can't open file 'repro_issue.py': [Errno 2] No such file or directory",
+      },
+      'bun test packages/foo/bar.test.ts -t "handles retry"': {
+        exitCode: 1,
+        stdout: "",
+        stderr: "AssertionError",
+      },
+    }
+    const runner: CommandRunner = async (cmd) => results[cmd.command]!
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(result).toEqual({
+      probe: { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
+      redEvidence: { exitCode: 1, outputTail: "AssertionError" },
+    })
+  })
+})
+
+describe("canonicalCommandForScript (F13d — engine-initiated probe's runner mapping)", () => {
+  it("maps a known scratch-script extension to its canonical runner invocation", () => {
+    expect(canonicalCommandForScript("repro_issue.py")).toBe("python repro_issue.py")
+    expect(canonicalCommandForScript("repro_issue.js")).toBe("node repro_issue.js")
+    expect(canonicalCommandForScript("repro_issue.mjs")).toBe("node repro_issue.mjs")
+    expect(canonicalCommandForScript("repro_issue.ts")).toBe("bun repro_issue.ts")
+    expect(canonicalCommandForScript("repro_issue.sh")).toBe("sh repro_issue.sh")
+    expect(canonicalCommandForScript("repro_issue.rb")).toBe("ruby repro_issue.rb")
+  })
+
+  it("returns undefined for an extension with no known runner", () => {
+    expect(canonicalCommandForScript("repro_issue.txt")).toBeUndefined()
   })
 })
 

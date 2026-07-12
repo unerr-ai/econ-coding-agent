@@ -160,18 +160,22 @@ export async function runSoundCheck(spec: VerifySpec, runner: CommandRunner): Pr
  * injected runner and reports any that now fail. The sound rung alone only
  * checks the slice's own spec — a fix that turns the target test green while
  * regressing an untouched neighbor still passes it unnoticed; this hands the
- * caller a factual report to gate against instead.
+ * caller a factual report to gate against instead. F13a — each failure
+ * carries its full `CommandResult` (exit code + stdout/stderr), reusing the
+ * sound rung's `SoundFailure` shape, so a live triage can tell an
+ * environment-red (non-zero exit, no assertion output) from an actual
+ * assertion-red instead of just a bare command name.
  *
  * @sem domain=routing role=regression-gate
  */
 export async function runRegressionGate(opts: {
   neighbors: readonly VerifyCommand[]
   runner: CommandRunner
-}): Promise<{ regressed: boolean; failures: VerifyCommand[] }> {
-  const failures: VerifyCommand[] = []
+}): Promise<{ regressed: boolean; failures: SoundFailure[] }> {
+  const failures: SoundFailure[] = []
   for (const neighbor of opts.neighbors) {
     const result = await opts.runner(neighbor)
-    if (result.exitCode !== 0) failures.push(neighbor)
+    if (result.exitCode !== 0) failures.push({ ...result, command: neighbor })
   }
   return { regressed: failures.length > 0, failures }
 }

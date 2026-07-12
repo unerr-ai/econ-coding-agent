@@ -17,6 +17,7 @@ import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
 import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
+import { ProviderTransform } from "@/provider/transform"
 import {
   setTestEditGate,
   testEditGateArmed,
@@ -92,6 +93,8 @@ import {
   makeShellCommandRunner,
   reproSpecificity,
   isReproScratchPath,
+  canonicalCommandForScript,
+  MISSING_FILE_RE,
   type ConductorLoopOptions,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
@@ -252,6 +255,14 @@ const PIN_PROBE_COMMAND_TOOLS = new Set(["shell", "bash"])
 // commands (discoverNeighborTests caps at 3); divided evenly across however
 // many neighbors were actually discovered so the whole gate always fits.
 const REGRESSION_GATE_TOTAL_BUDGET_MS = 240_000
+
+// F13d — extensions checked, in order, for an on-disk scratch repro script
+// when an "unpinnable-red" drift recurs with no pin — mirrors
+// RUNNER_BY_SCRIPT_EXT's coverage (slice-orchestrator.ts) exactly.
+const ENGINE_PROBE_SCRIPT_EXTS = ["py", "js", "mjs", "ts", "sh", "rb"] as const
+// F13d — bounded like the sound rung's own commands; a scratch repro is
+// rarely long-running, but a hung one must never wedge the turn loop.
+const ENGINE_PROBE_TIMEOUT_MS = 120_000
 
 /**
  * S9 — whether this step ran the pinned probe's script and it exited GREEN.
@@ -611,11 +622,16 @@ export const layer = Layer.effect(
     /**
      * F9a — the repro-fidelity judge's ONE dispatch: a tool-free,
      * temperature-0, forced-JSON completion on the executor tier (cheapest —
-     * this is a narrow, single-question check, not turn-open extraction).
-     * The caller (the SM4 pin-from-red site) fires this at most once per
-     * turn. An unresolvable model/language degrades to
-     * `DEGRADED_REPRO_FIDELITY` the same as a thrown completion — a
-     * housekeeping read never blocks the pin.
+     * this is a narrow, single-question check, not turn-open extraction),
+     * routed through the same `ProviderTransform` reasoning/provider-option
+     * builder the small-call paths use (F13g — some endpoints 400 a bare
+     * completion when reasoning is mandatory). The caller (the SM4
+     * pin-from-red site) fires this at most once per turn and logs the
+     * returned `degradedReason` whenever the verdict is the
+     * `DEGRADED_REPRO_FIDELITY` sentinel — "model-unresolved" (model/language
+     * unavailable, never reached the judge) or "judge-degraded" (the judge
+     * ran and itself degraded) — so silence is never mistaken for a
+     * confirmed-faithful verdict (F13c).
      *
      * @sem domain=routing role=repro-judge
      */
@@ -628,14 +644,25 @@ export const layer = Layer.effect(
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
       )
-      if (!mdl) return DEGRADED_REPRO_FIDELITY
+      if (!mdl) return { verdict: DEGRADED_REPRO_FIDELITY, degradedReason: "model-unresolved" as const }
       const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
-      if (!language) return DEGRADED_REPRO_FIDELITY
+      if (!language) return { verdict: DEGRADED_REPRO_FIDELITY, degradedReason: "model-unresolved" as const }
       const complete: ReproFidelityComplete = async ({ system, user }) => {
-        const out = await generateText({ model: language, system, prompt: user, maxOutputTokens: 512, temperature: 0 })
+        const out = await generateText({
+          model: language,
+          system,
+          prompt: user,
+          maxOutputTokens: 512,
+          temperature: 0,
+          providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
+        })
         return out.text.trim() || (out.reasoningText ?? "")
       }
-      return yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, complete }))
+      const verdict = yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, complete }))
+      return {
+        verdict,
+        degradedReason: verdict === DEGRADED_REPRO_FIDELITY ? ("judge-degraded" as const) : undefined,
+      }
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1661,6 +1688,13 @@ export const layer = Layer.effect(
         let reproDriftEvents = 0
         const REPRO_DRIFT_ESCALATION_THRESHOLD = 3
         let reproDriftTier2Fired = false
+        // F13d — engine-initiated canonical probe: fires at most once per
+        // turn, when an "unpinnable-red" drift keeps recurring (every
+        // per-kind nudge and the tier-2 escalation above already exhausted)
+        // yet a scratch repro script sits on disk unused (django case: 199
+        // turns burned this way while repro_issue.py sat there the whole
+        // time).
+        let engineProbeAttemptedThisTurn = false
         // S8 — converge-now deadline state: how many SM4-observed steps have
         // passed with a source (non-test) edit already on the board but no
         // repro pin, whether that source edit has landed at all this turn
@@ -1784,26 +1818,46 @@ export const layer = Layer.effect(
                   redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                 })
                 // F9a — repro-fidelity judge: fires at most once per turn,
-                // right here at pin time, and only when the pin names a
-                // script file (an inline/whole-suite probe has no file to
-                // check). A missing file skips the judge silently; a
-                // `faithful:false` verdict logs the gaps and injects ONE
-                // nudge — this never blocks the pin, never re-fires.
+                // right here at pin time. F13c — a live 10-instance run
+                // emitted ZERO fidelity markers, indistinguishable from a
+                // silent degrade: this now ALWAYS logs exactly one marker
+                // after the judge (or its bail branches) resolve —
+                // `repro_fidelity_ok` (faithful), `repro_fidelity_gap`
+                // (faithful:false — existing nudge behavior, unchanged), or
+                // `repro_fidelity_degraded` naming which bail fired
+                // ("no-script-filename" | "file-missing" | the dispatch's
+                // own "model-unresolved" | "judge-degraded"). Never blocks
+                // the pin, never re-fires.
                 if (!reproFidelityJudgedThisTurn) {
+                  reproFidelityJudgedThisTurn = true
                   const fidelityScriptFilename = extractScriptFilename(turnPinnedProbe.probe.command)
-                  if (fidelityScriptFilename) {
-                    reproFidelityJudgedThisTurn = true
+                  if (!fidelityScriptFilename) {
+                    yield* Effect.logInfo("repro_fidelity_degraded", {
+                      "session.id": sessionID,
+                      reason: "no-script-filename",
+                    })
+                  } else {
                     const reproContent = readPinnedReproFile(ctx.directory, fidelityScriptFilename)
-                    if (reproContent !== undefined) {
+                    if (reproContent === undefined) {
+                      yield* Effect.logInfo("repro_fidelity_degraded", {
+                        "session.id": sessionID,
+                        reason: "file-missing",
+                      })
+                    } else {
                       const issueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
                         .map((p) => (p.type === "text" ? p.text : ""))
                         .filter(Boolean)
                         .join("\n")
-                      const fidelityVerdict = yield* reproFidelityDispatch({ issueText, reproContent })
-                      if (!fidelityVerdict.faithful) {
+                      const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent })
+                      if (fidelityOutcome.degradedReason) {
+                        yield* Effect.logInfo("repro_fidelity_degraded", {
+                          "session.id": sessionID,
+                          reason: fidelityOutcome.degradedReason,
+                        })
+                      } else if (!fidelityOutcome.verdict.faithful) {
                         yield* Effect.logInfo("repro_fidelity_gap", {
                           "session.id": sessionID,
-                          gaps: fidelityVerdict.gaps,
+                          gaps: fidelityOutcome.verdict.gaps,
                         })
                         const fidelityNudge: SessionV1.User = {
                           id: MessageID.ascending(),
@@ -1819,10 +1873,12 @@ export const layer = Layer.effect(
                           messageID: fidelityNudge.id,
                           sessionID,
                           type: "text",
-                          text: reproFidelityNudgeText([...fidelityVerdict.gaps]),
+                          text: reproFidelityNudgeText([...fidelityOutcome.verdict.gaps]),
                           synthetic: true,
                         } satisfies SessionV1.TextPart)
                         continue
+                      } else {
+                        yield* Effect.logInfo("repro_fidelity_ok", { "session.id": sessionID })
                       }
                     }
                   }
@@ -2015,6 +2071,69 @@ export const layer = Layer.effect(
                     synthetic: true,
                   } satisfies SessionV1.TextPart)
                   continue
+                }
+              }
+
+              // F13d — engine-initiated canonical probe: an "unpinnable-red"
+              // drift that keeps recurring (every per-kind nudge above, and
+              // the tier-2 escalation, already exhausted this turn) means
+              // the model literally cannot produce a pinnable command on its
+              // own — django case: 199 turns burned this way while
+              // repro_issue.py sat on disk unused the whole time. Rather
+              // than nudge forever, look for the scratch repro file itself
+              // and run it, pinning on a runner-confirmed red exactly like
+              // the probe-from-red path above. A phantom ENOENT run (F13f —
+              // the file doesn't actually exist where expected) and a green
+              // run (11964 protection: a green repro pre-fix proves nothing)
+              // are both skipped, never pinned. Fires at most once per turn;
+              // never on a child session (this whole SM4 block already
+              // implies root-only).
+              if (
+                !engineProbeAttemptedThisTurn &&
+                (driftKinds.includes("unpinnable-red") || reproDriftKindsNudged.has("unpinnable-red"))
+              ) {
+                engineProbeAttemptedThisTurn = true
+                const scratchPath = ENGINE_PROBE_SCRIPT_EXTS.map((ext) => `repro_issue.${ext}`).find((name) =>
+                  existsSync(path.join(ctx.directory, name)),
+                )
+                const engineCommand = scratchPath ? canonicalCommandForScript(scratchPath) : undefined
+                if (engineCommand) {
+                  const engineResult = yield* Effect.promise(() =>
+                    makeShellCommandRunner({ cwd: ctx.directory, timeoutMs: ENGINE_PROBE_TIMEOUT_MS })({
+                      kind: "test",
+                      command: engineCommand,
+                    }),
+                  )
+                  const engineOutputTail = (engineResult.stderr.trim() || engineResult.stdout.trim() || "")
+                    .split("\n")
+                    .slice(-20)
+                    .join("\n")
+                  if (engineResult.exitCode === 0) {
+                    yield* Effect.logInfo("turn_probe_engine_green_skip", {
+                      "session.id": sessionID,
+                      probe: engineCommand,
+                      reason: "green",
+                    })
+                  } else if (MISSING_FILE_RE.test(engineOutputTail)) {
+                    yield* Effect.logInfo("turn_probe_engine_green_skip", {
+                      "session.id": sessionID,
+                      probe: engineCommand,
+                      reason: "file-missing",
+                    })
+                  } else {
+                    const enginePin = {
+                      probe: { kind: "test" as const, command: engineCommand },
+                      redEvidence: { exitCode: engineResult.exitCode, outputTail: engineOutputTail },
+                    }
+                    turnPinnedProbe = enginePin
+                    setPinnedProbe(sessionID, enginePin)
+                    yield* Effect.logInfo("turn_probe_pinned_engine", {
+                      "session.id": sessionID,
+                      probe: enginePin.probe.command,
+                      redExit: engineResult.exitCode,
+                      redTail: engineOutputTail,
+                    })
+                  }
                 }
               }
             }
@@ -2568,12 +2687,22 @@ export const layer = Layer.effect(
                     }),
                   )
                   if (regression.regressed) {
-                    const failingCommands = regression.failures.map((f) => f.command)
+                    // F13a — env-red vs assertion-red was previously
+                    // indistinguishable from the bare command name alone;
+                    // each failure's exit code + a ~15-line output tail
+                    // rides the marker and the reject nudge so the model
+                    // (and a live triage reading the log) can see WHY the
+                    // neighbor failed.
+                    const failingNeighbors = regression.failures.map((f) => ({
+                      command: f.command.command,
+                      exitCode: f.exitCode,
+                      outputTail: (f.stderr.trim() || f.stdout.trim() || "").split("\n").slice(-15).join("\n"),
+                    }))
                     if (!turnRegressionGateNudged) {
                       turnRegressionGateNudged = true
                       yield* Effect.logWarning("turn_regression_gate", {
                         "session.id": sessionID,
-                        failing: failingCommands,
+                        failing: failingNeighbors,
                       })
                       const regressionNudge: SessionV1.User = {
                         id: MessageID.ascending(),
@@ -2589,7 +2718,7 @@ export const layer = Layer.effect(
                         messageID: regressionNudge.id,
                         sessionID,
                         type: "text",
-                        text: `Your fix regressed ${failingCommands.length === 1 ? "a previously-passing test" : "previously-passing tests"} that were untouched by your change: ${failingCommands.map((c) => `\`${c}\``).join(", ")}. Fix the regression WITHOUT weakening the fix you already landed.`,
+                        text: `Your fix regressed ${failingNeighbors.length === 1 ? "a previously-passing test" : "previously-passing tests"} that were untouched by your change:\n${failingNeighbors.map((f) => `\`${f.command}\` (exit ${f.exitCode}):\n${f.outputTail}`).join("\n\n")}\nFix the regression WITHOUT weakening the fix you already landed.`,
                         synthetic: true,
                       } satisfies SessionV1.TextPart)
                       continue
@@ -2598,7 +2727,7 @@ export const layer = Layer.effect(
                     // nudge and never a deadlock; the break below fires.
                     yield* Effect.logWarning("turn_regression_unresolved", {
                       "session.id": sessionID,
-                      failing: failingCommands,
+                      failing: failingNeighbors,
                     })
                   } else {
                     yield* Effect.logInfo("turn_regression_green", {
