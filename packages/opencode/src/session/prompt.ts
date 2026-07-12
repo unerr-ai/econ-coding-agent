@@ -74,6 +74,7 @@ import {
   rewriteInterpreter,
   projectInterpreterCandidateCount,
   deriveTopLevelPackage,
+  selectRegressionPinCandidate,
 } from "./regression-neighbors"
 import {
   runConductorOrchestration,
@@ -2880,7 +2881,10 @@ export const layer = Layer.effect(
               // the first regressed finding gets ONE continue-with-message
               // naming the failing targets; a still-red second arrival logs
               // loudly and lets the turn end (never a second nudge, never a
-              // deadlock).
+              // deadlock). F16 — that same first pass also promotes the
+              // first honest (non-env-red) failure into the turn's pinned
+              // probe, replacing the now-green repro pin, so the finish gate
+              // won't release the turn on a stale repro alone.
               if (landedSourceEdits) {
                 const neighbors = discoverNeighborTests({
                   touchedSourceFiles: landedSourceEditFiles,
@@ -2954,6 +2958,31 @@ export const layer = Layer.effect(
                       }))
                       if (!turnRegressionGateNudged) {
                         turnRegressionGateNudged = true
+                        // F16 — promote an honest assertion-red neighbor
+                        // failure into the turn's pinned probe: a live case
+                        // held one for 80+ turns (detected, nudged once,
+                        // shipped anyway) because stuck_escalate only counts
+                        // repro reds and the repro pin itself had gone
+                        // green. This REPLACES that now-green repro pin —
+                        // the repro already proved its point, and the
+                        // failing neighbor becomes the binding contract the
+                        // finish gate (runTurnProbeGate) won't release until
+                        // it's green.
+                        const pinCandidate = selectRegressionPinCandidate(failingNeighbors)
+                        if (pinCandidate) {
+                          const regressionPin = {
+                            probe: { kind: "test" as const, command: pinCandidate.command },
+                            redEvidence: { exitCode: pinCandidate.exitCode, outputTail: pinCandidate.outputTail },
+                          }
+                          turnPinnedProbe = regressionPin
+                          setPinnedProbe(sessionID, regressionPin)
+                          yield* Effect.logInfo("turn_probe_pinned_regression", {
+                            "session.id": sessionID,
+                            probe: regressionPin.probe.command,
+                            redExit: pinCandidate.exitCode,
+                            redTail: pinCandidate.outputTail,
+                          })
+                        }
                         yield* Effect.logWarning("turn_regression_gate", {
                           "session.id": sessionID,
                           failing: failingNeighbors,

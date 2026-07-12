@@ -5,7 +5,10 @@
  * no-match empty-array case, and the 3-command cap — and F14a's project-interpreter
  * discovery: discoverProjectInterpreter's candidate ordering (repo-local venv, then conda
  * env, then PATH), first-success-wins, the none-found null case, the exact cwd-stripping
- * probe one-liner, and rewriteInterpreter's leading-token swap.
+ * probe one-liner, and rewriteInterpreter's leading-token swap — and F16's
+ * selectRegressionPinCandidate: picks the first assertion-shaped (non-env-red, non-zero
+ * exit) regression-gate failure to pin, skipping MISSING_FILE/MODULE_MISSING-shaped and
+ * exit-0 entries, `null` on an empty list.
  */
 
 import { describe, it, expect, afterEach } from "bun:test"
@@ -18,6 +21,7 @@ import {
   projectInterpreterCandidateCount,
   rewriteInterpreter,
   deriveTopLevelPackage,
+  selectRegressionPinCandidate,
 } from "../../src/session/regression-neighbors"
 
 const dirs: string[] = []
@@ -271,5 +275,59 @@ describe("deriveTopLevelPackage", () => {
 
   it("returns undefined for an empty file path", () => {
     expect(deriveTopLevelPackage("", cwd)).toBeUndefined()
+  })
+})
+
+describe("selectRegressionPinCandidate", () => {
+  it("picks the first assertion-shaped (non-env-red, non-zero exit) failure", () => {
+    const failures = [
+      { command: "python tests/runtests.py auth_tests --parallel 1", exitCode: 1, outputTail: "AssertionError: 2 != 1" },
+      { command: "python tests/runtests.py delete_tests --parallel 1", exitCode: 1, outputTail: "AssertionError: 3 != 4" },
+    ]
+    expect(selectRegressionPinCandidate(failures)).toEqual(failures[0])
+  })
+
+  it("skips a MISSING_FILE_RE-shaped failure and pins the next assertion-red one", () => {
+    const failures = [
+      { command: "python tests/runtests.py missing_dir --parallel 1", exitCode: 2, outputTail: "No such file or directory" },
+      { command: "python tests/runtests.py auth_tests --parallel 1", exitCode: 1, outputTail: "AssertionError: 2 != 1" },
+    ]
+    expect(selectRegressionPinCandidate(failures)).toEqual(failures[1])
+  })
+
+  it("skips a MODULE_MISSING_RE-shaped failure and pins the next assertion-red one", () => {
+    const failures = [
+      {
+        command: "python tests/runtests.py auth_tests --parallel 1",
+        exitCode: 1,
+        outputTail: "ModuleNotFoundError: No module named 'django'",
+      },
+      { command: "python tests/runtests.py delete_tests --parallel 1", exitCode: 1, outputTail: "AssertionError: 3 != 4" },
+    ]
+    expect(selectRegressionPinCandidate(failures)).toEqual(failures[1])
+  })
+
+  it("skips an exit-0 entry", () => {
+    const failures = [
+      { command: "python tests/runtests.py auth_tests --parallel 1", exitCode: 0, outputTail: "OK" },
+      { command: "python tests/runtests.py delete_tests --parallel 1", exitCode: 1, outputTail: "AssertionError: 3 != 4" },
+    ]
+    expect(selectRegressionPinCandidate(failures)).toEqual(failures[1])
+  })
+
+  it("returns null when every failure is env-red", () => {
+    const failures = [
+      { command: "python tests/runtests.py missing_dir --parallel 1", exitCode: 2, outputTail: "No such file or directory" },
+      {
+        command: "python tests/runtests.py auth_tests --parallel 1",
+        exitCode: 1,
+        outputTail: "ImportError: No module named django",
+      },
+    ]
+    expect(selectRegressionPinCandidate(failures)).toBeNull()
+  })
+
+  it("returns null for an empty list", () => {
+    expect(selectRegressionPinCandidate([])).toBeNull()
   })
 })

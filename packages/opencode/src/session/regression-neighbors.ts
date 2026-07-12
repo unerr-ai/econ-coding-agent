@@ -26,6 +26,7 @@ import { existsSync, readdirSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, extname, join, relative, basename as pathBasename } from "node:path"
 import type { VerifyCommand, CommandRunner } from "@opencode-ai/code-intelligence"
+import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 
 const MAX_NEIGHBOR_COMMANDS = 3
 /** Bound on the recursive descent under `<cwd>/tests/` for the pytest-style fallback. */
@@ -134,6 +135,28 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
   }
 
   return commands
+}
+
+/**
+ * F16 — the first regression-gate failure whose output is assertion-shaped:
+ * a non-zero exit that does NOT match the environment-crash signatures
+ * (`MISSING_FILE_RE`/`MODULE_MISSING_RE`) already used elsewhere to reject a
+ * phantom red. An honest neighbor failure held behind a once-per-turn nudge
+ * never trips the stuck-escalation backstop (it only counts repro reds) and
+ * can ship anyway — the caller pins whatever this returns so the finish gate
+ * refuses to close the turn until it's green too. `null` when every failure
+ * is env-red or the list is empty.
+ *
+ * @sem domain=routing role=regression-pin-selection
+ */
+export function selectRegressionPinCandidate(
+  failures: readonly { command: string; exitCode: number; outputTail: string }[],
+): { command: string; exitCode: number; outputTail: string } | null {
+  return (
+    failures.find(
+      (f) => f.exitCode !== 0 && !MISSING_FILE_RE.test(f.outputTail) && !MODULE_MISSING_RE.test(f.outputTail),
+    ) ?? null
+  )
 }
 
 // ---------------------------------------------------------------------------
