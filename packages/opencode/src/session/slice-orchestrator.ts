@@ -846,6 +846,16 @@ export async function deriveTurnProbe(opts: {
   return best ? { probe: best, redEvidence: bestRed } : undefined
 }
 
+// S9 — the shell's own "no such file" signature (exit 2 on most POSIX
+// shells/interpreters when the target script is gone) plus python's
+// "can't open file" variant, checked against the probe's OWN output tail so
+// a probe re-run failing this way names the real cause (the pinned repro
+// file was deleted post-pin — django-11790 strict run #4) rather than the
+// generic "STILL FAILING" reason, which reads as an unfixed bug instead of a
+// tampered contract.
+const MISSING_FILE_RE = /No such file or directory|can't open file/i
+const PROBE_SCRIPT_FILE_RE = /[\w./-]+\.(?:py|js|ts|mjs|sh|rb)\b/
+
 /** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */
 export interface TurnProbeGateResult {
   reject: boolean
@@ -860,11 +870,13 @@ export interface TurnProbeGateResult {
  * The turn-end backstop: a fix-shaped turn that pinned a reproduction may not
  * conclude while a tracked test was edited on a no-test-edit turn, or while the
  * pinned reproduction is still red. A reject carries the continue-message the
- * caller re-injects; a clean test tree AND green repro returns accept, with
- * the green run's output tail attached (S1 — the pin's red evidence and this
- * accept's green evidence form the done-time pair). Runs in the session cwd
- * via the same bounded shell runner the sound rung uses, so a hung command
- * can never wedge the turn.
+ * caller re-injects — naming a missing pinned file as the real cause (S9)
+ * rather than the generic "still failing" reason when the probe's own output
+ * says so; a clean test tree AND green repro returns accept, with the green
+ * run's output tail attached (S1 — the pin's red evidence and this accept's
+ * green evidence form the done-time pair). Runs in the session cwd via the
+ * same bounded shell runner the sound rung uses, so a hung command can never
+ * wedge the turn.
  *
  * @sem domain=routing role=repro-gate
  */
@@ -896,6 +908,21 @@ export async function runTurnProbeGate(opts: {
       outputTail: (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n"),
     }
   const detail = (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n")
+  // S9 — a missing-file failure is a tampered contract, not an unfixed bug:
+  // name the real cause so the model recreates the file instead of hunting
+  // for a root cause that was never the problem.
+  if (result.exitCode === 2 && MISSING_FILE_RE.test(detail)) {
+    const fileMatch = opts.probe.command.match(PROBE_SCRIPT_FILE_RE)
+    const file = fileMatch ? fileMatch[0].split("/").pop()! : opts.probe.command
+    return {
+      reject: true,
+      rung: "probe",
+      exitCode: result.exitCode,
+      reason:
+        `The pinned repro file \`${file}\` is missing (it was deleted after pinning) — recreate it exactly as it ` +
+        `was and re-run \`${opts.probe.command}\`; a missing file counts as RED, not as done.`,
+    }
+  }
   return {
     reject: true,
     rung: "probe",

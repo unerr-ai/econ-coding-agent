@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { classifyReproDrift } from "../../src/session/repro-drift"
+import { classifyReproDrift, extractScriptFilename } from "../../src/session/repro-drift"
 
 // Table tests over synthetic step inputs — the shape prompt.ts's SM4 block
 // passes: `stepObs.failedCommands` (from turn-supervisor's observeStep) and
@@ -13,6 +13,9 @@ function writeErr(error: string) {
 }
 function editOk() {
   return { type: "tool", tool: "edit", state: { status: "completed" } }
+}
+function bashOk(command: string) {
+  return { type: "tool", tool: "bash", state: { status: "completed", input: { command } } }
 }
 
 const NO_TEST_EDIT_ERROR =
@@ -123,5 +126,44 @@ describe("classifyReproDrift — combined / silent otherwise", () => {
   it("returns an empty array when the failing command is already pinnable", () => {
     const kinds = classifyReproDrift({ failedCommands: ["pytest tests/test_foo.py::test_bar"], parts: [] })
     expect(kinds).toEqual([])
+  })
+})
+
+describe("classifyReproDrift — pinned-repro-deleted", () => {
+  it("fires on an `rm` of the pinned script's basename", () => {
+    const kinds = classifyReproDrift({
+      failedCommands: [],
+      parts: [bashOk("rm repro_issue.py")],
+      pinnedScript: "repro_issue.py",
+    })
+    expect(kinds).toContain("pinned-repro-deleted")
+  })
+
+  it("does NOT fire on an `rm` of an unrelated file", () => {
+    const kinds = classifyReproDrift({
+      failedCommands: [],
+      parts: [bashOk("rm scratch.log")],
+      pinnedScript: "repro_issue.py",
+    })
+    expect(kinds).not.toContain("pinned-repro-deleted")
+  })
+
+  it("never fires with no pinnedScript input, even on a matching rm", () => {
+    const kinds = classifyReproDrift({ failedCommands: [], parts: [bashOk("rm repro_issue.py")] })
+    expect(kinds).not.toContain("pinned-repro-deleted")
+  })
+})
+
+describe("extractScriptFilename", () => {
+  it("extracts the basename from a python invocation with a venv path prefix", () => {
+    expect(extractScriptFilename(".venv/bin/python repro_issue.py")).toBe("repro_issue.py")
+  })
+
+  it("extracts the basename from a nested test-directory path", () => {
+    expect(extractScriptFilename("python tests/x/repro_y.py")).toBe("repro_y.py")
+  })
+
+  it("returns undefined when the command names no file", () => {
+    expect(extractScriptFilename("bun test")).toBeUndefined()
   })
 })

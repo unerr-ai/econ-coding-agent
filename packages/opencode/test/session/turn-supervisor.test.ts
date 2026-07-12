@@ -8,7 +8,13 @@ import {
   createBatchMomentumWatcher,
   SLOW_COMMAND_MS,
 } from "../../src/session/turn-supervisor"
-import { stuckNudgeText, grindValveNudgeText, reproDriftNudgeText, convergeNowNudgeText } from "../../src/session/prompts/nudges"
+import {
+  stuckNudgeText,
+  grindValveNudgeText,
+  reproDriftNudgeText,
+  convergeNowNudgeText,
+  pinGreenFinishNudgeText,
+} from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
 import {
@@ -461,5 +467,36 @@ describe("reproDriftNudgeText (suite-edit-denied)", () => {
     expect(text.toLowerCase()).toContain("repo root")
     expect(text.toLowerCase()).toContain("never inside")
     expect(text.toLowerCase()).toContain("tests.*")
+  })
+})
+
+// -- S9 reproDriftNudgeText pinned-repro-deleted clause ----------------------
+
+describe("reproDriftNudgeText (pinned-repro-deleted)", () => {
+  it("names the deleted file and the pinned command, and calls a missing file RED", () => {
+    const text = reproDriftNudgeText("pinned-repro-deleted", {
+      file: "repro_issue.py",
+      probeCommand: "python repro_issue.py",
+    })
+    expect(text).toContain("repro_issue.py")
+    expect(text).toContain("python repro_issue.py")
+    expect(text.toUpperCase()).toContain("RED")
+  })
+
+  it("falls back to generic phrasing with no context", () => {
+    const text = reproDriftNudgeText("pinned-repro-deleted")
+    expect(text.toLowerCase()).toContain("pinned repro file")
+  })
+})
+
+// -- S9 pinGreenFinishNudgeText -----------------------------------------------
+
+describe("pinGreenFinishNudgeText", () => {
+  it("names the pinned command, the STOP instruction, and forbids touching the repro file", () => {
+    const text = pinGreenFinishNudgeText("python repro_issue.py")
+    expect(text).toContain("python repro_issue.py")
+    expect(text.toUpperCase()).toContain("STOP")
+    expect(text.toLowerCase()).toContain("untracked")
+    expect(text.toLowerCase()).toContain("final answer")
   })
 })

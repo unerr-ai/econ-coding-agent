@@ -1557,6 +1557,37 @@ describe("runTurnProbeGate (M4)", () => {
     expect(result).toEqual({ reject: false, outputTail: "" })
     expect(calls).toEqual([TEST_TREE_GUARD_COMMAND.command, probe.command])
   })
+
+  // -- S9 missing-file reason -------------------------------------------------
+
+  it("names the missing pinned file when the probe fails with exit 2 + a 'can't open file' tail", async () => {
+    const scriptProbe: VerifyCommand = { kind: "test", command: "python repro_issue.py" }
+    const { runner } = scriptedRunner({
+      [scriptProbe.command]: {
+        exitCode: 2,
+        stdout: "",
+        stderr: "python: can't open file 'repro_issue.py': [Errno 2] No such file or directory",
+      },
+    })
+    const result = await runTurnProbeGate({ probe: scriptProbe, noTestEdit: false, runner })
+    expect(result.reject).toBe(true)
+    expect(result.rung).toBe("probe")
+    expect(result.exitCode).toBe(2)
+    expect(result.reason).toContain("repro_issue.py")
+    expect(result.reason).toContain("is missing")
+    expect(result.reason).not.toContain("STILL FAILING")
+  })
+
+  it("keeps the generic STILL FAILING reason for a normal assertion failure (not a missing-file signature)", async () => {
+    const scriptProbe: VerifyCommand = { kind: "test", command: "python repro_issue.py" }
+    const { runner } = scriptedRunner({
+      [scriptProbe.command]: { exitCode: 1, stdout: "", stderr: "AssertionError: expected 255, got '255'" },
+    })
+    const result = await runTurnProbeGate({ probe: scriptProbe, noTestEdit: false, runner })
+    expect(result.reject).toBe(true)
+    expect(result.reason).toContain("STILL FAILING")
+    expect(result.reason).not.toContain("is missing")
+  })
 })
 
 describe("todosToLoopSlices — verify-command derivation (F2)", () => {

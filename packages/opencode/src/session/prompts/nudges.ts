@@ -71,9 +71,12 @@ export const ENVIRONMENT_SLOW_NUDGE =
  * prompt.ts's SM4 block injects when `classifyReproDrift` (repro-drift.ts)
  * flags a step during the repro pre-pass window. Each names the CONCRETE
  * alternative — a standalone `repro_issue.py` run as its own command — rather
- * than restating the seed's full instructions.
+ * than restating the seed's full instructions. The 4th kind,
+ * `pinned-repro-deleted`, fires AFTER a pin lands (not during the pre-pass)
+ * and takes an optional `context` naming the deleted file and the pinned
+ * command the done-gate re-runs; the other three kinds ignore it.
  */
-export function reproDriftNudgeText(kind: ReproDriftKind): string {
+export function reproDriftNudgeText(kind: ReproDriftKind, context?: { file: string; probeCommand: string }): string {
   switch (kind) {
     case "inline-repro":
       return "You ran an inline `python -c`/heredoc command carrying an assertion instead of a file. An inline command cannot be pinned as this turn's verification contract — the turn-end gate has nothing to re-run. Write that exact assertion into a file named `repro_issue.py` at the repo root and run `python repro_issue.py` as its own single command."
@@ -81,6 +84,8 @@ export function reproDriftNudgeText(kind: ReproDriftKind): string {
       return "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root (never inside the tests/ tree), importing ONLY from the installed package (never from a tests.* module — define minimal stand-in classes inline if you need one), asserting the issue's expected behavior and run it standalone as `python repro_issue.py`."
     case "unpinnable-red":
       return "Your failing command was a whole-suite run or a multi-line/batched script. Neither can be pinned as this turn's reproduction — the gate needs one single, targeted command to re-run. Isolate the same failure into a single-command file, `repro_issue.py` at the repo root, and run it alone as `python repro_issue.py`."
+    case "pinned-repro-deleted":
+      return `You deleted \`${context?.file ?? "the pinned repro file"}\`, but it is this turn's pinned verification contract — the done-gate re-runs \`${context?.probeCommand ?? "the pinned command"}\` and a missing file counts as RED. Recreate the file exactly as it was and leave it in place until the turn ends; it is untracked and never enters the patch.`
   }
 }
 
@@ -105,4 +110,19 @@ export const REPRO_DRIFT_ESCALATION_NUDGE =
  */
 export function convergeNowNudgeText(steps: number): string {
   return `Your source fix landed ${steps} steps ago and no reproduction has been pinned — continued broad verification is not converging. Do ONE of these now: (a) make a single-file repro run — \`repro_issue.py\` at the repo ROOT, one command, \`python repro_issue.py\` — confirming your fix (it must fail on the pre-fix code for the issue's reason); or (b) FINISH: give your final answer now, stating plainly what you verified and what you could not. Do not start any new investigation.`
+}
+
+/**
+ * S9 — pin-green finish nudge: prompt.ts's SM4 block injects this when the
+ * turn's pinned reproduction has already run GREEN after the source fix
+ * landed and the model keeps "verifying" broadly for PIN_GREEN_FINISH_STEPS
+ * more observed steps (django-11790 strict run #4: green at step 18, 9 more
+ * steps of re-running suites, then a step-24 `rm` of the pinned file and a
+ * 3600s wall-kill at step 25 — nothing told it the done-gate is now the
+ * terminator). Unlike `convergeNowNudgeText`, there is no repro-run
+ * alternative to offer — the pin already confirmed green — so this names
+ * only the honest finish, plus the one concrete thing NOT to touch.
+ */
+export function pinGreenFinishNudgeText(probeCommand: string): string {
+  return `Your pinned reproduction (\`${probeCommand}\`) ran GREEN after your source fix — the verification contract for this turn is satisfied, and the done-gate will re-run it to confirm. STOP verifying: do not run more suites or probes. Leave the repro file exactly where it is (it is untracked and never enters the patch). Give your final answer now.`
 }

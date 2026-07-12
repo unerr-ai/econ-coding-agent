@@ -34,8 +34,9 @@ import {
   reproDriftNudgeText,
   REPRO_DRIFT_ESCALATION_NUDGE,
   convergeNowNudgeText,
+  pinGreenFinishNudgeText,
 } from "./prompts/nudges"
-import { classifyReproDrift, type ReproDriftKind } from "./repro-drift"
+import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import { triagePreamble } from "./prompts/preambles"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
@@ -222,6 +223,45 @@ export const REPRO_PIN_DEADLINE_STEPS = 12
 // calls and no second finish attempt — every done-time bar lives in the
 // !hasToolCalls exit path, which a tool-calling agent can evade forever).
 export const POST_FIX_CONVERGE_STEPS = 8
+
+// S9 — how many SM4-observed steps a turn may keep "verifying" broadly AFTER
+// its pinned reproduction has already run GREEN before the finish nudge
+// fires (django-11790 strict run #4: the pin went green at step 18, then 9
+// more steps of re-running suites, a step-24 `rm` of the pinned file, and
+// the 3600s wall killed it at step 25 — nothing told the model the
+// done-gate is now the terminator). Shorter than POST_FIX_CONVERGE_STEPS
+// because a green pin is stronger done-evidence than a landed source edit
+// alone.
+export const PIN_GREEN_FINISH_STEPS = 3
+
+// S9 — tool names whose input carries a `command` field worth checking for a
+// green run of the pinned probe's script (mirrors turn-supervisor.ts's own
+// COMMAND_TOOLS set for the same two tool ids).
+const PIN_PROBE_COMMAND_TOOLS = new Set(["shell", "bash"])
+
+/**
+ * S9 — whether this step ran the pinned probe's script and it exited GREEN.
+ * Cheapest reliable signal: the bash tool's own `state.metadata.exit` (the
+ * exit code every completed bash/shell part carries — the same field
+ * `greenMemoAfter` in tools.ts keys on), checked ahead of any output-text
+ * heuristic since it is the tool's own authoritative result, not a scan of
+ * its text.
+ */
+function stepRanPinnedProbeGreen(parts: readonly unknown[], scriptFilename: string): boolean {
+  for (const raw of parts) {
+    const part = raw as {
+      type?: string
+      tool?: string
+      state?: { status?: string; input?: Record<string, unknown>; metadata?: Record<string, unknown> }
+    }
+    if (part?.type !== "tool" || !part.tool || !PIN_PROBE_COMMAND_TOOLS.has(part.tool)) continue
+    if (part.state?.status !== "completed") continue
+    const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
+    if (!command || !command.includes(scriptFilename)) continue
+    if (part.state?.metadata?.["exit"] === 0) return true
+  }
+  return false
+}
 
 function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: string }[] {
   const found: { file: string; reason: string }[] = []
@@ -1563,6 +1603,15 @@ export const layer = Layer.effect(
         let postFixNoPinSteps = 0
         let landedSourceEditThisTurn = false
         let convergeNudgeFired = false
+        // S9 — pin-green finish-nudge state: mirrors the S8 locals above but
+        // for the OTHER half of the trace (django-11790 strict run #4) —
+        // once the pinned probe has been OBSERVED to run green this turn,
+        // count subsequent observed steps with a source fix on the board and
+        // nudge once at the deadline instead of letting the turn re-verify
+        // forever.
+        let pinObservedGreen = false
+        let pinGreenSteps = 0
+        let pinGreenNudgeFired = false
         // S3 — whether this turn's pin came from the P4 continuation store
         // (restored at turn open) rather than being authored/observed this
         // turn. An inherited pin + no new source edits is a legitimate
@@ -1684,6 +1733,11 @@ export const layer = Layer.effect(
             // edit/write just re-landed. Root sessions only (this whole
             // observation gate already implies !session.parentID).
             const stepParts = lastAssistantMsg?.parts ?? []
+            // S9 — the pinned probe's script filename, extracted once per
+            // step and shared by the pin-green finish nudge below, the
+            // deletion-guard drift kind, and the observability log right
+            // here — one extraction, several consumers.
+            const pinnedScriptFilename = turnPinnedProbe ? extractScriptFilename(turnPinnedProbe.probe.command) : undefined
             for (const block of scanGateBlocks(stepParts)) recordGateBlock(sessionID, block.file, block.reason)
             for (const event of extractTrajectory(stepParts).events) {
               if (event.kind === "file-edit") clearGateBlock(sessionID, event.filePath)
@@ -1695,6 +1749,13 @@ export const layer = Layer.effect(
               // fixless finish (the empty-patch shape).
               if (event.kind === "file-edit" && !isTestFilePath(event.filePath) && !isReproScratchPath(event.filePath))
                 landedSourceEditThisTurn = true
+              // S9 — observability only, no throttle: a file-edit touching
+              // the pinned script AFTER it was pinned is tamper-shaped
+              // (django-11790 strict run #4's `rm repro_issue.py`) — lets
+              // trace analysis see every post-pin repro edit, not just the
+              // deletion the guard below reacts to.
+              if (turnPinnedProbe && pinnedScriptFilename && event.kind === "file-edit" && path.basename(event.filePath) === pinnedScriptFilename)
+                yield* Effect.logInfo("pinned_probe_edited", { "session.id": sessionID, file: event.filePath })
             }
 
             // S2 — repro-first mid-turn hand-off/abstention. Only while the
@@ -1843,6 +1904,53 @@ export const layer = Layer.effect(
               }
             }
 
+            // S9 — pinned-repro deletion guard: unlike the drift kinds above
+            // (armed on !turnPinnedProbe, before a pin lands), this one only
+            // makes sense WITH a pin already landed — the pinned file IS the
+            // turn's verification contract, and deleting it post-pin
+            // (django-11790 strict run #4: `rm repro_issue.py` at step 24,
+            // then the 3600s wall killed the turn one step later with no
+            // recovery) must be caught even though the repro pre-pass itself
+            // already resolved. Same once-per-kind Set as the drift block
+            // above, same synthetic-nudge pattern.
+            if (
+              reproSeededThisTurn &&
+              turnPinnedProbe &&
+              pinnedScriptFilename &&
+              !reproDriftKindsNudged.has("pinned-repro-deleted")
+            ) {
+              const deletionKinds = classifyReproDrift({
+                failedCommands: stepObs.failedCommands,
+                parts: stepParts,
+                pinnedScript: pinnedScriptFilename,
+              })
+              if (deletionKinds.includes("pinned-repro-deleted")) {
+                reproDriftKindsNudged.add("pinned-repro-deleted")
+                yield* Effect.logInfo("repro_drift", { "session.id": sessionID, kind: "pinned-repro-deleted" })
+                const deletionNudge: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(deletionNudge)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: deletionNudge.id,
+                  sessionID,
+                  type: "text",
+                  text: reproDriftNudgeText("pinned-repro-deleted", {
+                    file: pinnedScriptFilename,
+                    probeCommand: turnPinnedProbe.probe.command,
+                  }),
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+                continue
+              }
+            }
+
             // S8 — converge-now deadline: a bug-shaped turn whose fix has
             // already landed (a source edit is on the board) but never gets
             // pinned keeps "verifying" broadly forever — run #3's step-21
@@ -1883,6 +1991,53 @@ export const layer = Layer.effect(
                   synthetic: true,
                 } satisfies SessionV1.TextPart)
                 continue
+              }
+            }
+
+            // S9 — pin-green finish nudge: symmetric to the converge-now
+            // nudge above, for the case that block deliberately excludes
+            // (turnPinnedProbe set). django-11790 strict run #4: the pin ran
+            // GREEN at step 18 and the model kept re-running suites for 9
+            // more steps (~2.4 min/step) before a step-24 cleanup deleted
+            // the pinned file and the 3600s wall killed it at step 25 —
+            // nothing told it the done-gate is now the terminator once a pin
+            // is green. Detect a green run of the pinned probe THIS step
+            // (stepRanPinnedProbeGreen — the bash tool's own
+            // `metadata.exit === 0`, not an output-text heuristic), then
+            // count observed steps with a source fix already landed; at the
+            // deadline inject ONE nudge to stop and finish.
+            if (turnPinnedProbe) {
+              if (!pinObservedGreen) {
+                if (pinnedScriptFilename && stepRanPinnedProbeGreen(stepParts, pinnedScriptFilename))
+                  pinObservedGreen = true
+              } else if (landedSourceEditThisTurn && !pinGreenNudgeFired) {
+                pinGreenSteps++
+                if (pinGreenSteps >= PIN_GREEN_FINISH_STEPS) {
+                  pinGreenNudgeFired = true
+                  yield* Effect.logInfo("turn_pin_green_nudge", {
+                    "session.id": sessionID,
+                    pinGreenSteps,
+                    probe: turnPinnedProbe.probe.command,
+                  })
+                  const pinGreenNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(pinGreenNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: pinGreenNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: pinGreenFinishNudgeText(turnPinnedProbe.probe.command),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
               }
             }
 
