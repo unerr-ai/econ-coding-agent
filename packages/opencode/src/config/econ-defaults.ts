@@ -209,10 +209,12 @@ export function econDefaultConfig(): ConfigV1.Info {
             parallel_tool_calls: true,
           }),
           // 2026-07-08 catalog add; 2026-07-09 conductor swap: minimax-m3 is now bound to the
-          // conductor tier (see ECON_TIER_BINDING in model-registry.ts), reasoning channel off at
-          // config level via reasoningEffort:"none". kimi remains catalog-only, not bound to a tier.
+          // conductor tier (see ECON_TIER_BINDING in model-registry.ts). 2026-07-12 E0: bounded
+          // explicit "high" — "none" suppressed the judgment tier, and DELETING the param meant
+          // unbounded server-side thinking (one 2,453s step on 11964). Pin it; never omit it.
+          // kimi remains catalog-only, not bound to a tier.
           "minimax/minimax-m3": econModel("minimax/minimax-m3", "MiniMax M3 (econ conductor — experiment)", {
-            reasoningEffort: "none",
+            reasoningEffort: "high",
             parallel_tool_calls: true,
           }),
           "moonshotai/kimi-k2p7-code": econModel("moonshotai/kimi-k2p7-code", "Kimi K2.7 Code (catalog)", {

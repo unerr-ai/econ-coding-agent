@@ -41,7 +41,7 @@ never run. The leaderboard supplied it for free.
 | # | What we do | Evidence | What the 75.8 run does | Cost to us |
 |---|---|---|---|---|
 | S1 | **Mute reasoning** on ordinary conductor steps (`reasoningEffort:"none"`); un-mute only plan / bash-failure recovery / contradiction | `packages/opencode/src/session/llm/reasoning-gate.ts:174-216` | high reasoning on every step | The trained SWE policy (which layer to fix, repro-first) lives in the thinking phase; our residual failure class (layer choice, 11964/11790) is exactly that judgment. Muting saves cents at MiniMax prices. |
-| S2 | **Temperature 1.0** for the minimax family (vendor default, never revisited) | `packages/opencode/src/provider/transform.ts:479-496` | ships `temperature: 0.0` | Hot sampling + no deliberation = variance off the trained policy's modal path → our flip-floppers (11790 ~50% pass rate). |
+| S2 | ~~Temperature 1.0~~ **CORRECTED 2026-07-12 during E0:** the `minimax-m2 → 1.0` row in `transform.ts:479-496` is a dead legacy entry — the live binding `minimax-m3` doesn't match it and falls through to `ECON_EXECUTION_TEMPERATURE = 0.1` (`request.ts:32,198`, the F12 mechanism working as designed) | `packages/opencode/src/session/llm/request.ts:32,198` | ships `temperature: 0.0` | We already run near-greedy (0.1 ≈ their 0.0). Temperature is NOT the variance source; the flip-flop driver narrows to S1 (muted reasoning) + MoE serving nondeterminism. Legacy m2 row neutralized to 0.0 anyway. |
 | S3 | **~20 structured tools**, schemas resent each request (compacted via `compactJsonSchema`), meter/nudge lines interleaved | `packages/opencode/src/tool/registry.ts:76-99, 547-561` | one bash tool, raw stdout | Distribution shift off the RL-native bash loop + per-step token tax. |
 | S4 | **Water-fill trimming** of tool results at ~20k est. tokens/step, largest-first | `packages/opencode/src/session/step-budget.ts:18, 63-87` | 10k-char head/tail elision only | Can trim the exact evidence (assertion text) the policy needed. |
 | S5 | **Fragmented evidence chain**: slices, turn-read side calls, compaction summarized by a *different tier*; tier switches downgrade prior thinking to text | `packages/opencode/src/session/overflow.ts:22-56`; `packages/opencode/src/session/message-v2.ts:376-390` | one linear conversation, near-perfect prefix cache | Every seam drops evidence + breaks the cache prefix that makes $0.07 possible. Note: our recent wins (armed-turns-never-decompose 919480c94, continue-inline demotion) already moved toward the linear loop. |
@@ -56,6 +56,28 @@ never run. The leaderboard supplied it for free.
 symptom-layer draws) is variance *induced* by S1+S2, then policed by machinery built to compensate.
 Both truths hold — on genuinely undisciplined models (flash era) the chain took us 0/10 → 9/10.
 The error was applying the full substitute to a trained model and never measuring the difference.
+
+**E0 implementation notes (2026-07-12, uncommitted — validation in progress):**
+- Gate rewritten: the conductor is never suppressed — `applyAdaptiveReasoning` now only deletes a
+  config-pinned `"none"` (the `opencode.json` conductor block still pins `reasoningEffort:"none"`
+  from the deepseek-flash era; the gate deletes it unconditionally, so no reasoning param reaches
+  the wire → the model's native default, same as mini-swe-agent). Phase-detection machinery
+  (plan/recovery/contradiction) deleted as dead code.
+- Gateway verified clean: `econ-litellm` serves minimax-m3 via **Fireworks** (priority tier) with
+  no proxy-side reasoning pin — the mute was entirely engine+config side. Past runs' nonzero
+  reasoning_tokens (e.g. 11885 r2: 14,863) were the old gate's plan/recovery un-mutes firing;
+  post-E0 these should rise substantially.
+- F17 regression-neighbor breadth implemented alongside (additive Pass 2 in
+  `regression-neighbors.ts`: module stems + variants over discovered test roots, cap 3 kept,
+  `"models"` added to noise stems — the 11885 case now surfaces `tests/delete` +
+  `tests/delete_regress`).
+- **E0 correction (live finding, e0-mini10-r1):** open question #1 is answered — sending NO
+  reasoning param means *unbounded* thinking on the Fireworks path, and the tail is real: 11964
+  ran steps 1–13 at 1–32s each, then one step streamed reasoning for **2,453s (41 min)** (12039
+  stalled ~25 min the same way; verified not-looping — linear steps, no repeats, gateway healthy).
+  The leaderboard variant is "(high reasoning)" — a **bounded explicit effort**, not unbounded
+  default. Corrected: conductor pins `reasoningEffort:"high"` in `opencode.json` (the gate's
+  non-"none" early-return passes it through). Delete-the-param was an over-shoot of mini-parity.
 
 ## Does this apply to the other tiers? Yes — the suppression matrix
 

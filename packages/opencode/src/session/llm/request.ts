@@ -135,13 +135,13 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
-  // Adaptive conductor reasoning gate: default stays non-thinking; this un-mutes
-  // thinking only for the turn's plan step, the step right after a failed command,
-  // and the step right after a tool result contradicted the model's premise (F4).
-  // Small (housekeeping) calls skip the gate entirely: a stateless one-shot ends
-  // in a user message and would always read as a "plan" step — un-muted thinking
-  // then starves/slows its JSON output. (The turn-read call never rides this
-  // path at all: it dispatches via generateText — prompt.ts turnReadDispatch.)
+  // Adaptive conductor reasoning gate: strips the config-level
+  // reasoningEffort:"none" marker on every conductor request so the provider
+  // default (the model's own, un-suppressed thinking) always applies — see
+  // reasoning-gate.ts. Small (housekeeping) calls skip the gate entirely: a
+  // stateless one-shot's un-muted thinking would starve/slow its JSON output.
+  // (The turn-read call never rides this path at all: it dispatches via
+  // generateText — prompt.ts turnReadDispatch.)
   // Turn-level ambiguity trigger (task #52): the per-slice difficulty floor
   // (allocation.ts) only fires once the conductor has decomposed a turn into
   // typed slices — a turn it handles inline, no decomposition, never reaches it
@@ -164,8 +164,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       })
     }
   }
-  const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(input.messages, options)
-  if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID, reason: reasoningGate })
+  const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(options)
+  if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID })
 
   const messages =
     isOpenaiOauth || input.isWorkflow
