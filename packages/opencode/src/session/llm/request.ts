@@ -14,8 +14,7 @@ import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
-import { applyAdaptiveReasoning } from "./reasoning-gate"
-import { getArmingDecision } from "../arming-store"
+import { guardReasoningEffort } from "./reasoning-gate"
 import { sessionAffinityFor, tiersForModel } from "@opencode-ai/code-intelligence"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
@@ -135,37 +134,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   }
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
-  // Adaptive conductor reasoning gate: strips the config-level
-  // reasoningEffort:"none" marker on every conductor request so the provider
-  // default (the model's own, un-suppressed thinking) always applies — see
-  // reasoning-gate.ts. Small (housekeeping) calls skip the gate entirely: a
-  // stateless one-shot's un-muted thinking would starve/slow its JSON output.
-  // (The turn-read call never rides this path at all: it dispatches via
-  // generateText — prompt.ts turnReadDispatch.)
-  // Turn-level ambiguity trigger (task #52): the per-slice difficulty floor
-  // (allocation.ts) only fires once the conductor has decomposed a turn into
-  // typed slices — a turn it handles inline, no decomposition, never reaches it
-  // and gets authored at the conductor's cheap baseline despite being flagged
-  // ambiguous or hard. Floors the conductor's OWN reasoning at reasoner-grade
-  // ("high", the same effort reasoner/oracle ship at) for every non-housekeeping
-  // step of the turn — never a model/tier swap, which run-19's live-fire proved
-  // costly at turn-open (tier-router.ts: "the lead agent is never swapped at
-  // turn-open"). One-way: only fires from the muted "none" baseline, so a turn
-  // OL-7.5's plan-raise (or this same floor on an earlier step) already lifted
-  // is left untouched, never lowered.
-  if (!input.small && options.reasoningEffort === "none") {
-    const arming = getArmingDecision(input.sessionID)
-    if (arming && (arming.ambiguity === "ambiguous" || arming.hardness === "hard")) {
-      options.reasoningEffort = "high"
-      yield* Effect.logInfo("reasoning un-muted (turn ambiguity floor)", {
-        sessionID: input.sessionID,
-        ambiguity: arming.ambiguity,
-        hardness: arming.hardness,
-      })
-    }
-  }
-  const reasoningGate = input.small ? undefined : applyAdaptiveReasoning(options)
-  if (reasoningGate) yield* Effect.logInfo("adaptive reasoning un-muted", { sessionID: input.sessionID })
+  // Reasoning-effort guard (reasoning-gate.ts): an ordinary request never
+  // ships the mute marker — a stale config-pinned "none" is rewritten to the
+  // bounded "high", never deleted, since omitting the param means unbounded
+  // server-side thinking (one 41-minute step in e0-mini10-r1). Small
+  // (housekeeping) one-shots are muted instead: un-muted thinking starves or
+  // slows their JSON output. (The turn-read call never rides this path at
+  // all: it dispatches via generateText — prompt.ts turnReadDispatch.)
+  const reasoningGate = guardReasoningEffort(options, input.small === true)
+  if (reasoningGate) yield* Effect.logInfo("reasoning effort guarded", { sessionID: input.sessionID, action: reasoningGate })
 
   const messages =
     isOpenaiOauth || input.isWorkflow
