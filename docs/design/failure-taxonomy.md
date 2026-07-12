@@ -421,6 +421,12 @@ remain awaiting explicit go-ahead** — this section is the plan, not the change
    outranks it (`session/llm/reasoning-gate.ts`). Enumeration requirement lands as
    conductor delta bullet 4b — enumerate ≥2 candidate layers + a discriminating
    check per candidate at every contradiction fork (`session/system.ts`).
+   **Superseded 2026-07-13 (E0 — [native-loop-gap.md](./native-loop-gap.md)):** the
+   adaptive gate itself is gone — conductor reasoning is always-on at bounded
+   "high", so the mute and its plan/recovery/contradiction un-mutes died with it
+   (`reasoning-gate.ts` is now a two-way effort guard: stale "none" → "high" on
+   ordinary requests, any pinned effort → "none" on small housekeeping one-shots).
+   The enumeration delta (4b) survives unchanged.
 5. **Index assignment-style definitions; broaden testability probes** (I1, I2). Unblocks
    coupling on classic-idiom JS → the judge cell; de-starves every difficulty signal the
    localization ladder reads.

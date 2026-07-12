@@ -1,8 +1,9 @@
 # The native-loop gap — brainstorm: from a 75.8 floor to an 85 target
 
-**Status:** brainstorm / measurement plan — nothing here is implemented. Written 2026-07-12 to be
-picked up in a fresh session without any prior context. Companion artifact: "econ gap report — the
-75.8 baseline" (same content, rendered).
+**Status:** in execution. Written 2026-07-12 as a brainstorm/measurement plan; E0 landed 2026-07-13
+(commits `b01ccb54e` reasoning un-suppression, `2d291c918` F17 breadth, plus the follow-up guard +
+seeds + F18 commits — see "E0 local validation" below). E1–E3 pending. Companion artifact: "econ gap
+report — the 75.8 baseline" (same content, rendered).
 
 ## The datum that triggered this
 
@@ -57,7 +58,7 @@ symptom-layer draws) is variance *induced* by S1+S2, then policed by machinery b
 Both truths hold — on genuinely undisciplined models (flash era) the chain took us 0/10 → 9/10.
 The error was applying the full substitute to a trained model and never measuring the difference.
 
-**E0 implementation notes (2026-07-12, uncommitted — validation in progress):**
+**E0 implementation notes (2026-07-12/13, committed `b01ccb54e` + `2d291c918`):**
 - Gate rewritten: the conductor is never suppressed — `applyAdaptiveReasoning` now only deletes a
   config-pinned `"none"` (the `opencode.json` conductor block still pins `reasoningEffort:"none"`
   from the deepseek-flash era; the gate deletes it unconditionally, so no reasoning param reaches
@@ -78,6 +79,13 @@ The error was applying the full substitute to a trained model and never measurin
   The leaderboard variant is "(high reasoning)" — a **bounded explicit effort**, not unbounded
   default. Corrected: conductor pins `reasoningEffort:"high"` in `opencode.json` (the gate's
   non-"none" early-return passes it through). Delete-the-param was an over-shoot of mini-parity.
+- **Final gate form (2026-07-13):** `guardReasoningEffort` bounds the channel in both directions —
+  an ordinary request's stale config-pinned `"none"` rewrites to bounded `"high"` (never deleted;
+  deletion recreates the unbounded-thinking hang), and small housekeeping one-shots mute to
+  `"none"` (the E0 config pin would otherwise have un-muted the triage/evaluator JSON one-shots,
+  which the old skip-the-gate path kept muted only by inheriting the conductor's `"none"`). The
+  task-#52 turn-ambiguity floor died as subsumed — it only raised from the `"none"` baseline the
+  guard now lifts unconditionally.
 
 ## Does this apply to the other tiers? Yes — the suppression matrix
 
@@ -116,7 +124,40 @@ matching the observed 8–9/10 plateau). Forensics:
   Probe green + `turn_regression_green` both fired — the regression gate ran but its neighbor
   selection didn't include the delete_regress large-delete tests. **Candidate lever (not built):
   regression-neighbor breadth** — select neighbors by the edited module's test-package, not only
-  same-file proximity.
+  same-file proximity. *(Built next day as F17 pass 2, `2d291c918`.)*
+
+## E0 local validation — the corrected pin, 5-task re-run (2026-07-13, dist-e0-mini10-r1)
+
+Strict local re-run of the five previously-failing instances (gold-graded, tests reverted, no
+hints): **11964, 12039, 12050 PASS** at $0.03–0.49 with no stalls — the two 40-min hang victims
+and the disk casualty all cured by the bounded pin. **11790, 11885 FAIL**, both in the
+spec-underdetermination class the doc predicted. Forensics (bundle
+`unerr-benchmarks/e2e/distributed/out/dist-e0-mini10-r1/`):
+
+- **11790 — type-fidelity miss ($0.485, 116 steps).** Ground truth (dataset-verified): the gold
+  patch assigns the mirrored value in its source type — `widget.attrs['maxlength'] =
+  username_max_length` (the **int**) — and the hidden test asserts `attrs.get('maxlength') == 254`
+  with typed equality. Our patch routed through `widget_attrs()`, whose CharField layer
+  stringifies internally → `'254'`: identical HTML, failed typed equality. The run's own repro
+  asserted rendered/presence output, which cannot see the difference — so no self-check could
+  catch it. **Fix landed:** FIX + REPRO seed priors now name the mirrored-entry case explicitly
+  (assign the source value itself, never via a helper that stringifies; assert the mirrored dict
+  entry with typed equality against the source, never rendered output).
+- **11885 — design draw regressed large-deletes ($0.550, 93 steps).** The simple
+  `{model: qs}` OR-combine draw broke `test_large_delete`/`test_large_delete_related` (P2P). The
+  r2-passing design gates its merges — single-table WHERE only, distinct leaf columns, else one
+  DELETE per queryset. F17 breadth now surfaces `tests/delete` + `tests/delete_regress` at
+  finish, so this draw gets caught at the gate instead of shipping; converging on the passing
+  design first-try remains best-of-N territory (below).
+- **Shipped-despite-red, decomposed.** On 11790 the structured gates did fire
+  (`turn_regression_unresolved` + `repro_unresolved` + `turn_probe_pin_miss`), nudged once, then
+  failed open by design and the patch shipped — fail-open-loud is deliberate (withholding a patch
+  guarantees a miss; a doubted patch might still pass). The genuine HOLE was the neighboring
+  class: a mid-turn bash test run that ended red and was never re-run green ships silently when no
+  probe/regression artifact captures it — the finish chain never scanned the transcript itself.
+  **Fix landed: F18 seen-red finish gate** — a pure transcript scan before the S3 gate; unresolved
+  test-shaped reds (env-red excluded, probe-cleared reds excluded) draw one re-verify nudge, then
+  `turn_seen_red_unverified` loud fail-open. Shell-only, ≈$0, no LLM calls.
 
 ## Path-to-85 arithmetic
 
@@ -125,7 +166,7 @@ The native loop's failure classes are exactly where a harness earns its keep —
 
 | Lever | Native-loop failure it fixes | Est. points | Est. cost impact |
 |---|---|---|---|
-| Verification gate (thin, finish-time): pinned red→green + regression neighbors as accept/reject on the model's own loop | wrong exits the model believes in; zero regression checking in mini | +2–5 | shell-only, ≈$0 |
+| Verification gate (thin, finish-time): pinned red→green + regression neighbors as accept/reject on the model's own loop — **partially landed 2026-07-13**: F17 neighbor breadth + F18 seen-red transcript scan | wrong exits the model believes in; zero regression checking in mini | +2–5 | shell-only, ≈$0 |
 | Spec-prior consult: on fidelity-gap signatures, ONE narrow reasoner one-shot enumerating the implied contract. NEVER whole-turn takeover — the s9-ceiling-probe-r1 proved takeover = 2.6× cost, same layer-choice coin-flip (reasoner failed 11964 with a descriptor-coercion patch; cheap tier had drawn the gold `Choices.__str__`) | issue underdetermines the graded contract (11964/11790 class) | +2–4 | +$0.01–0.02 avg |
 | Best-of-N (2–3 cheap draws) + execution-grounded selection on low-confidence finishes | high-variance judgment draws (flip-floppers) | +2–6 | +$0.03–0.06 avg |
 | Hard-tail escalation: bounded reasoner/oracle slices on the ~42 hard instances | long-horizon multi-file bugs | +1–4 | +$0.02–0.05 avg |
@@ -140,6 +181,12 @@ $0.07 base). 85 is defensible arithmetic, not a slogan.
   flaky-5 ×2 runs. Isolates S1+S2 cost. ~$2. Knobs: reasoning-gate default for conductor;
   transform.ts temperature map. (Do NOT commit engine changes for this — probe-style config swap
   with revert, same pattern as the ceiling probe.)
+  **Status: PARTIAL-DONE 2026-07-12/13.** The probe graduated straight to a landed engine change
+  (the S2 audit killed the temperature question — we already run 0.1 — and the mute was
+  unambiguously wrong, so nothing to revert): bounded `"high"` pin + two-way guard committed;
+  flaky-5 re-run ×1 local cured 3/5, the remaining 2 are the spec-gap class (see "E0 local
+  validation"). Outstanding: the ×2 variance repeat, and the executor-tier effort sweep
+  (executor still ships a partial mute at `"low"`).
 - **E1 — Null-harness control.** mini-swe-agent v2.0.0 pointed at OUR LiteLLM gateway
   (`LITELLM_API_KEY` in `unerr-benchmarks/e2e/econ/.env.local`), our minimax binding, high
   reasoning, on Mini-10 + ~25 held-out non-django medium instances
