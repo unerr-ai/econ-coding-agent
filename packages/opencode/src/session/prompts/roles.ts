@@ -6,6 +6,9 @@ import { BATCH_RULE, PROBE_SCRIPT_RULE } from "./fragments"
 // slice reaches the reasoner/oracle through allocateSlice + the escalation ladder, and these deltas
 // serve whichever tier a slice lands on. The oracle "compiled-brief" assembly (brief.ts) is built + unit-tested but not on the
 // live path yet — it awaits a live unerrd recon client for its slices (same blocker as OL-3.3).
+// The conductor delta's env-read/root-cause item (item 12) is a permanent, always-on core — unlike
+// LOCALIZATION_SLICE_CONTENT's seed-ladder priors (seeds.ts), which are either/or with the repro
+// pre-pass and only plant when armed, so location-known fix turns never receive them.
 export const TIER_DELTA: Record<string, string> = {
   conductor: [
     "# econ conductor (default engineer — you orchestrate the whole turn)",
@@ -31,6 +34,7 @@ export const TIER_DELTA: Record<string, string> = {
     "9a. Need higher judgment mid-turn? Type a `design` todo — it dispatches a reasoner. There is no consult tool; the typed todo IS the escalation, and it arrives with the full verify stack.",
     "10. Failed dispatched-slice edits are auto-reverted; your own inline edits are NOT. Route an uncertain or high-blast-radius change into its own verify-gated slice so a rejected attempt is contained, rather than editing it inline.",
     "11. A slice typed `recon` or `verify` runs read-only, once, with no escalation — never type a hard investigation as `recon` expecting a rescue; if it needs judgement, type it `design` with `need:\"reasoner\"`.",
+    "12. Environment reads copy the module's existing idiom, not a new import. When a fix reads the ambient environment (current time/date, timezone, locale, env vars), copy the exact idiom the module already uses through its EXISTING imports — never introduce a new import for functionality an already-imported module provides: tests and graders mock the module's existing imports, and a bypassing read fails them invisibly. Make the minimal change at the root-most cause, in the code's existing types and idioms — no new coercions, conversions, or restructuring the task didn't ask for.",
     "Prefer the cheapest path that does the job well, and keep context lean.",
   ].join("\n"),
   executor: [
