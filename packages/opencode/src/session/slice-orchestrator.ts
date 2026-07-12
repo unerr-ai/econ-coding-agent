@@ -749,6 +749,39 @@ export function reproSpecificity(cmd: VerifyCommand): number {
   return named > 0 ? named : REPRO_SCRIPT_RE.test(cmd.command) ? 1 : 0
 }
 
+// F8 — exit-masking-proof probe pinning: a `| tail`/`echo`/`|| true` stage is
+// display-only and always exits 0 regardless of the command underneath it, so
+// pinning the command AS TYPED means the turn-end re-run sees a masked exit
+// code and the red-check never fires. Conservative single-stage patterns only.
+const TRAILING_OR_TRUE_RE = /\s*\|\|\s*true\s*;?\s*$/
+const TRAILING_ECHO_RE = /\s*(?:;|&&)\s*echo\b[^;&|]*$/
+const TRAILING_DISPLAY_PIPE_RE = /([^|])\s*\|\s*(?:tail|head|cat|tee)\b[^|;&]*$/
+
+/**
+ * Strips a repro command's display-only trailing stages — a `| tail`/`head`/
+ * `cat`/`tee` pipe, a trailing `; echo`/`&& echo` segment, or `|| true` — so
+ * the re-run this feeds sees the command's OWN exit code, never the
+ * wrapper's: `python repro_issue.py 2>&1 | tail -30` always exits 0
+ * regardless of the script underneath, which is exactly why the red-check
+ * kept missing it. Strips repeatedly to a fixpoint; anything that doesn't
+ * clearly match one of these three shapes (e.g. `| grep -c FAIL`, which
+ * changes semantics) is returned unchanged.
+ *
+ * @sem domain=routing role=repro-pin
+ */
+export function normalizeProbeCommand(command: string): string {
+  let current = command.trim()
+  for (;;) {
+    const next = current
+      .replace(TRAILING_OR_TRUE_RE, "")
+      .replace(TRAILING_ECHO_RE, "")
+      .replace(TRAILING_DISPLAY_PIPE_RE, "$1")
+      .replace(/[\s;]+$/, "")
+    if (next === current) return current
+    current = next
+  }
+}
+
 /**
  * The most-specific pinned reproduction among a slice's extracted verify
  * commands (task #7 probe rung) — reuses `extractVerifyCommands`'s output,
@@ -812,7 +845,11 @@ export interface TurnProbePin {
  * inline and dispatched no slices, where the slice-level probe rung never
  * engages. S1 — the red-state fallback's confirming run is captured as
  * `redEvidence` (exit code + ≤20-line output tail) so the pin carries its own
- * evidence, not just an assertion.
+ * evidence, not just an assertion. F8 — each candidate is re-run and pinned
+ * in its NORMALIZED form (normalizeProbeCommand strips display-only
+ * `| tail`/`echo`/`|| true` wrapping) so the turn-end gate's re-run reads the
+ * repro's own exit code, never a masked one; specificity is still scored on
+ * the raw candidate.
  *
  * @sem domain=routing role=repro-pin
  */
@@ -833,10 +870,13 @@ export async function deriveTurnProbe(opts: {
   for (const candidate of opts.candidateTests) {
     const score = reproSpecificity(candidate)
     if (score === 0 || score <= bestScore) continue // can't beat the current pin — skip the run
-    const result = await opts.runner(candidate)
+    // F8 — re-run the NORMALIZED command so the exit code checked below is
+    // the repro's own, never a `| tail`/`echo`/`|| true` wrapper's.
+    const normalized: VerifyCommand = { ...candidate, command: normalizeProbeCommand(candidate.command) }
+    const result = await opts.runner(normalized)
     if (result.exitCode !== 0) {
       bestScore = score
-      best = candidate
+      best = normalized
       bestRed = {
         exitCode: result.exitCode,
         outputTail: (result.stderr.trim() || result.stdout.trim() || "").split("\n").slice(-20).join("\n"),

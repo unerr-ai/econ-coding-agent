@@ -48,6 +48,7 @@ import {
   extractVerifyCommands,
   TEST_TREE_GUARD_COMMAND,
   deriveTurnProbe,
+  normalizeProbeCommand,
   runTurnProbeGate,
   childSlicePermission,
   isDeciderSeat,
@@ -1163,6 +1164,19 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
     expect(REPRO_SLICE_CONTENT).toMatch(/importing ONLY from the installed package/i)
     expect(REPRO_SLICE_CONTENT).toMatch(/never from tests\.\* or a test module/i)
   })
+
+  // F8 — exit-masking-proof probe pinning: models were running the repro as
+  // `... | tail -30` or `...; echo "exit=$?"`, which always exits 0 and
+  // silently defeats the red-check re-execution regardless of the real result.
+  it("demands the repro run BARE (no tail/echo/git-stash masking) and every named symptom asserted", () => {
+    expect(REPRO_SLICE_CONTENT).toMatch(/Run it BARE/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/exactly `python repro_issue\.py`/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never `\| tail`/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never `; echo "exit=\$\?"`/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never wrapped in `git stash`/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/assert EVERY one of them/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/one assert per symptom/)
+  })
 })
 
 describe("isFixShapedPrompt / promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
@@ -1345,6 +1359,38 @@ describe("extractVerifyCommands (F2)", () => {
   })
 })
 
+describe("normalizeProbeCommand (F8 — exit-masking-proof probe pinning)", () => {
+  it("strips a trailing display-only `| tail` stage but keeps a preceding redirect", () => {
+    expect(normalizeProbeCommand("python repro_issue.py 2>&1 | tail -30")).toBe("python repro_issue.py 2>&1")
+  })
+
+  it("strips a trailing `; echo \"exit=$?\"` segment", () => {
+    expect(normalizeProbeCommand('cd /testbed && timeout 60 python repro_issue.py; echo "exit=$?"')).toBe(
+      "cd /testbed && timeout 60 python repro_issue.py",
+    )
+  })
+
+  it("strips only the FINAL `| tail` stage, leaving an earlier chained pipeline intact", () => {
+    expect(
+      normalizeProbeCommand("pip install pytz sqlparse 2>&1 | tail -3 && python repro_issue.py 2>&1 | tail -30"),
+    ).toBe("pip install pytz sqlparse 2>&1 | tail -3 && python repro_issue.py 2>&1")
+  })
+
+  it("strips a chained `| tail` AND a trailing `; echo` in the same command", () => {
+    expect(normalizeProbeCommand("python repro_issue.py | tail -5 ; echo x")).toBe("python repro_issue.py")
+  })
+
+  it("leaves an unrelated pipe stage untouched — `| grep` changes semantics", () => {
+    expect(normalizeProbeCommand("python tests/runtests.py auth_tests -k max_length")).toBe(
+      "python tests/runtests.py auth_tests -k max_length",
+    )
+    expect(normalizeProbeCommand("cmd | grep -c FAIL")).toBe("cmd | grep -c FAIL")
+    // `||` (OR) is not a pipe — `|| tail` must never be split into a dangling `|`
+    expect(normalizeProbeCommand("python x.py || tail -f log")).toBe("python x.py || tail -f log")
+    expect(normalizeProbeCommand("python repro_issue.py")).toBe("python repro_issue.py")
+  })
+})
+
 describe("deriveTurnProbe (M4)", () => {
   it("extracts the most-specific pinned reproduction from a bug prompt", async () => {
     const prompt = `
@@ -1429,6 +1475,28 @@ But the actual repro is:
     const candidates: VerifyCommand[] = [{ kind: "test", command: "bun test packages/foo/bar.test.ts" }]
     const result = await deriveTurnProbe({ promptText: "Fix the bug.", candidateTests: candidates })
     expect(result).toBeUndefined()
+  })
+
+  // F8 — the raw candidate as typed masks its own exit code (`| tail -30`
+  // always exits 0); the runner must see the NORMALIZED command, and the pin
+  // it confirms red on must carry that same normalized form.
+  it("re-runs and pins the NORMALIZED command, not the raw exit-masking candidate", async () => {
+    const receivedCommands: string[] = []
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py 2>&1 | tail -30" }]
+    const runner: CommandRunner = async (cmd) => {
+      receivedCommands.push(cmd.command)
+      return { exitCode: 1, stdout: "", stderr: "AssertionError" }
+    }
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(receivedCommands).toEqual(["python repro_issue.py 2>&1"])
+    expect(result).toEqual({
+      probe: { kind: "test", command: "python repro_issue.py 2>&1" },
+      redEvidence: { exitCode: 1, outputTail: "AssertionError" },
+    })
   })
 })
 
