@@ -61,8 +61,10 @@ import {
   resolveVerifierTier,
   resolveJudgeTier,
   isReadOnlySlice,
+  runRegressionGate,
   type RmClient,
 } from "@opencode-ai/code-intelligence"
+import { discoverNeighborTests } from "./regression-neighbors"
 import {
   runConductorOrchestration,
   resolveSliceModel,
@@ -245,6 +247,11 @@ export const PIN_GREEN_FINISH_STEPS = 3
 // green run of the pinned probe's script (mirrors turn-supervisor.ts's own
 // COMMAND_TOOLS set for the same two tool ids).
 const PIN_PROBE_COMMAND_TOOLS = new Set(["shell", "bash"])
+
+// F11 — total wall-clock budget for the turn-end regression gate's neighbor
+// commands (discoverNeighborTests caps at 3); divided evenly across however
+// many neighbors were actually discovered so the whole gate always fits.
+const REGRESSION_GATE_TOTAL_BUDGET_MS = 240_000
 
 /**
  * S9 — whether this step ran the pinned probe's script and it exited GREEN.
@@ -1628,6 +1635,10 @@ export const layer = Layer.effect(
         // reject-with-nudge cycle for a bug-shaped turn finishing with no
         // verified reproduction/source edit, then a loud break (never a loop).
         let unverifiedFinishNudged = false
+        // F11 — the turn-end regression gate's own bounded retry, mirroring
+        // unverifiedFinishNudged exactly: ONE reject-with-continue cycle
+        // naming the neighbor test(s) that turned red, then a loud break.
+        let turnRegressionGateNudged = false
         // The turn's OPENING user message id, captured once at step 0 before
         // any synthetic nudge (stuck/grind/batch/probe-gate/S2/S3) can shift
         // `lastUser` forward — the stable anchor S3 scans "this turn's"
@@ -2450,17 +2461,28 @@ export const layer = Layer.effect(
               const bugShaped =
                 (storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
                 testEditGateArmed(sessionID)
+              // F11 — hoisted out of the `bugShaped` branch below so the
+              // regression gate further down can reuse this SAME trajectory
+              // scan (never a second one) on every root turn's finish, not
+              // just a bug-shaped one.
+              const turnStartID = turnOpenUserID ?? lastUser.id
+              const turnAssistantParts = msgs
+                .filter((m) => m.info.role === "assistant" && m.info.id > turnStartID)
+                .flatMap((m) => m.parts)
+              const landedSourceEditFiles = [
+                ...new Set(
+                  extractTrajectory(turnAssistantParts).events.flatMap((e) =>
+                    // Scratch repro scripts are evidence, not fixes — counting
+                    // one here would blind both the zero-source-edit arm and
+                    // the repro-tamper arm to a repro-only turn.
+                    e.kind === "file-edit" && !isTestFilePath(e.filePath) && !isReproScratchPath(e.filePath)
+                      ? [e.filePath]
+                      : [],
+                  ),
+                ),
+              ]
+              const landedSourceEdits = landedSourceEditFiles.length > 0
               if (bugShaped) {
-                const turnStartID = turnOpenUserID ?? lastUser.id
-                const turnAssistantParts = msgs
-                  .filter((m) => m.info.role === "assistant" && m.info.id > turnStartID)
-                  .flatMap((m) => m.parts)
-                const landedSourceEdits = extractTrajectory(turnAssistantParts).events.some(
-                  // Scratch repro scripts are evidence, not fixes — counting
-                  // one here would blind both the zero-source-edit arm and
-                  // the repro-tamper arm to a repro-only turn.
-                  (e) => e.kind === "file-edit" && !isTestFilePath(e.filePath) && !isReproScratchPath(e.filePath),
-                )
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro
                 // cannot legitimately flip green with zero source changes —
@@ -2515,6 +2537,75 @@ export const layer = Layer.effect(
                     hadPin: turnPinnedProbe !== undefined,
                     landedSourceEdits,
                   })
+                }
+              }
+
+              // F11 — turn-end regression gate: a fix that turns its OWN
+              // pinned repro green can still regress an untouched neighbor
+              // test (live case: a django deletion.py rewrite passed its own
+              // repro but broke delete.tests.DeletionTests.test_large_delete
+              // — nothing in the root path ran any existing test near the
+              // touched code). Runs once a turn has landed real source edits
+              // to check against — never on a repro-only/no-edit turn (S3
+              // above already gates that shape; there's nothing to regress).
+              // Mirrors S3's reject-once-then-loud-pass discipline exactly:
+              // the first regressed finding gets ONE continue-with-message
+              // naming the failing targets; a still-red second arrival logs
+              // loudly and lets the turn end (never a second nudge, never a
+              // deadlock).
+              if (landedSourceEdits) {
+                const neighbors = discoverNeighborTests({
+                  touchedSourceFiles: landedSourceEditFiles,
+                  cwd: process.cwd(),
+                })
+                if (neighbors.length > 0) {
+                  const regression = yield* Effect.promise(() =>
+                    runRegressionGate({
+                      neighbors,
+                      runner: makeShellCommandRunner({
+                        timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / neighbors.length),
+                      }),
+                    }),
+                  )
+                  if (regression.regressed) {
+                    const failingCommands = regression.failures.map((f) => f.command)
+                    if (!turnRegressionGateNudged) {
+                      turnRegressionGateNudged = true
+                      yield* Effect.logWarning("turn_regression_gate", {
+                        "session.id": sessionID,
+                        failing: failingCommands,
+                      })
+                      const regressionNudge: SessionV1.User = {
+                        id: MessageID.ascending(),
+                        sessionID,
+                        role: "user",
+                        time: { created: Date.now() },
+                        agent: lastUser.agent,
+                        model: lastUser.model,
+                      }
+                      yield* sessions.updateMessage(regressionNudge)
+                      yield* sessions.updatePart({
+                        id: PartID.ascending(),
+                        messageID: regressionNudge.id,
+                        sessionID,
+                        type: "text",
+                        text: `Your fix regressed ${failingCommands.length === 1 ? "a previously-passing test" : "previously-passing tests"} that were untouched by your change: ${failingCommands.map((c) => `\`${c}\``).join(", ")}. Fix the regression WITHOUT weakening the fix you already landed.`,
+                        synthetic: true,
+                      } satisfies SessionV1.TextPart)
+                      continue
+                    }
+                    // Second arrival still regressed — loud, never a second
+                    // nudge and never a deadlock; the break below fires.
+                    yield* Effect.logWarning("turn_regression_unresolved", {
+                      "session.id": sessionID,
+                      failing: failingCommands,
+                    })
+                  } else {
+                    yield* Effect.logInfo("turn_regression_green", {
+                      "session.id": sessionID,
+                      neighbors: neighbors.map((n) => n.command),
+                    })
+                  }
                 }
               }
             }
