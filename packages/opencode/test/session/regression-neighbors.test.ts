@@ -2,11 +2,16 @@
  * Tests for regression-neighbors.ts (packages/opencode/src/session/regression-neighbors.ts):
  * F11's discoverNeighborTests — Django-style tests/runtests.py + tests/<dir> matching, the
  * pytest-style filename fallback under tests/** and the source file's own directory, the
- * no-match empty-array case, and the 3-command cap — and F14a's project-interpreter
- * discovery: discoverProjectInterpreter's candidate ordering (repo-local venv, then conda
- * env, then PATH), first-success-wins, the none-found null case, the exact cwd-stripping
- * probe one-liner, and rewriteInterpreter's leading-token swap — and F16's
- * selectRegressionPinCandidate: picks the first assertion-shaped (non-env-red, non-zero
+ * no-match empty-array case, and the 3-command cap — F17's additive module-package breadth:
+ * the django-11885 scenario (basename stem surfaces tests/delete + tests/delete_regress, the
+ * noisy "models" parent stem excluded so tests/model_forms/model_fields never appear), a
+ * generic non-django repo reaching a one-level-below package tests/ tree via the parent-stem
+ * only, the "ion"-stripped morphological variant reaching a strictly-prefixed pytest file, a
+ * noise-stem (utils) exclusion, and the combined proximity+breadth cap enforcement — and
+ * F14a's project-interpreter discovery: discoverProjectInterpreter's candidate ordering
+ * (repo-local venv, then conda env, then PATH), first-success-wins, the none-found null case,
+ * the exact cwd-stripping probe one-liner, and rewriteInterpreter's leading-token swap — and
+ * F16's selectRegressionPinCandidate: picks the first assertion-shaped (non-env-red, non-zero
  * exit) regression-gate failure to pin, skipping MISSING_FILE/MODULE_MISSING-shaped and
  * exit-0 entries, `null` on an empty list.
  */
@@ -128,6 +133,96 @@ describe("discoverNeighborTests — pytest-style fallback (no tests/runtests.py)
     const cwd = makeFixture()
     const result = discoverNeighborTests({ touchedSourceFiles: [], cwd })
     expect(result).toEqual([])
+  })
+})
+
+describe("discoverNeighborTests — module-package breadth (F17, additive)", () => {
+  it("django-11885: deletion.py's basename stem surfaces tests/delete and tests/delete_regress, with the noisy 'models' parent stem excluded (never tests/model_forms or tests/model_fields)", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    for (const dirName of ["delete", "delete_regress", "model_forms", "model_fields"]) {
+      mkdirSync(join(cwd, "tests", dirName), { recursive: true })
+    }
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/db/models/deletion.py"],
+      cwd,
+    })
+
+    expect(result.map((c) => c.command).sort()).toEqual(
+      ["python tests/runtests.py delete --parallel 1", "python tests/runtests.py delete_regress --parallel 1"].sort(),
+    )
+  })
+
+  it("adds a parent-package stem match via a one-level-below test tree when same-file proximity finds nothing (generic, non-django pytest repo)", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "mypkg", "tests"), { recursive: true })
+    writeFileSync(join(cwd, "mypkg", "tests", "test_widgets.py"), "")
+    mkdirSync(join(cwd, "mypkg", "widgets"), { recursive: true })
+    writeFileSync(join(cwd, "mypkg", "widgets", "render.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["mypkg/widgets/render.py"],
+      cwd,
+    })
+
+    expect(result).toEqual([{ kind: "test", command: "python -m pytest mypkg/tests/test_widgets.py -x -q" }])
+  })
+
+  it("applies the 'ion'-stripped morphological variant so a stem still reaches a strictly-prefixed pytest file", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "test_delete_extra.py"), "")
+    mkdirSync(join(cwd, "mypkg", "models"), { recursive: true })
+    writeFileSync(join(cwd, "mypkg", "models", "deletion.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["mypkg/models/deletion.py"],
+      cwd,
+    })
+
+    expect(result).toEqual([{ kind: "test", command: "python -m pytest tests/test_delete_extra.py -x -q" }])
+  })
+
+  it("excludes a noise parent stem (utils) so it never matches an unrelated test file it would otherwise fuzzy-match", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "test_utils.py"), "")
+    mkdirSync(join(cwd, "pkg", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "utils", "helpers.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["pkg/utils/helpers.py"],
+      cwd,
+    })
+
+    expect(result).toEqual([])
+  })
+
+  it("caps combined proximity + breadth commands at the existing MAX_NEIGHBOR_COMMANDS (3), proximity kept first", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "test_alpha_one.py"), "")
+    writeFileSync(join(cwd, "tests", "test_alpha_two.py"), "")
+    writeFileSync(join(cwd, "tests", "test_sub_x.py"), "")
+    writeFileSync(join(cwd, "tests", "test_sub_y.py"), "")
+    writeFileSync(join(cwd, "tests", "test_sub_z.py"), "")
+    mkdirSync(join(cwd, "pkg", "sub"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "sub", "alpha.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["pkg/sub/alpha.py"],
+      cwd,
+    })
+
+    expect(result).toHaveLength(3)
+    const commands = result.map((c) => c.command)
+    expect(commands).toContain("python -m pytest tests/test_alpha_one.py -x -q")
+    expect(commands).toContain("python -m pytest tests/test_alpha_two.py -x -q")
+    expect(commands.some((c) => c.includes("test_sub_"))).toBe(true)
   })
 })
 

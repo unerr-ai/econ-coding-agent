@@ -20,6 +20,17 @@
  * runner; `rewriteInterpreter` then swaps the winning path into each
  * neighbor command's leading `python`/`python3` token.
  *
+ * F17 — module-package breadth: same-file proximity alone still missed the
+ * live case above's OWN sibling (`delete_regress`) whenever the touched
+ * file's basename topic doesn't stretch far enough, so this adds an
+ * additive second pass keyed on each touched file's parent-package name
+ * (dropped when it's a noise stem like `models`/`utils` that would explode
+ * into unrelated matches) plus dumb, predictable morphological variants of
+ * every stem, searched across every test tree the repo exposes — `tests/`
+ * or `test/` at the repo root, and one level below it (covers a top-level
+ * package's own `tests/` dir, e.g. `sklearn/tests/`) — never deeper. Same
+ * cap, same dedup, proximity always tried first.
+ *
  * @sem domain=routing role=neighbor-discovery
  */
 import { existsSync, readdirSync, type Dirent } from "node:fs"
@@ -94,19 +105,102 @@ function collectPytestMatches(dir: string, topic: string, depth: number, maxDept
 }
 
 /**
+ * F17 — parent-package names dropped from module-package breadth: too generic
+ * across a Python repo shape (any framework's app layout carries an
+ * `__init__`/`utils`/`base`/`core`, and an ORM-shaped one carries a `models`
+ * package) to search on without exploding into unrelated matches — verified
+ * for `models`: the loose stem-overlap check in `sharesWordStem` alone would
+ * match every `model_*` django test dir (`model_forms`, `model_fields`, …)
+ * off a 5-of-6-char shared prefix. A file's own basename is never dropped,
+ * however generic.
+ */
+const NOISE_PARENT_STEMS = new Set(["__init__", "utils", "base", "core", "models"])
+
+/**
+ * F17 — the module-package breadth stems for one touched source file: its own
+ * basename (always kept) plus its parent directory's name, unless that
+ * parent is a noise stem or identical to the basename. No cwd relativizing
+ * here — the caller only needs a name to search test-tree entries against.
+ */
+function deriveModuleStems(file: string): string[] {
+  const base = pathBasename(file, extname(file))
+  const parentDir = dirname(file)
+  const parent = parentDir === "." || parentDir === "" ? "" : pathBasename(parentDir)
+  const stems = [base]
+  if (parent && parent !== base && !NOISE_PARENT_STEMS.has(parent)) stems.push(parent)
+  return stems
+}
+
+/**
+ * F17 — dumb, predictable morphological variants of a stem: the stem itself,
+ * minus a trailing "ion", minus a trailing "s" — no stemming library, no
+ * recursion between the two strips. Exists because the pytest-style filename
+ * match (`pytestFileMatchesTopic`) is a strict prefix check, not the fuzzy
+ * `sharesWordStem` django dirs get, so "deletion" alone would never reach a
+ * `test_delete_*.py` file without the "ion"-stripped variant.
+ */
+function stemVariants(stem: string): string[] {
+  const variants = new Set([stem])
+  if (stem.endsWith("ion")) variants.add(stem.slice(0, -3))
+  if (stem.endsWith("s")) variants.add(stem.slice(0, -1))
+  return [...variants]
+}
+
+/** Safety bound on test-tree roots scanned by breadth discovery — a repo with an unusually wide top-level fan-out must never turn root discovery into a repo-wide walk. */
+const MAX_TEST_TREE_ROOTS = 40
+
+/**
+ * F17 — every test tree this repo exposes for breadth discovery: `tests/` or
+ * `test/` at the repo root, plus one level below root (covers a top-level
+ * package's own test dir, e.g. `sklearn/tests/`, `astropy/tests/`) — never
+ * deeper, so this stays a bounded directory-existence scan, never a walk.
+ */
+function discoverTestTreeRoots(cwd: string): string[] {
+  const roots: string[] = []
+  const testDirNames = ["tests", "test"]
+  for (const name of testDirNames) {
+    const candidate = join(cwd, name)
+    if (existsSync(candidate)) roots.push(candidate)
+  }
+  let topLevel: Dirent[]
+  try {
+    topLevel = readdirSync(cwd, { withFileTypes: true })
+  } catch {
+    return roots
+  }
+  for (const entry of topLevel) {
+    if (roots.length >= MAX_TEST_TREE_ROOTS) break
+    if (!entry.isDirectory()) continue
+    for (const name of testDirNames) {
+      const candidate = join(cwd, entry.name, name)
+      if (existsSync(candidate)) roots.push(candidate)
+    }
+  }
+  return roots
+}
+
+/**
  * Discover a small set of pre-existing test commands whose scope plausibly
- * covers `opts.touchedSourceFiles` — Django-style (`tests/runtests.py`
- * present → matching `tests/<dir>` names) when the repo is shaped that way,
- * else a pytest-style filename glob under `<cwd>/tests/**` (bounded depth)
- * and the source file's own directory. Deduped, capped at
- * `MAX_NEIGHBOR_COMMANDS`; returns `[]` when nothing matches so the caller's
- * gate never runs on a guess.
+ * covers `opts.touchedSourceFiles`. Two passes, same cap, same dedup:
+ *
+ * 1. Same-file proximity (F11, unchanged) — Django-style (`tests/runtests.py`
+ *    present → matching `tests/<dir>` names) when the repo is shaped that
+ *    way, else a pytest-style filename glob under `<cwd>/tests/**` (bounded
+ *    depth) and the source file's own directory.
+ * 2. Module-package breadth (F17, additive) — only runs while the cap has
+ *    room left: each touched file's parent-package name (dropped when it's a
+ *    noise stem) plus dumb morphological variants of every stem, searched
+ *    across every test tree the repo exposes (root `tests`/`test`, plus one
+ *    level below root).
+ *
+ * Deduped, capped at `MAX_NEIGHBOR_COMMANDS` across both passes; returns `[]`
+ * when nothing matches so the caller's gate never runs on a guess.
  */
 export function discoverNeighborTests(opts: { touchedSourceFiles: readonly string[]; cwd: string }): VerifyCommand[] {
   const { touchedSourceFiles, cwd } = opts
   const commands: VerifyCommand[] = []
   const seen = new Set<string>()
-  const push = (command: string) => {
+  const pushCommand = (command: string) => {
     if (seen.has(command) || commands.length >= MAX_NEIGHBOR_COMMANDS) return
     seen.add(command)
     commands.push({ kind: "test", command })
@@ -114,6 +208,7 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
 
   const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
 
+  // Pass 1 — same-file proximity (F11, unchanged).
   for (const sourceFile of touchedSourceFiles) {
     if (commands.length >= MAX_NEIGHBOR_COMMANDS) break
     const topic = neighborTopic(sourceFile)
@@ -121,7 +216,7 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
 
     if (isDjangoRepo) {
       for (const dirName of djangoNeighborDirs(cwd, topic)) {
-        push(`python tests/runtests.py ${dirName} --parallel 1`)
+        pushCommand(`python tests/runtests.py ${dirName} --parallel 1`)
       }
       continue
     }
@@ -130,7 +225,34 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
     collectPytestMatches(join(cwd, "tests"), topic, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
     collectPytestMatches(dirname(join(cwd, sourceFile)), topic, 0, 0, matches)
     for (const match of matches) {
-      push(`python -m pytest ${relative(cwd, match)} -x -q`)
+      pushCommand(`python -m pytest ${relative(cwd, match)} -x -q`)
+    }
+  }
+
+  // Pass 2 — module-package breadth (F17, additive), only while cap room remains.
+  if (commands.length < MAX_NEIGHBOR_COMMANDS) {
+    const testTreeRoots = isDjangoRepo ? [] : discoverTestTreeRoots(cwd)
+    outer: for (const sourceFile of touchedSourceFiles) {
+      for (const stem of deriveModuleStems(sourceFile)) {
+        for (const variant of stemVariants(stem)) {
+          if (commands.length >= MAX_NEIGHBOR_COMMANDS) break outer
+
+          if (isDjangoRepo) {
+            for (const dirName of djangoNeighborDirs(cwd, variant)) {
+              pushCommand(`python tests/runtests.py ${dirName} --parallel 1`)
+            }
+            continue
+          }
+
+          const matches = new Set<string>()
+          for (const root of testTreeRoots) {
+            collectPytestMatches(root, variant, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
+          }
+          for (const match of matches) {
+            pushCommand(`python -m pytest ${relative(cwd, match)} -x -q`)
+          }
+        }
+      }
     }
   }
 
