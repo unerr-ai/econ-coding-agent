@@ -155,3 +155,17 @@ export function reproFidelityNudgeText(gaps: string[]): string {
 export function toothlessReproNudgeText(script: string): string {
   return `Your reproduction script (\`${script}\`) only prints — it can never fail, so it was not pinned. Add an assertion (or a non-zero exit) that fails while the bug is present, run it again, and it will be pinned.`
 }
+
+/**
+ * F18 — seen-red nudge: prompt.ts's finish-time block injects this once,
+ * when `findUnresolvedSeenRed` (seen-red.ts) finds a test/repro run the
+ * turn's own transcript shows went red and was never re-run green. Names
+ * each command plus its evidence tail so the model can't claim it never saw
+ * the failure — the django-11790 shape (a mid-turn pytest run failed, was
+ * never re-run, and the patch shipped anyway).
+ */
+export function seenRedUnresolvedNudgeText(unresolved: readonly { command: string; outputTail: string }[]): string {
+  const single = unresolved.length === 1
+  const list = unresolved.map((u) => `\`${u.command}\`:\n${u.outputTail}`).join("\n\n")
+  return `You saw ${single ? "this command" : "these commands"} fail mid-turn and never re-ran ${single ? "it" : "them"} green:\n${list}\nRe-run ${single ? "it" : "each of them"} now (fixing the underlying issue first if it is still failing) and confirm GREEN before finishing.`
+}

@@ -39,8 +39,10 @@ import {
   pinGreenFinishNudgeText,
   reproFidelityNudgeText,
   toothlessReproNudgeText,
+  seenRedUnresolvedNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
+import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
 import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
@@ -298,6 +300,32 @@ function stepRanPinnedProbeGreen(parts: readonly unknown[], scriptFilename: stri
     if (part.state?.metadata?.["exit"] === 0) return true
   }
   return false
+}
+
+// F18 — the plain {command, exitCode, output} array findUnresolvedSeenRed
+// (seen-red.ts) unit-tests against, extracted from a turn's assistant tool
+// parts. Mirrors stepRanPinnedProbeGreen's part-scanning shape exactly, just
+// collecting every completed command instead of checking one.
+function extractTurnBashExecutions(parts: readonly unknown[]): SeenRedExecution[] {
+  const executions: SeenRedExecution[] = []
+  for (const raw of parts) {
+    const part = raw as {
+      type?: string
+      tool?: string
+      state?: { status?: string; input?: Record<string, unknown>; metadata?: Record<string, unknown>; output?: string }
+    }
+    if (part?.type !== "tool" || !part.tool || !PIN_PROBE_COMMAND_TOOLS.has(part.tool)) continue
+    if (part.state?.status !== "completed") continue
+    const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
+    if (!command) continue
+    const exit = part.state?.metadata?.["exit"]
+    executions.push({
+      command,
+      exitCode: typeof exit === "number" ? exit : undefined,
+      output: part.state?.output ?? "",
+    })
+  }
+  return executions
 }
 
 function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: string }[] {
@@ -1697,6 +1725,15 @@ export const layer = Layer.effect(
         // unverifiedFinishNudged exactly: ONE reject-with-continue cycle
         // naming the neighbor test(s) that turned red, then a loud break.
         let turnRegressionGateNudged = false
+        // F18 — the seen-red gate's own bounded retry, same discipline: ONE
+        // reject-with-continue cycle naming the still-unresolved red
+        // command(s), then a loud break. `turnPinnedProbeRanGreen` is a
+        // passthrough flag set by the M4 block's own accept branch (S1)
+        // below — the M4 gate re-runs the pinned probe by shelling out
+        // directly, invisible to the transcript this gate scans, so without
+        // this flag a genuinely-cleared pin would read as still unresolved.
+        let turnSeenRedNudged = false
+        let turnPinnedProbeRanGreen = false
         // F14a — the interpreter discovered for this turn's regression-gate
         // neighbor commands, cached so discovery (it shells out) runs at
         // most once even if the gate block below is revisited within the
@@ -2774,6 +2811,10 @@ export const layer = Layer.effect(
                   probe: turnPinnedProbe.probe.command,
                   outputTail: gate.outputTail ?? null,
                 })
+                // F18 — passthrough only, no behavior change: this run
+                // happened outside the transcript (the gate shells out
+                // directly), so the seen-red scan below needs telling.
+                turnPinnedProbeRanGreen = true
               }
             }
 
@@ -2811,6 +2852,61 @@ export const layer = Layer.effect(
                 ),
               ]
               const landedSourceEdits = landedSourceEditFiles.length > 0
+              // F18 — seen-red must re-verify: a turn that LANDED source
+              // edits while a mid-turn test/repro run it saw fail red was
+              // never re-run green must not ship silently — the gap that let
+              // django-11790 ship after a failing mid-turn test run. None of
+              // M4 (a narrower pinned-probe check), S3 (below), or F11 (a
+              // neighbor-regression check) replay the turn's own transcript
+              // for this shape. Guarded on landedSourceEdits, not bugShaped:
+              // any turn that changed source owes its seen reds a green,
+              // while a read-only diagnostic turn that correctly ENDS red
+              // (report-the-failure asks) must not be nudged to "fix" it.
+              // Pure transcript scan (seen-red.ts) — no LLM calls, no
+              // commands run. Reject-once-then-loud-pass, same discipline as
+              // every sibling gate: never blocks submission past the second
+              // arrival.
+              if (landedSourceEdits) {
+                const seenRedExecutions = extractTurnBashExecutions(turnAssistantParts)
+                const unresolvedSeenRed = findUnresolvedSeenRed(
+                  seenRedExecutions,
+                  turnPinnedProbeRanGreen ? turnPinnedProbe?.probe.command : undefined,
+                )
+                if (unresolvedSeenRed.length > 0) {
+                  if (!turnSeenRedNudged) {
+                    turnSeenRedNudged = true
+                    yield* Effect.logWarning("turn_seen_red_nudge", {
+                      "session.id": sessionID,
+                      unresolved: unresolvedSeenRed,
+                    })
+                    const seenRedNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(seenRedNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: seenRedNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: seenRedUnresolvedNudgeText(unresolvedSeenRed),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                  // Second arrival still unresolved — loud, never a second
+                  // nudge and never a deadlock; the turn is allowed to end
+                  // (fail-open-loud, same discipline as every sibling gate).
+                  yield* Effect.logWarning("turn_seen_red_unverified", {
+                    "session.id": sessionID,
+                    unresolved: unresolvedSeenRed,
+                  })
+                }
+              }
               if (bugShaped) {
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro
