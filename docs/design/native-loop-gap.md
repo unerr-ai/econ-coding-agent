@@ -57,6 +57,45 @@ symptom-layer draws) is variance *induced* by S1+S2, then policed by machinery b
 Both truths hold — on genuinely undisciplined models (flash era) the chain took us 0/10 → 9/10.
 The error was applying the full substitute to a trained model and never measuring the difference.
 
+## Does this apply to the other tiers? Yes — the suppression matrix
+
+The suppressions are NOT conductor-only, and for >85 every tier has to work. Per the same audit
+(`reasoning-gate.ts:178-179` comment; `transform.ts:479-496` temp map is keyed by model family,
+not tier):
+
+| Tier (binding) | S1 reasoning | S2 temperature | S3–S5 taxes |
+|---|---|---|---|
+| conductor (minimax-m3) | **"none"** — fully muted on ordinary steps | **1.0** (minimax family) | full — and it runs ~90–100% of steps |
+| executor (gpt-oss-120b) | "low" — partially suppressed | family default (unaudited — E0 scope) | full, PLUS brief-fed child sessions |
+| reasoner (deepseek-v4-pro) | "high" — unsuppressed | default (unaudited) | brief-fed one-shots by design |
+| oracle (glm-5.2) | "high" — unsuppressed | default (unaudited) | brief-fed one-shots by design |
+
+Two observations. First, **the allocation is inverted**: the most-suppressed tier (conductor) is
+the one making nearly all judgment calls in the decomposition-first architecture, while full
+thinking is reserved for tiers invoked least. Second, the **fragmentation tax is heavier off-
+conductor**: child slices are compiled-brief one-shots *by design* ([cross-tier-context.md](./cross-tier-context.md))
+— optimal for cost, but an RL-trained model's policy expects the full linear evidence trail, so
+E2's ablation should include a slice-level arm (brief vs fuller context), not just whole-turn arms.
+E0's temp/effort sweep must cover all four bindings, not just the conductor.
+
+## Live confirmation — Mini-10 r5 (2026-07-12, post spec-prior seeds, suppression still on)
+
+8/10, $1.26. **11790 and 11964 passed; 11848 and 11885 failed — the exact instances that passed
+the run before.** The flip-flop set {11790, 11848, 11885, 11964} now rotates per run — the
+suppression-variance signature (each ~50–80% pass ⇒ ~0.25–0.5 chance of all four in one run,
+matching the observed 8–9/10 plateau). Forensics:
+
+- **11848 — honest-grind-exhausted.** 27 steps, `repro_unresolved`, two `turn_probe_pin_miss`,
+  finished `turn_completed_unverified hadPin=false`. The chain stayed honest (no fake green); the
+  model simply never designed the utcnow-mock-aware repro — deliberation work that muted thinking
+  would carry.
+- **11885 — wrong-exit with a NEW chain gap.** Same OR-combine approach that passed r2, drawn
+  with a flawed implementation (breaks `test_large_delete`/`test_large_delete_related` P2P).
+  Probe green + `turn_regression_green` both fired — the regression gate ran but its neighbor
+  selection didn't include the delete_regress large-delete tests. **Candidate lever (not built):
+  regression-neighbor breadth** — select neighbors by the edited module's test-package, not only
+  same-file proximity.
+
 ## Path-to-85 arithmetic
 
 500 instances. 75.8% = 379 solved. 85% = 425 → **+46 instances** the native loop misses.
