@@ -101,6 +101,11 @@ seam table: [features/README.md](./features/README.md).
 - Model strategy — [MODEL_SELECTION.md](./strategy/MODEL_SELECTION.md) (which open/rented models
   we run per tier, Phase 1) + [MODEL_TRAINING_STRATEGY.md](./strategy/MODEL_TRAINING_STRATEGY.md)
   (how we post-train our *own* mid-tier reasoner in Phase 2 — recipe, data flywheel, parity math).
+- [FRONTIER_PARITY_FEASIBILITY.md](./strategy/FRONTIER_PARITY_FEASIBILITY.md) — the 2026-07
+  research memo: can econ reach Opus-parity on open weights (yes, ~$10–30k) and Fable-grade (raw
+  model no — ceiling law; verified-outcomes slice partially)? What Sakana Fugu actually is (trained
+  conductor over *closed* APIs — validates econ's topology, fails every sovereign requirement),
+  the gap-closing recipe menu with costs, sovereign-buyer requirements mapped to econ, watch-list.
 - Economics — token COGS & pricing ([TOKEN_ECONOMICS.md](./strategy/TOKEN_ECONOMICS.md)), regional
   market sizing ([MARKET_ECONOMICS.md](./strategy/MARKET_ECONOMICS.md),
   [MARKET_ECONOMICS_EUROPE.md](./strategy/MARKET_ECONOMICS_EUROPE.md)), GPU-utilization tactics
