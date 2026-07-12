@@ -72,6 +72,8 @@ import {
   uncertaintyFromParts,
   redecompositionSignalsFromOutcomes,
   isReproScratchPath,
+  MODULE_MISSING_RE,
+  missingModuleFromOutput,
   type ConductorSliceDispatch,
   type SliceProbes,
   type OrchestrationTodo,
@@ -1626,6 +1628,24 @@ But the actual repro is:
     expect(result).toBeUndefined()
   })
 
+  // F15b — same discipline, a different phantom-red shape: a
+  // ModuleNotFoundError means the interpreter running the candidate can't
+  // even import the touched package, so this exit proves nothing either.
+  it("skips (never pins) a candidate whose non-zero exit is a phantom module-not-found, not a real red", async () => {
+    const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]
+    const runner: CommandRunner = async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "Traceback (most recent call last):\nModuleNotFoundError: No module named 'django'",
+    })
+    const result = await deriveTurnProbe({
+      promptText: "The computation is off by one.",
+      candidateTests: candidates,
+      runner,
+    })
+    expect(result).toBeUndefined()
+  })
+
   it("still pins a non-phantom non-zero exit (a real AssertionError) alongside a phantom candidate", async () => {
     const candidates: VerifyCommand[] = [
       { kind: "test", command: "python repro_issue.py" },
@@ -1653,6 +1673,35 @@ But the actual repro is:
       probe: { kind: "test", command: 'bun test packages/foo/bar.test.ts -t "handles retry"' },
       redEvidence: { exitCode: 1, outputTail: "AssertionError" },
     })
+  })
+})
+
+describe("MODULE_MISSING_RE / missingModuleFromOutput (F15b)", () => {
+  it("matches the py3 ModuleNotFoundError shape and extracts the module name", () => {
+    const output = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'django'"
+    expect(MODULE_MISSING_RE.test(output)).toBe(true)
+    expect(missingModuleFromOutput(output)).toBe("django")
+  })
+
+  it("matches the ImportError shape (unquoted module name) and extracts it", () => {
+    const output = "ImportError: No module named asgiref"
+    expect(MODULE_MISSING_RE.test(output)).toBe(true)
+    expect(missingModuleFromOutput(output)).toBe("asgiref")
+  })
+
+  it("extracts a dotted submodule name", () => {
+    const output = "ModuleNotFoundError: No module named 'django.core.exceptions'"
+    expect(missingModuleFromOutput(output)).toBe("django.core.exceptions")
+  })
+
+  it("does not match an unrelated exception", () => {
+    const output = "AttributeError: 'NoneType' object has no attribute 'foo'"
+    expect(MODULE_MISSING_RE.test(output)).toBe(false)
+    expect(missingModuleFromOutput(output)).toBeNull()
+  })
+
+  it("returns null for output with no module-missing signature", () => {
+    expect(missingModuleFromOutput("AssertionError: expected 1 got 2")).toBeNull()
   })
 })
 

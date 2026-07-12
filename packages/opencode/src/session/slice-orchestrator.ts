@@ -925,7 +925,11 @@ export interface TurnProbePin {
  * non-zero exit whose output matches the shell's own file-not-found
  * signature (`MISSING_FILE_RE`) is a phantom red, not a confirmed one: the
  * candidate is skipped rather than pinned, so a script that was never
- * actually executed can't become the turn's verification contract.
+ * actually executed can't become the turn's verification contract. F15b —
+ * the same discipline applies to a `ModuleNotFoundError`/`ImportError`
+ * (`MODULE_MISSING_RE`): the interpreter running the candidate couldn't even
+ * import the touched package, so its exit proves nothing about the issue
+ * either.
  *
  * @sem domain=routing role=repro-pin
  */
@@ -958,6 +962,10 @@ export async function deriveTurnProbe(opts: {
       // this exit proves nothing about the issue. Never pin a contract
       // nothing can meet.
       if (MISSING_FILE_RE.test(outputTail)) continue
+      // F15b — same discipline, a different phantom-red shape: the
+      // interpreter running the candidate can't even import the touched
+      // package.
+      if (MODULE_MISSING_RE.test(outputTail)) continue
       bestScore = score
       best = normalized
       bestRed = { exitCode: result.exitCode, outputTail }
@@ -977,6 +985,23 @@ export async function deriveTurnProbe(opts: {
 // pins, not just to explain one after the fact. Exported so both sites
 // stay byte-identical rather than carrying a second copy of the pattern.
 export const MISSING_FILE_RE = /No such file or directory|can't open file/i
+
+// F15b — a Python "module not found" error is also an environment crash, not
+// a confirmed red: the interpreter running the probe can't import the
+// touched package at all (container image's PATH python with no project
+// install), so a non-zero exit here proves nothing about the issue either.
+// Matches both `ModuleNotFoundError: No module named 'x'` (py3) and the
+// `ImportError: No module named x` shape (py2 / some py3 import sites).
+// Exported so prompt.ts's engine-initiated probe reuses the same pattern
+// (plus the captured module name) before it pins or retries.
+export const MODULE_MISSING_RE = /(?:ModuleNotFoundError|ImportError): No module named ['"]?([\w.]+)['"]?/
+
+/** The missing module name from a ModuleNotFoundError/ImportError output line (first match), or `null` when the output doesn't match `MODULE_MISSING_RE`. */
+export function missingModuleFromOutput(output: string): string | null {
+  const match = MODULE_MISSING_RE.exec(output)
+  return match ? match[1]! : null
+}
+
 const PROBE_SCRIPT_FILE_RE = /[\w./-]+\.(?:py|js|ts|mjs|sh|rb)\b/
 
 /** Outcome of the turn-end prove-it gate; `reject` blocks the turn from ending. */

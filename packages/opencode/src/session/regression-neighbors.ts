@@ -141,6 +141,28 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
 // import the project, not just any `python` that happens to be on PATH
 // ---------------------------------------------------------------------------
 
+/**
+ * F15a — the top-level package to probe an interpreter against, derived from a
+ * touched source file's path. A model's edit tools report ABSOLUTE paths
+ * (e.g. `/testbed/django/db/models/deletion.py`), so this relativizes against
+ * `cwd` first when the file falls under it, then applies the existing
+ * `src/<pkg>` second-segment rule. A path outside `cwd` (absolute and not a
+ * cwd descendant) falls back to its own first non-empty segment — not a real
+ * package, but the least-wrong guess, and documented as such. Empty input
+ * returns `undefined` so the caller can skip discovery rather than probe
+ * garbage.
+ *
+ * @sem domain=routing role=package-derivation
+ */
+export function deriveTopLevelPackage(file: string, cwd: string): string | undefined {
+  if (!file) return undefined
+  const prefix = cwd.endsWith("/") ? cwd : `${cwd}/`
+  const relativized = file.startsWith(prefix) ? file.slice(prefix.length) : file
+  const segments = relativized.split("/").filter(Boolean)
+  if (segments.length === 0) return undefined
+  return segments[0] === "src" ? (segments[1] ?? segments[0]) : segments[0]
+}
+
 /** Cap on conda envs enumerated across all conda roots combined — a machine with many envs must never turn discovery into a probe storm. */
 const MAX_CONDA_ENVS_PROBED = 8
 

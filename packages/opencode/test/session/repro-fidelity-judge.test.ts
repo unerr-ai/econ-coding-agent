@@ -30,6 +30,7 @@ import {
   type ReproFidelityComplete,
 } from "../../src/session/repro-fidelity-judge"
 import { reproFidelityNudgeText } from "../../src/session/prompts/nudges"
+import { REPRO_FIDELITY_SYSTEM_PROMPT } from "../../src/session/prompts/judges"
 
 describe("parseReproFidelityResponse", () => {
   test("a faithful verdict with no gaps parses", () => {
@@ -146,6 +147,19 @@ describe("reproFidelityNudgeText", () => {
     const gaps = ["gap one here", "gap two here"]
     const text = reproFidelityNudgeText(gaps)
     for (const gap of gaps) expect(text).toContain(gap)
+  })
+
+  test("F15d — tells the model to verify each gap against the issue text and ignore an invented one", () => {
+    const text = reproFidelityNudgeText(["some gap"])
+    expect(text).toContain("Verify each gap above against the issue text yourself")
+    expect(text).toContain("ignore any gap here that asserts something the issue itself does not state")
+  })
+})
+
+describe("REPRO_FIDELITY_SYSTEM_PROMPT", () => {
+  test("F15d — forbids the judge from inventing an expectation the issue does not state", () => {
+    expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("never invent an expectation the issue text does not state")
+    expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("omit that gap entirely rather than assert one")
   })
 })
 

@@ -38,12 +38,14 @@ import {
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
   reproFidelityNudgeText,
+  toothlessReproNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
   applyAssertionTeethGap,
+  hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
 import { triagePreamble } from "./prompts/preambles"
@@ -66,7 +68,13 @@ import {
   runRegressionGate,
   type RmClient,
 } from "@opencode-ai/code-intelligence"
-import { discoverNeighborTests, discoverProjectInterpreter, rewriteInterpreter, projectInterpreterCandidateCount } from "./regression-neighbors"
+import {
+  discoverNeighborTests,
+  discoverProjectInterpreter,
+  rewriteInterpreter,
+  projectInterpreterCandidateCount,
+  deriveTopLevelPackage,
+} from "./regression-neighbors"
 import {
   runConductorOrchestration,
   resolveSliceModel,
@@ -96,6 +104,8 @@ import {
   isReproScratchPath,
   canonicalCommandForScript,
   MISSING_FILE_RE,
+  MODULE_MISSING_RE,
+  missingModuleFromOutput,
   type ConductorLoopOptions,
   type ConductorSliceDispatch,
   type OrchestrationTodo,
@@ -325,6 +335,25 @@ function readPinnedReproFile(cwd: string, filename: string): string | undefined 
   } catch {
     return undefined
   }
+}
+
+/**
+ * F15c — pin-blocking teeth: the script filename an about-to-be-pinned
+ * command names when it matches the repro-script shape (`isReproScratchPath`
+ * — `repro`/`reproduce`-named, not a named test file) AND is readable on
+ * disk AND has no assertion teeth (`hasAssertionTeeth`) — a print-only
+ * script that always exits 0 and so can never fail. `undefined` for a
+ * named-test-file command (pytest/runtests — not a repro script), an
+ * unreadable/missing script, or a script that already has teeth; the caller
+ * refuses the pin only when this returns a filename.
+ */
+function toothlessPinScript(cwd: string, command: string): string | undefined {
+  if (!isReproScratchPath(command)) return undefined
+  const filename = extractScriptFilename(command)
+  if (!filename) return undefined
+  const content = readPinnedReproFile(cwd, filename)
+  if (content === undefined) return undefined
+  return hasAssertionTeeth(content) ? undefined : filename
 }
 
 /**
@@ -1724,6 +1753,11 @@ export const layer = Layer.effect(
         // F9a — repro-fidelity judge fires at most once per turn, right at
         // the pin-from-red site below.
         let reproFidelityJudgedThisTurn = false
+        // F15c — toothless-pin-refusal nudge: fires at most once per turn,
+        // shared by both pin sites (mirrors reproFidelityJudgedThisTurn
+        // above); after the first refusal only the `turn_probe_toothless_skip`
+        // marker keeps logging, no repeat nudge.
+        let toothlessPinNudgedThisTurn = false
 
         /**
          * F14b — the shared fidelity-check dispatch for BOTH probe-pin
@@ -1883,6 +1917,43 @@ export const layer = Layer.effect(
                   runner: makeShellCommandRunner({ cwd: ctx.directory }),
                 }),
               )
+              // F15c — pin-blocking teeth: refuse (never pin) a repro-script
+              // candidate whose content on disk can never fail, BEFORE the
+              // pin lands — unlike the F14b fidelity dispatch below, which
+              // only runs (and only nudges) AFTER a pin already landed.
+              // Named-test-file candidates (pytest/runtests — not a
+              // repro/reproduce-named script) pass through untouched.
+              let toothlessScript: string | undefined
+              if (turnPinnedProbe) {
+                toothlessScript = toothlessPinScript(ctx.directory, turnPinnedProbe.probe.command)
+                if (toothlessScript) {
+                  yield* Effect.logInfo("turn_probe_toothless_skip", {
+                    "session.id": sessionID,
+                    script: toothlessScript,
+                  })
+                  if (!toothlessPinNudgedThisTurn) {
+                    toothlessPinNudgedThisTurn = true
+                    const toothlessNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(toothlessNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: toothlessNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: toothlessReproNudgeText(toothlessScript),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                  }
+                  turnPinnedProbe = undefined
+                }
+              }
               if (turnPinnedProbe) {
                 // P4 — a mid-turn pin is part of the contract a continuation
                 // turn inherits too.
@@ -1899,9 +1970,9 @@ export const layer = Layer.effect(
                 // `dispatchPinnedReproFidelity`, which logs exactly one
                 // marker after the judge (or its bail branches) resolve —
                 // `repro_fidelity_ok` (faithful), `repro_fidelity_gap`
-                // (faithful:false, or a toothless script per F14b's
-                // `hasAssertionTeeth` — existing nudge behavior, unchanged),
-                // or `repro_fidelity_degraded` naming which bail fired
+                // (faithful:false — F15c's pin-time refusal above means a
+                // toothless script rarely reaches here anymore), or
+                // `repro_fidelity_degraded` naming which bail fired
                 // ("no-script-filename" | "file-missing" | the dispatch's
                 // own "model-unresolved" | "judge-degraded"). Never blocks
                 // the pin, never re-fires.
@@ -1917,7 +1988,7 @@ export const layer = Layer.effect(
                   lastUser,
                 })
                 if (fidelityResult.gap) continue
-              } else {
+              } else if (!toothlessScript) {
                 // S8 — pin-miss observability: django-11790 strict run #3 hit
                 // a red run of a named repro file that did NOT pin, and the
                 // pin path had no logging to say why (all candidates scored
@@ -2155,34 +2226,122 @@ export const layer = Layer.effect(
                       reason: "file-missing",
                     })
                   } else {
-                    const enginePin = {
-                      probe: { kind: "test" as const, command: engineCommand },
-                      redEvidence: { exitCode: engineResult.exitCode, outputTail: engineOutputTail },
+                    // F15b — a ModuleNotFoundError/ImportError is an
+                    // environment crash, not a confirmed red: the
+                    // interpreter running the probe can't import the
+                    // touched package at all, so the exit proves nothing.
+                    // One bounded retry — discover an interpreter that CAN
+                    // import the missing module (F14a's
+                    // discoverProjectInterpreter) and re-run with it —
+                    // before giving up on this firing; never cached across
+                    // turns, never retried twice.
+                    const missingModule = missingModuleFromOutput(engineOutputTail)
+                    let finalCommand = engineCommand
+                    let finalResult = engineResult
+                    let finalOutputTail = engineOutputTail
+                    let envSkip = false
+                    if (missingModule) {
+                      const interpreter = yield* Effect.promise(() =>
+                        discoverProjectInterpreter({
+                          cwd: ctx.directory,
+                          topLevelPackage: missingModule,
+                          runner: makeShellCommandRunner({ timeoutMs: 5000 }),
+                        }),
+                      )
+                      const retried = interpreter !== null
+                      if (interpreter) {
+                        const [retriedCommand] = rewriteInterpreter([engineCommand], interpreter)
+                        const retryResult = yield* Effect.promise(() =>
+                          makeShellCommandRunner({ cwd: ctx.directory, timeoutMs: ENGINE_PROBE_TIMEOUT_MS })({
+                            kind: "test",
+                            command: retriedCommand,
+                          }),
+                        )
+                        const retryOutputTail = (retryResult.stderr.trim() || retryResult.stdout.trim() || "")
+                          .split("\n")
+                          .slice(-20)
+                          .join("\n")
+                        if (
+                          retryResult.exitCode !== 0 &&
+                          !MISSING_FILE_RE.test(retryOutputTail) &&
+                          !MODULE_MISSING_RE.test(retryOutputTail)
+                        ) {
+                          finalCommand = retriedCommand
+                          finalResult = retryResult
+                          finalOutputTail = retryOutputTail
+                        } else {
+                          envSkip = true
+                        }
+                      } else {
+                        envSkip = true
+                      }
+                      if (envSkip) {
+                        yield* Effect.logInfo("turn_probe_engine_env_skip", {
+                          "session.id": sessionID,
+                          missingModule,
+                          retried,
+                        })
+                      }
                     }
-                    turnPinnedProbe = enginePin
-                    setPinnedProbe(sessionID, enginePin)
-                    yield* Effect.logInfo("turn_probe_pinned_engine", {
-                      "session.id": sessionID,
-                      probe: enginePin.probe.command,
-                      redExit: engineResult.exitCode,
-                      redTail: engineOutputTail,
-                    })
-                    // F14b — this engine-initiated pin skipped the fidelity
-                    // dispatch entirely (a live run showed both engine pins
-                    // firing zero fidelity markers): share the same
-                    // dispatch the SM4 probe-from-red site uses above.
-                    const engineFidelityIssueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
-                      .map((p) => (p.type === "text" ? p.text : ""))
-                      .filter(Boolean)
-                      .join("\n")
-                    const engineFidelityResult = yield* dispatchPinnedReproFidelity({
-                      sessionID,
-                      cwd: ctx.directory,
-                      probeCommand: enginePin.probe.command,
-                      issueText: engineFidelityIssueText,
-                      lastUser,
-                    })
-                    if (engineFidelityResult.gap) continue
+                    // F15c — pin-blocking teeth: refuse (never pin) a
+                    // repro-script whose content on disk can never fail —
+                    // same discipline as the SM4 probe-from-red site above.
+                    const toothlessScript = envSkip ? undefined : toothlessPinScript(ctx.directory, finalCommand)
+                    if (toothlessScript) {
+                      yield* Effect.logInfo("turn_probe_toothless_skip", {
+                        "session.id": sessionID,
+                        script: toothlessScript,
+                      })
+                      if (!toothlessPinNudgedThisTurn) {
+                        toothlessPinNudgedThisTurn = true
+                        const toothlessNudge: SessionV1.User = {
+                          id: MessageID.ascending(),
+                          sessionID,
+                          role: "user",
+                          time: { created: Date.now() },
+                          agent: lastUser.agent,
+                          model: lastUser.model,
+                        }
+                        yield* sessions.updateMessage(toothlessNudge)
+                        yield* sessions.updatePart({
+                          id: PartID.ascending(),
+                          messageID: toothlessNudge.id,
+                          sessionID,
+                          type: "text",
+                          text: toothlessReproNudgeText(toothlessScript),
+                          synthetic: true,
+                        } satisfies SessionV1.TextPart)
+                      }
+                    } else if (!envSkip) {
+                      const enginePin = {
+                        probe: { kind: "test" as const, command: finalCommand },
+                        redEvidence: { exitCode: finalResult.exitCode, outputTail: finalOutputTail },
+                      }
+                      turnPinnedProbe = enginePin
+                      setPinnedProbe(sessionID, enginePin)
+                      yield* Effect.logInfo("turn_probe_pinned_engine", {
+                        "session.id": sessionID,
+                        probe: enginePin.probe.command,
+                        redExit: finalResult.exitCode,
+                        redTail: finalOutputTail,
+                      })
+                      // F14b — this engine-initiated pin skipped the fidelity
+                      // dispatch entirely (a live run showed both engine pins
+                      // firing zero fidelity markers): share the same
+                      // dispatch the SM4 probe-from-red site uses above.
+                      const engineFidelityIssueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                        .map((p) => (p.type === "text" ? p.text : ""))
+                        .filter(Boolean)
+                        .join("\n")
+                      const engineFidelityResult = yield* dispatchPinnedReproFidelity({
+                        sessionID,
+                        cwd: ctx.directory,
+                        probeCommand: enginePin.probe.command,
+                        issueText: engineFidelityIssueText,
+                        lastUser,
+                      })
+                      if (engineFidelityResult.gap) continue
+                    }
                   }
                 }
               }
@@ -2738,21 +2897,33 @@ export const layer = Layer.effect(
                   // logs one marker and skips the gate entirely rather than
                   // reject-nudging on a false-red environment failure.
                   if (turnDiscoveredInterpreter === undefined) {
-                    const firstEditSegments = landedSourceEditFiles[0].split("/")
-                    const topLevelPackage = firstEditSegments[0] === "src" ? firstEditSegments[1] ?? firstEditSegments[0] : firstEditSegments[0]
-                    turnDiscoveredInterpreter = yield* Effect.promise(() =>
-                      discoverProjectInterpreter({
-                        cwd: process.cwd(),
-                        topLevelPackage,
-                        runner: makeShellCommandRunner({ timeoutMs: 5000 }),
-                      }),
-                    )
-                    if (turnDiscoveredInterpreter === null) {
+                    const topLevelPackage = deriveTopLevelPackage(landedSourceEditFiles[0], process.cwd())
+                    if (!topLevelPackage) {
+                      // No usable package name (e.g. an empty edit path) —
+                      // skip discovery rather than probe garbage, and cache
+                      // the miss so this doesn't retry every neighbor check.
                       yield* Effect.logWarning("turn_regression_env", {
                         "session.id": sessionID,
-                        package: topLevelPackage,
-                        probed: projectInterpreterCandidateCount(process.cwd()),
+                        package: "",
+                        probed: 0,
+                        reason: "no-package",
                       })
+                      turnDiscoveredInterpreter = null
+                    } else {
+                      turnDiscoveredInterpreter = yield* Effect.promise(() =>
+                        discoverProjectInterpreter({
+                          cwd: process.cwd(),
+                          topLevelPackage,
+                          runner: makeShellCommandRunner({ timeoutMs: 5000 }),
+                        }),
+                      )
+                      if (turnDiscoveredInterpreter === null) {
+                        yield* Effect.logWarning("turn_regression_env", {
+                          "session.id": sessionID,
+                          package: topLevelPackage,
+                          probed: projectInterpreterCandidateCount(process.cwd()),
+                        })
+                      }
                     }
                   }
                   if (turnDiscoveredInterpreter !== null) {

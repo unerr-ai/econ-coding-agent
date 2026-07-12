@@ -52,6 +52,8 @@ Check exactly three things:
 (b) QUOTE COVERAGE — every behavior or expression the issue text explicitly quotes (a literal expression, attribute access, or stated value) has its own dedicated assert. A repro that only checks a downstream effect of a quoted expression, without asserting the expression itself, is a gap.
 (c) TARGET FIDELITY — every assert calls the exact object, method, or function the issue names, not only something that merely happens as a side effect of it.
 
+Every gap must quote the issue's own exact expression or stated value — never invent an expectation the issue text does not state; when the issue names no concrete expected value for something, omit that gap entirely rather than assert one.
+
 Output exactly this JSON shape and nothing else:
 {"faithful":true,"gaps":[]}
 or, when (a), (b), or (c) fails:

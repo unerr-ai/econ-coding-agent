@@ -17,6 +17,7 @@ import {
   discoverProjectInterpreter,
   projectInterpreterCandidateCount,
   rewriteInterpreter,
+  deriveTopLevelPackage,
 } from "../../src/session/regression-neighbors"
 
 const dirs: string[] = []
@@ -246,5 +247,29 @@ describe("rewriteInterpreter", () => {
   it("leaves a non-python command untouched", () => {
     const result = rewriteInterpreter(["bun test packages/foo"], "/repo/.venv/bin/python")
     expect(result).toEqual(["bun test packages/foo"])
+  })
+})
+
+describe("deriveTopLevelPackage", () => {
+  const cwd = "/testbed"
+
+  it("relativizes an absolute path under cwd, then takes the first segment", () => {
+    expect(deriveTopLevelPackage("/testbed/django/db/models/deletion.py", cwd)).toBe("django")
+  })
+
+  it("takes the first segment of an already-relative path", () => {
+    expect(deriveTopLevelPackage("django/db/models/deletion.py", cwd)).toBe("django")
+  })
+
+  it("applies the existing src/<pkg> second-segment rule", () => {
+    expect(deriveTopLevelPackage("src/pkg/x.py", cwd)).toBe("pkg")
+  })
+
+  it("falls back to the first non-empty segment for an absolute path outside cwd", () => {
+    expect(deriveTopLevelPackage("/other/pkg/x.py", cwd)).toBe("other")
+  })
+
+  it("returns undefined for an empty file path", () => {
+    expect(deriveTopLevelPackage("", cwd)).toBeUndefined()
   })
 })

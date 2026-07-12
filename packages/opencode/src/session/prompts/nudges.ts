@@ -141,5 +141,17 @@ export function pinGreenFinishNudgeText(probeCommand: string): string {
  */
 export function reproFidelityNudgeText(gaps: string[]): string {
   const list = gaps.map((gap) => `- ${gap}`).join("\n")
-  return `Your pinned reproduction misses part of the issue's real expectation:\n${list}\nA green fix can still fail the real grader while these gaps stand — a rendered/serialized/printed value can look right even when the underlying type or object is wrong, and an expression the issue explicitly names needs its own assert, not just a downstream effect. Add the missing asserts to the pinned reproduction file now, re-run it, and confirm it is STILL RED on the unpatched code for these NEW asserts too before you continue.`
+  return `Your pinned reproduction misses part of the issue's real expectation:\n${list}\nA green fix can still fail the real grader while these gaps stand — a rendered/serialized/printed value can look right even when the underlying type or object is wrong, and an expression the issue explicitly names needs its own assert, not just a downstream effect. Add the missing asserts to the pinned reproduction file now, re-run it, and confirm it is STILL RED on the unpatched code for these NEW asserts too before you continue. Verify each gap above against the issue text yourself first — ignore any gap here that asserts something the issue itself does not state.`
+}
+
+/**
+ * F15c — toothless-repro nudge: prompt.ts's pin sites inject this once, when
+ * the about-to-be-pinned repro script has no assertion teeth
+ * (`hasAssertionTeeth` in repro-fidelity-judge.ts) — a print-only script that
+ * always exits 0 can never fail, so it forms an unfalsifiable verification
+ * contract and the pin is refused rather than landed. Names the one concrete
+ * fix rather than a generic "verify better."
+ */
+export function toothlessReproNudgeText(script: string): string {
+  return `Your reproduction script (\`${script}\`) only prints — it can never fail, so it was not pinned. Add an assertion (or a non-zero exit) that fails while the bug is present, run it again, and it will be pinned.`
 }
