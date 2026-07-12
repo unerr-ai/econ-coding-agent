@@ -32,3 +32,28 @@ JOB 2 — REPORT EVIDENCE, one "evidence" object per goal whose shape is diagnos
 
 Output exactly this JSON shape and nothing else ("evidence" only on diagnosis-shaped goals):
 {"goals":[{"quote":"...","shape":"...","deliverable":"...","dependsOn":[0],"needsPlan":false,"evidence":{"locationNamed":false,"locationQuote":"","fixSpecified":false,"fixQuote":"","hardness":"moderate","ambiguity":"clear"}}],"constraints":[{"quote":"...","kind":"..."}],"confidence":"high","turnRole":"fresh"}`
+
+// F9a — the repro-fidelity judge's system prompt (repro-fidelity-judge.ts):
+// fires once, at pin time, on the reproduction the engine just pinned as the
+// turn's verification contract. A repro can pin HONESTLY (it does fail on the
+// unpatched code) while still asserting the WRONG expectation — a
+// rendered/serialized surface that hides the real type, or a downstream
+// effect instead of the exact expression the issue names — so a green fix
+// still fails the real grader. The judge reports facts only; it never decides
+// whether to nudge (the caller, prompt.ts, owns that).
+
+/** Stable, single-line prefix of `REPRO_FIDELITY_SYSTEM_PROMPT` — lets a scripted LLM stub in tests recognize a repro-fidelity request by its system message without duplicating the full prompt text. */
+export const REPRO_FIDELITY_PROMPT_MARKER = "You are the repro-fidelity judge"
+
+export const REPRO_FIDELITY_SYSTEM_PROMPT = `${REPRO_FIDELITY_PROMPT_MARKER}. You are given an ISSUE (the user's request) and the PINNED REPRODUCTION script that is this turn's verification contract. Decide whether the reproduction's asserts actually pin the issue's real expectation. Output JSON only — no prose, no markdown fences, no commentary.
+
+Check exactly three things:
+(a) TYPE FIDELITY — every assert compares an API-level value with == against its exact type (int, bool, the real object), never a rendered, serialized, printed, templated, or HTML form of it. Asserting on markup or a str()/repr() surface when the issue is about the underlying value is a gap.
+(b) QUOTE COVERAGE — every behavior or expression the issue text explicitly quotes (a literal expression, attribute access, or stated value) has its own dedicated assert. A repro that only checks a downstream effect of a quoted expression, without asserting the expression itself, is a gap.
+(c) TARGET FIDELITY — every assert calls the exact object, method, or function the issue names, not only something that merely happens as a side effect of it.
+
+Output exactly this JSON shape and nothing else:
+{"faithful":true,"gaps":[]}
+or, when (a), (b), or (c) fails:
+{"faithful":false,"gaps":["<one concrete missing assert, <=120 chars>"]}
+At most 3 gaps. Each gap must name the CONCRETE missing assert (the value/expression/object it should check), never a vague restatement.`

@@ -126,3 +126,20 @@ export function convergeNowNudgeText(steps: number): string {
 export function pinGreenFinishNudgeText(probeCommand: string): string {
   return `Your pinned reproduction (\`${probeCommand}\`) ran GREEN after your source fix — the verification contract for this turn is satisfied, and the done-gate will re-run it to confirm. STOP verifying: do not run more suites or probes. Leave the repro file exactly where it is (it is untracked and never enters the patch). Give your final answer now.`
 }
+
+/**
+ * F9a — repro-fidelity nudge: prompt.ts's SM4 pin-from-red site injects this
+ * once, when the repro-fidelity judge (repro-fidelity-judge.ts) reports
+ * `faithful:false` on the reproduction just pinned. Names the concrete gaps,
+ * why a green fix can still fail the real grader anyway (a
+ * rendered/serialized/printed value can look right while the underlying
+ * type or object is wrong, and a quoted expression with no dedicated assert
+ * is silently unverified), and the one action to take: add the missing
+ * asserts, re-run the repro, and confirm it is STILL RED on the unpatched
+ * code for the NEW asserts too — a repro edited after the fix can only ever
+ * run green.
+ */
+export function reproFidelityNudgeText(gaps: string[]): string {
+  const list = gaps.map((gap) => `- ${gap}`).join("\n")
+  return `Your pinned reproduction misses part of the issue's real expectation:\n${list}\nA green fix can still fail the real grader while these gaps stand — a rendered/serialized/printed value can look right even when the underlying type or object is wrong, and an expression the issue explicitly names needs its own assert, not just a downstream effect. Add the missing asserts to the pinned reproduction file now, re-run it, and confirm it is STILL RED on the unpatched code for these NEW asserts too before you continue.`
+}

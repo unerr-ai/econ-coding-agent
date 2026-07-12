@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import path from "path"
+import { existsSync, readFileSync } from "node:fs"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -35,8 +36,14 @@ import {
   REPRO_DRIFT_ESCALATION_NUDGE,
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
+  reproFidelityNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
+import {
+  runReproFidelityJudge,
+  DEGRADED_REPRO_FIDELITY,
+  type ReproFidelityComplete,
+} from "./repro-fidelity-judge"
 import { triagePreamble } from "./prompts/preambles"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
@@ -279,6 +286,26 @@ function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: stri
     found.push({ file: m[1]!, reason: (nl === -1 ? output : output.slice(0, nl)).trim() })
   }
   return found
+}
+
+/** F9a — cap on the pinned repro file read for the fidelity judge: a runaway/huge scratch file must never blow the judge's prompt budget. */
+const REPRO_FIDELITY_MAX_FILE_BYTES = 8 * 1024
+
+/**
+ * F9a — read the pinned repro script off disk for the fidelity judge,
+ * capped at `REPRO_FIDELITY_MAX_FILE_BYTES`. A missing file (deleted, never
+ * written, or a read error) returns `undefined` — the caller skips the
+ * judge silently, never blocking the pin.
+ */
+function readPinnedReproFile(cwd: string, filename: string): string | undefined {
+  const target = path.join(cwd, filename)
+  if (!existsSync(target)) return undefined
+  try {
+    const raw = readFileSync(target, "utf8")
+    return raw.length > REPRO_FIDELITY_MAX_FILE_BYTES ? raw.slice(0, REPRO_FIDELITY_MAX_FILE_BYTES) : raw
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -572,6 +599,36 @@ export const layer = Layer.effect(
       // formerly-silent extraction flake decodable from the run log.
       if (parseRetried) yield* Effect.logInfo("turn_read_retry", { reason: "parse", tier })
       return verdict
+    })
+
+    /**
+     * F9a — the repro-fidelity judge's ONE dispatch: a tool-free,
+     * temperature-0, forced-JSON completion on the executor tier (cheapest —
+     * this is a narrow, single-question check, not turn-open extraction).
+     * The caller (the SM4 pin-from-red site) fires this at most once per
+     * turn. An unresolvable model/language degrades to
+     * `DEGRADED_REPRO_FIDELITY` the same as a thrown completion — a
+     * housekeeping read never blocks the pin.
+     *
+     * @sem domain=routing role=repro-judge
+     */
+    const reproFidelityDispatch = Effect.fn("SessionPrompt.reproFidelityDispatch")(function* (input: {
+      issueText: string
+      reproContent: string
+    }) {
+      const { issueText, reproContent } = input
+      const m = resolveSliceModel("executor")
+      const mdl = Option.getOrUndefined(
+        yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
+      )
+      if (!mdl) return DEGRADED_REPRO_FIDELITY
+      const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
+      if (!language) return DEGRADED_REPRO_FIDELITY
+      const complete: ReproFidelityComplete = async ({ system, user }) => {
+        const out = await generateText({ model: language, system, prompt: user, maxOutputTokens: 512, temperature: 0 })
+        return out.text.trim() || (out.reasoningText ?? "")
+      }
+      return yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, complete }))
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1612,6 +1669,9 @@ export const layer = Layer.effect(
         let pinObservedGreen = false
         let pinGreenSteps = 0
         let pinGreenNudgeFired = false
+        // F9a — repro-fidelity judge fires at most once per turn, right at
+        // the pin-from-red site below.
+        let reproFidelityJudgedThisTurn = false
         // S3 — whether this turn's pin came from the P4 continuation store
         // (restored at turn open) rather than being authored/observed this
         // turn. An inherited pin + no new source edits is a legitimate
@@ -1712,6 +1772,50 @@ export const layer = Layer.effect(
                   redExit: turnPinnedProbe.redEvidence?.exitCode ?? null,
                   redTail: turnPinnedProbe.redEvidence?.outputTail ?? null,
                 })
+                // F9a — repro-fidelity judge: fires at most once per turn,
+                // right here at pin time, and only when the pin names a
+                // script file (an inline/whole-suite probe has no file to
+                // check). A missing file skips the judge silently; a
+                // `faithful:false` verdict logs the gaps and injects ONE
+                // nudge — this never blocks the pin, never re-fires.
+                if (!reproFidelityJudgedThisTurn) {
+                  const fidelityScriptFilename = extractScriptFilename(turnPinnedProbe.probe.command)
+                  if (fidelityScriptFilename) {
+                    reproFidelityJudgedThisTurn = true
+                    const reproContent = readPinnedReproFile(ctx.directory, fidelityScriptFilename)
+                    if (reproContent !== undefined) {
+                      const issueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                        .map((p) => (p.type === "text" ? p.text : ""))
+                        .filter(Boolean)
+                        .join("\n")
+                      const fidelityVerdict = yield* reproFidelityDispatch({ issueText, reproContent })
+                      if (!fidelityVerdict.faithful) {
+                        yield* Effect.logInfo("repro_fidelity_gap", {
+                          "session.id": sessionID,
+                          gaps: fidelityVerdict.gaps,
+                        })
+                        const fidelityNudge: SessionV1.User = {
+                          id: MessageID.ascending(),
+                          sessionID,
+                          role: "user",
+                          time: { created: Date.now() },
+                          agent: lastUser.agent,
+                          model: lastUser.model,
+                        }
+                        yield* sessions.updateMessage(fidelityNudge)
+                        yield* sessions.updatePart({
+                          id: PartID.ascending(),
+                          messageID: fidelityNudge.id,
+                          sessionID,
+                          type: "text",
+                          text: reproFidelityNudgeText([...fidelityVerdict.gaps]),
+                          synthetic: true,
+                        } satisfies SessionV1.TextPart)
+                        continue
+                      }
+                    }
+                  }
+                }
               } else {
                 // S8 — pin-miss observability: django-11790 strict run #3 hit
                 // a red run of a named repro file that did NOT pin, and the
