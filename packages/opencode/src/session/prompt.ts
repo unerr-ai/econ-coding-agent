@@ -2776,7 +2776,7 @@ export const layer = Layer.effect(
                   messageID: hubNudge.id,
                   sessionID,
                   type: "text",
-                  text: hubDesignDegradedNudgeText(bouncedHubFiles),
+                  text: hubDesignDegradedNudgeText(bouncedHubFiles, hubEditDefiningFiles(sessionID)),
                   synthetic: true,
                 } satisfies SessionV1.TextPart)
               }

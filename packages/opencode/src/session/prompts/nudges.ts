@@ -62,10 +62,16 @@ export function hubDesignVerdictNudgeText(
  * degrades (model/language unresolved, or the judge itself produced no
  * verdict): no design to hand back, so the nudge falls back to asking the
  * model to re-derive the fix site itself under the same never-a-coercion
- * constraint the judge would otherwise have enforced.
+ * constraint the judge would otherwise have enforced. Wave 8d: when the
+ * session's defining-file allowlist has resolved, the nudge names those
+ * candidates concretely instead of asking the model to re-derive them.
  */
-export function hubDesignDegradedNudgeText(bouncedFiles: string[]): string {
-  return `Your edits have twice landed on shared hub modules (${bouncedFiles.join(", ")}) — that is symptom-layer avoidance. Re-derive the fix site yourself before any further edit: name the module that DEFINES the misbehaving class or function the issue names, and fix its behavior THERE — never a coercion at a consumption site.`
+export function hubDesignDegradedNudgeText(bouncedFiles: string[], rootMostCandidates: readonly string[] = []): string {
+  const opening = `Your edits have twice landed on shared hub modules (${bouncedFiles.join(", ")}) — that is symptom-layer avoidance. `
+  if (rootMostCandidates.length === 0) {
+    return `${opening}Re-derive the fix site yourself before any further edit: name the module that DEFINES the misbehaving class or function the issue names, and fix its behavior THERE — never a coercion at a consumption site.`
+  }
+  return `${opening}Per the code graph, the symbols this issue names are defined in: ${rootMostCandidates.join(", ")}. The root-most of these is the fix site — fix the misbehaving class or function's own behavior THERE, never a coercion at a consumption site.`
 }
 
 /**

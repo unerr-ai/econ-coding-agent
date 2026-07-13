@@ -408,6 +408,28 @@ describe("Wave 5 — hubEditDenialMessage", () => {
     const msg = hubEditDenialMessage("django/db/models/base.py", 42)
     expect(msg).toContain("DIFFERENT shared file")
   })
+
+  it("wave 8d: lists the resolved root-most candidates when provided", () => {
+    const msg = hubEditDenialMessage("django/db/models/fields/__init__.py", 26, [
+      "django/db/models/enums.py",
+      "django/db/models/base.py",
+    ])
+    expect(msg).toContain("Per the code graph, the symbols this issue names are defined in:")
+    expect(msg).toContain("django/db/models/enums.py")
+    expect(msg).toContain("django/db/models/base.py")
+    expect(msg).toContain("root-most fix site is one of these")
+  })
+
+  it("wave 8d: byte-identical to the legacy message when no candidates are given", () => {
+    const msg = hubEditDenialMessage("django/db/models/base.py", 42)
+    expect(msg).toBe(
+      "42 other modules import django/db/models/base.py directly — it is shared infrastructure. " +
+        "A behavior fix belongs at the root-most layer: the module that DEFINES the class or function the issue names, not a shared file every consumer flows through. " +
+        "Re-check where that behavior is defined and prefer fixing there. " +
+        "Moving the same change to a DIFFERENT shared file is not the fix — the defining module is. " +
+        "If this hub file genuinely is the root-most layer, re-issue this exact edit and it will be allowed.",
+    )
+  })
 })
 
 describe("Wave 6 — hubEditBouncedFiles", () => {
@@ -829,6 +851,7 @@ describe("Wave 8c — evaluateHubEditGate applies the band filter to resolved si
     expect(result.action).toBe("deny")
     if (result.action === "deny") {
       expect(result.importers).toBe(26)
+      expect(result.message).toContain("django/db/models/enums.py")
     }
   })
 })

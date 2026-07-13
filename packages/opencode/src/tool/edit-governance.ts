@@ -403,14 +403,18 @@ export function hubEditDefiningResolved(sessionID: string): boolean {
   return hubEditDefiningResolvedSet.has(sessionID)
 }
 
-/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. */
-export function hubEditDenialMessage(relPath: string, importers: number): string {
-  return (
+/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining sites concretely instead of leaving the model to re-derive them. */
+export function hubEditDenialMessage(relPath: string, importers: number, rootMostCandidates: readonly string[] = []): string {
+  const base =
     `${importers} other modules import ${relPath} directly — it is shared infrastructure. ` +
     `A behavior fix belongs at the root-most layer: the module that DEFINES the class or function the issue names, not a shared file every consumer flows through. ` +
     `Re-check where that behavior is defined and prefer fixing there. ` +
     `Moving the same change to a DIFFERENT shared file is not the fix — the defining module is. ` +
     `If this hub file genuinely is the root-most layer, re-issue this exact edit and it will be allowed.`
+  if (rootMostCandidates.length === 0) return base
+  return (
+    base +
+    ` Per the code graph, the symbols this issue names are defined in: ${rootMostCandidates.join(", ")} — the root-most fix site is one of these; fix the behavior there.`
   )
 }
 
@@ -517,8 +521,11 @@ export async function bandFilterDefiningSites(
  * pattern as callersAtRiskWarning: timeout/throw/cold graph → allow, never
  * block on a cold graph); a fan-in clearing HUB_IMPORTER_THRESHOLD records
  * the file as bounced (so an identical retry passes) and denies with the
- * root-most-layer redirect message. Logging-free by design — edit.ts/write.ts
- * log at the call site, inside their own Effect.
+ * root-most-layer redirect message, enumerating the session's resolved
+ * defining-file allowlist in that message when one exists (Wave 8d) so the
+ * model gets concrete candidates instead of having to re-derive them.
+ * Logging-free by design — edit.ts/write.ts log at the call site, inside
+ * their own Effect.
  *
  * @sem domain=intelligence role=analysis
  */
@@ -597,7 +604,11 @@ export async function evaluateHubEditGate(opts: {
 
     if (!hubEditBounced.has(opts.sessionID)) hubEditBounced.set(opts.sessionID, new Set())
     hubEditBounced.get(opts.sessionID)!.add(opts.filePath)
-    return { action: "deny", message: hubEditDenialMessage(opts.filePath, importers), importers }
+    return {
+      action: "deny",
+      message: hubEditDenialMessage(opts.filePath, importers, hubEditDefiningFiles(opts.sessionID)),
+      importers,
+    }
   } catch {
     return { action: "allow" }
   }

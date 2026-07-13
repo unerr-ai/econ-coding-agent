@@ -402,6 +402,23 @@ describe("Wave 7 — hubDesignDegradedNudgeText", () => {
     expect(text.toLowerCase()).toContain("defines")
     expect(text.toLowerCase()).toContain("coercion")
   })
+
+  it("wave 8d: without candidates, text is unchanged (still asks the model to re-derive)", () => {
+    const text = hubDesignDegradedNudgeText(["hub_a.py", "hub_b.py"])
+    expect(text).toBe(
+      "Your edits have twice landed on shared hub modules (hub_a.py, hub_b.py) — that is symptom-layer avoidance. Re-derive the fix site yourself before any further edit: name the module that DEFINES the misbehaving class or function the issue names, and fix its behavior THERE — never a coercion at a consumption site.",
+    )
+  })
+
+  it("wave 8d: with candidates, names them and drops the re-derive-yourself instruction", () => {
+    const text = hubDesignDegradedNudgeText(["hub_a.py", "hub_b.py"], ["django/db/models/enums.py"])
+    expect(text).toContain("hub_a.py")
+    expect(text).toContain("hub_b.py")
+    expect(text).toContain("Per the code graph, the symbols this issue names are defined in:")
+    expect(text).toContain("django/db/models/enums.py")
+    expect(text.toLowerCase()).not.toContain("re-derive the fix site yourself")
+    expect(text.toLowerCase()).toContain("coercion")
+  })
 })
 
 // -- stuckNudgeText ---------------------------------------------------------
