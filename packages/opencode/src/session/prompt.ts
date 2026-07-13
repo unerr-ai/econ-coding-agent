@@ -35,6 +35,9 @@ import {
   hubEditGateArmed,
   hubEditBouncedFiles,
   hubEditDefiningFiles,
+  setHubEditIssueText,
+  hubEditIssueText,
+  hubEditDefiningResolved,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
@@ -3342,26 +3345,33 @@ export const layer = Layer.effect(
               setNoEditsGate(sessionID, noEditsGateArmed(session.parentID))
               // Hub-edit bounce gate: child sessions inherit the parent's
               // armed state exactly like the no-edits gate — no prompt
-              // condition, no per-turn re-derivation. Also inherit the
-              // parent's defining-file allowlist so a dispatched slice gets
-              // the same redirect-doctrine bypass the root turn computed.
-              setHubEditGate(sessionID, hubEditGateArmed(session.parentID), hubEditDefiningFiles(session.parentID))
+              // condition, no per-turn re-derivation. If the parent's
+              // defining-file allowlist has already resolved, inherit it
+              // wholesale (no lazy re-resolution needed); otherwise inherit
+              // just the parent's stored issue text so the child's own first
+              // gate evaluation resolves it lazily too.
+              if (hubEditDefiningResolved(session.parentID)) {
+                setHubEditGate(sessionID, hubEditGateArmed(session.parentID), hubEditDefiningFiles(session.parentID))
+              } else {
+                setHubEditGate(sessionID, hubEditGateArmed(session.parentID))
+                const parentIssueText = hubEditIssueText(session.parentID)
+                if (parentIssueText !== undefined) setHubEditIssueText(sessionID, parentIssueText)
+              }
             } else {
               const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
               // Hub-edit bounce gate: root sessions arm unconditionally every
               // turn — unlike the no-test-edit gate this doesn't depend on
               // any prompt-derived fix-shaped signal. Defining-file
-              // allowlist: the graph's definition sites for symbols the
-              // issue names are computed once here so a first edit that
-              // lands exactly on the module the redirect doctrine names as
-              // the fix site is never bounced (django/contrib/auth/forms.py,
-              // ddl_references.py forensics).
-              const definingSites = yield* Effect.promise(() => issueSymbolDefinitionSites(userText))
-              setHubEditGate(
-                sessionID,
-                true,
-                definingSites.map((s) => s.file),
-              )
+              // allowlist: resolved LAZILY at first gate evaluation
+              // (evaluateHubEditGate), not here — turn-open's graph is cold
+              // on a fresh repo (initial index ~12s vs. the 3s probe budget
+              // this used to race), so the eager version always resolved
+              // empty and the feature was provably inert
+              // (django/contrib/auth/forms.py, ddl_references.py forensics).
+              // Store the issue text so the lazy resolver has something to
+              // resolve once the graph has had a chance to warm.
+              setHubEditGate(sessionID, true)
+              setHubEditIssueText(sessionID, userText)
 
               // The turn-read runs on every root turn open (always-on, no
               // feature flag); TurnOpenCalls is the test-only off switch so

@@ -22,7 +22,7 @@ import {
   type EditImpactGraph,
 } from "@opencode-ai/code-intelligence"
 import type { StuckSignal } from "../../../code-intelligence/src/orchestration-fsm"
-import { getGraph } from "./graph-tools"
+import { getGraph, issueSymbolDefinitionSitesIfReady } from "./graph-tools"
 import { RSK_CALLER_THRESHOLD } from "./graph-tools-enrich"
 
 /**
@@ -314,13 +314,32 @@ export async function callersAtRiskWarning(
 /** How many distinct importer files make a python/ts/js file a "hub" the bounce gate fires on — see docs/architecture measurement (django: base.py=3, fields/__init__.py=18, enums.py=1). */
 const HUB_IMPORTER_THRESHOLD = 3
 
+/**
+ * Wave 8c — among the defining modules an issue names, the root-most
+ * (least-imported) band is the plausible fix layer; a co-named module
+ * several times more central is infrastructure the issue merely mentions
+ * (e.g. a repro model's `CharField` resolves to
+ * django/db/models/fields/__init__.py, fanIn 26, alongside `TextChoices` →
+ * enums.py, fanIn 1 — only enums.py is the root-most fix layer). Measured
+ * floor across the 5 probe instances: pollutant sites are always ≥3.7× the
+ * minimum resolved fan-in, and the gold fix site is always the minimum
+ * itself — see `bandFilterDefiningSites`.
+ */
+const DEFINING_SITE_ROOTMOST_BAND = 3
+
 const hubEditGate = new Set<string>()
 
 /** Per-session set of file paths already bounced once — an identical retry on the same file passes. */
 const hubEditBounced = new Map<string, Set<string>>()
 
-/** Per-session set of graph-reported defining-module paths for the symbols the issue names (from `issueSymbolDefinitionSites`, computed once at root turn-open and inherited by child sessions) — an edit landing on one of these is the redirect doctrine's own answer, so `evaluateHubEditGate` allows it even over the fan-in threshold. Cleared whenever the gate disarms. */
+/** Per-session set of graph-reported defining-module paths for the symbols the issue names (from `issueSymbolDefinitionSites`/`issueSymbolDefinitionSitesIfReady`, resolved either at arming time — a child inheriting an already-resolved parent, or a test — or lazily at first gate evaluation, see `evaluateHubEditGate`) — an edit landing on one of these is the redirect doctrine's own answer, so `evaluateHubEditGate` allows it even over the fan-in threshold. Cleared whenever the gate disarms. */
 const hubEditDefiningFilesStore = new Map<string, Set<string>>()
+
+/** Per-session stored turn issue text — set alongside arming (root turn-open, or a child inheriting an unresolved parent's text) so `evaluateHubEditGate`'s lazy resolver has something to resolve once the graph has had a chance to warm. Cleared on disarm. */
+const hubEditIssueTextStore = new Map<string, string>()
+
+/** Session IDs whose defining-file allowlist resolution has completed — either supplied directly at arming time or resolved lazily by `evaluateHubEditGate`. Once a session is in this set the resolver is never called again for it (memoized). Cleared on disarm. Kept private — read through `hubEditDefiningResolved` so the accessor name doesn't collide with the Set itself. */
+const hubEditDefiningResolvedSet = new Set<string>()
 
 /** The session's bounced file set as an array (insertion order) — empty for an unknown or never-bounced session. Read by prompt.ts's hub-shopping trigger to detect a second DISTINCT bounced file in one turn (the tell that the model is moving the same fix to another hub instead of reconsidering where it belongs). */
 export function hubEditBouncedFiles(sessionID: string): string[] {
@@ -330,19 +349,32 @@ export function hubEditBouncedFiles(sessionID: string): string[] {
 /**
  * Arm or disarm the hub-edit bounce gate for a session — set once per turn
  * at turn open (root sessions decide unconditionally; child sessions
- * inherit). `definingFiles`, when the gate arms, replaces the session's
- * stored defining-module allowlist wholesale (a fresh turn's graph read
- * fully supersedes the last); disarming clears it. Path shape is whatever
- * the caller passes as-is — matching against an edit's absolute filePath
- * happens later, in `evaluateHubEditGate`, via `pathsRefer`.
+ * inherit). Arming WITH `definingFiles` (a child inheriting an
+ * already-resolved parent, or a test) replaces the stored allowlist
+ * wholesale and marks the session resolved immediately. Arming WITHOUT it
+ * (the common root-turn-open case now that resolution is lazy — see
+ * `evaluateHubEditGate`) starts the session with an empty allowlist and
+ * leaves it UNRESOLVED, so the first gate evaluation attempts the real
+ * resolution once the graph has had a chance to warm. Disarming clears the
+ * allowlist, the stored issue text, and the resolved flag. Path shape is
+ * whatever the caller passes as-is — matching against an edit's absolute
+ * filePath happens later, in `evaluateHubEditGate`, via `pathsRefer`.
  */
 export function setHubEditGate(sessionID: string, armed: boolean, definingFiles?: readonly string[]): void {
   if (armed) {
     hubEditGate.add(sessionID)
-    hubEditDefiningFilesStore.set(sessionID, new Set(definingFiles ?? []))
+    if (definingFiles !== undefined) {
+      hubEditDefiningFilesStore.set(sessionID, new Set(definingFiles))
+      hubEditDefiningResolvedSet.add(sessionID)
+    } else {
+      hubEditDefiningFilesStore.set(sessionID, new Set())
+      hubEditDefiningResolvedSet.delete(sessionID)
+    }
   } else {
     hubEditGate.delete(sessionID)
     hubEditDefiningFilesStore.delete(sessionID)
+    hubEditIssueTextStore.delete(sessionID)
+    hubEditDefiningResolvedSet.delete(sessionID)
   }
 }
 
@@ -351,9 +383,24 @@ export function hubEditGateArmed(sessionID: string): boolean {
   return hubEditGate.has(sessionID)
 }
 
-/** The session's stored defining-file allowlist (insertion order) — empty for a session with none recorded. Read by prompt.ts's child-inherit arming call so a dispatched slice gets the same redirect-doctrine bypass the root turn computed. */
+/** The session's stored defining-file allowlist (insertion order) — empty for a session with none recorded. Read by prompt.ts's child-inherit arming call so a dispatched slice gets the same redirect-doctrine bypass the root turn computed (or resolved) already has. */
 export function hubEditDefiningFiles(sessionID: string): string[] {
   return Array.from(hubEditDefiningFilesStore.get(sessionID) ?? [])
+}
+
+/** Store the session's turn issue text for the hub-edit gate's lazy defining-file resolution — set alongside `setHubEditGate` at arming time (root turn-open) or inherited by a child from its parent's stored text when the parent hasn't resolved yet. */
+export function setHubEditIssueText(sessionID: string, issueText: string): void {
+  hubEditIssueTextStore.set(sessionID, issueText)
+}
+
+/** The session's stored turn issue text, if any — read by `evaluateHubEditGate`'s lazy resolver and by prompt.ts's child-inherit arming call. */
+export function hubEditIssueText(sessionID: string): string | undefined {
+  return hubEditIssueTextStore.get(sessionID)
+}
+
+/** Has the session's defining-file allowlist resolution completed — either supplied at arming time or resolved lazily by `evaluateHubEditGate`? Memoization guard: once true, the resolver is never called again for this session this turn. */
+export function hubEditDefiningResolved(sessionID: string): boolean {
+  return hubEditDefiningResolvedSet.has(sessionID)
 }
 
 /** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. */
@@ -390,13 +437,83 @@ export function pathsRefer(a: string, b: string): boolean {
 }
 
 /**
+ * Wave 8c — narrows a resolver's defining-site list down to the root-most
+ * band: the plausible fix layer among modules the issue text names, instead
+ * of every incidental symbol it happens to mention. `kind: "file"` sites (an
+ * explicit filename the issue text literally names) are the strongest
+ * evidence available — always kept, and excluded from the band computation.
+ * For the rest, deduped by file, `fanInOf` supplies each file's import
+ * count; a file whose `fanInOf` throws is treated as kept and excluded from
+ * the min computation (fail-open, consistent with the gate's philosophy:
+ * graph trouble must never block). With no computable fan-ins, everything is
+ * kept. Otherwise a file survives when its fan-in is at most
+ * `DEFINING_SITE_ROOTMOST_BAND` times the minimum resolved fan-in. Returns
+ * the kept files, file-kind sites first, insertion order preserved, deduped.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function bandFilterDefiningSites(
+  sites: ReadonlyArray<{ file: string; kind?: string }>,
+  fanInOf: (file: string) => number | Promise<number>,
+): Promise<string[]> {
+  const fileKindSites: string[] = []
+  const seenFileKind = new Set<string>()
+  const rest: string[] = []
+  const seenRest = new Set<string>()
+
+  for (const site of sites) {
+    if (site.kind === "file") {
+      if (!seenFileKind.has(site.file)) {
+        seenFileKind.add(site.file)
+        fileKindSites.push(site.file)
+      }
+    } else if (!seenFileKind.has(site.file) && !seenRest.has(site.file)) {
+      seenRest.add(site.file)
+      rest.push(site.file)
+    }
+  }
+
+  const fanIns = new Map<string, number>()
+  for (const file of rest) {
+    try {
+      fanIns.set(file, await fanInOf(file))
+    } catch {
+      // Fail open: an unresolvable fan-in never excludes a file, and never
+      // participates in the min computation below.
+    }
+  }
+
+  if (fanIns.size === 0) return [...fileKindSites, ...rest]
+
+  const min = Math.min(...Array.from(fanIns.values()))
+  const kept = rest.filter((file) => {
+    const fanIn = fanIns.get(file)
+    return fanIn === undefined || fanIn <= min * DEFINING_SITE_ROOTMOST_BAND
+  })
+
+  return [...fileKindSites, ...kept]
+}
+
+/**
  * The hub-edit bounce gate's ONE decision point. Not armed or a test file →
- * allow; a file matching the session's stored defining-file allowlist (see
- * `setHubEditGate`) → allow with `definingSite: true` — the redirect
- * doctrine's own answer, never bounced regardless of fan-in; a file already
- * bounced this session → allow with `retried: true` so the call site can log
- * the pass-through distinctly from a fresh allow. Otherwise races the
- * graph's fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS (same fail-open
+ * allow. Before consulting the defining-file allowlist: an unresolved
+ * session with stored issue text gets one lazy resolution attempt here (via
+ * `resolveDefiningSites`, default `issueSymbolDefinitionSitesIfReady`),
+ * raced against `GOVERNANCE_GRAPH_BUDGET_MS` — turn-open used to compute the
+ * allowlist eagerly against a cold graph (initial index ~12s on a fresh
+ * checkout vs. the old 3s probe budget) and it always resolved empty, so
+ * resolution now happens here instead, lazily, once the graph has had a
+ * chance to warm across the turn; a null/timeout/throw leaves the session
+ * unresolved so the NEXT evaluation retries, a non-null result passes
+ * through `bandFilterDefiningSites` (Wave 8c) before it replaces the stored
+ * allowlist and marks the session resolved (memoized — never re-resolved
+ * after that), so an incidental high-centrality symbol the issue merely
+ * mentions doesn't itself grant a hub bypass — only the root-most band does.
+ * A file matching the allowlist → allow with `definingSite: true` — the
+ * redirect doctrine's own answer, never bounced regardless of fan-in; a file
+ * already bounced this session → allow with `retried: true` so the call
+ * site can log the pass-through distinctly from a fresh allow. Otherwise
+ * races the graph's fileFanIn against the same budget (same fail-open
  * pattern as callersAtRiskWarning: timeout/throw/cold graph → allow, never
  * block on a cold graph); a fan-in clearing HUB_IMPORTER_THRESHOLD records
  * the file as bounced (so an identical retry passes) and denies with the
@@ -409,12 +526,51 @@ export async function evaluateHubEditGate(opts: {
   sessionID: string
   filePath: string
   graph?: HubFanInGraph
+  resolveDefiningSites?: (issueText: string) => Promise<Array<{ file: string; kind?: string }> | null>
 }): Promise<
   | { action: "allow"; retried?: boolean; definingSite?: boolean }
   | { action: "deny"; message: string; importers: number }
 > {
   if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
   if (isTestFilePath(opts.filePath)) return { action: "allow" }
+
+  // Hoisted once so both the lazy defining-site resolution below and the
+  // fan-in check further down share the same graph handle. getGraph() can
+  // throw (cold/unavailable graph) — caught here so it never escapes
+  // uncaught; a throw leaves `graph` undefined and both downstream uses
+  // fail open through their own try/catch when they dereference it.
+  let graph: HubFanInGraph | undefined
+  try {
+    graph = opts.graph ?? (getGraph() as unknown as HubFanInGraph)
+  } catch {
+    // graph stays undefined — downstream sections fail open.
+  }
+
+  if (!hubEditDefiningResolved(opts.sessionID)) {
+    const issueText = hubEditIssueTextStore.get(opts.sessionID)
+    if (issueText !== undefined) {
+      const resolveDefiningSites = opts.resolveDefiningSites ?? issueSymbolDefinitionSitesIfReady
+      try {
+        const timedOut = Symbol("hub-edit-defining-resolve-budget-timeout")
+        const budget = new Promise<typeof timedOut>((resolveBudget) =>
+          setTimeout(() => resolveBudget(timedOut), GOVERNANCE_GRAPH_BUDGET_MS),
+        )
+        const resolveAndFilter = async () => {
+          const sites = await resolveDefiningSites(issueText)
+          if (sites === null) return null
+          return bandFilterDefiningSites(sites, (file) => graph!.fileFanIn(file))
+        }
+        const result = await Promise.race([resolveAndFilter(), budget])
+        if (result !== timedOut && result !== null) {
+          hubEditDefiningFilesStore.set(opts.sessionID, new Set(result))
+          hubEditDefiningResolvedSet.add(opts.sessionID)
+        }
+      } catch {
+        // Leave unresolved — the graph is likely still cold; the next
+        // evaluation this turn retries once it's had more time to warm.
+      }
+    }
+  }
 
   const definingFiles = hubEditDefiningFilesStore.get(opts.sessionID)
   if (definingFiles) {
@@ -429,12 +585,11 @@ export async function evaluateHubEditGate(opts: {
   }
 
   try {
-    const graph = opts.graph ?? (getGraph() as unknown as HubFanInGraph)
     const timedOut = Symbol("hub-edit-gate-budget-timeout")
     const budget = new Promise<typeof timedOut>((resolve) =>
       setTimeout(() => resolve(timedOut), GOVERNANCE_GRAPH_BUDGET_MS),
     )
-    const result = await Promise.race([Promise.resolve(graph.fileFanIn(opts.filePath)), budget])
+    const result = await Promise.race([Promise.resolve(graph!.fileFanIn(opts.filePath)), budget])
     if (result === timedOut) return { action: "allow" }
 
     const importers = result

@@ -404,10 +404,24 @@ export async function probeTurnRisk(prompt: string, graph: BunSqliteGraph = getG
 const ISSUE_SYMBOL_EXTRACTION_CAP = 8
 /** At most this many graph matches kept per extracted symbol. */
 const ISSUE_SYMBOL_SITES_PER_SYMBOL = 2
+/** Graph search pool per symbol before quality filtering — wider than ISSUE_SYMBOL_SITES_PER_SYMBOL so the exact-name/test-path filter has candidates to choose from. */
+const ISSUE_SYMBOL_SEARCH_POOL = 8
+/** `issueSymbolDefinitionSitesIfReady`'s "ready right now?" budget — much tighter than RISK_PROBE_INDEX_BUDGET_MS since a miss just means "retry at the next gate evaluation", not "give up for the turn". */
+const ISSUE_SYMBOL_READY_BUDGET_MS = 50
 
 /** A bare lowercase word (no case transition, dot, or underscore) — dropped as prose, not a symbol reference. */
 function isPureLowercaseWord(token: string): boolean {
   return /^[a-z]+$/.test(token)
+}
+
+/** An ALL-CAPS bare token (letters/digits/underscore only, no dot) — a SQL keyword (CREATE, INDEX, WHERE) or acronym (HTML, RFC), not a symbol reference. Dotted tokens like `models.CASCADE` don't match — they contain a `.`. */
+function isAllCapsToken(token: string): boolean {
+  return /^[A-Z0-9_]+$/.test(token)
+}
+
+/** A bare domain name (code.djangoproject.com, github.com) — issue prose links to docs/issues, not code symbols. Lowercase dotted module paths (django.utils.http.parse_http_date) don't end in a TLD so they survive. */
+function isDomainToken(token: string): boolean {
+  return /^([a-z0-9-]+\.)+(com|org|net|io|dev|edu|gov)$/i.test(token)
 }
 
 /**
@@ -415,10 +429,13 @@ function isPureLowercaseWord(token: string): boolean {
  * grounding: backtick-quoted spans (taken verbatim — the issue text is
  * explicitly marking these as code) plus CamelCase/PascalCase or dotted
  * identifiers found in the plain prose, deduped case-insensitively with
- * pure-lowercase prose words dropped, capped at
- * `ISSUE_SYMBOL_EXTRACTION_CAP`. Exported standalone (no graph call) so it
- * unit-tests without an indexed repo; `issueSymbolDefinitionSites` below is
- * the half that resolves these to entities.
+ * pure-lowercase prose words, ALL-CAPS bare tokens (SQL keywords/acronyms —
+ * the CamelCase branch of the identifier regex matches these too, since it
+ * only requires an uppercase letter after zero-or-more lowercase/digit
+ * chars), and domain-like tokens (code.djangoproject.com) all dropped,
+ * capped at `ISSUE_SYMBOL_EXTRACTION_CAP`. Exported standalone (no graph
+ * call) so it unit-tests without an indexed repo; `issueSymbolDefinitionSites`
+ * below is the half that resolves these to entities.
  *
  * @sem domain=routing role=analysis
  */
@@ -428,6 +445,7 @@ export function extractIssueSymbols(issueText: string): string[] {
   const add = (raw: string) => {
     const token = raw.trim()
     if (!token || isPureLowercaseWord(token)) return
+    if (isAllCapsToken(token) || isDomainToken(token)) return
     const key = token.toLowerCase()
     if (seen.has(key)) return
     seen.add(key)
@@ -447,16 +465,65 @@ export function extractIssueSymbols(issueText: string): string[] {
   return out.slice(0, ISSUE_SYMBOL_EXTRACTION_CAP)
 }
 
+/** True when `file` lives under a `tests`/`test` directory segment or its basename starts with `test_` — dropped from definition-site resolution so a test's mere USE of a symbol never counts as the symbol's defining site. */
+function isTestLikePath(file: string): boolean {
+  if (/(^|\/)tests?(\/|$)/.test(file)) return true
+  const basename = file.split("/").pop() ?? file
+  return basename.startsWith("test_")
+}
+
 /**
- * Wave 7 — grounding for the hub-design judge (session/hub-design-judge.ts
- * via prompt.ts's `hubDesignDispatch`): resolves the issue text's candidate
- * symbols (`extractIssueSymbols`) to their defining entities in the code
- * graph, so the reasoner-tier design call gets concrete file/kind evidence
- * instead of guessing from prose alone. Races the same
- * `RISK_PROBE_INDEX_BUDGET_MS` budget `probeTurnRisk` uses — a cold or slow
- * index yields `[]` rather than stalling the hub-shopping trigger. Fully
- * defensive: any error, timeout, or empty extraction yields `[]`, never
- * throws — the caller degrades to the no-evidence nudge.
+ * Wave 8b — resolves ONE extracted symbol to its defining site(s), shared by
+ * `issueSymbolDefinitionSites` and `issueSymbolDefinitionSitesIfReady` so
+ * both apply the same precision rules (junk sites here grant a hub-gate
+ * bypass, so precision beats recall). A `.py`-shaped symbol (a literal
+ * filename the issue mentions) emits a `kind: "file"` site directly with no
+ * graph call — `pathsRefer`'s suffix match resolves it against absolute edit
+ * paths on its own. Otherwise searches the graph (`ISSUE_SYMBOL_SEARCH_POOL`
+ * candidates), drops test-like paths, and keeps ONLY entities whose name
+ * exactly equals the symbol's last dotted segment (a substring match like
+ * `AdminAuthenticationForm` for `AuthenticationForm` contributes nothing),
+ * capped at `ISSUE_SYMBOL_SITES_PER_SYMBOL`. A dotted symbol whose full-token
+ * search finds nothing retries once against just the last segment (resolves
+ * `django.db.backends.ddl_references.Columns` to the `Columns` class).
+ */
+async function resolveIssueSymbolSites(
+  symbol: string,
+  graph: BunSqliteGraph,
+): Promise<Array<{ symbol: string; kind: string; file: string }>> {
+  if (/^[\w./-]+\.py$/.test(symbol)) {
+    return [{ symbol, kind: "file", file: symbol }]
+  }
+  const lastSegment = symbol.includes(".") ? symbol.slice(symbol.lastIndexOf(".") + 1) : symbol
+  const search = async (query: string): Promise<Array<{ symbol: string; kind: string; file: string }>> => {
+    const matches = await graph.search(query, ISSUE_SYMBOL_SEARCH_POOL)
+    const out: Array<{ symbol: string; kind: string; file: string }> = []
+    for (const e of matches) {
+      if (isTestLikePath(e.filePath)) continue
+      if (e.name !== lastSegment) continue
+      out.push({ symbol, kind: e.kind, file: e.filePath })
+      if (out.length >= ISSUE_SYMBOL_SITES_PER_SYMBOL) break
+    }
+    return out
+  }
+  const fullTokenSites = await search(symbol)
+  if (fullTokenSites.length > 0) return fullTokenSites
+  if (symbol !== lastSegment) return search(lastSegment)
+  return []
+}
+
+/**
+ * Wave 7/8b — grounding for the hub-design judge (session/hub-design-judge.ts
+ * via prompt.ts's `hubDesignDispatch`) and, via `issueSymbolDefinitionSitesIfReady`
+ * below, the hub-edit gate's lazy defining-file allowlist: resolves the issue
+ * text's candidate symbols (`extractIssueSymbols`) to their defining entities
+ * through the shared `resolveIssueSymbolSites` precision filter (exact-name
+ * match only, test-like paths dropped, `.py`-shaped symbols pass through as a
+ * file site with no graph call). Races the same `RISK_PROBE_INDEX_BUDGET_MS`
+ * budget `probeTurnRisk` uses — a cold or slow index yields `[]` rather than
+ * stalling the hub-shopping trigger. Fully defensive: any error, timeout, or
+ * empty extraction yields `[]`, never throws — the caller degrades to the
+ * no-evidence nudge.
  *
  * @sem domain=routing role=analysis
  */
@@ -482,12 +549,58 @@ export async function issueSymbolDefinitionSites(
     if (symbols.length === 0) return []
     const out: Array<{ symbol: string; kind: string; file: string }> = []
     for (const symbol of symbols) {
-      const matches = await graph.search(symbol, ISSUE_SYMBOL_SITES_PER_SYMBOL)
-      for (const e of matches) out.push({ symbol, kind: e.kind, file: e.filePath })
+      out.push(...(await resolveIssueSymbolSites(symbol, graph)))
     }
     return out
   } catch {
     return []
+  }
+}
+
+/**
+ * Wave 8b — the hub-edit gate's lazy defining-file allowlist resolver
+ * (edit-governance.ts's `evaluateHubEditGate`). Turn-open computed the
+ * allowlist eagerly against a cold graph — the initial index takes ~12s on a
+ * fresh checkout (django) against the 3s `RISK_PROBE_INDEX_BUDGET_MS` probe
+ * budget, so the eager version always raced a still-cold index and resolved
+ * empty; the feature was provably inert. This resolver is called lazily
+ * instead, at first gate evaluation once the graph has had a chance to warm,
+ * so it races a much tighter `ISSUE_SYMBOL_READY_BUDGET_MS` "ready right
+ * now?" check and returns `null` — never `[]` — when the index isn't ready
+ * or on any thrown error, so the caller can tell "still cold, retry next
+ * evaluation" apart from "graph is ready and genuinely found no defining
+ * sites" (a real `[]`). When ready, resolution goes through the same
+ * `resolveIssueSymbolSites` precision filter `issueSymbolDefinitionSites` uses.
+ *
+ * @sem domain=routing role=analysis
+ */
+export async function issueSymbolDefinitionSitesIfReady(
+  issueText: string,
+  graph: BunSqliteGraph = getGraph(),
+): Promise<Array<{ symbol: string; kind: string; file: string }> | null> {
+  try {
+    const indexReady = indexReadyFor(graph)
+    if (indexReady) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const budget = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), ISSUE_SYMBOL_READY_BUDGET_MS)
+      })
+      try {
+        const raced = await Promise.race([indexReady.then(() => "ready" as const), budget])
+        if (raced === "timeout") return null
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+    const symbols = extractIssueSymbols(issueText)
+    if (symbols.length === 0) return []
+    const out: Array<{ symbol: string; kind: string; file: string }> = []
+    for (const symbol of symbols) {
+      out.push(...(await resolveIssueSymbolSites(symbol, graph)))
+    }
+    return out
+  } catch {
+    return null
   }
 }
 

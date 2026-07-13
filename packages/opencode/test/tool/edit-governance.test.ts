@@ -378,6 +378,10 @@ import {
   hubEditDefiningFiles,
   evaluateHubEditGate,
   pathsRefer,
+  setHubEditIssueText,
+  hubEditIssueText,
+  hubEditDefiningResolved,
+  bandFilterDefiningSites,
   type HubFanInGraph,
 } from "../../src/tool/edit-governance"
 
@@ -588,5 +592,243 @@ describe("Wave 8 — pathsRefer", () => {
 
   it("unrelated paths do not match", () => {
     expect(pathsRefer("django/db/models/base.py", "django/forms/widgets.py")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 8b — lazy defining-file resolution: the allowlist resolves at first
+// gate evaluation (via the resolveDefiningSites test seam) rather than at
+// turn-open, since the turn-open graph is cold on a fresh repo. A null
+// result leaves the session unresolved so the next evaluation retries; a
+// non-null result replaces the allowlist and memoizes so the resolver never
+// runs again for that session.
+// ---------------------------------------------------------------------------
+
+describe("Wave 8b — evaluateHubEditGate lazy defining-site resolution", () => {
+  const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 5 }
+
+  it("a resolver hit allows a first edit to the resolved defining file despite over-threshold fan-in", async () => {
+    setHubEditGate("ses_hub_lazy_a", true)
+    setHubEditIssueText("ses_hub_lazy_a", "fix the hub")
+    const resolveDefiningSites = async () => [{ file: "django/x/hub.py" }]
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_a",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+    expect(hubEditDefiningResolved("ses_hub_lazy_a")).toBe(true)
+  })
+
+  it("a null resolver result leaves the session unresolved (bounces), then a later evaluation retries and resolves", async () => {
+    setHubEditGate("ses_hub_lazy_b", true)
+    setHubEditIssueText("ses_hub_lazy_b", "fix the hub")
+    let calls = 0
+    let ready = false
+    const resolveDefiningSites = async () => {
+      calls++
+      return ready ? [{ file: "django/x/hub.py" }] : null
+    }
+
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_b",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(first.action).toBe("deny")
+    expect(hubEditDefiningResolved("ses_hub_lazy_b")).toBe(false)
+    expect(calls).toBe(1)
+
+    ready = true
+    const second = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_b",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(second).toEqual({ action: "allow", definingSite: true })
+    expect(hubEditDefiningResolved("ses_hub_lazy_b")).toBe(true)
+    expect(calls).toBe(2)
+  })
+
+  it("a resolved session never calls the resolver again (memoized across further evaluations)", async () => {
+    setHubEditGate("ses_hub_lazy_c", true)
+    setHubEditIssueText("ses_hub_lazy_c", "fix the hub")
+    let calls = 0
+    const resolveDefiningSites = async () => {
+      calls++
+      return [{ file: "django/x/hub.py" }]
+    }
+
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_c",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(first).toEqual({ action: "allow", definingSite: true })
+    expect(calls).toBe(1)
+
+    const second = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_c",
+      filePath: "/repo/django/other_hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(second.action).toBe("deny")
+    expect(calls).toBe(1)
+
+    const third = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_c",
+      filePath: "/repo/django/other_hub2.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(third.action).toBe("deny")
+    expect(calls).toBe(1)
+  })
+
+  it("disarm clears the stored issue text and resolved state — a re-arm without files or issue text never calls the resolver", async () => {
+    setHubEditGate("ses_hub_lazy_d", true)
+    setHubEditIssueText("ses_hub_lazy_d", "fix the hub")
+    let calls = 0
+    const resolveDefiningSites = async () => {
+      calls++
+      return [{ file: "django/x/hub.py" }]
+    }
+
+    await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_d",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(calls).toBe(1)
+    expect(hubEditDefiningResolved("ses_hub_lazy_d")).toBe(true)
+
+    setHubEditGate("ses_hub_lazy_d", false)
+    expect(hubEditDefiningResolved("ses_hub_lazy_d")).toBe(false)
+    expect(hubEditIssueText("ses_hub_lazy_d")).toBeUndefined()
+
+    setHubEditGate("ses_hub_lazy_d", true)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_lazy_d",
+      filePath: "/repo/django/x/hub.py",
+      graph: overThresholdGraph,
+      resolveDefiningSites,
+    })
+    expect(calls).toBe(1) // no issue text stored after the re-arm — resolver never invoked
+    expect(result.action).toBe("deny")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 8c — root-most band filter: a resolved defining-site list is narrowed
+// to the least-imported band before it becomes the allowlist, so a co-named
+// module several times more central than the true fix layer (an incidental
+// symbol the issue merely mentions in repro code) doesn't itself grant a hub
+// bypass.
+// ---------------------------------------------------------------------------
+
+describe("Wave 8c — bandFilterDefiningSites", () => {
+  it("keeps only the minimum-fan-in site when a co-named site is far more central", async () => {
+    const fanIns: Record<string, number> = { "a.py": 1, "b.py": 26 }
+    const kept = await bandFilterDefiningSites(
+      [{ file: "a.py" }, { file: "b.py" }],
+      (file) => fanIns[file],
+    )
+    expect(kept).toEqual(["a.py"])
+  })
+
+  it("keeps every site within the root-most band (<= 3x the minimum)", async () => {
+    const fanIns: Record<string, number> = { "a.py": 1, "b.py": 3 }
+    const kept = await bandFilterDefiningSites(
+      [{ file: "a.py" }, { file: "b.py" }],
+      (file) => fanIns[file],
+    )
+    expect(kept).toEqual(["a.py", "b.py"])
+  })
+
+  it("a single high-fan-in site is kept (it is trivially its own minimum)", async () => {
+    const kept = await bandFilterDefiningSites([{ file: "a.py" }], () => 27)
+    expect(kept).toEqual(["a.py"])
+  })
+
+  it("a kind:'file' site is always kept and excluded from the band computation", async () => {
+    const fanIns: Record<string, number> = { "a.py": 1, "b.py": 26 }
+    const kept = await bandFilterDefiningSites(
+      [{ file: "named.py", kind: "file" }, { file: "a.py" }, { file: "b.py" }],
+      (file) => fanIns[file],
+    )
+    expect(kept).toEqual(["named.py", "a.py"])
+  })
+
+  it("a throwing fanInOf keeps that file and excludes it from the min computation", async () => {
+    const fanIns: Record<string, number> = { "a.py": 1, "c.py": 30 }
+    const kept = await bandFilterDefiningSites(
+      [{ file: "a.py" }, { file: "b.py" }, { file: "c.py" }],
+      (file) => {
+        if (file === "b.py") throw new Error("fan-in unavailable")
+        return fanIns[file]
+      },
+    )
+    expect(kept).toEqual(["a.py", "b.py"])
+  })
+
+  it("fanInOf throwing for every site keeps everything", async () => {
+    const kept = await bandFilterDefiningSites([{ file: "a.py" }, { file: "b.py" }], () => {
+      throw new Error("graph unavailable")
+    })
+    expect(kept).toEqual(["a.py", "b.py"])
+  })
+})
+
+describe("Wave 8c — evaluateHubEditGate applies the band filter to resolved sites", () => {
+  const fanInGraph: HubFanInGraph = {
+    fileFanIn: (filePath: string) => {
+      if (filePath.endsWith("django/db/models/enums.py")) return 1
+      if (filePath.endsWith("django/db/models/fields/__init__.py")) return 26
+      return 0
+    },
+  }
+
+  it("the gold minimum-fan-in resolved site allows even over threshold", async () => {
+    setHubEditGate("ses_hub_band_gold", true)
+    setHubEditIssueText("ses_hub_band_gold", "fix the field")
+    const resolveDefiningSites = async () => [
+      { file: "django/db/models/enums.py" },
+      { file: "django/db/models/fields/__init__.py" },
+    ]
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_band_gold",
+      filePath: "/repo/django/db/models/enums.py",
+      graph: fanInGraph,
+      resolveDefiningSites,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+  })
+
+  it("the incidental high-fan-in resolved site is band-filtered out and bounces", async () => {
+    setHubEditGate("ses_hub_band_pollutant", true)
+    setHubEditIssueText("ses_hub_band_pollutant", "fix the field")
+    const resolveDefiningSites = async () => [
+      { file: "django/db/models/enums.py" },
+      { file: "django/db/models/fields/__init__.py" },
+    ]
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_band_pollutant",
+      filePath: "/repo/django/db/models/fields/__init__.py",
+      graph: fanInGraph,
+      resolveDefiningSites,
+    })
+    expect(result.action).toBe("deny")
+    if (result.action === "deny") {
+      expect(result.importers).toBe(26)
+    }
   })
 })
