@@ -303,6 +303,35 @@ The gate is the same shape that already converted 11885 (test-edit gate) and mad
 honest (bounded S3): a hard bounce with a re-entry path, where advisory text was proven
 inert on the flash conductor three times.
 
+**Wave 5 landed — commit `b4d81daec`.** What shipped, per the build digest + review:
+- `resolvePythonImport` (ast-extractor.ts): relative dot-hops, absolute dotted via the
+  `__init__.py` package walk-up with repoRoot + `src/` fallback, `from pkg import
+  submodule` per-name targeting, plain `import x.y [as w]`; python bindings feed the
+  call-edge pass. django edge resolution: 30% → **84.7%**.
+- `BunSqliteGraph.fileFanIn(filePath)`: distinct importer files, self-imports excluded.
+- Hub-edit bounce gate (edit-governance.ts, wired into edit.ts + write.ts before the
+  write, armed unconditionally for root sessions at turn open, children inherit):
+  `HUB_IMPORTER_THRESHOLD = 3`, once-per-file-per-session hysteresis, fail-open on
+  cold/slow graph, telemetry `hub_edit_gate_bounced` / `hub_edit_gate_passed_on_retry`.
+- Post-fix django fan-in table (why 3): base.py **3**, fields/`__init__.py` **18**,
+  enums.py **1** (gold fix file — does NOT fire), utils/http.py 21, ddl_references.py 5,
+  deletion.py 6. The package façade absorbs base.py's true fan-in (consumers import
+  `django.db.models`, not `.base` directly), so direct-import counts run low — but the
+  contract holds: both files the 11964 spray touched fire, the gold file doesn't.
+  Review note: the deliberately-rejected alternative was crediting re-exports through
+  package `__init__.py` fan-in — it would have flagged enums.py too (models/`__init__`
+  re-exports it) and steered AGAINST the gold fix. Direct-import fan-in only.
+- Known cost: at threshold 3, ~21% of django files bounce their first edit (+1 turn
+  each, hysteresis-capped). The previously-green four instances' fix files all bounce
+  once (http.py 21, deletion.py 6, ddl 5) — their re-verification on this binary is the
+  regression check. Threshold is the tuning knob if bounce noise shows up.
+- Denial message reworded in review: "N other modules import <file> directly — it is
+  shared infrastructure…" (the original "one of this repo's most-imported modules"
+  reads absurd at N=3 and would cost the gate credibility with the conductor).
+
+**Iteration 5 run for 11964 (wave-5 binary): launched.** Forensic keys for the grade:
+did `hub_edit_gate_bounced` fire on base.py/fields, and did the patch land in enums.py.
+
 **11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
 prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
 pass came when the reasoner did the diagnosis in dispatched slices. The principled next
