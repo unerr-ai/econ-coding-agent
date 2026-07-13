@@ -1,6 +1,8 @@
 # 08 — The signal bus & round-F variance hardening
 
-**Status:** IMPLEMENTATION IN PROGRESS (2026-07-14). This doc is the build plan + record
+**Status:** IMPLEMENTED (2026-07-14, commit `3a1f4802e`) — all waves landed: bus core
+(SB-1), producer wiring (SB-2), deferral consumer (SB-3), RF-2..RF-7, T1; verified by
+tsgo + 692 targeted tests + CLI smoke. This doc is the build plan + record
 for the round-F wave: the unified signal bus, the hard-tail deferral consumer, and the
 seven deterministic conversions from the
 [variance forensics](../testing/HARNESS_AND_VARIANCE_REPORT.md) Part V, shaped by

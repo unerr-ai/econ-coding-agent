@@ -61,6 +61,19 @@ Two verdict columns, and they mean different things — read them as a **before 
 - **11815** — Migrations use the *value* of an enum object instead of its *name*
 - **11885** — Combine fast-delete queries
 
+**Grader artifacts (verified 2026-07-14, variance forensics §III).** The SWE-bench log
+parser treats a test as failing when its verbose "ok" line is missing — and unittest
+`subTest` failures glue adjacent output lines, so a passing test adjacent to a subTest
+ERROR reads as absent ⇒ red. Two instances carry this:
+
+| instance | glued test | reality |
+|---|---|---|
+| 11848 | `test_parsing_year_less_than_70` (F2P) | passes at runtime; its "ok" line is glued into rfc850's subTest-ERROR line — several red readings of 11848 were this artifact, not a wrong fix |
+| 11964 | `test_textchoices` (F2P) | line-gluing artifact; gold adds only `test_str` — one working `__str__` flips both F2P |
+
+When a local real-grade shows exactly one of these red, re-read the raw verbose log
+before calling the run a fail.
+
 **Triage focus.** The baseline ✗ cases (11964, 11815, 11885) tell us where the slicer is
 weak — **11848 has since flipped to a clean pass** (45/45, conductor-only; see its row), so
 it's now a win rather than a weak spot. The ✓ cases are the guardrail: any slicer change
