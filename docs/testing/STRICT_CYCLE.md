@@ -845,3 +845,61 @@ The reasoner one-shot (`runHubDesignJudge`) was historically 0-for-2 (degraded).
 **Mechanism scoreboard this sweep:** seen-red (new) 1 fire/1 convert · F11 regression gate 4 green-verifies, correct neighbors throughout (round-robin fix) · wave-11 convention gate 2 deny→convert · hub gate 1 bounce→allow. The declared-done-on-red class is now closed by two independent layers (transcript scan + harness re-run), both validated live in the same sweep.
 
 **Phase-1 state:** round C reset the B-streak; round D = consecutive sweep #1 on the fixed binary (difficult-5 all green inside the 10/10). Round E (second consecutive) is the remaining Phase-1 gate.
+
+## Round E (2026-07-13, same binary 0.0.0-main-202607131318) — FULL MINI-10: 8/10, streak reset
+
+Second sequential local sweep (`sweepE-driver.sh`, clone of the D driver), zero gateway errors,
+~2h05 wall, total $2.55. **11815 ❌ (failures=2) · 12039 ❌ (failures=1)**; the other eight
+green, five of them cheaper than round D. Logs archived to `arena-run-logs/roundE/` (22 files).
+
+| Instance | Result | Cost | Notes |
+|---|---|---|---|
+| 11790 | ✅ 79 OK | $0.077 | stable |
+| 11815 | ❌ failures=2 | $0.220 | 0 slices (D pass had 4); autopsy below |
+| 11848 | ✅ 45 OK | $0.045 | convention gate deny→convert again |
+| 11880 | ✅ 115 OK | $0.079 | clean |
+| 11885 | ✅ 45 OK, sk=1 | $0.998 | long run (7626 log lines) but converged; seen-red honest |
+| 11951 | ✅ 27 OK | $0.070 | clean |
+| 11964 | ✅ 17 OK | $0.636 | deny→convert chain as in D |
+| 11999 | ✅ 31 OK | $0.038 | clean |
+| 12039 | ❌ failures=1 | $0.330 | first-ever red for this instance; autopsy below |
+| 12050 | ✅ 11 OK | $0.046 | clean |
+
+**11815 autopsy — gates worked, conductor alone couldn't converge; the shipped patch was a
+one-character-class near-miss.** 49 turns, 100% conductor, **zero slices** (round D's pass
+decomposed into 4 slices, 156 turns, reasoner+oracle+executor). Both new finish gates fired
+exactly as designed: `turn_seen_red_nudge` (16 laundered FAILEDs watched) → denied once →
+`turn_regression_gate` → still unresolved → fail-open-loud (`seen_red_unverified` +
+`regression_unresolved`). The final patch had the RIGHT mechanism (serialize enum by name,
+`Enum["A"]` member-access form, correct import reduction) but rendered the member name with
+`'%s.%s["%s"]'` instead of `%r` → `TextEnum["A"]` vs gold's `TextEnum['A']` — functionally
+identical Python, red on the gold suite's string-equality asserts. Two independent lessons:
+(a) **decomposition arming is stochastic** — same binary, same prompt, D armed 4 slices and
+passed, E armed none and failed; (b) the quote-style face is the `%r`/repr **maintainer-prior
+class** (same family as the typed-equality prior seeded in b478bb6a0), not a reasoning failure.
+
+**12039 autopsy — first-ever red; partial right-layer fix + a phantom second layer;
+regression gate green was honest but blind (no in-arena witness).** 69 turns, 100% conductor,
+0 slices, no gate friction (`3 hub_allow, 1 turn_regression_green`). The agent patched
+`ddl_references.py` with only the empty-suffix guard (4+/1−) — covering the trailing-space
+face but not the missing-space-before-DESC face the gold test asserts
+(`("headline"DESC)` — gold restructures `col_str` in BOTH `Columns` and `IndexColumns`;
+round D's winning patch was the full 8+/5− two-class shape). It then burned ~20 turns on an
+unrelated `PRAGMA legacy_alter_table` addition to `sqlite3/schema.py` (11+) — a phantom layer
+its scratch repro surfaced. F11's green is not a gate failure: the failing F2P is a
+gold-modified test that does not exist in the arena; pre-existing neighbors genuinely pass
+with the partial fix. **No harness mechanism can witness a face that has no in-arena test** —
+this is the spec-gap/partial-shape class (tier-immune per the reasoner-conductor probe),
+where the only lever is patch-shape priors + convergence variance (best-of-N).
+
+**Round-E mechanism scoreboard:** seen-red 1 fire (11815, honest deny) · F11 2 fires (1
+honest deny 11815, 1 honest-but-blind green 12039) · convention gate 1 deny→convert (11848)
+· zero false fires anywhere. Both reds are **variance**, not regression: 11815 passed D with
+slices, 12039 passed A4/B/C/D four times conductor-only. The gates now detect-and-say-so; what
+they cannot do is make a conductor-only turn converge (11815) or witness a test that isn't in
+the arena (12039).
+
+**Phase-1 state:** the D–E consecutive pair broke on 12039 (difficult-5 member). Next gate:
+two consecutive clean sweeps, pending the round-F decision (leading candidate: deterministic
+escalation/decomposition arming when a finish gate bounces a turn — a denied finish IS the
+hard-tail signal the risk router exists for; 11815 D-vs-E is the direct evidence pair).
