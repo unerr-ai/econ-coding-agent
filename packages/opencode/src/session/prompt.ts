@@ -38,6 +38,7 @@ import {
   setHubEditIssueText,
   hubEditIssueText,
   hubEditDefiningResolved,
+  hubEditRetriedAgainstCandidates,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
@@ -2714,18 +2715,31 @@ export const layer = Layer.effect(
             // two DISTINCT files this session — the live-fire tell (django-
             // 11964 forensics) that the conductor is moving the same
             // wrong-layer fix to another shared module instead of
-            // reconsidering where the fix belongs. Wave 6's todo-plant let
-            // the conductor clobber/ignore the injected todo, spawn its own
-            // paraphrased Task subagent, have generic delegation route that
-            // to the executor tier, and implement the resulting symptom-
-            // layer verdict — so the design call is now SYNCHRONOUS, at the
-            // reasoner tier, grounded with graph evidence
-            // (issueSymbolDefinitionSites), with the verdict injected
-            // directly into the nudge. Same once-per-turn-loop guard
-            // (hubDesignPrepassPlanted) and log/nudge/continue shape as the
-            // grind valve; no todo-plant anymore.
+            // reconsidering where the fix belongs. Wave 9 (round-A3 11964):
+            // a confident single-file wrong-layer draw never produces a
+            // second distinct bounce — it just re-issues its own bounced
+            // edit against the SAME file, which evaluateHubEditGate allows
+            // as a retry and this trigger's 2-distinct-files count never
+            // fires. But a retry against a file the denial message already
+            // named a defining candidate for is the same hub-shopping tell
+            // one bounce earlier — evaluateHubEditGate flags that via
+            // hubEditRetriedAgainstCandidates, so this trigger also fires on
+            // that flag. Wave 6's todo-plant let the conductor clobber/
+            // ignore the injected todo, spawn its own paraphrased Task
+            // subagent, have generic delegation route that to the executor
+            // tier, and implement the resulting symptom-layer verdict — so
+            // the design call is now SYNCHRONOUS, at the reasoner tier,
+            // grounded with graph evidence (issueSymbolDefinitionSites),
+            // with the verdict injected directly into the nudge. Same
+            // once-per-turn-loop guard (hubDesignPrepassPlanted) and
+            // log/nudge/continue shape as the grind valve; no todo-plant
+            // anymore.
             const bouncedHubFiles = hubEditBouncedFiles(sessionID)
-            if (!hubDesignPrepassPlanted && bouncedHubFiles.length >= 2 && !session.parentID) {
+            if (
+              !hubDesignPrepassPlanted &&
+              (bouncedHubFiles.length >= 2 || hubEditRetriedAgainstCandidates(sessionID)) &&
+              !session.parentID
+            ) {
               hubDesignPrepassPlanted = true
               yield* Effect.logWarning("hub_design_prepass", {
                 "session.id": sessionID,

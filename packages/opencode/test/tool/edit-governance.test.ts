@@ -382,6 +382,7 @@ import {
   hubEditIssueText,
   hubEditDefiningResolved,
   bandFilterDefiningSites,
+  hubEditRetriedAgainstCandidates,
   type HubFanInGraph,
 } from "../../src/tool/edit-governance"
 
@@ -853,5 +854,91 @@ describe("Wave 8c — evaluateHubEditGate applies the band filter to resolved si
       expect(result.importers).toBe(26)
       expect(result.message).toContain("django/db/models/enums.py")
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 9 — a retry against a non-candidate is itself the hub-shopping tell.
+// Round-A3 django-11964 forensics: a confident single-file wrong-layer draw
+// bounces query_utils.py, the denial message names enums.py as the defining
+// candidate, and the conductor re-issues the SAME bounced edit rather than
+// moving to enums.py. That never produces the 2-distinct-bounced-files
+// count the wave 7 trigger needs, so evaluateHubEditGate now flags the
+// session (via hubEditRetriedAgainstCandidates) whenever a bounced-set
+// retry lands on a file outside a non-empty resolved defining-file
+// allowlist.
+// ---------------------------------------------------------------------------
+
+describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate file", () => {
+  const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 25 }
+
+  it("a resolved allowlist + a retry on a non-candidate file: deny, then allow+retried with the flag set", async () => {
+    setHubEditGate("ses_hub_retry_a", true, ["django/db/models/enums.py"])
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_a")).toBe(false)
+
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_a",
+      filePath: "/repo/django/db/models/query_utils.py",
+      graph: overThresholdGraph,
+    })
+    expect(first.action).toBe("deny")
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_a")).toBe(false)
+
+    const second = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_a",
+      filePath: "/repo/django/db/models/query_utils.py",
+      graph: overThresholdGraph,
+    })
+    expect(second).toEqual({ action: "allow", retried: true })
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_a")).toBe(true)
+  })
+
+  it("an empty allowlist retry never sets the flag (nothing was named to shop against)", async () => {
+    setHubEditGate("ses_hub_retry_b", true)
+
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_b",
+      filePath: "/repo/hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(first.action).toBe("deny")
+
+    const second = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_b",
+      filePath: "/repo/hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(second).toEqual({ action: "allow", retried: true })
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_b")).toBe(false)
+  })
+
+  it("a non-empty allowlist edit landing ON the candidate takes the definingSite path, never the flag", async () => {
+    setHubEditGate("ses_hub_retry_c", true, ["django/db/models/enums.py"])
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_c",
+      filePath: "/repo/django/db/models/enums.py",
+      graph: overThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_c")).toBe(false)
+  })
+
+  it("disarming clears the flag", async () => {
+    setHubEditGate("ses_hub_retry_d", true, ["django/db/models/enums.py"])
+    await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_d",
+      filePath: "/repo/django/db/models/query_utils.py",
+      graph: overThresholdGraph,
+    })
+    await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_d",
+      filePath: "/repo/django/db/models/query_utils.py",
+      graph: overThresholdGraph,
+    })
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_d")).toBe(true)
+
+    setHubEditGate("ses_hub_retry_d", false)
+    expect(hubEditRetriedAgainstCandidates("ses_hub_retry_d")).toBe(false)
   })
 })

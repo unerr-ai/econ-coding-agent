@@ -341,6 +341,9 @@ const hubEditIssueTextStore = new Map<string, string>()
 /** Session IDs whose defining-file allowlist resolution has completed — either supplied directly at arming time or resolved lazily by `evaluateHubEditGate`. Once a session is in this set the resolver is never called again for it (memoized). Cleared on disarm. Kept private — read through `hubEditDefiningResolved` so the accessor name doesn't collide with the Set itself. */
 const hubEditDefiningResolvedSet = new Set<string>()
 
+/** Wave 9 — session IDs whose retry of a bounced edit landed on a path outside the resolved defining-file allowlist: the denial message named the graph's candidates and the model re-issued the same edit against a different, non-candidate file anyway (round-A3 django-11964: bounced query_utils.py, denial named enums.py, conductor re-issued query_utils.py). Read through `hubEditRetriedAgainstCandidates`. Cleared on disarm. */
+const hubEditRetryAgainstCandidatesSet = new Set<string>()
+
 /** The session's bounced file set as an array (insertion order) — empty for an unknown or never-bounced session. Read by prompt.ts's hub-shopping trigger to detect a second DISTINCT bounced file in one turn (the tell that the model is moving the same fix to another hub instead of reconsidering where it belongs). */
 export function hubEditBouncedFiles(sessionID: string): string[] {
   return Array.from(hubEditBounced.get(sessionID) ?? [])
@@ -375,6 +378,7 @@ export function setHubEditGate(sessionID: string, armed: boolean, definingFiles?
     hubEditDefiningFilesStore.delete(sessionID)
     hubEditIssueTextStore.delete(sessionID)
     hubEditDefiningResolvedSet.delete(sessionID)
+    hubEditRetryAgainstCandidatesSet.delete(sessionID)
   }
 }
 
@@ -401,6 +405,11 @@ export function hubEditIssueText(sessionID: string): string | undefined {
 /** Has the session's defining-file allowlist resolution completed — either supplied at arming time or resolved lazily by `evaluateHubEditGate`? Memoization guard: once true, the resolver is never called again for this session this turn. */
 export function hubEditDefiningResolved(sessionID: string): boolean {
   return hubEditDefiningResolvedSet.has(sessionID)
+}
+
+/** Wave 9 — has this session re-issued a bounced edit against a file that is NOT one of the graph's named defining candidates? A retry against a non-candidate is itself the hub-shopping tell (round-A3 django-11964's conductor re-issued its bounced edit rather than moving to the denial message's named candidate). Read by prompt.ts's hub-shopping trigger as an alternate fire condition alongside the 2-distinct-bounced-files check. */
+export function hubEditRetriedAgainstCandidates(sessionID: string): boolean {
+  return hubEditRetryAgainstCandidatesSet.has(sessionID)
 }
 
 /** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining sites concretely instead of leaving the model to re-derive them. */
@@ -523,7 +532,13 @@ export async function bandFilterDefiningSites(
  * the file as bounced (so an identical retry passes) and denies with the
  * root-most-layer redirect message, enumerating the session's resolved
  * defining-file allowlist in that message when one exists (Wave 8d) so the
- * model gets concrete candidates instead of having to re-derive them.
+ * model gets concrete candidates instead of having to re-derive them. Wave
+ * 9: when that bounced-retry passes and the allowlist is non-empty, the
+ * filePath already failed the allowlist match above — so a retry landing
+ * here against a non-empty allowlist means the model saw the named
+ * candidates and re-issued a non-candidate edit anyway; that session is
+ * flagged via `hubEditRetriedAgainstCandidates`, the same hub-shopping tell
+ * prompt.ts's trigger otherwise needs a second distinct bounced file to see.
  * Logging-free by design — edit.ts/write.ts log at the call site, inside
  * their own Effect.
  *
@@ -588,6 +603,16 @@ export async function evaluateHubEditGate(opts: {
 
   const bounced = hubEditBounced.get(opts.sessionID)
   if (bounced?.has(opts.filePath)) {
+    // Wave 9: the loop above already ruled out a match against the resolved
+    // defining-file allowlist (a match returns earlier with definingSite:
+    // true), so reaching here with a non-empty allowlist means the model was
+    // shown the graph's named candidates in the denial message and
+    // re-issued this exact non-candidate edit anyway — flag it as the same
+    // hub-shopping tell prompt.ts's 2-distinct-bounced-files trigger looks
+    // for, one bounce earlier.
+    if (definingFiles && definingFiles.size > 0) {
+      hubEditRetryAgainstCandidatesSet.add(opts.sessionID)
+    }
     return { action: "allow", retried: true }
   }
 
