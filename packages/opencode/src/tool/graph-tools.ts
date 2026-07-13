@@ -465,8 +465,8 @@ export function extractIssueSymbols(issueText: string): string[] {
   return out.slice(0, ISSUE_SYMBOL_EXTRACTION_CAP)
 }
 
-/** True when `file` lives under a `tests`/`test` directory segment or its basename starts with `test_` — dropped from definition-site resolution so a test's mere USE of a symbol never counts as the symbol's defining site. */
-function isTestLikePath(file: string): boolean {
+/** True when `file` lives under a `tests`/`test` directory segment or its basename starts with `test_` — shared by definition-site resolution (a test's mere USE of a symbol never counts as its defining site) and the convention-divergence gate (never fires on a test file). @sem domain=intelligence role=analysis */
+export function isTestLikePath(file: string): boolean {
   if (/(^|\/)tests?(\/|$)/.test(file)) return true
   const basename = file.split("/").pop() ?? file
   return basename.startsWith("test_")

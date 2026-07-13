@@ -243,3 +243,16 @@ export function unverifiedFinishGateNudgeText(command?: string): string {
     ? `You are finishing after making source changes with NO test execution anywhere in this turn. Run \`${command}\` now, confirm the result, and only then give your final answer.`
     : "You are finishing after making source changes with NO test execution anywhere in this turn. Run the project's test suite for the modules you changed, then finish."
 }
+
+/**
+ * Wave 11 stage 2 — convention-divergence gate nudge: edit.ts/write.ts throw
+ * this once per session, at the moment `detectReceiverMethodDivergence`
+ * (convention-divergence.ts) flags an added `<receiver>.<method>(...)` call
+ * whose receiver is already established in the file but never paired with
+ * this method before (the django-11848 A4 red shape). Never names the right
+ * answer or an alternative — only points back at the file's own existing
+ * usage and asks for a re-read; an identical retry is accepted.
+ */
+export function conventionDivergenceNudgeText(receiver: string, method: string, receiverSites: number[]): string {
+  return `Verification pause (fires once per task): this edit calls \`${receiver}.${method}(...)\` — a method this file has never used — while the file already uses \`${receiver}\` at line(s) ${receiverSites.join(", ")}. Re-read the entity you are editing and this file's existing usage, including comments and docstrings, and confirm the right variant for THIS code. Then retry; an identical retry will be accepted.`
+}

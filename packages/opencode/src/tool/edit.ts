@@ -28,7 +28,17 @@ import {
   rawTaskChildGateArmed,
   rawTaskChildDenialMessage,
   evaluateHubEditGate,
+  hubEditGateArmed,
 } from "./edit-governance"
+import { isTestLikePath } from "./graph-tools"
+import {
+  detectReceiverMethodDivergence,
+  addedLines,
+  evaluateConventionDivergenceGate,
+  hasDeniedConventionDivergence,
+  markConventionDivergenceDenied,
+} from "./convention-divergence"
+import { conventionDivergenceNudgeText } from "@/session/prompts/nudges"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -196,6 +206,51 @@ export const EditTool = Tool.define(
               const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
               const desiredBom = source.bom || next.bom
               contentNew = next.text
+
+              // Convention-divergence gate: a first added `R.m(` call whose
+              // receiver is already established in this file but never
+              // paired with this method before is denied once per session
+              // (bounded to ONE deny total, not per file) — armed only
+              // within the hub-edit gate's own armed scope, run AFTER it
+              // allows so a hub bounce always takes precedence.
+              const conventionDivergence =
+                hubEditGateArmed(ctx.sessionID) && !isTestLikePath(filePath)
+                  ? detectReceiverMethodDivergence({
+                      beforeContent: contentOld,
+                      addedText: addedLines(old, replacement),
+                    })
+                  : null
+              const conventionAction = evaluateConventionDivergenceGate({
+                armed: hubEditGateArmed(ctx.sessionID),
+                isTestPath: isTestLikePath(filePath),
+                isNewFile: false,
+                divergence: conventionDivergence,
+                alreadyDenied: hasDeniedConventionDivergence(ctx.sessionID),
+              })
+              if (conventionAction === "deny") {
+                markConventionDivergenceDenied(ctx.sessionID)
+                yield* Effect.logInfo("convention_divergence_denied", {
+                  "session.id": ctx.sessionID,
+                  receiver: conventionDivergence!.receiver,
+                  method: conventionDivergence!.method,
+                  file: path.relative(instance.worktree, filePath),
+                })
+                throw new Error(
+                  conventionDivergenceNudgeText(
+                    conventionDivergence!.receiver,
+                    conventionDivergence!.method,
+                    conventionDivergence!.receiverSites,
+                  ),
+                )
+              }
+              if (conventionAction === "pass-retry") {
+                yield* Effect.logInfo("convention_divergence_pass_on_retry", {
+                  "session.id": ctx.sessionID,
+                  receiver: conventionDivergence!.receiver,
+                  method: conventionDivergence!.method,
+                  file: path.relative(instance.worktree, filePath),
+                })
+              }
 
               diff = trimDiff(
                 createTwoFilesPatch(

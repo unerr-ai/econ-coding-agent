@@ -7,7 +7,15 @@
  */
 
 import { describe, it, expect } from "bun:test"
-import { detectReceiverMethodDivergence } from "../../src/tool/convention-divergence"
+import {
+  detectReceiverMethodDivergence,
+  addedLines,
+  evaluateConventionDivergenceGate,
+  shouldDenyConventionDivergence,
+  hasDeniedConventionDivergence,
+  markConventionDivergenceDenied,
+} from "../../src/tool/convention-divergence"
+import { conventionDivergenceNudgeText } from "../../src/session/prompts/nudges"
 
 describe("detectReceiverMethodDivergence", () => {
   it("11848 shape: before has datetime.datetime(...), added has datetime.datetime.now( — FIRES with receiverSites", () => {
@@ -111,5 +119,88 @@ describe("detectReceiverMethodDivergence", () => {
 
     const out = detectReceiverMethodDivergence({ beforeContent, addedText })
     expect(out).toBeNull()
+  })
+})
+
+// -- wave 11 stage 2: addedLines ---------------------------------------------
+
+describe("addedLines", () => {
+  it("returns only the lines new to `after`, preserving order", () => {
+    const before = ["a", "b", "c"].join("\n")
+    const after = ["a", "b", "c", "d", "e"].join("\n")
+    expect(addedLines(before, after)).toBe("d\ne")
+  })
+
+  it("a line removed and re-added elsewhere is not counted as added", () => {
+    const before = ["a", "b"].join("\n")
+    const after = ["b", "a"].join("\n")
+    expect(addedLines(before, after)).toBe("")
+  })
+
+  it("empty before: every line in after is added", () => {
+    expect(addedLines("", "x\ny")).toBe("x\ny")
+  })
+})
+
+// -- wave 11 stage 2: evaluateConventionDivergenceGate / shouldDenyConventionDivergence --
+
+describe("shouldDenyConventionDivergence", () => {
+  const divergence = { receiver: "datetime.datetime", method: "now", receiverSites: [4] }
+  const base = { armed: true, isTestPath: false, isNewFile: false, divergence, alreadyDenied: false }
+
+  it("denies once: armed, non-test, existing file, a divergence, not yet denied", () => {
+    expect(shouldDenyConventionDivergence(base)).toBe(true)
+    expect(evaluateConventionDivergenceGate(base)).toBe("deny")
+  })
+
+  it("an already-denied session never denies again — passes on retry instead", () => {
+    expect(shouldDenyConventionDivergence({ ...base, alreadyDenied: true })).toBe(false)
+    expect(evaluateConventionDivergenceGate({ ...base, alreadyDenied: true })).toBe("pass-retry")
+  })
+
+  it("a test-like path never denies", () => {
+    expect(shouldDenyConventionDivergence({ ...base, isTestPath: true })).toBe(false)
+    expect(evaluateConventionDivergenceGate({ ...base, isTestPath: true })).toBe("silent")
+  })
+
+  it("brand-new file creation never denies", () => {
+    expect(shouldDenyConventionDivergence({ ...base, isNewFile: true })).toBe(false)
+    expect(evaluateConventionDivergenceGate({ ...base, isNewFile: true })).toBe("silent")
+  })
+
+  it("an unarmed session never denies", () => {
+    expect(shouldDenyConventionDivergence({ ...base, armed: false })).toBe(false)
+    expect(evaluateConventionDivergenceGate({ ...base, armed: false })).toBe("silent")
+  })
+
+  it("no divergence detected never denies", () => {
+    expect(shouldDenyConventionDivergence({ ...base, divergence: null })).toBe(false)
+    expect(evaluateConventionDivergenceGate({ ...base, divergence: null })).toBe("silent")
+  })
+})
+
+// -- wave 11 stage 2: per-session store --------------------------------------
+
+describe("hasDeniedConventionDivergence / markConventionDivergenceDenied", () => {
+  it("a fresh session has not been denied; marking it flips the flag for that session only", () => {
+    const sessionA = "conv-div-store-session-a"
+    const sessionB = "conv-div-store-session-b"
+    expect(hasDeniedConventionDivergence(sessionA)).toBe(false)
+    markConventionDivergenceDenied(sessionA)
+    expect(hasDeniedConventionDivergence(sessionA)).toBe(true)
+    expect(hasDeniedConventionDivergence(sessionB)).toBe(false)
+  })
+})
+
+// -- wave 11 stage 2: conventionDivergenceNudgeText --------------------------
+
+describe("conventionDivergenceNudgeText", () => {
+  it("names the receiver, method, and receiver sites — never an alternative", () => {
+    const text = conventionDivergenceNudgeText("datetime.datetime", "now", [4])
+    expect(text).toContain("datetime.datetime.now(")
+    expect(text).toContain("datetime.datetime")
+    expect(text).toContain("line(s) 4")
+    expect(text).toContain("fires once per task")
+    expect(text).toContain("an identical retry will be accepted")
   })
 })
