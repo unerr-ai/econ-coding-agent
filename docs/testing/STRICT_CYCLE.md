@@ -781,3 +781,28 @@ The reasoner one-shot (`runHubDesignJudge`) was historically 0-for-2 (degraded).
 **LLM health — all runs:** main conductor loop clean throughout. Single recurring benign error: title agent (executor tier, bound via model-registry.ts ECON_TIER_BINDING[executor]) rejects `reasoning_effort: "none"` via Fireworks API (config mismatch; cosmetic, no impact).
 
 **Phase-1 exit state:** A4=4/5 with 11848 red root-caused + counterfactual-rerun-green. **Round B (on UTC-prior + judge-threading binary, commits pending):** targets 5/5 (A4 rerun + 11848 retry on UTC seeded conductor prior) as gate #1 of 2 for phase-1 close.
+
+## Round B (2026-07-13, binary 0.0.0-main-202607130930 = A4 stack + judge threading fix 86b40d2e6 + wave-11 convention-divergence rescan gate 45c3db95e/483a90561) — 5/5
+
+**First clean sweep of the difficult five in the strict cycle.** Consecutive-sweep #1 of 2 for Phase-1 exit.
+
+| Instance | Result | Cost / shape | Forensics |
+|---|---|---|---|
+| 11790 | ✅ 79 OK | $0.046 / 13 turns, 0 escalations, 100% conductor | Defining-site allow (auth/forms.py); type-fidelity prior held. Stable from A4. |
+| 11885 | ✅ 45 OK, skipped=1 | $0.22 / 66 turns, 0 escalations | A4b revalidation: pre-existing test run proactively, deletion.py allowed, zero finish-gate friction. Same 25+/5− shape. **Second consecutive green.** |
+| 12039 | ✅ 24 OK, skipped=12 | $0.069 / 19 turns, 0 escalations | Ddl_references.py allowed (defining_site_allow); full-shape 8+/5− patch covering Columns and IndexColumns. Stable from A4. |
+| 11848 | ✅ 45 OK | $0.052 / 18 turns, 0 escalations, 100% conductor | **A4 red converted by UTC-domain prior seeding.** Patch: `current_year = datetime.datetime.utcnow().year` in `django/utils/http.py`, century arithmetic `current_year_relative + 2000; if > 50: subtract 100`. Gold-equivalent. **Second consecutive green.** |
+| 11964 | ✅ 17 OK | $0.065 / 17 turns, 0 escalations, 100% conductor | A4's live judge dispatch on the second green: bounce fields=26 → bounce base=4 → define-site allow → final patch `django/db/models/enums.py` `__str__` on Choices. Stable. Hub gate allowed once post-fire, no rethrow. **Second consecutive green.** |
+
+**Wave-11 gate (convention-divergence rescan):** fired once on 11848, first firing outside the labbed instance.
+
+**11848 B-run autopsy (wave-11 convention-divergence gate):**
+
+1. Agent's initial patch read `current_year = datetime.datetime.now().year` — the A4 coin-flip variant (API choice is stochastic across runs).
+2. Wave-11 gate: edit adds a method the file never calls on a receiver the file already uses → trigger = answer-blind rescan deny. Payload: one bounded deny naming the receiver's existing sites (no new imports / no new call signatures). Language-agnostic: `R.m(` shape matching, `#//*` comment strip, `{self,cls,this}` stop-list, no extension gating.
+3. Agent read the denial message (verbatim: receiver `datetime.datetime` has existing call `.utcnow()` in lines 165/189), issued `pass_on_retry` with the identical-signature edit, second call succeeded.
+4. Gate evidence: (a) forensic — UTC evidence was IN the edited function (docstring line 165 + utctimetuple line 189; naive repo-wide frequency count would vote WRONG); (b) field-survey validation — balanced patterns (silent-when-balanced) + frequency-variant detection only robust on cheap detectors; (c) unerr-cli audit — existing convention machinery blind to library-API calls, content scanner the only relevant substrate.
+
+**Consecutive-green board:** 11790 ✅✅ · 11885 ✅✅ · 12039 ✅✅ · 11848 ✅✅ · 11964 ✅✅. **Phase-1 gate #1 met.** Round C (third consecutive sweep on the same binary) launched immediately per the close-out protocol.
+
+**Process note:** per-round run logs archived to `arena-run-logs/round{A4,B,…}` before any overwrite (lesson: A4b rerun clobbered the red 11848 DEBUG log).
