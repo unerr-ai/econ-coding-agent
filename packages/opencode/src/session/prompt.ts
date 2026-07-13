@@ -40,6 +40,7 @@ import {
   reproFidelityNudgeText,
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
+  unverifiedFinishNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
@@ -1716,12 +1717,19 @@ export const layer = Layer.effect(
         let turnPinnedProbe: Awaited<ReturnType<typeof deriveTurnProbe>>
         let probeGateRetries = 0
         const MAX_PROBE_GATE_RETRIES = 3
-        // S3 — the done-time fallback bar's own bounded retry: exactly ONE
-        // reject-with-nudge cycle for a bug-shaped turn finishing with no
-        // verified reproduction/source edit, then a loud break (never a loop).
-        let unverifiedFinishNudged = false
+        // S3 — the done-time fallback bar's own bounded retry: up to
+        // MAX_UNVERIFIED_FINISH_ATTEMPTS reject-with-nudge cycles for a
+        // bug-shaped turn finishing with no verified reproduction/source
+        // edit, escalating the nudge text after the first, then a loud
+        // break (never an unbounded loop). An explicit repro-todo
+        // cancellation (the repro seed's own escape hatch) short-circuits
+        // straight to the loud, turn-ending branch at any attempt — a
+        // reasoned cancellation is not the silence this gate exists to
+        // catch (django-11848 iter-3).
+        let unverifiedFinishAttempts = 0
+        const MAX_UNVERIFIED_FINISH_ATTEMPTS = 3
         // F11 — the turn-end regression gate's own bounded retry, mirroring
-        // unverifiedFinishNudged exactly: ONE reject-with-continue cycle
+        // the old S3 once-nudge discipline exactly: ONE reject-with-continue cycle
         // naming the neighbor test(s) that turned red, then a loud break.
         let turnRegressionGateNudged = false
         // F18 — the seen-red gate's own bounded retry, same discipline: ONE
@@ -2438,9 +2446,10 @@ export const layer = Layer.effect(
             // and no second finish attempt, because every done-time bar (S3
             // below) lives in the !hasToolCalls exit path a tool-calling
             // agent never enters. Count observed post-fix, no-pin steps; at
-            // the deadline, pre-arm unverifiedFinishNudged so the S3 bar
-            // treats the NEXT finish attempt as its one-nudge-then-loud-pass
-            // exit ramp instead of rejecting forever.
+            // the deadline, pre-arm unverifiedFinishAttempts to its cap so
+            // the S3 bar treats the NEXT finish attempt as its final
+            // loud-fail-open exit ramp (this converge-now nudge already told
+            // the model to converge) instead of rejecting forever.
             if (
               !convergeNudgeFired &&
               !turnPinnedProbe &&
@@ -2451,7 +2460,7 @@ export const layer = Layer.effect(
               postFixNoPinSteps++
               if (postFixNoPinSteps >= POST_FIX_CONVERGE_STEPS) {
                 convergeNudgeFired = true
-                unverifiedFinishNudged = true
+                unverifiedFinishAttempts = MAX_UNVERIFIED_FINISH_ATTEMPTS
                 yield* Effect.logWarning("turn_converge_nudge", { "session.id": sessionID, postFixNoPinSteps })
                 const convergeNudge: SessionV1.User = {
                   id: MessageID.ascending(),
@@ -2915,12 +2924,30 @@ export const layer = Layer.effect(
                 // continuation turn and passes (the M4 gate above already
                 // re-ran it green).
                 if (!turnPinnedProbe || (!landedSourceEdits && !pinInheritedFromStore)) {
-                  if (!unverifiedFinishNudged) {
-                    unverifiedFinishNudged = true
+                  // ESCAPE — the repro seed's own contract (seeds.ts
+                  // REPRO_SLICE_CONTENT point 6) lets the model cancel the
+                  // repro after 2 distinct failed approaches by marking the
+                  // todo cancelled with a one-line reason. That is a
+                  // legitimate, reasoned exit, not the silence django-11848
+                  // iter-3 shipped unverified on — short-circuit straight to
+                  // the loud, turn-ending branch whenever the todo store
+                  // actually records one, regardless of attempt count.
+                  const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                  const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
+                  const reproCancelled = reproTodo?.status === "cancelled"
+                  if (reproCancelled) {
+                    yield* Effect.logWarning("turn_completed_unverified", {
+                      "session.id": sessionID,
+                      hadPin: turnPinnedProbe !== undefined,
+                      landedSourceEdits,
+                      reproCancelled: true,
+                    })
+                  } else if (unverifiedFinishAttempts < MAX_UNVERIFIED_FINISH_ATTEMPTS) {
+                    unverifiedFinishAttempts++
                     // S4 — fold any still-unresolved governance-gate block
-                    // into the same nudge (django-12039: blocked twice,
-                    // never re-landed).
-                    const unresolvedBlocks = [...getGateBlocks(sessionID)]
+                    // into the same nudge, first rejection only
+                    // (django-12039: blocked twice, never re-landed).
+                    const unresolvedBlocks = unverifiedFinishAttempts === 1 ? [...getGateBlocks(sessionID)] : []
                     const blockLines = unresolvedBlocks
                       .map(
                         ([file, reason]) =>
@@ -2932,6 +2959,7 @@ export const layer = Layer.effect(
                       hadPin: turnPinnedProbe !== undefined,
                       landedSourceEdits,
                       unresolvedBlocks: unresolvedBlocks.length,
+                      attempt: unverifiedFinishAttempts,
                     })
                     const finishNudge: SessionV1.User = {
                       id: MessageID.ascending(),
@@ -2947,20 +2975,21 @@ export const layer = Layer.effect(
                       messageID: finishNudge.id,
                       sessionID,
                       type: "text",
-                      text:
-                        "You are finishing a bug-fix task with NO verified reproduction / NO source change. Author a minimal repro script asserting the issue's EXPECTED behavior, RUN it, and report the result. If it fails, your fix is incomplete." +
-                        (blockLines ? `\n${blockLines}` : ""),
+                      text: unverifiedFinishNudgeText(unverifiedFinishAttempts, blockLines || undefined),
                       synthetic: true,
                     } satisfies SessionV1.TextPart)
                     continue
+                  } else {
+                    // MAX_UNVERIFIED_FINISH_ATTEMPTS rejections spent and no
+                    // cancellation on record — loud, never a further nudge
+                    // and never a deadlock; the break below fires.
+                    yield* Effect.logWarning("turn_completed_unverified", {
+                      "session.id": sessionID,
+                      hadPin: turnPinnedProbe !== undefined,
+                      landedSourceEdits,
+                      reproCancelled: false,
+                    })
                   }
-                  // Second finish attempt still unresolved — loud, never a
-                  // second nudge and never a deadlock; the break below fires.
-                  yield* Effect.logWarning("turn_completed_unverified", {
-                    "session.id": sessionID,
-                    hadPin: turnPinnedProbe !== undefined,
-                    landedSourceEdits,
-                  })
                 }
               }
 

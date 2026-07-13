@@ -29,7 +29,19 @@
  * every stem, searched across every test tree the repo exposes — `tests/`
  * or `test/` at the repo root, and one level below it (covers a top-level
  * package's own `tests/` dir, e.g. `sklearn/tests/`) — never deeper. Same
- * cap, same dedup, proximity always tried first.
+ * cap, same dedup, proximity always tried first — now itself ranked behind
+ * the exact-twin pass below (F19).
+ *
+ * F19 — Django exact-twin: pass 1's fuzzy `tests/<dir>` substring match
+ * (`djangoDirMatchesTopic`) can pick a wrong or overly-broad directory —
+ * editing `django/utils/http.py` selected `tests/httpwrappers` on substring
+ * overlap alone and missed its real twin, `tests/utils_tests/test_http.py`
+ * (pass 2 couldn't reach it either: `utils` is a noise parent stem, and
+ * pytest tree roots are disabled for Django repos). For a Django repo this
+ * now runs FIRST, ahead of pass 1: for each touched file's basename stem,
+ * scans every `tests/<dir>/test_<stem>.py` for an exact filename hit and
+ * adds its module-level test command. Ranked ahead of both fuzzy passes so
+ * `MAX_NEIGHBOR_COMMANDS` trims fuzzy hits first, never an exact twin.
  *
  * @sem domain=routing role=neighbor-discovery
  */
@@ -180,9 +192,51 @@ function discoverTestTreeRoots(cwd: string): string[] {
 }
 
 /**
+ * F19 — relativizes an absolute touched-file path against `cwd` before
+ * deriving path segments from it. Edit tools report ABSOLUTE paths, so a
+ * segment derived from the raw path would carry the cwd's own prefix instead
+ * of the repo-local one (the `package=""` bug class `deriveTopLevelPackage`
+ * already guards against below — this mirrors that same prefix-strip).
+ */
+function relativizeToCwd(file: string, cwd: string): string {
+  const prefix = cwd.endsWith("/") ? cwd : `${cwd}/`
+  return file.startsWith(prefix) ? file.slice(prefix.length) : file
+}
+
+/**
+ * F19 — a touched file's basename stem matched against every
+ * `tests/<dir>/test_<stem>.py` for an exact filename hit, not the fuzzy
+ * substring/word-stem check pass 1 and pass 2 use — the module-level command
+ * a hit here returns is precise enough to outrank anything the fuzzy passes
+ * find. A missing/unreadable `tests/` dir yields none, never a throw.
+ */
+function djangoExactTwinCommands(cwd: string, sourceFile: string): string[] {
+  const relativized = relativizeToCwd(sourceFile, cwd)
+  const stem = pathBasename(relativized, extname(relativized))
+  if (!stem) return []
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(join(cwd, "tests"), { withFileTypes: true }).filter((entry) => entry.isDirectory())
+  } catch {
+    return []
+  }
+  const commands: string[] = []
+  for (const entry of entries) {
+    if (existsSync(join(cwd, "tests", entry.name, `test_${stem}.py`))) {
+      commands.push(`python tests/runtests.py ${entry.name}.test_${stem} --parallel 1`)
+    }
+  }
+  return commands
+}
+
+/**
  * Discover a small set of pre-existing test commands whose scope plausibly
- * covers `opts.touchedSourceFiles`. Two passes, same cap, same dedup:
+ * covers `opts.touchedSourceFiles`. Three passes, same cap, same dedup,
+ * ranked front-to-back:
  *
+ * 0. Django exact-twin (F19, Django repos only) — highest rank: each touched
+ *    file's basename stem matched against every `tests/<dir>/test_<stem>.py`
+ *    for an exact filename hit, before any fuzzy matching runs.
  * 1. Same-file proximity (F11, unchanged) — Django-style (`tests/runtests.py`
  *    present → matching `tests/<dir>` names) when the repo is shaped that
  *    way, else a pytest-style filename glob under `<cwd>/tests/**` (bounded
@@ -193,8 +247,10 @@ function discoverTestTreeRoots(cwd: string): string[] {
  *    across every test tree the repo exposes (root `tests`/`test`, plus one
  *    level below root).
  *
- * Deduped, capped at `MAX_NEIGHBOR_COMMANDS` across both passes; returns `[]`
- * when nothing matches so the caller's gate never runs on a guess.
+ * Deduped, capped at `MAX_NEIGHBOR_COMMANDS` across all three passes; exact
+ * twins are pushed first so the cap trims fuzzy hits first, never a twin.
+ * Returns `[]` when nothing matches so the caller's gate never runs on a
+ * guess.
  */
 export function discoverNeighborTests(opts: { touchedSourceFiles: readonly string[]; cwd: string }): VerifyCommand[] {
   const { touchedSourceFiles, cwd } = opts
@@ -207,6 +263,17 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
   }
 
   const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
+
+  // Pass 0 — Django exact-twin (F19), highest rank: runs before any fuzzy
+  // matching so MAX_NEIGHBOR_COMMANDS trims fuzzy hits first, never a twin.
+  if (isDjangoRepo) {
+    for (const sourceFile of touchedSourceFiles) {
+      if (commands.length >= MAX_NEIGHBOR_COMMANDS) break
+      for (const command of djangoExactTwinCommands(cwd, sourceFile)) {
+        pushCommand(command)
+      }
+    }
+  }
 
   // Pass 1 — same-file proximity (F11, unchanged).
   for (const sourceFile of touchedSourceFiles) {

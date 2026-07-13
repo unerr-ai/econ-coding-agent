@@ -7,7 +7,10 @@
  * noisy "models" parent stem excluded so tests/model_forms/model_fields never appear), a
  * generic non-django repo reaching a one-level-below package tests/ tree via the parent-stem
  * only, the "ion"-stripped morphological variant reaching a strictly-prefixed pytest file, a
- * noise-stem (utils) exclusion, and the combined proximity+breadth cap enforcement — and
+ * noise-stem (utils) exclusion, and the combined proximity+breadth cap enforcement — F19's
+ * Django exact-twin pass: an exact `tests/<dir>/test_<stem>.py` hit ranked ahead of the fuzzy
+ * `httpwrappers` substring match, absolute touched-file paths relativized before deriving the
+ * stem, dedup across repeated twins, and the cap still trimming fuzzy hits first — and
  * F14a's project-interpreter discovery: discoverProjectInterpreter's candidate ordering
  * (repo-local venv, then conda env, then PATH), first-success-wins, the none-found null case,
  * the exact cwd-stripping probe one-liner, and rewriteInterpreter's leading-token swap — and
@@ -223,6 +226,109 @@ describe("discoverNeighborTests — module-package breadth (F17, additive)", () 
     expect(commands).toContain("python -m pytest tests/test_alpha_one.py -x -q")
     expect(commands).toContain("python -m pytest tests/test_alpha_two.py -x -q")
     expect(commands.some((c) => c.includes("test_sub_"))).toBe(true)
+  })
+})
+
+describe("discoverNeighborTests — Django exact-twin (F19, highest rank)", () => {
+  it("editing django/utils/http.py yields tests/utils_tests/test_http.py FIRST, ahead of the fuzzy tests/httpwrappers hit", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "utils_tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "utils_tests", "test_http.py"), "")
+    mkdirSync(join(cwd, "tests", "httpwrappers"), { recursive: true })
+    mkdirSync(join(cwd, "django", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "django", "utils", "http.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/utils/http.py"],
+      cwd,
+    })
+
+    expect(result[0]).toEqual({
+      kind: "test",
+      command: "python tests/runtests.py utils_tests.test_http --parallel 1",
+    })
+    expect(result.map((c) => c.command)).toContain("python tests/runtests.py httpwrappers --parallel 1")
+  })
+
+  it("relativizes an ABSOLUTE touched-file path against cwd before deriving the stem (the package=\"\" bug class)", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "utils_tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "utils_tests", "test_http.py"), "")
+    mkdirSync(join(cwd, "django", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "django", "utils", "http.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: [join(cwd, "django", "utils", "http.py")],
+      cwd,
+    })
+
+    expect(result[0]).toEqual({
+      kind: "test",
+      command: "python tests/runtests.py utils_tests.test_http --parallel 1",
+    })
+  })
+
+  it("dedups the twin command when two touched files resolve to the same test twin (already found)", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "utils_tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "utils_tests", "test_http.py"), "")
+    mkdirSync(join(cwd, "django", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "django", "utils", "http.py"), "")
+    mkdirSync(join(cwd, "django", "core"), { recursive: true })
+    writeFileSync(join(cwd, "django", "core", "http.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/utils/http.py", "django/core/http.py"],
+      cwd,
+    })
+
+    expect(result).toEqual([{ kind: "test", command: "python tests/runtests.py utils_tests.test_http --parallel 1" }])
+  })
+
+  it("still trims fuzzy hits, never a twin, when the combined pass 0+1+2 total exceeds MAX_NEIGHBOR_COMMANDS", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "utils_tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "utils_tests", "test_http.py"), "")
+    for (const dirName of ["httpwrappers", "http_extra", "http_more"]) {
+      mkdirSync(join(cwd, "tests", dirName), { recursive: true })
+    }
+    mkdirSync(join(cwd, "django", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "django", "utils", "http.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/utils/http.py"],
+      cwd,
+    })
+
+    expect(result).toHaveLength(3)
+    expect(result[0]).toEqual({
+      kind: "test",
+      command: "python tests/runtests.py utils_tests.test_http --parallel 1",
+    })
+  })
+
+  it("returns [] for the exact-twin pass alone when no tests/<dir>/test_<stem>.py matches (fuzzy passes still apply)", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "delete"), { recursive: true })
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/db/models/deletion.py"],
+      cwd,
+    })
+
+    expect(result).toEqual([{ kind: "test", command: "python tests/runtests.py delete --parallel 1" }])
   })
 })
 

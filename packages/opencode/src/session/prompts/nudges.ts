@@ -157,6 +157,29 @@ export function toothlessReproNudgeText(script: string): string {
 }
 
 /**
+ * S3 — unverified-finish nudge: prompt.ts's finish-time block injects this
+ * on each rejected finish arrival for a bug-shaped turn with no verified
+ * reproduction / no source change, up to MAX_UNVERIFIED_FINISH_ATTEMPTS
+ * times (django-11848 iter-3: the old once-nudge model let a second silent
+ * arrival fail open loud with source edits shipped and no repro ever run).
+ * `attempt` 1 keeps the original ask-for-a-repro wording plus any S4
+ * unresolved-block fold-in; attempt 2+ escalates to the explicit either/or
+ * contract from the repro seed's own escape hatch (seeds.ts
+ * REPRO_SLICE_CONTENT point 6) — build and run the repro, or mark the repro
+ * todo cancelled with a one-line reason — so a still-silent model can no
+ * longer plausibly claim it didn't know cancellation was a legitimate exit.
+ */
+export function unverifiedFinishNudgeText(attempt: number, blockLines?: string): string {
+  if (attempt <= 1) {
+    return (
+      "You are finishing a bug-fix task with NO verified reproduction / NO source change. Author a minimal repro script asserting the issue's EXPECTED behavior, RUN it, and report the result. If it fails, your fix is incomplete." +
+      (blockLines ? `\n${blockLines}` : "")
+    )
+  }
+  return `You are finishing a bug-fix task with NO verified reproduction / NO source change (rejection ${attempt}). You cannot finish silently: build the repro and run it red→green, or mark the repro todo cancelled with a one-line reason.`
+}
+
+/**
  * F18 — seen-red nudge: prompt.ts's finish-time block injects this once,
  * when `findUnresolvedSeenRed` (seen-red.ts) finds a test/repro run the
  * turn's own transcript shows went red and was never re-run green. Names

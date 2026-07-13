@@ -25,6 +25,7 @@ import { Image } from "../../src/image/image"
 
 import { Question } from "../../src/question"
 import { SessionTodo } from "@opencode-ai/core/session/todo"
+import { REPRO_SLICE_CONTENT } from "../../src/session/prompts/seeds"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
@@ -2182,6 +2183,90 @@ it.instance(
       }
     }),
   3_000,
+)
+
+// S3 — unverified-finish gate (bounded re-rejection + repro-cancel escape hatch)
+
+it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails open loud", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({ title: "Bug report" })
+
+    // Four text-only, no-tool-call, finish="stop" replies: the model never
+    // authors/runs a repro and never cancels the repro todo — three rejected
+    // finish arrivals (escalating nudges), then a loud fourth.
+    yield* llm.text("still investigating")
+    yield* llm.text("still investigating")
+    yield* llm.text("still investigating")
+    yield* llm.text("done, no repro run")
+
+    const result = yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      parts: [{ type: "text", text: "There is a bug in the parser — it mis-tokenizes trailing commas." }],
+    })
+
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+    expect(yield* llm.calls).toBe(4)
+
+    const msgs = yield* sessions.messages({ sessionID: session.id })
+    const nudgeTexts = msgs
+      .filter((msg) => msg.info.role === "user")
+      .flatMap((msg) => msg.parts)
+      .filter((part): part is SessionV1.TextPart => part.type === "text")
+      .map((part) => part.text)
+      .filter((text) => text.includes("You are finishing a bug-fix task"))
+
+    expect(nudgeTexts).toHaveLength(3)
+    expect(nudgeTexts.some((text) => text.includes("rejection 2"))).toBe(true)
+    expect(nudgeTexts.some((text) => text.includes("rejection 3"))).toBe(true)
+    expect(nudgeTexts.filter((text) => text.includes("cannot finish silently"))).toHaveLength(2)
+  }),
+)
+
+it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with no nudge", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const todos = yield* SessionTodo.Service
+    const session = yield* sessions.create({ title: "Bug report" })
+
+    // The repro seed's own escape hatch (seeds.ts REPRO_SLICE_CONTENT point
+    // 6): after 2 distinct failed approaches, marking the todo cancelled
+    // with a one-line reason is a legitimate exit, not silence.
+    yield* todos.update({
+      sessionID: session.id,
+      todos: [{ content: REPRO_SLICE_CONTENT, status: "cancelled", priority: "high" }],
+    })
+
+    yield* llm.text("could not reproduce after two attempts, fixed defensively")
+
+    const result = yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      parts: [{ type: "text", text: "There is a bug in the parser — it mis-tokenizes trailing commas." }],
+    })
+
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+    // Exactly one round trip: the cancellation short-circuits straight to
+    // the loud, turn-ending branch — never a nudge, never a second call.
+    expect(yield* llm.calls).toBe(1)
+
+    const msgs = yield* sessions.messages({ sessionID: session.id })
+    const nudgeTexts = msgs
+      .filter((msg) => msg.info.role === "user")
+      .flatMap((msg) => msg.parts)
+      .filter((part): part is SessionV1.TextPart => part.type === "text")
+      .map((part) => part.text)
+      .filter((text) => text.includes("You are finishing a bug-fix task"))
+
+    expect(nudgeTexts).toHaveLength(0)
+  }),
 )
 
 // Agent variant

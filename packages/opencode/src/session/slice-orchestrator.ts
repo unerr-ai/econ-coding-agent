@@ -1397,27 +1397,33 @@ export interface TriageTodoRow extends OrchestrationTodo {
 /**
  * §1.2/U2 — materialize the turn-open todo skeleton from a non-null triage
  * verdict: one root todo per goal (dependency order, `orderTriageGoals`), and
- * for any goal that needs a frame pre-pass, one frame-seed child linked by the
- * goal-tree's `parentID` position index (goal -> task, one level — well inside
- * the tracker's depth-3 cap). The seed decision is a clean DOMAIN SPLIT: for a
- * DIAGNOSIS goal the arming decision OWNS localization arming
- * (`armLocalization` — the P1-alt code table over the turn-read's extracted
- * evidence, arming-judge.ts), so `needsPlan` cannot override it; its old OR
- * would else force a reasoner pre-pass onto an already-located bug the
- * decision correctly declined (the django-12039 regression). For a
- * NON-diagnosis/build goal, `needsPlan` owns the planning pre-pass and plants
- * the P12 PLAN seed — fresh work with no bug must not receive the diagnosis
- * writer's bug-hunt brief. Same-kind goals resolve to the same seed content, so
- * cross-goal content dedup plants at most ONE pre-pass per kind, parented to
- * the first qualifying goal in dependency order; a single diagnosis goal never
- * plants both (needsPlan is ignored on the diagnosis branch — the 12050
- * double-seed regression). S2 — repro-first sequencing: on a diagnosis goal
- * that still needs a reproduction (`arming.armReproduction` and no pin has
- * landed yet, `opts.hasPinnedProbe`), the REPRO seed plants INSTEAD of
- * localization — a post-fix repro can only ever run green, so localization is
- * WITHHELD until the mid-turn hand-off (prompt.ts SM4 block) plants it once
- * the repro pins (or the abstention deadline passes). `hasPinnedProbe:true`
- * (the prompt already named a pinnable command) restores today's behavior.
+ * for any goal that needs a frame pre-pass, one or more frame-seed children
+ * linked by the goal-tree's `parentID` position index (goal -> task, one
+ * level — well inside the tracker's depth-3 cap). The seed decision is a
+ * clean DOMAIN SPLIT: for a DIAGNOSIS goal the arming decision OWNS
+ * localization arming (`armLocalization` — the P1-alt code table over the
+ * turn-read's extracted evidence, arming-judge.ts), so `needsPlan` cannot
+ * override it; its old OR would else force a reasoner pre-pass onto an
+ * already-located bug the decision correctly declined (the django-12039
+ * regression). For a NON-diagnosis/build goal, `needsPlan` owns the planning
+ * pre-pass and plants the P12 PLAN seed — fresh work with no bug must not
+ * receive the diagnosis writer's bug-hunt brief; a diagnosis goal never
+ * plants the PLAN seed (needsPlan is ignored on the diagnosis branch — the
+ * 12050 double-seed regression). Same-kind goals resolve to the same seed
+ * content, so cross-goal content dedup plants at most ONE pre-pass per kind
+ * across the whole skeleton, parented to the first qualifying goal in
+ * dependency order. S2 — repro-then-localization sequencing: on a diagnosis
+ * goal, the REPRO seed (when `arming.armReproduction` and no pin has landed
+ * yet, `opts.hasPinnedProbe`) and the LOCALIZATION seed (when
+ * `arming.armLocalization`) are NOT mutually exclusive — both can plant on
+ * the same goal, repro first then localization, same `parentID`: the repro
+ * is the evidence pre-pass, localization is the writer that consumes it. A
+ * turn that only needs one plants only that one. `hasPinnedProbe:true` (the
+ * prompt already named a pinnable command) drops the repro seed regardless of
+ * `armReproduction`. (Formerly either/or — repro suppressed localization
+ * entirely on a diagnosis-vague-with-repro-need turn, so its root-most-layer/
+ * typed-equality/existing-idiom fix discipline never reached the turn; the
+ * django-11964 iter-3 and 11848 iter-2 regressions.)
  *
  * @sem domain=routing role=router
  */
@@ -1439,18 +1445,16 @@ export function buildTriageTodoSkeleton(
   for (const origIdx of order) {
     const goal = verdict.goals[origIdx]!
     const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
-    const seed = isDiagnosis
-      ? needsRepro
-        ? REPRO_PREPASS_TODO
-        : arming.armLocalization
-          ? LOCALIZATION_PREPASS_TODO
-          : undefined
+    const seeds = isDiagnosis
+      ? [...(needsRepro ? [REPRO_PREPASS_TODO] : []), ...(arming.armLocalization ? [LOCALIZATION_PREPASS_TODO] : [])]
       : (goal.needsPlan ?? false)
-        ? PLAN_PREPASS_TODO
-        : undefined
-    if (!seed || plantedSeedContent.has(seed.content)) continue
-    plantedSeedContent.add(seed.content)
-    todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
+        ? [PLAN_PREPASS_TODO]
+        : []
+    for (const seed of seeds) {
+      if (plantedSeedContent.has(seed.content)) continue
+      plantedSeedContent.add(seed.content)
+      todos.push({ ...seed, parentID: positionOf.get(origIdx)! })
+    }
   }
   return todos
 }

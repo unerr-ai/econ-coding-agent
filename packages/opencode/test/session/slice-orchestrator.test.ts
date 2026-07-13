@@ -867,16 +867,59 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.every((t) => t.parentID === undefined)).toBe(true)
   })
 
-  it("S2 — repro seeds INSTEAD of localization when armReproduction is true and no pin exists yet", () => {
+  it("S2 — repro-then-localization: a diagnosis goal needing both plants BOTH seeds, repro first, same parentID (django-11964 iter-3 / 11848 iter-2 fix)", () => {
     const verdict: TriageVerdict = {
       goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
       constraints: [],
       confidence: "high",
     }
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: true, hardness: "moderate" })
+    expect(todos).toHaveLength(3)
+    expect(todos[1]!.content).toBe(REPRO_SLICE_CONTENT)
+    expect(todos[2]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
+    expect(todos[1]!.parentID).toBe(0)
+    expect(todos[2]!.parentID).toBe(0)
+  })
+
+  it("S2 — needsRepro only (armLocalization:false) plants the repro seed only", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: false, armReproduction: true, hardness: "moderate" })
     expect(todos).toHaveLength(2)
     expect(todos[1]!.content).toBe(REPRO_SLICE_CONTENT)
     expect(todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toBe(false)
+  })
+
+  it("S2 — armLocalization only (no repro need) plants the localization seed only", () => {
+    const verdict: TriageVerdict = {
+      goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: false, hardness: "moderate" })
+    expect(todos).toHaveLength(2)
+    expect(todos[1]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
+    expect(todos.some((t) => t.content === REPRO_SLICE_CONTENT)).toBe(false)
+  })
+
+  it("S2 — two diagnosis goals needing both seeds still dedup by content: ONE repro + ONE localization, both parented to the first", () => {
+    const verdict: TriageVerdict = {
+      goals: [
+        { quote: "goal one", shape: "diagnosis-vague", deliverable: "" },
+        { quote: "goal two", shape: "diagnosis-vague", deliverable: "" },
+      ],
+      constraints: [],
+      confidence: "high",
+    }
+    const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: true, hardness: "hard" })
+    expect(todos).toHaveLength(4) // 2 root goals + 1 repro + 1 localization
+    expect(todos.filter((t) => t.content === REPRO_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.parentID === 0)).toHaveLength(2)
+    expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
 
   it("S2 — hasPinnedProbe:true restores today's behavior (localization, not repro) even when armReproduction is true", () => {
