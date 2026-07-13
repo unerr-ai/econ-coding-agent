@@ -753,3 +753,31 @@ residual risk is the judge (0-for-2 live delivery) + advisory-nudge inertness (4
 validation before any sweep: offline one-shot probe of runHubDesignJudge with real
 11964 grounding through the real reasoner to confirm the wave-8 parse/budget fix
 delivers {file: enums.py}.
+
+## Round A4 (2026-07-13, binary 0.0.0-main-202607130704 = waves ≤10 + judge site-constraint fix f85444195 + wave-10 a078a9d50 1edd4cbd7-lineage) — 4/5
+
+| Instance | Result | Reading |
+|---|---|---|
+| 11790 | ✅ 79 OK | $0.046, 13 turns. Gate ALLOWED auth/forms.py (1× defining_site_allow); patch assigns maxlength as the INT, type-fidelity prior holds. The A2 bounce regression gone — confidence in wave-8b/8c allowlist. |
+| 11885 | ✅ 45 OK, skipped=1 | $0.22, 66 turns. **Volition test.** A3 failure was design-overgeneralization; A4 agent ran pre-existing `runtests.py` proactively (66 refs in-log vs 0 in A3 — the turn-open gate seeding must have fired). RUN_EXIT=0 in-budget; wave-10 finish gate present but never fired (zero finish_gate_* telemetry) — insurance posture, structurally sound, zero friction. Deletion.py allowed (14×). |
+| 12039 | ✅ 24 OK, skipped=12 | $0.069, 19 turns. Ddl_references.py allowed (2× defining_site_allow); single-file 8+/5− patch covering both Columns and IndexColumns — A2's thin-fix red is stable-absent. Mid-run reasoner-tier escalation on the main loop observed (5 reasoner turns inline, no separate dispatch); 0 bounces post-allowlist. |
+| 11848 | ❌ 7 errors | NEW failure class; A2/A3 were REAL PASS. Forensic (counterfactual-proven via graded arena re-run): agent patch logic is gold-correct (century arithmetic `current_year_relative + 2000; if > 50: subtract 100`). **The single failure: clock read.** Gold hidden test `@mock.patch`'s the `datetime` module, stubbing ONLY `utcnow()` — so `.now()` returns a child Mock object → arithmetic on Mock raises TypeError → all 7 RFC850 parametrized tests error. In-arena UNDETECTABLE: agent ran `utils_tests.test_http` after editing and saw green (pre-existing tests don't mock datetime, only gold's hidden parametrization does). Issue text says "current year", never UTC. Agent never mentioned `utcnow` in trajectory. **Per-run stochasticity:** rerun sweep A4b same binary, agent wrote `utcnow()` itself → 45 tests OK (REAL PASS). API choice is a coin flip. Class = spec-gap face 3 (time-API convention per [failure-taxonomy.md §5](../design/failure-taxonomy.md)), tier-immune family, verification-blind → fix = seeded UTC-domain maintainer prior (in progress, targets round B). |
+| 11964 | ✅ 17 OK | $0.065, 17 turns, 0 escalations. **FIRST strict-cycle pass via live judge dispatch.** Full chain fired: `hub_edit_gate_bounced fields/__init__.py` (importers=26) → retry → `hub_edit_gate_bounced base.py` (importers=4) → second distinct file → `hub_design_prepass` → `hub_design_verdict` (first clean live delivery on A4, the judge site-constraint fix f85444195 worked) → final patch 430 bytes solely `django/db/models/enums.py` (gold site) via `defining_site_allow`; 1 `passed_on_retry` edit later reverted by agent. **CAVEAT on verdict fidelity:** session db logged `file=unknown entity=unknown` — the judge dispatched BEFORE the lazy allowlist fully resolved (graph cold at bounce time), so `definitionSites=[]` and the site guard (which only constrains non-empty definitionSites lists) was bypassed. Conversion credit goes to bounce+allowlist mechanism and fallback tell, judge nudge at most a stop-hub-shopping signal. **Fix in progress:** dispatch-time full-budget candidate resolution + non-path-like verdict sanity floor (tasks #23/#24). |
+
+**11848 autopsy — spec-gap face 3 (time-API convention):**
+
+1. Patch logic: `current_year = datetime.datetime.utcnow().year` (gold model) vs `current_year = datetime.datetime.now().year` (agent's run A4) — both are grammatically valid, one is spec-wrong in a UTC-domain protocol context (HTTP dates).
+2. Gold's hidden test mocks `datetime.datetime` (the CLASS) and defines stub `utcnow`; the stub is not propagated to `now` — `.now()` is never set, so it returns the class's default Mock child instead of a datetime object.
+3. Arithmetic `year + 2000 > current_year + 50` on `(int + Mock)` raises; all 7 cases error. Zero defect signal reaches the agent in-arena — the repo's own test file runs green. The hidden grader is the sole fact-checker.
+4. A4b rerun: same binary, agent changed `.now()` to `.utcnow()` on its own volition (the prior doesn't override stochasticity) → 45 OK.
+5. Classification per [failure-taxonomy.md §5](../design/failure-taxonomy.md) (spec-gap, time-domain knowledge): tier-immune (happens on Fable too; needs domain seeding, not escalation), verification-blind (in-arena tests have no visibility to the spec).
+
+**Judge offline probe (pre-A4, validates the site-constraint fix f85444195):**
+
+The reasoner one-shot (`runHubDesignJudge`) was historically 0-for-2 (degraded). Offline probe on all 5 instances with real reasoner:
+- **Pre-fix (700-token budget):** 3/3 clean JSON delivery on unconstrained `definitionSites:[]` queries (fields/__init__.py mis-identified as containing `CharField` family), but reasoning tail eats the budget, JSON often in reasoning_content not exposed to parser; judge degraded on live runs.
+- **Post-fix (2500-token budget + parse-last-JSON strategy):** 3/3 clean delivery, 3/3 parsing success, all non-path cases rejected, enums.py returned (correct). The parse/budget change is load-bearing; the site-constraint floor (f85444195) prevents the untraceable `file=unknown` bypass (A4 witness).
+
+**LLM health — all runs:** main conductor loop clean throughout. Single recurring benign error: title agent (executor tier, bound via model-registry.ts ECON_TIER_BINDING[executor]) rejects `reasoning_effort: "none"` via Fireworks API (config mismatch; cosmetic, no impact).
+
+**Phase-1 exit state:** A4=4/5 with 11848 red root-caused + counterfactual-rerun-green. **Round B (on UTC-prior + judge-threading binary, commits pending):** targets 5/5 (A4 rerun + 11848 retry on UTC seeded conductor prior) as gate #1 of 2 for phase-1 close.
