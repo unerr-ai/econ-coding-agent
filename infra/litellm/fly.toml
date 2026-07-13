@@ -1,11 +1,13 @@
 # econ LiteLLM gateway — Fly.io app (Sprint OL-8, docs/features/08-litellm-gateway.md).
-# Org: vamsee-k-933 (team space) · Region: bom (Mumbai) — in-region egress control.
+# Org: vamsee-k-933 (team space) · Region: iad (Ashburn, US-East) — colocated with the
+# US-hosted model providers and the swebench-agent-* benchmark fleet (all in iad).
 app = "econ-litellm"
-# bom (Mumbai) is the target region but had no machine capacity on 2026-07-04 (tried
-# shared-cpu-2x/2gb and 1x/1gb). sin is the nearest fallback; move back with
-# `fly scale count 1 --region bom` when capacity returns. Residency is unaffected today —
-# the gateway proxies to US-hosted Fireworks either way.
-primary_region = "sin"
+# iad (US-East) keeps the gateway in the same region as every provider it proxies to and
+# the rest of the fly fleet — ample capacity, lowest hop to US-hosted providers. Residency
+# is unaffected: the gateway proxies to US-hosted providers either way. (History: originally
+# bom/Mumbai for in-region egress; bom had no machine capacity on 2026-07-04, so it ran on
+# sin/Singapore until the 2026-07-13 relocation to iad.)
+primary_region = "iad"
 
 [build]
 dockerfile = "Dockerfile"
