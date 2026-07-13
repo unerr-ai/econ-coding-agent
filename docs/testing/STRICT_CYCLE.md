@@ -200,6 +200,107 @@ with the explicit-cancel escape, F19 exact-twin neighbors, seed co-planting.
 Consecutive-green: 11790 ✅✅ · 11885 ✅✅ · 12039 ✅✅ · 11964 reset · 11848 ❌.
 Iteration 4 (wave-3 binary): 11848 + 11964, then the twice-green set re-verifies.
 
+### Iteration 4 — 2026-07-13 — validate wave 3 (binary `202607130017`, HEAD `9a21ca8aa`)
+
+| Instance | Verdict | Cost / turns | Notes |
+|---|---|---|---|
+| 11848 | ❌ **REAL FAIL** (same 7-error signature as iter-3) | $0.0532 / 20 turns | **Every wave-3 mechanism worked and the failure narrowed to a single bit.** Autopsy below. |
+
+**11848 iter-4 autopsy (gates honest, one domain bit left):**
+
+1. **S3 forced engagement**: the agent built `repro_issue.py` this time and even tried to
+   pin the real hidden test class (`utils_tests.test_http.HttpDateProcessingTests` — it
+   guessed the exact name; the pin missed only because its command shape errors in the
+   arena). The engine refused to pin the never-red repro (`turn_probe_engine_green_skip
+   reason=green`), S3 re-rejected twice (attempt=1, attempt=2), the S8 converge valve
+   then capped it — honest loud finish, `reproCancelled=false`.
+2. **F19 worked**: neighbors now lead with `utils_tests.test_http` — the correct twin.
+   It runs green legitimately: the BASE repo's tests pass under the agent's fix; only
+   gold's mocked-utcnow parametrization distinguishes, and it exists only at grading.
+3. **The patch**: century arithmetic is now gold-equivalent AND generalizes
+   (`current_century` + `>50 → past`). The single wrong bit — for the third consecutive
+   run — is the clock accessor: local `datetime.datetime.now()` in a GMT protocol
+   context. Gold mocks `utcnow` only → `.now()` returns a MagicMock → arithmetic raises
+   → all 7 mocked cases error.
+4. The repro asserted real-clock cases only (the wave-2 mocked-clock clause in REPRO
+   item 8 did not bind), so no local signal could distinguish the accessors.
+
+**Verdict:** the enforcement layer is now honest end-to-end; the residual is one bit of
+DOMAIN knowledge, not harness design. Local `now()` is genuinely wrong code for GMT
+timestamp parsing (year-boundary drift), independent of any grader. **Wave-4 knob (one
+sentence, conductor delta item 12 extension):** protocol timestamps (HTTP, cookies,
+email) are UTC/GMT-domain — read the clock through the module's UTC accessor
+(`utcnow()`/UTC-aware equivalent), never local `now()`; graders and tests mock the UTC
+accessor. With the accessor right, the already-correct arithmetic passes gold's mock.
+Committed `f6b12d1ee`.
+
+| 11964 | ❌ **REAL FAIL** (15/17, same signature) | $0.2032 / 53 turns, **0 escalations** | **K3 worked — `seeds=["repro","localization"]` both planted — and the conductor violated the delivered prior anyway** (third straight symptom-layer choice): sprayed `isinstance(val, _Enum) → val.value` coercions across `Model.__init__`'s assignment sites, the literal "never coerce at the sites where values flow" anti-pattern, in `base.py` — django's highest-fan-in class. Repro honest (pinned from red → green over its own path); wrong layer misses the hidden tests' other paths by construction. |
+
+## Iteration 5 — wave-4 binary (`f6b12d1ee`, build 202607130031)
+
+**Change under test:** conductor delta item 12's UTC-domain extension — "Protocol
+timestamps (HTTP dates, cookies, email headers) are UTC/GMT-domain: read the clock
+through the UTC accessor (`utcnow()` or the UTC-aware equivalent), never local
+`now()`". One sentence of domain prior, no harness change.
+
+| Instance | Result | Cost / shape | What happened |
+|---|---|---|---|
+| 11848 | ✅ **REAL PASS — first ever, after 4 straight fails** | $0.0500 / 19 turns, 0 escalations, 100% conductor | Patch is gold-equivalent: `current_year = datetime.datetime.utcnow().year; year += 2000; if year > current_year + 50: year -= 100` in `parse_http_date`. All 45 `utils_tests.test_http` tests OK. The clock read goes through the module's EXISTING `datetime` import via the UTC accessor — precisely what iters 1–4 got wrong four different ways (boundary flip → `time.gmtime()` bypass → `.now()` crash → `.now()` honest-red loop). |
+
+**Verdict:** the 11848 family is closed by one sentence of domain knowledge, exactly the
+"small missing knob" class the campaign hunts. The enforcement chain built in waves 1–3
+(seen-red gate, bounded S3, repro clock clause) had already made the failure *honest*;
+wave 4 made it *convertible*. Iter-5 is also the cheapest 11848 attempt ever ($0.05 vs
+$0.42–$0.56 for the failed tries) — the agent stopped thrashing against its own red repro.
+
+**Second green (same binary, fresh arena):** 11848 ✅ again — 45/45 OK, $0.0835 / 27
+turns, same `django/utils/http.py` 4+/4− shape. **11848 is ✅✅.**
+
+**Consecutive-green board after iteration 5:** 11790 ✅✅ · 11885 ✅✅ · 12039 ✅✅ ·
+11848 ✅✅ · 11964 ❌ — one instance left for the Phase-1 exit gate.
+
+## Why 11964 keeps failing — the risk-router forensics (wave-5 rationale)
+
+The junior trace of the escalation path answered "why 0 escalations on a maximal-fan-in
+edit" with three stacked facts, each verified in code:
+
+1. **The graph is cold in arenas.** `getOrCreateEntry()` (graph-tools.ts:141) creates the
+   graph lazily on the FIRST probe and indexes in the background; `probeTurnRisk` /
+   `probeSliceCoupling` wait only `RISK_PROBE_INDEX_BUDGET_MS = 3000` ms and then return
+   0-risk / low-coupling defaults. A fresh django clone cannot index in 3s, so early
+   turns see no signal. (Python IS supported — `.py` is in the extractor's language map —
+   so this is latency, not capability.)
+2. **The inline path has signal but no consumer.** `probeTurnRisk` feeds
+   `planRaiseForTurn`, which only raises reasoning effort on the SAME conductor tier —
+   and post-E0 the conductor already runs at bounded "high", so the raise is a no-op.
+   `allocateSlice()` (the thing that actually escalates tiers) is reached ONLY by
+   dispatched slices; a conductor that stays inline for 53 turns never touches it.
+3. **The edit-time gate is blind to this failure shape.** `callersAtRiskWarning`
+   (edit-governance.ts:274, wired into edit.ts + write.ts) fires only on SIGNATURE
+   changes — its own test proves a body-only edit yields no warning — and it is
+   advisory-only ("never rejects the edit"). The 11964 coercion spray was body-only
+   edits to `Model.__init__`, so nothing fired; and this campaign has shown twice
+   (test-edit gate → 11885, bounded S3 → 11848 honesty) that advisory text never steers
+   the flash conductor while a bounded hard gate converts it.
+
+**Wave-5 design (task #19):** apply the proven bounce-gate pattern to structural risk —
+first edit to a top-fan-in hub file in a fix-shaped root session is DENIED once with a
+root-most-layer redirect; re-issuing the same edit passes (once-per-file hysteresis);
+fail-open when the graph is cold. Plus a fire-and-forget index kick at root arming so
+fresh clones are warm by edit time. Threshold set from an empirical django measurement
+(riskScore + caller counts for base.py vs enums.py vs the already-passing files, so the
+gate catches the hub spray without taxing legitimate fixes like deletion.py).
+
+**11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
+prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
+pass came when the reasoner did the diagnosis in dispatched slices. The principled next
+lever is the product's own thesis: an inline edit to `django/db/models/base.py
+Model.__init__` (maximal fan-in/centrality) should trip the structural-risk escalation —
+and receipts show 0 escalations, likely because the arena clone has no graph index →
+no risk signal → the router is structurally inert on benchmark repos. Investigation
+running; if confirmed, the fix is giving the risk router signal in fresh repos (or an
+edit-time fan-in proxy riding the existing governance gate), NOT more prompt text.
+
 **11848 iter-3 autopsy (the gates fail open, and the clock-read keeps oscillating):**
 
 1. The boundary arithmetic is now EXACTLY gold's (`≤50 → future`), and the agent used the
