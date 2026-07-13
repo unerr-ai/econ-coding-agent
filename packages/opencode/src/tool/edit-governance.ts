@@ -5,7 +5,10 @@
  * unerr's own `ur|rsk` signal uses, appends a callers-at-risk warning to the
  * tool's returned output. Non-blocking and fail-open by construction — a
  * cold, slow, or erroring graph simply yields no warning; the edit always
- * lands.
+ * lands. Also owns the hub-edit bounce gate: a blocking (but one-time-
+ * bounceable) deny for edits that land on a file-level import hub, steering
+ * a fix toward the root-most layer instead of the hub every value flows
+ * through.
  *
  * @sem domain=intelligence role=tools
  */
@@ -293,5 +296,107 @@ export async function callersAtRiskWarning(
     return renderInlineBlastRadius(result)
   } catch {
     return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hub-edit bounce gate — edits landing on a file the graph shows is one of
+// the repo's most-imported modules get bounced ONCE, steering the model to
+// re-check whether the behavior belongs at the root-most layer (the module
+// that DEFINES the thing) instead of a hub every value flows through. The
+// bounce is one-time per (session, file): recording the file in the bounced
+// set BEFORE returning the deny means an identical retry — the model
+// re-issuing the exact same edit after re-checking — passes. Same per-
+// session Set arming pattern as testEditGate/noEditsGate above, armed at
+// turn open in prompt.ts's root-arming block.
+// ---------------------------------------------------------------------------
+
+/** How many distinct importer files make a python/ts/js file a "hub" the bounce gate fires on — see docs/architecture measurement (django: base.py=3, fields/__init__.py=18, enums.py=1). */
+const HUB_IMPORTER_THRESHOLD = 3
+
+const hubEditGate = new Set<string>()
+
+/** Per-session set of file paths already bounced once — an identical retry on the same file passes. */
+const hubEditBounced = new Map<string, Set<string>>()
+
+/** Arm or disarm the hub-edit bounce gate for a session — set once per turn at turn open (root sessions decide unconditionally; child sessions inherit). */
+export function setHubEditGate(sessionID: string, armed: boolean): void {
+  if (armed) hubEditGate.add(sessionID)
+  else hubEditGate.delete(sessionID)
+}
+
+/** Is the hub-edit bounce gate armed for this session? */
+export function hubEditGateArmed(sessionID: string): boolean {
+  return hubEditGate.has(sessionID)
+}
+
+/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. */
+export function hubEditDenialMessage(relPath: string, importers: number): string {
+  return (
+    `${importers} other modules import ${relPath} directly — it is shared infrastructure. ` +
+    `A behavior fix belongs at the root-most layer: the module that DEFINES the class or function the issue names, not a shared file every consumer flows through. ` +
+    `Re-check where that behavior is defined and prefer fixing there. ` +
+    `If this hub file genuinely is the root-most layer, re-issue this exact edit and it will be allowed.`
+  )
+}
+
+/** Narrow graph surface the hub-edit gate needs — BunSqliteGraph satisfies it structurally; tests pass a synthetic fake (including one whose fileFanIn never resolves, to exercise the budget race). */
+export interface HubFanInGraph {
+  fileFanIn(filePath: string): number | Promise<number>
+}
+
+function emitHubEditGateEvent(
+  event: "hub_edit_gate_bounced" | "hub_edit_gate_passed_on_retry",
+  data: Record<string, unknown>,
+): void {
+  // Structured stderr log — same shape/tag convention as recordToolCall's
+  // meter log (tool/_shared/meter.ts): console.error so it survives without
+  // polluting `opencode run --format json`'s machine-readable stdout.
+  console.error(`[econ:governance]`, JSON.stringify({ event, ...data }))
+}
+
+/**
+ * The hub-edit bounce gate's ONE decision point. Not armed, a test file, or
+ * a file already bounced this session → allow. Otherwise races the graph's
+ * fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS (same fail-open pattern as
+ * callersAtRiskWarning: timeout/throw/cold graph → allow, never block on a
+ * cold graph); a fan-in clearing HUB_IMPORTER_THRESHOLD records the file as
+ * bounced (so an identical retry passes) and denies with the root-most-layer
+ * redirect message.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function evaluateHubEditGate(opts: {
+  sessionID: string
+  filePath: string
+  graph?: HubFanInGraph
+}): Promise<{ action: "allow" } | { action: "deny"; message: string; importers: number }> {
+  if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
+  if (isTestFilePath(opts.filePath)) return { action: "allow" }
+
+  const bounced = hubEditBounced.get(opts.sessionID)
+  if (bounced?.has(opts.filePath)) {
+    emitHubEditGateEvent("hub_edit_gate_passed_on_retry", { file: opts.filePath })
+    return { action: "allow" }
+  }
+
+  try {
+    const graph = opts.graph ?? (getGraph() as unknown as HubFanInGraph)
+    const timedOut = Symbol("hub-edit-gate-budget-timeout")
+    const budget = new Promise<typeof timedOut>((resolve) =>
+      setTimeout(() => resolve(timedOut), GOVERNANCE_GRAPH_BUDGET_MS),
+    )
+    const result = await Promise.race([Promise.resolve(graph.fileFanIn(opts.filePath)), budget])
+    if (result === timedOut) return { action: "allow" }
+
+    const importers = result
+    if (importers < HUB_IMPORTER_THRESHOLD) return { action: "allow" }
+
+    if (!hubEditBounced.has(opts.sessionID)) hubEditBounced.set(opts.sessionID, new Set())
+    hubEditBounced.get(opts.sessionID)!.add(opts.filePath)
+    emitHubEditGateEvent("hub_edit_gate_bounced", { file: opts.filePath, importers })
+    return { action: "deny", message: hubEditDenialMessage(opts.filePath, importers), importers }
+  } catch {
+    return { action: "allow" }
   }
 }

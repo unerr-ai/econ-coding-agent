@@ -453,6 +453,67 @@ function resolveRelativeImport(specifier: string, fromFile: string): string | nu
   return null
 }
 
+/** Probe `<base>.py` then `<base>/__init__.py`; null if neither exists. */
+function probePythonPath(base: string): string | null {
+  if (existsSync(base + ".py")) return base + ".py"
+  const initPath = join(base, "__init__.py")
+  if (existsSync(initPath)) return initPath
+  return null
+}
+
+/**
+ * Resolve a Python import specifier against the importing file's absolute
+ * path. A relative specifier's leading dots are package hops from
+ * `dirname(fromFile)` (one dot = same package dir, each extra dot = one
+ * parent up); a bare `from . import X`/`from .. import X` (no dotted path
+ * after the dots) resolves to that package directory's `__init__.py`
+ * itself. An absolute dotted specifier (`django.db.models.base`) resolves
+ * against the importing file's source root — found by walking up from
+ * `dirname(fromFile)` while each directory still contains `__init__.py`,
+ * stopping at the first ancestor that doesn't — and, failing that, against
+ * an optional `repoRoot` and its `src/` subdirectory. Each candidate probes
+ * `<path>.py` then `<path>/__init__.py`; returns null when nothing exists
+ * on disk (external packages like `os`, `re` stay unresolved — correct).
+ */
+function resolvePythonImport(specifier: string, fromFile: string, repoRoot?: string): string | null {
+  if (specifier.startsWith(".")) {
+    const dotMatch = specifier.match(/^(\.+)(.*)$/)
+    const dots = dotMatch?.[1] ?? "."
+    const rest = dotMatch?.[2] ?? ""
+
+    let dir = dirname(fromFile)
+    for (let i = 1; i < dots.length; i++) dir = dirname(dir)
+
+    if (!rest) {
+      const initPath = join(dir, "__init__.py")
+      return existsSync(initPath) ? initPath : null
+    }
+
+    const segments = rest.split(".")
+    return probePythonPath(resolve(dir, ...segments))
+  }
+
+  const segments = specifier.split(".")
+
+  let sourceRoot = dirname(fromFile)
+  while (existsSync(join(sourceRoot, "__init__.py"))) {
+    const parent = dirname(sourceRoot)
+    if (parent === sourceRoot) break
+    sourceRoot = parent
+  }
+  const fromSourceRoot = probePythonPath(resolve(sourceRoot, ...segments))
+  if (fromSourceRoot) return fromSourceRoot
+
+  if (repoRoot) {
+    const fromRepoRoot = probePythonPath(resolve(repoRoot, ...segments))
+    if (fromRepoRoot) return fromRepoRoot
+    const fromSrc = probePythonPath(resolve(repoRoot, "src", ...segments))
+    if (fromSrc) return fromSrc
+  }
+
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Call-site keyword filter and enclosing-entity lookup
 // ---------------------------------------------------------------------------
@@ -497,22 +558,26 @@ function findEnclosingEntity(lineNo: number, entities: ExtractedEntity[]): Extra
 /**
  * Extract import and call edges from source using regex. Import edges parse
  * ES named/default/namespace bindings, CommonJS `require()` destructured and
- * whole-module bindings, and Python-style `from X import Y`, resolving
- * relative specifiers to an absolute `toFile` (null for external/unresolved).
- * Call edges scan each entity's body for bare
+ * whole-module bindings, and Python `from X import A as Z, B` / `import
+ * X.Y.Z as W` forms, resolving both relative (JS `./...`) and Python
+ * (relative dot-hop and absolute dotted, via resolvePythonImport) specifiers
+ * to an absolute `toFile` (null for external/unresolved — an npm package or
+ * a stdlib module like `os`). Call edges scan each entity's body for bare
  * `identifier(` call sites and for `X.fn(` property calls whose receiver `X`
  * resolves to a same-file namespace or default import binding — excluding
  * other member access (`obj.foo(` where `obj` isn't an import) and language
  * keywords — and resolve the callee name against same-file entities or this
- * file's own import bindings; only resolved calls are kept (edge_kind
- * "call"), attributed to their enclosing entity via line ranges.
+ * file's own import bindings (Python's local binding names included); only
+ * resolved calls are kept (edge_kind "call"), attributed to their enclosing
+ * entity via line ranges.
  *
  * @sem domain=intelligence role=utilities
  */
 export function extractEdges(
   content: string,
   filePath: string,
-  entities: ExtractedEntity[] = []
+  entities: ExtractedEntity[] = [],
+  repoRoot?: string
 ): ExtractedEdge[] {
   const edges: ExtractedEdge[] = []
   const importNameToFile = new Map<string, string | null>()
@@ -585,12 +650,59 @@ export function extractEdges(
     }
   }
 
-  // Python: from X import A, B (path resolution not attempted — dotted modules)
-  const pyImport = /^from\s+\S+\s+import\s+(.+)$/gm
-  while ((m = pyImport.exec(content)) !== null) {
-    const names = (m[1] ?? "").split(",").map((s) => s.trim().split(/\s+as\s+/)[0]?.trim()).filter(Boolean)
-    for (const n of names) {
-      if (n) edges.push({ fromEntity: "", toEntity: n, toFile: null, kind: "import" })
+  // Python: from X import A as Z, B / import X.Y.Z as W, a, b — gated on file
+  // extension since python's import grammar has no analog to overlap with
+  // the ES/CJS forms above. Module specifiers resolve via
+  // resolvePythonImport (relative dot-hops, absolute dotted against the
+  // importing file's source root or repoRoot); each imported name's LOCAL
+  // binding also registers in importNameToFile so the bare-call pass below
+  // resolves python call sites the same way it does JS ones.
+  if (filePath.endsWith(".py")) {
+    // from X import A as Z, B
+    const pyFromImport = /^from\s+(\S+)\s+import\s+(.+)$/gm
+    while ((m = pyFromImport.exec(content)) !== null) {
+      const moduleSpecifier = m[1] ?? ""
+      const moduleToFile = resolvePythonImport(moduleSpecifier, filePath, repoRoot)
+      const moduleIsPackage = moduleToFile !== null && moduleToFile.endsWith("__init__.py")
+      const moduleDir = moduleToFile ? dirname(moduleToFile) : null
+
+      const pieces = (m[2] ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+      for (const piece of pieces) {
+        const [sourceName, aliasName] = piece.split(/\s+as\s+/).map((s) => s.trim())
+        if (!sourceName) continue
+        const localName = aliasName || sourceName
+
+        // Submodule-from-package: `from pkg import submodule` — if X
+        // resolved to a package's __init__.py and <X-dir>/<name>.py exists
+        // on disk, the imported name's own edge target is that submodule
+        // file, not the package's __init__.py.
+        let toFile = moduleToFile
+        if (moduleIsPackage && moduleDir) {
+          const submodulePath = join(moduleDir, `${sourceName}.py`)
+          if (existsSync(submodulePath)) toFile = submodulePath
+        }
+
+        edges.push({ fromEntity: "", toEntity: sourceName, toFile, kind: "import" })
+        importNameToFile.set(localName, toFile)
+      }
+    }
+
+    // import X.Y.Z as W, a, b
+    const pyPlainImport = /^import\s+(.+)$/gm
+    while ((m = pyPlainImport.exec(content)) !== null) {
+      const pieces = (m[1] ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+      for (const piece of pieces) {
+        const [modPart, aliasPart] = piece.split(/\s+as\s+/).map((s) => s.trim())
+        if (!modPart) continue
+        const segments = modPart.split(".")
+        const lastSeg = segments[segments.length - 1]
+        const bindingName = aliasPart || lastSeg
+        if (!bindingName) continue
+
+        const toFile = resolvePythonImport(modPart, filePath, repoRoot)
+        edges.push({ fromEntity: "", toEntity: bindingName, toFile, kind: "import" })
+        importNameToFile.set(bindingName, toFile)
+      }
     }
   }
 

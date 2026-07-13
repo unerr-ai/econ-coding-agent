@@ -405,7 +405,7 @@ export class BunSqliteGraph implements CodeIntelligence {
           entitiesTotal++
         }
 
-        const edges = extractEdges(content, filePath, entities)
+        const edges = extractEdges(content, filePath, entities, this.root)
         for (const edge of edges) {
           insertEdge.run(filePath, edge.fromEntity, edge.toEntity, edge.toFile ?? null, edge.kind)
           edgesTotal++
@@ -602,6 +602,24 @@ export class BunSqliteGraph implements CodeIntelligence {
 
     // Divide by 100 to maintain the existing [0, 1] return contract
     return Math.min(1, maxScore / 100)
+  }
+
+  /**
+   * Distinct-file fan-in for filePath: how many OTHER files hold an edge
+   * (import or call) pointing at it. Self-imports (from_file === to_file)
+   * are excluded so a file's own internal references never inflate its
+   * count. The raw hub signal the edit-time hub-edit gate thresholds on.
+   *
+   * @sem domain=intelligence role=analysis
+   */
+  fileFanIn(filePath: string): number {
+    const absPath = filePath.startsWith("/") ? filePath : join(this.root, filePath)
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT from_file) as n FROM edges WHERE to_file = ? AND from_file != ?`
+      )
+      .get(absPath, absPath) as { n: number } | null
+    return row?.n ?? 0
   }
 
   // -------------------------------------------------------------------------

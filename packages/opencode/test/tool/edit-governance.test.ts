@@ -362,3 +362,133 @@ describe("OL-7.9 — evaluateTestEditGate (the single gate: structural + policy)
     expect(result).toEqual({ action: "allow" })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Wave 5 — hub-edit bounce gate: arm/disarm store, denial message, and the
+// evaluateHubEditGate decision point (armed + over-threshold denies once — an
+// identical retry on that same file passes; a test file, an under-threshold
+// file, an unarmed session, and a cold/hanging or throwing graph all allow).
+// ---------------------------------------------------------------------------
+
+import {
+  setHubEditGate,
+  hubEditGateArmed,
+  hubEditDenialMessage,
+  evaluateHubEditGate,
+  type HubFanInGraph,
+} from "../../src/tool/edit-governance"
+
+describe("Wave 5 — hub-edit gate store", () => {
+  it("arms, consults, and disarms per session", () => {
+    setHubEditGate("ses_hub_a", true)
+    setHubEditGate("ses_hub_b", false)
+    expect(hubEditGateArmed("ses_hub_a")).toBe(true)
+    expect(hubEditGateArmed("ses_hub_b")).toBe(false)
+    expect(hubEditGateArmed("ses_hub_never_set")).toBe(false)
+  })
+})
+
+describe("Wave 5 — hubEditDenialMessage", () => {
+  it("names the file, the importer count, and the root-most-layer redirect", () => {
+    const msg = hubEditDenialMessage("django/db/models/base.py", 42)
+    expect(msg).toContain("django/db/models/base.py")
+    expect(msg).toContain("42")
+    expect(msg).toContain("root-most layer")
+    expect(msg).toContain("re-issue this exact edit")
+  })
+})
+
+describe("Wave 5 — evaluateHubEditGate", () => {
+  const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 5 }
+  const underThresholdGraph: HubFanInGraph = { fileFanIn: () => 1 }
+  const hangingGraph: HubFanInGraph = { fileFanIn: () => new Promise(() => {}) }
+
+  it("unarmed session → allow, even over threshold", async () => {
+    setHubEditGate("ses_hub_unarmed", false)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_unarmed",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("a test file allows even over threshold", async () => {
+    setHubEditGate("ses_hub_test", true)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_test",
+      filePath: "tests/test_hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("an under-threshold file allows", async () => {
+    setHubEditGate("ses_hub_under", true)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_under",
+      filePath: "leaf.py",
+      graph: underThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("first edit to an over-threshold file denies with the message; an identical retry passes", async () => {
+    setHubEditGate("ses_hub_bounce", true)
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_bounce",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(first.action).toBe("deny")
+    if (first.action === "deny") {
+      expect(first.importers).toBe(5)
+      expect(first.message).toContain("hub.py")
+    }
+
+    const retry = await evaluateHubEditGate({
+      sessionID: "ses_hub_bounce",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(retry).toEqual({ action: "allow" })
+  })
+
+  it("a different over-threshold file on the same session still bounces once", async () => {
+    setHubEditGate("ses_hub_bounce2", true)
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_hub_bounce2",
+      filePath: "hub_a.py",
+      graph: overThresholdGraph,
+    })
+    expect(first.action).toBe("deny")
+    const second = await evaluateHubEditGate({
+      sessionID: "ses_hub_bounce2",
+      filePath: "hub_b.py",
+      graph: overThresholdGraph,
+    })
+    expect(second.action).toBe("deny")
+  })
+
+  it("defensive: a cold/hanging graph is bounded by the budget and resolves allow", async () => {
+    setHubEditGate("ses_hub_hang", true)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_hang",
+      filePath: "hub.py",
+      graph: hangingGraph,
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("defensive: a throwing graph allows (fail-open, never throws)", async () => {
+    setHubEditGate("ses_hub_throw", true)
+    const throwingGraph: HubFanInGraph = {
+      fileFanIn: () => {
+        throw new Error("graph unavailable")
+      },
+    }
+    await expect(
+      evaluateHubEditGate({ sessionID: "ses_hub_throw", filePath: "hub.py", graph: throwingGraph }),
+    ).resolves.toEqual({ action: "allow" })
+  })
+})

@@ -24,6 +24,7 @@ import {
   noEditsDenialMessage,
   rawTaskChildGateArmed,
   rawTaskChildDenialMessage,
+  evaluateHubEditGate,
 } from "./edit-governance"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
@@ -73,6 +74,16 @@ export const WriteTool = Tool.define(
           // test file (a repro) falls through.
           if (exists && testEditGateArmed(ctx.sessionID) && isTestFilePath(filepath)) {
             throw new Error(testEditDenialMessage(path.relative(instance.worktree, filepath)))
+          }
+
+          // Hub-edit bounce gate: a first write to a file the graph shows is
+          // one of the repo's most-imported modules is denied once, steering
+          // toward the root-most layer; an identical retry passes.
+          const hubGateResult = yield* Effect.promise(() =>
+            evaluateHubEditGate({ sessionID: ctx.sessionID, filePath: filepath }),
+          )
+          if (hubGateResult.action === "deny") {
+            throw new Error(hubGateResult.message)
           }
 
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }

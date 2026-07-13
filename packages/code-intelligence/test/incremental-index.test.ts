@@ -99,3 +99,29 @@ describe("BunSqliteGraph — incremental indexing", () => {
     expect(run3.edges).toBe(run1.edges)
   })
 })
+
+// Wave 5 — fileFanIn: distinct-importer-file count over a small python
+// fixture (the hub-edit gate's raw signal).
+describe("BunSqliteGraph — fileFanIn", () => {
+  let dir: string
+  let graph: BunSqliteGraph
+
+  afterEach(async () => {
+    graph?.close()
+    if (dir) await rm(dir, { recursive: true, force: true })
+  })
+
+  it("counts distinct importer files, excluding self-imports and non-importers", async () => {
+    dir = await mkdtemp(join(tmpdir(), "econ-graph-fanin-"))
+    await writeFile(join(dir, "base.py"), "class Model:\n    pass\n")
+    await writeFile(join(dir, "caller_a.py"), "from base import Model\n")
+    await writeFile(join(dir, "caller_b.py"), "from base import Model\n")
+    await writeFile(join(dir, "lonely.py"), "x = 1\n")
+
+    graph = new BunSqliteGraph(":memory:", dir)
+    await graph.index(dir)
+
+    expect(graph.fileFanIn("base.py")).toBe(2)
+    expect(graph.fileFanIn("lonely.py")).toBe(0)
+  })
+})

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { extractEdges, extractEntities } from "../src/ast-extractor"
@@ -212,5 +212,112 @@ describe("extractEdges — CommonJS require() bindings", () => {
 
     const callEdge = edges.find((e) => e.kind === "call" && e.toEntity === "readFileSync")
     expect(callEdge).toBeUndefined()
+  })
+})
+
+// Wave 5 — Python import resolution (relative dot-hops, absolute dotted
+// against the importing file's source root, submodule-from-package, plain
+// `import`, and external/stdlib modules staying unresolved).
+describe("extractEdges — Python import resolution", () => {
+  test("relative import, one dot: from .base import Model resolves within the same package dir", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    mkdirSync(join(dir, "pkg"))
+    writeFileSync(join(dir, "pkg", "__init__.py"), "")
+    writeFileSync(join(dir, "pkg", "base.py"), "class Model:\n    pass\n")
+    const modFile = join(dir, "pkg", "mod.py")
+    const src = "from .base import Model\n"
+    const edges = extractEdges(src, modFile)
+    const expectedToFile = join(dir, "pkg", "base.py")
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "Model")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBe(expectedToFile)
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("relative import, two dots: from ..base import Model walks up one package level", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    mkdirSync(join(dir, "pkg"))
+    writeFileSync(join(dir, "pkg", "__init__.py"), "")
+    writeFileSync(join(dir, "pkg", "base.py"), "class Model:\n    pass\n")
+    mkdirSync(join(dir, "pkg", "sub"))
+    writeFileSync(join(dir, "pkg", "sub", "__init__.py"), "")
+    const modFile = join(dir, "pkg", "sub", "mod.py")
+    const src = "from ..base import Model\n"
+    const edges = extractEdges(src, modFile)
+    const expectedToFile = join(dir, "pkg", "base.py")
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "Model")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBe(expectedToFile)
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("absolute dotted intra-package: from pkg.base import Model resolves against the source root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    mkdirSync(join(dir, "pkg"))
+    writeFileSync(join(dir, "pkg", "__init__.py"), "")
+    writeFileSync(join(dir, "pkg", "base.py"), "class Model:\n    pass\n")
+    mkdirSync(join(dir, "pkg", "sub"))
+    writeFileSync(join(dir, "pkg", "sub", "__init__.py"), "")
+    const modFile = join(dir, "pkg", "sub", "mod.py")
+    const src = "from pkg.base import Model\n"
+    const edges = extractEdges(src, modFile)
+    const expectedToFile = join(dir, "pkg", "base.py")
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "Model")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBe(expectedToFile)
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("submodule-from-package: from pkg import base resolves to the submodule file, not the package __init__", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    mkdirSync(join(dir, "pkg"))
+    writeFileSync(join(dir, "pkg", "__init__.py"), "")
+    writeFileSync(join(dir, "pkg", "base.py"), "class Model:\n    pass\n")
+    const callerFile = join(dir, "caller.py")
+    const src = "from pkg import base\n"
+    const edges = extractEdges(src, callerFile)
+    const expectedToFile = join(dir, "pkg", "base.py")
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "base")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBe(expectedToFile)
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("plain import x.y binds the final segment and resolves it against the source root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    mkdirSync(join(dir, "pkg"))
+    writeFileSync(join(dir, "pkg", "__init__.py"), "")
+    writeFileSync(join(dir, "pkg", "base.py"), "class Model:\n    pass\n")
+    const callerFile = join(dir, "caller.py")
+    const src = "import pkg.base\n"
+    const edges = extractEdges(src, callerFile)
+    const expectedToFile = join(dir, "pkg", "base.py")
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "base")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBe(expectedToFile)
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("external stdlib module: import os stays unresolved (null toFile)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ast-extractor-py-"))
+    const callerFile = join(dir, "caller.py")
+    const src = "import os\n"
+    const edges = extractEdges(src, callerFile)
+
+    const importEdge = edges.find((e) => e.kind === "import" && e.toEntity === "os")
+    expect(importEdge).toBeDefined()
+    expect(importEdge?.toFile).toBeNull()
+
+    rmSync(dir, { recursive: true, force: true })
   })
 })

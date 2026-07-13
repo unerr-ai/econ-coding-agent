@@ -24,6 +24,8 @@ import {
   setNoEditsGate,
   noEditsGateArmed,
   isTestFilePath,
+  setHubEditGate,
+  hubEditGateArmed,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
@@ -3188,8 +3190,16 @@ export const layer = Layer.effect(
               // P3 — a plan-only parent's dispatched slices must not edit
               // either; children inherit the no-edits gate unconditionally.
               setNoEditsGate(sessionID, noEditsGateArmed(session.parentID))
+              // Hub-edit bounce gate: child sessions inherit the parent's
+              // armed state exactly like the no-edits gate — no prompt
+              // condition, no per-turn re-derivation.
+              setHubEditGate(sessionID, hubEditGateArmed(session.parentID))
             } else {
               const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
+              // Hub-edit bounce gate: root sessions arm unconditionally every
+              // turn — unlike the no-test-edit gate this doesn't depend on
+              // any prompt-derived fix-shaped signal.
+              setHubEditGate(sessionID, true)
 
               // The turn-read runs on every root turn open (always-on, no
               // feature flag); TurnOpenCalls is the test-only off switch so

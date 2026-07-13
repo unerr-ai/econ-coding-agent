@@ -27,6 +27,7 @@ import {
   noEditsDenialMessage,
   rawTaskChildGateArmed,
   rawTaskChildDenialMessage,
+  evaluateHubEditGate,
 } from "./edit-governance"
 
 function normalizeLineEndings(text: string): string {
@@ -113,6 +114,16 @@ export const EditTool = Tool.define(
             (yield* afs.existsSafe(filePath))
           ) {
             throw new Error(testEditDenialMessage(path.relative(instance.worktree, filePath)))
+          }
+
+          // Hub-edit bounce gate: a first edit to a file the graph shows is
+          // one of the repo's most-imported modules is denied once, steering
+          // toward the root-most layer; an identical retry passes.
+          const hubGateResult = yield* Effect.promise(() =>
+            evaluateHubEditGate({ sessionID: ctx.sessionID, filePath }),
+          )
+          if (hubGateResult.action === "deny") {
+            throw new Error(hubGateResult.message)
           }
 
           let diff = ""
