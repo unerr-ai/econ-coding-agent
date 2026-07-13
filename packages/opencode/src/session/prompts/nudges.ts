@@ -41,6 +41,18 @@ export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: num
 }
 
 /**
+ * Wave 6 — the message injected when the hub-shopping trigger fires
+ * (prompt.ts's hub-shopping trigger, right after the L4.2 grind valve): the
+ * session has now bounced two DISTINCT hub files, the tell that the model is
+ * moving the same wrong-layer fix to another shared module instead of
+ * reconsidering where it belongs. Same "hold edits, a design is coming"
+ * doctrine as grindValveNudgeText above.
+ */
+export function hubDesignPrepassNudgeText(bouncedFiles: string[]): string {
+  return `Your edits have now landed on TWO different shared hub modules in this turn (${bouncedFiles.join(", ")}) — moving the same fix to another shared file is not a fix, it is avoidance. A root-cause design pre-pass has been added to your todo list and will run automatically; it will name the ROOT-MOST site — the module that DEFINES the misbehaving class or function — and the concrete change to make there. HOLD further source edits until that design comes back, then implement it AT the site it names.`
+}
+
+/**
  * L1.2c — the message injected when the batch-momentum watcher fires
  * (turn-supervisor.ts `createBatchMomentumWatcher`): the transcript shows a
  * run of single-call steps, which in-context trains the model out of the

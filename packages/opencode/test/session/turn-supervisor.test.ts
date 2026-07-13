@@ -14,14 +14,16 @@ import {
   reproDriftNudgeText,
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
+  hubDesignPrepassNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
+import { GRIND_DESIGN_PREPASS_TODO, hubDesignPrepassTodo } from "../../src/session/slice-orchestrator"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
+  HUB_DESIGN_PREPASS_CONTENT_PREFIX,
 } from "../../src/session/prompts/seeds"
 
 // SM4 — the root-loop step observer that feeds the stuck supervisor. Pure, so
@@ -366,6 +368,43 @@ describe("createGrindValve", () => {
     const text = grindValveNudgeText({ step: 60, stepsSinceGreen: 15 })
     expect(text).toContain("60")
     expect(text).toContain("15")
+    expect(text.toLowerCase()).toContain("design")
+  })
+})
+
+// -- Wave 6 — hub-shopping design pre-pass -----------------------------------
+// Same "assert the proposal shape, not deep dispatch" scope as the grind
+// valve's own todo/nudge tests above (the OL-7.3b hook, allocation, and
+// fold-back are existing machinery with their own tests) — prompt.ts's inner
+// loop wiring itself has no scoped test here or for any sibling watcher
+// (grind valve, stuck ladder, batch momentum, env-slow all lack one too; the
+// loop's Effect/session/provider harness makes a scoped unit test
+// disproportionate) — typecheck + these shape/content tests carry the wave.
+
+describe("Wave 6 — hubDesignPrepassTodo", () => {
+  it("proposes through the existing delegation shape: a design/reasoner todo naming the bounced files", () => {
+    const todo = hubDesignPrepassTodo(["django/db/models/base.py", "django/forms/widgets.py"])
+    expect(todo.status).toBe("pending")
+    expect(todo.sliceType).toBe("design")
+    expect(todo.need).toBe("reasoner")
+    expect(todo.persona).toBe("researcher")
+    expect(todo.content).toContain("django/db/models/base.py")
+    expect(todo.content).toContain("django/forms/widgets.py")
+    expect(todo.content.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX)).toBe(true)
+  })
+
+  it("dedup-by-prefix keeps it distinct from every other seed's content", () => {
+    for (const other of [GRIND_DESIGN_SLICE_CONTENT, LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT]) {
+      expect(other.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX)).toBe(false)
+    }
+  })
+})
+
+describe("Wave 6 — hubDesignPrepassNudgeText", () => {
+  it("names the bounced files and holds edits until the design returns", () => {
+    const text = hubDesignPrepassNudgeText(["hub_a.py", "hub_b.py"])
+    expect(text).toContain("hub_a.py")
+    expect(text).toContain("hub_b.py")
     expect(text.toLowerCase()).toContain("design")
   })
 })

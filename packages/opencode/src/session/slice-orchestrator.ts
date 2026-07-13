@@ -23,6 +23,7 @@ import {
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
   REPRO_SLICE_CONTENT,
+  hubDesignPrepassContent,
 } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import {
@@ -1248,6 +1249,31 @@ export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
   sliceType: "design",
   need: "reasoner",
   persona: "researcher",
+}
+
+/**
+ * Wave 6 — the design seed the hub-shopping trigger plants (prompt.ts inner
+ * loop, right after the L4.2 grind valve) when a session bounces two DISTINCT
+ * hub files in one turn: the tell that the conductor is retreating from a
+ * denied edit only to move the same wrong-layer fix to a DIFFERENT shared
+ * module, instead of reconsidering where the fix belongs. Same edit-free
+ * `design`/reasoner shape as GRIND_DESIGN_PREPASS_TODO above — the OL-7.3b
+ * slice hook dispatches it through the EXISTING delegation machinery (a lone
+ * design seed clears the shouldOrchestrate benefit gate) and the fold-back
+ * relay hands its design back to the conductor. A function, not a constant,
+ * because the bounced file list is dynamic per session — see
+ * hubDesignPrepassContent in prompts/seeds.ts, and dedup by its stable
+ * HUB_DESIGN_PREPASS_CONTENT_PREFIX rather than the full content string.
+ */
+export function hubDesignPrepassTodo(bouncedFiles: readonly string[]): InjectedSliceTodo {
+  return {
+    content: hubDesignPrepassContent(bouncedFiles),
+    status: "pending",
+    priority: "high",
+    sliceType: "design",
+    need: "reasoner",
+    persona: "researcher",
+  }
 }
 
 // B3 — explicit test-work authorization: an authoring verb with tests as its

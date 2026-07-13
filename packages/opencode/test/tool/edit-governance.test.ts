@@ -374,6 +374,7 @@ import {
   setHubEditGate,
   hubEditGateArmed,
   hubEditDenialMessage,
+  hubEditBouncedFiles,
   evaluateHubEditGate,
   type HubFanInGraph,
 } from "../../src/tool/edit-governance"
@@ -395,6 +396,29 @@ describe("Wave 5 — hubEditDenialMessage", () => {
     expect(msg).toContain("42")
     expect(msg).toContain("root-most layer")
     expect(msg).toContain("re-issue this exact edit")
+  })
+
+  it("wave 6: warns against moving the same change to a DIFFERENT shared file", () => {
+    const msg = hubEditDenialMessage("django/db/models/base.py", 42)
+    expect(msg).toContain("DIFFERENT shared file")
+  })
+})
+
+describe("Wave 6 — hubEditBouncedFiles", () => {
+  it("empty for an unknown/never-bounced session", () => {
+    expect(hubEditBouncedFiles("ses_hub_bouncedfiles_unknown")).toEqual([])
+  })
+
+  it("lists files after bounces, empty before any", async () => {
+    const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 5 }
+    setHubEditGate("ses_hub_bouncedfiles", true)
+    expect(hubEditBouncedFiles("ses_hub_bouncedfiles")).toEqual([])
+
+    await evaluateHubEditGate({ sessionID: "ses_hub_bouncedfiles", filePath: "hub_a.py", graph: overThresholdGraph })
+    expect(hubEditBouncedFiles("ses_hub_bouncedfiles")).toEqual(["hub_a.py"])
+
+    await evaluateHubEditGate({ sessionID: "ses_hub_bouncedfiles", filePath: "hub_b.py", graph: overThresholdGraph })
+    expect(hubEditBouncedFiles("ses_hub_bouncedfiles")).toEqual(["hub_a.py", "hub_b.py"])
   })
 })
 
@@ -451,7 +475,7 @@ describe("Wave 5 — evaluateHubEditGate", () => {
       filePath: "hub.py",
       graph: overThresholdGraph,
     })
-    expect(retry).toEqual({ action: "allow" })
+    expect(retry).toEqual({ action: "allow", retried: true })
   })
 
   it("a different over-threshold file on the same session still bounces once", async () => {

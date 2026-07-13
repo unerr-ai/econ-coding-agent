@@ -118,12 +118,25 @@ export const EditTool = Tool.define(
 
           // Hub-edit bounce gate: a first edit to a file the graph shows is
           // one of the repo's most-imported modules is denied once, steering
-          // toward the root-most layer; an identical retry passes.
+          // toward the root-most layer; an identical retry passes. The gate
+          // itself is logging-free — log here, at the call site, inside the
+          // Effect.
           const hubGateResult = yield* Effect.promise(() =>
             evaluateHubEditGate({ sessionID: ctx.sessionID, filePath }),
           )
           if (hubGateResult.action === "deny") {
+            yield* Effect.logWarning("hub_edit_gate_bounced", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filePath),
+              importers: hubGateResult.importers,
+            })
             throw new Error(hubGateResult.message)
+          }
+          if (hubGateResult.action === "allow" && hubGateResult.retried) {
+            yield* Effect.logInfo("hub_edit_gate_passed_on_retry", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filePath),
+            })
           }
 
           let diff = ""

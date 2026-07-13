@@ -26,6 +26,7 @@ import {
   isTestFilePath,
   setHubEditGate,
   hubEditGateArmed,
+  hubEditBouncedFiles,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
@@ -43,6 +44,7 @@ import {
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
   unverifiedFinishNudgeText,
+  hubDesignPrepassNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
@@ -59,6 +61,7 @@ import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REPRO_SLICE_CONTENT,
+  HUB_DESIGN_PREPASS_CONTENT_PREFIX,
 } from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
@@ -86,6 +89,7 @@ import {
   resolveSliceModel,
   hasPendingTypedSlices,
   GRIND_DESIGN_PREPASS_TODO,
+  hubDesignPrepassTodo,
   LOCALIZATION_PREPASS_TODO,
   extractTrajectory,
   promptAuthorizesTestEdits,
@@ -1887,6 +1891,10 @@ export const layer = Layer.effect(
         const ESCALATION_DECAY_STEPS = 4
         let productiveSinceEscalation = 0
         let envSlowNudged = false
+        // Wave 6 — once-per-turn-loop guard for the hub-shopping trigger
+        // (mirrors envSlowNudged's once-per-turn shape): fires at most once
+        // per turn-loop instance, same as the grind valve it rides beside.
+        let hubDesignPrepassPlanted = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // SM4 — root-loop stuck supervisor. The inline path (this loop) had no
@@ -2625,6 +2633,53 @@ export const layer = Layer.effect(
                 sessionID,
                 type: "text",
                 text: grindValveNudgeText(grindSignal),
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
+            // Wave 6 — hub-shopping trigger. Runs AFTER the grind valve above
+            // and BEFORE the stuck ladder below: on a step where the grind
+            // valve also fires, its `continue` already exits the loop before
+            // this block runs, so grind wins on a shared step — acceptable,
+            // since planting the grind design pre-pass already holds edits
+            // this turn. Root sessions only (a dispatched child slice runs
+            // its own verified slice-loop, not this inner loop). Fires ONCE
+            // per turn-loop instance when the hub-edit bounce gate has denied
+            // two DISTINCT files this session — the live-fire tell (django-
+            // 11964 forensics) that the conductor is moving the same
+            // wrong-layer fix to another shared module instead of
+            // reconsidering where the fix belongs. Same dedup-by-content
+            // (here: by stable prefix, since the file list is dynamic) and
+            // plant/log/nudge/continue shape as the grind valve.
+            const bouncedHubFiles = hubEditBouncedFiles(sessionID)
+            if (!hubDesignPrepassPlanted && bouncedHubFiles.length >= 2 && !session.parentID) {
+              hubDesignPrepassPlanted = true
+              const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+              if (!currentTodos.some((t) => t.content.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX))) {
+                yield* todoStore
+                  .update({ sessionID, todos: [...currentTodos, hubDesignPrepassTodo(bouncedHubFiles)] })
+                  .pipe(Effect.ignore)
+              }
+              yield* Effect.logWarning("hub_design_prepass", {
+                "session.id": sessionID,
+                mechanism: "sm-backstop",
+                bouncedFiles: bouncedHubFiles,
+              })
+              const hubNudge: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(hubNudge)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: hubNudge.id,
+                sessionID,
+                type: "text",
+                text: hubDesignPrepassNudgeText(bouncedHubFiles),
                 synthetic: true,
               } satisfies SessionV1.TextPart)
               continue

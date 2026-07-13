@@ -319,6 +319,11 @@ const hubEditGate = new Set<string>()
 /** Per-session set of file paths already bounced once — an identical retry on the same file passes. */
 const hubEditBounced = new Map<string, Set<string>>()
 
+/** The session's bounced file set as an array (insertion order) — empty for an unknown or never-bounced session. Read by prompt.ts's hub-shopping trigger to detect a second DISTINCT bounced file in one turn (the tell that the model is moving the same fix to another hub instead of reconsidering where it belongs). */
+export function hubEditBouncedFiles(sessionID: string): string[] {
+  return Array.from(hubEditBounced.get(sessionID) ?? [])
+}
+
 /** Arm or disarm the hub-edit bounce gate for a session — set once per turn at turn open (root sessions decide unconditionally; child sessions inherit). */
 export function setHubEditGate(sessionID: string, armed: boolean): void {
   if (armed) hubEditGate.add(sessionID)
@@ -336,6 +341,7 @@ export function hubEditDenialMessage(relPath: string, importers: number): string
     `${importers} other modules import ${relPath} directly — it is shared infrastructure. ` +
     `A behavior fix belongs at the root-most layer: the module that DEFINES the class or function the issue names, not a shared file every consumer flows through. ` +
     `Re-check where that behavior is defined and prefer fixing there. ` +
+    `Moving the same change to a DIFFERENT shared file is not the fix — the defining module is. ` +
     `If this hub file genuinely is the root-most layer, re-issue this exact edit and it will be allowed.`
   )
 }
@@ -345,24 +351,16 @@ export interface HubFanInGraph {
   fileFanIn(filePath: string): number | Promise<number>
 }
 
-function emitHubEditGateEvent(
-  event: "hub_edit_gate_bounced" | "hub_edit_gate_passed_on_retry",
-  data: Record<string, unknown>,
-): void {
-  // Structured stderr log — same shape/tag convention as recordToolCall's
-  // meter log (tool/_shared/meter.ts): console.error so it survives without
-  // polluting `opencode run --format json`'s machine-readable stdout.
-  console.error(`[econ:governance]`, JSON.stringify({ event, ...data }))
-}
-
 /**
- * The hub-edit bounce gate's ONE decision point. Not armed, a test file, or
- * a file already bounced this session → allow. Otherwise races the graph's
- * fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS (same fail-open pattern as
- * callersAtRiskWarning: timeout/throw/cold graph → allow, never block on a
- * cold graph); a fan-in clearing HUB_IMPORTER_THRESHOLD records the file as
- * bounced (so an identical retry passes) and denies with the root-most-layer
- * redirect message.
+ * The hub-edit bounce gate's ONE decision point. Not armed or a test file →
+ * allow; a file already bounced this session → allow with `retried: true` so
+ * the call site can log the pass-through distinctly from a fresh allow.
+ * Otherwise races the graph's fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS
+ * (same fail-open pattern as callersAtRiskWarning: timeout/throw/cold graph →
+ * allow, never block on a cold graph); a fan-in clearing
+ * HUB_IMPORTER_THRESHOLD records the file as bounced (so an identical retry
+ * passes) and denies with the root-most-layer redirect message. Logging-free
+ * by design — edit.ts/write.ts log at the call site, inside their own Effect.
  *
  * @sem domain=intelligence role=analysis
  */
@@ -370,14 +368,13 @@ export async function evaluateHubEditGate(opts: {
   sessionID: string
   filePath: string
   graph?: HubFanInGraph
-}): Promise<{ action: "allow" } | { action: "deny"; message: string; importers: number }> {
+}): Promise<{ action: "allow"; retried?: boolean } | { action: "deny"; message: string; importers: number }> {
   if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
   if (isTestFilePath(opts.filePath)) return { action: "allow" }
 
   const bounced = hubEditBounced.get(opts.sessionID)
   if (bounced?.has(opts.filePath)) {
-    emitHubEditGateEvent("hub_edit_gate_passed_on_retry", { file: opts.filePath })
-    return { action: "allow" }
+    return { action: "allow", retried: true }
   }
 
   try {
@@ -394,7 +391,6 @@ export async function evaluateHubEditGate(opts: {
 
     if (!hubEditBounced.has(opts.sessionID)) hubEditBounced.set(opts.sessionID, new Set())
     hubEditBounced.get(opts.sessionID)!.add(opts.filePath)
-    emitHubEditGateEvent("hub_edit_gate_bounced", { file: opts.filePath, importers })
     return { action: "deny", message: hubEditDenialMessage(opts.filePath, importers), importers }
   } catch {
     return { action: "allow" }
