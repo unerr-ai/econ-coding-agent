@@ -566,3 +566,29 @@ every trajectory (their fix files all bounce once). The honest exit criterion:
 **all difficult 5 green twice consecutively on the final (wave-7) binary.** Running
 two full sequential sweeps (round A, round B) of 11790 · 11885 · 12039 · 11848 ·
 11964 on build 202607130236.
+
+## Round A sweep (wave-7 binary) — 2/5, two regressions, and the gate's design bug
+
+| Instance | Result | Autopsy |
+|---|---|---|
+| 11790 | ❌ 2 failures | Gate bounced django/contrib/auth/forms.py (importers=7) — **its own correct fix file** — then the re-issued trajectory wrote `widget.attrs['maxlength'] = str(username_max_length)`: the exact type-fidelity trap (gold assigns the INT; hidden tests assert it typed) the mirrored-entry seed prior exists for. |
+| 11885 | ✅ 47 OK | — |
+| 12039 | ❌ 1 failure | Gate bounced ddl_references.py (importers=6) — again the correct fix file — then a thin single-site fix (`if suffix:` in IndexColumns only), missing the sibling `Columns` case the previous 11-line winning patch covered. |
+| 11848 | ✅ 45 OK | — |
+| 11964 | ❌ 15 failures | Chain fired correctly (bounce fields=26 → bounce base=4 → tell → **judge-degraded AGAIN, 0-for-2**) but this time the degraded fallback nudge did NOT convert — patch stayed in base.py + fields. The fallback is not reliable; the verdict rung must work. |
+
+**Two structural defects, both measured:**
+1. **The gate contradicts its own doctrine.** Its redirect says "the defining module is
+   the right site" — yet it bounces the defining modules themselves (forms.py and
+   ddl_references.py ARE where the issue-named behavior lives; importers 6-7 ≈ ordinary
+   files, not hubs — direct fan-in cannot separate base.py(4) from forms.py(7)).
+   **Wave-8 fix: definition-aware allowlist** — at root arming, resolve the issue-named
+   symbols' defining files (issueSymbolDefinitionSites, already built) and never bounce
+   them. 11964's fields/base (not defining modules of Choices/TextChoices) still bounce.
+2. **O-J1: the reasoner one-shot has never delivered a verdict** (judge-degraded 2/2).
+   Suspected: reasoning-heavy output exhausts the 700-token budget before the JSON, or
+   the JSON lands in the reasoning tail the parser never sees. **Wave-8 fix:** budget →
+   2500, parse the LAST balanced JSON object anywhere in text+reasoning, "output the
+   JSON as the last line" prompt tail, and log the raw response head on degrade.
+
+Round B is cancelled on this binary; the close-out sweep restarts on the wave-8 binary.
