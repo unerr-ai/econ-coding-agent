@@ -806,3 +806,42 @@ The reasoner one-shot (`runHubDesignJudge`) was historically 0-for-2 (degraded).
 **Consecutive-green board:** 11790 ✅✅ · 11885 ✅✅ · 12039 ✅✅ · 11848 ✅✅ · 11964 ✅✅. **Phase-1 gate #1 met.** Round C (third consecutive sweep on the same binary) launched immediately per the close-out protocol.
 
 **Process note:** per-round run logs archived to `arena-run-logs/round{A4,B,…}` before any overwrite (lesson: A4b rerun clobbered the red 11848 DEBUG log).
+
+## Round C / C2 / C3 (2026-07-13, binary 0.0.0-main-202607130930) — 3/5, streak reset; reruns isolate two mechanisms
+
+**Round C:** 11790 ✅ · 12039 ✅ · 11848 ✅ · **11885 ❌** · **11964 ❌** (11964 red during a live gateway-degradation window — 7× `Service Unavailable`; C2 rerun voided by the same outage mid-run). **C2:** 11885 ✅ (clean infra). **C3:** 11964 ✅ (clean, 2-for-2 on healthy infra) · **11885 ❌** (clean infra, failures=2) → 11885 = 3-of-5 on this binary, a real coin flip.
+
+**Deep forensic (read-only, before any fix — full logs in `arena-run-logs/round{C,C2,C3}`):**
+
+1. **Seen-red gate blind by exit-code laundering.** Every red test run the agent watched — 3 in C, 9 in C3 — rode a `returncode 0` execution: `runtests.py … 2>&1 | grep … | tail -40; echo …; python inspect.py` (the pipe/compound reports the LAST command's exit). `findUnresolvedSeenRed`'s first predicate was `exitCode !== 0` → the gate never saw a single red in either run (`turn_seen_red_nudge` count: 0 in both). Latent secondary: `extractTestTargetTokens` counted interpreter paths (`.venv/bin/python`) as targets → any later exit-0 python call could falsely clear a red.
+2. **Round C = genuine declared-done-on-red, enabled by a second independent blind spot.** F11's `discoverNeighborTests` was polluted: the agent's scratch app `_repro_app/models.py` (not filtered — `REPRO_SCRIPT_RE` matches repro-named FILES only) contributed basename `models`, whose Pass-0 exact twins (`auth_tests/flatpages_tests/invalid_models_tests · test_models.py`) filled all `MAX_NEIGHBOR_COMMANDS=3` slots before deletion.py's `delete`/`delete_regress` got a turn → `turn_regression_green` on 3 unrelated suites → shipped (`RUN_EXIT=0`).
+3. **C3 = gates WORKED, local timeout guillotined the recovery.** Only deletion.py was touched (scratch file repro-named → filtered), neighbors resolved correctly, F11 re-ran `runtests.py delete --parallel 1` itself (exit 1, immune to laundering), denied the finish, pinned the red. The conductor began its recovery (step 84) and the arena's 1700s `timeout` killed it mid-LLM-call (start 17:37:01 + 1700s = 18:05:21; log last write 18:03). `build_run.sh`'s `set -e` also swallowed `RUN_EXIT=124` (no PATCH stage in the chain log). Mid-surgery tree graded red.
+
+## Round-D fix wave (2026-07-13, commits 3b9f4f7b7 + db7d956be + arena script) — binary 0.0.0-main-202607131318
+
+1. **`fix(seen-red)` 3b9f4f7b7 — output-signature red detection.** A zero-exit execution now counts as red when the command contains a pipe/compound, `looksLikeTestExecution` confirms a test at command position (cat/grep reads never qualify), and the output carries a runner red-summary (`FAILED (…)`/`FAIL:`/`N failed` — `LAUNDERED_FAILURE_SIGNATURE_RE`, stricter than the exit≠0 signature). Target tokens now come from the runner-bearing segment only; an interpreter path is never a target; bare module labels after the runner are targets (enables cross-shape clearing, incl. dotted-narrowing `delete` ⇄ `delete.DeletionTests`); a red-signatured later run never clears; unresolved capped at last 3. C/C3 live commands replayed as unit tests (seen-red suite 15 tests).
+2. **`fix(regression-gate)` db7d956be — scratch-dir filter + round-robin cap.** `isReproScratchPath` also matches repro-named directory segments (`_repro_app/`, `repro/`; not `reports/`/`reproducibility/`); `discoverNeighborTests` fills the cap round-robin across touched files (single-file behavior unchanged). Round-C replay is a unit test (`delete` must land within the first 3 commands despite a scaffolded `models.py`).
+3. **Arena parity:** `build_run.sh` timeout 1700→2400s; RUN_EXIT captured under `set +e` so a timeout kill still reports.
+
+**D1 solo live-fire (11885):** REAL PASS, 45 OK, $0.44 (first attempt aborted at startup by a gateway config regression — `UnsupportedParamsError: tool_choice/reasoning_effort` on the new minimax deployment; user fixed proxy-side, clean rerun). Win mechanism: F11 fired on the exact assertNumQueries regression (neighbors correct: `delete`, `delete_regress`), denied, pinned; agent recovered with the deeper 41+/4− deletion.py fix; `turn_regression_green` released the turn. No test-file edits at all.
+
+## Round D (2026-07-13, binary 0.0.0-main-202607131318) — FULL MINI-10: 10/10
+
+**First perfect full-set strict sweep.** Sequential single-owner driver (`arena-run-logs/roundD/sweepD-driver.sh`), fresh arena per instance, zero gateway errors across all runs. Total $2.48, 69 min wall.
+
+| Instance | Result | Cost / turns | Gate story |
+|---|---|---|---|
+| 11790 | ✅ 79 OK | $0.17 / 35 | clean; 7 reasoner turns (21% tok, 51% cost) |
+| 11815 | ✅ 46 OK | $0.82 / 152 | hardest run: 4 tiers (45 reasoner, 20 oracle, 9 executor), 54.8% reduction |
+| 11848 | ✅ 45 OK | $0.21 / 25 | **wave-11 convention gate deny→convert** (2nd live conversion); regression-green |
+| 11880 | ✅ 115 OK | $0.14 / 42 | clean |
+| 11885 | ✅ 45 OK, sk=1 | $0.44 / 84 | **seen-red nudge FIRST LIVE FIRE** (laundered red caught at finish) + regression-green |
+| 11951 | ✅ 27 OK, sk=5 | $0.09 / 27 | clean |
+| 11964 | ✅ 17 OK | $0.21 / 63 | convention deny→convert, hub bounce→allow, regression-green |
+| 11999 | ✅ 31 OK | $0.13 / 26 | clean |
+| 12039 | ✅ 24 OK, sk=12 | $0.20 / 48 | clean |
+| 12050 | ✅ 11 OK | $0.07 / 27 | clean |
+
+**Mechanism scoreboard this sweep:** seen-red (new) 1 fire/1 convert · F11 regression gate 4 green-verifies, correct neighbors throughout (round-robin fix) · wave-11 convention gate 2 deny→convert · hub gate 1 bounce→allow. The declared-done-on-red class is now closed by two independent layers (transcript scan + harness re-run), both validated live in the same sweep.
+
+**Phase-1 state:** round C reset the B-streak; round D = consecutive sweep #1 on the fixed binary (difficult-5 all green inside the 10/10). Round E (second consecutive) is the remaining Phase-1 gate.
