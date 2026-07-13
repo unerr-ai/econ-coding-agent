@@ -15,6 +15,16 @@ project's second pillar — hand the model the right slice, not the whole repo.
 Status: implemented (S2.0–S2.6). All modules below ship with passing test
 suites; see each section's "Tests" line.
 
+> **Plugin layer retired (2026-07-13).** The `.opencode/plugins/econ-*.js` MVP
+> plugins that originally wired these seams (econ-recon-inject S2.1,
+> econ-output-trim S2.2, and siblings) are deleted — the engine owns recon,
+> trimming, governance, and checkpointing natively. Any run launched with the
+> old plugin dir present double-hooked the loop: on the fly fleet's mini-10
+> (2026-07-13) econ-recon-inject injected a recon bundle on EVERY step, and the
+> conductor patched the injected symptom layer instead of investigating —
+> 3/10 wrong-layer failures that never reproduced locally. The diagrams below
+> are preserved as the design record of those seams.
+
 ---
 
 ## Turn-time flow

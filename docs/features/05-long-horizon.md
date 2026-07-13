@@ -50,7 +50,11 @@ pieces (S5.1 / S5.2 / S5.3), shipped together.
 ## S5.1 — Checkpoint writer (proactive context reconstruction)
 
 `packages/code-intelligence/src/checkpoint.ts` (pure, deterministic, no LLM) +
-`test/checkpoint.test.ts`. Runtime trigger: `.opencode/plugins/econ-checkpoint.js`.
+`test/checkpoint.test.ts`. Runtime trigger: was `.opencode/plugins/econ-checkpoint.js`
+(MVP plugin, **retired 2026-07-13** with the whole `.opencode/plugins/econ-*.js` layer —
+the native engine owns these seams now; the plugins double-hooked them on any run
+launched with the econ repo's `.opencode/` present, which is how the fly fleet's
+mini-10 diverged from local: every-step recon injection + a second governance gate).
 
 ### How it reconciles with OpenCode compaction
 
