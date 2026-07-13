@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { BunSqliteGraph } from "../code-intelligence/src/bun-sqlite-graph"
 import { extractIssueSymbols, issueSymbolDefinitionSites } from "./src/tool/graph-tools"
-import { pathsRefer } from "./src/tool/edit-governance"
+import { pathsRefer, bandFilterDefiningSites } from "./src/tool/edit-governance"
 
 const SCRATCH = "/private/tmp/claude-501/-Users-jaswanth-IdeaProjects-econ-coding-agent/16094f9e-8c0a-413d-81d3-e87c74c5fb03/scratchpad"
 const META = `${process.env.HOME}/econ-swe-arena/meta`
@@ -52,13 +52,19 @@ for (const short of ["11790", "11885", "12039", "11848", "11964"]) {
     console.log(`  ${s.symbol} -> [${s.kind}] ${s.file} (fanIn=${fanIn})`)
   }
 
+  // Wave 8c: the gate band-filters resolved sites by fan-in before they
+  // become the allowlist — replicate that here (root-most band, file-kind
+  // sites always kept), then judge each file of interest against it.
+  const allowFiles = await bandFilterDefiningSites(sites, (f) => graph.fileFanIn(join(repo, f)))
+  console.log(`band-filtered allowlist: ${allowFiles.join(", ") || "(empty)"}`)
+
   for (const { file, label } of INTEREST[short]) {
     const abs = join(repo, file)
     const fanIn = await graph.fileFanIn(abs)
-    const allowMatch = sites.find((s) => pathsRefer(abs, s.file) || pathsRefer(file, s.file))
+    const allowMatch = allowFiles.find((f) => pathsRefer(abs, f) || pathsRefer(file, f))
     const verdict =
       allowMatch !== undefined
-        ? `ALLOW (definingSite via symbol '${allowMatch.symbol}')`
+        ? `ALLOW (definingSite '${allowMatch}')`
         : fanIn >= THRESHOLD
           ? `BOUNCE (fanIn=${fanIn} >= ${THRESHOLD})`
           : `allow (fanIn=${fanIn} < ${THRESHOLD})`
