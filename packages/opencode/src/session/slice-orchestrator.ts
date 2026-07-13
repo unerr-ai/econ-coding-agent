@@ -719,17 +719,29 @@ const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
 // matched filename (group 1) so F10's canonicalScriptProbeCommand can pin the
 // FILE without a second, driftable copy of this pattern.
 const REPRO_SCRIPT_RE = /(?:^|[\s/])((?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb))\b/i
+// django-11885 round C — a scaffolded scratch APP (`_repro_app/models.py`)
+// isn't a repro-named FILE, so REPRO_SCRIPT_RE above missed it entirely and
+// the scratch edit counted as a landed source fix. This is a SEPARATE regex
+// (not folded into REPRO_SCRIPT_RE — its capture group is load-bearing for
+// F10's canonicalScriptProbeCommand) matching a repro-named DIRECTORY
+// segment anywhere in the path: optional leading underscore, `repro`/
+// `reproduce`, then only an underscore-separated suffix before the next
+// `/`, so `reports/` and `reproducibility/` (no underscore break) don't
+// false-positive.
+const REPRO_DIR_RE = /(?:^|\/)_?(?:repro|reproduce)(?:_[\w.-]*)?\//i
 
 /**
- * Whether a file path is an agent-authored scratch reproduction script rather
- * than product source — writing one must not count as "a source fix landed"
- * anywhere done-time evidence is weighed (S3's zero-source-edit bar, S8's
- * converge-now counter), or a repro-only turn looks fixed.
+ * Whether a file path is an agent-authored scratch reproduction artifact
+ * rather than product source — a repro-named FILE (REPRO_SCRIPT_RE) or any
+ * path with a repro-named DIRECTORY segment (REPRO_DIR_RE, e.g. a scaffolded
+ * `_repro_app/models.py`). Writing one must not count as "a source fix
+ * landed" anywhere done-time evidence is weighed (S3's zero-source-edit bar,
+ * S8's converge-now counter), or a repro-only turn looks fixed.
  *
  * @sem domain=routing role=repro-specificity
  */
 export function isReproScratchPath(filePath: string): boolean {
-  return REPRO_SCRIPT_RE.test(filePath)
+  return REPRO_SCRIPT_RE.test(filePath) || REPRO_DIR_RE.test(filePath)
 }
 
 /**

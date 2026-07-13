@@ -230,27 +230,87 @@ function djangoExactTwinCommands(cwd: string, sourceFile: string): string[] {
 }
 
 /**
+ * F19 — every candidate command for ONE touched file, in rank order: Django
+ * exact-twin (pass 0), same-file proximity (pass 1), then module-package
+ * breadth (pass 2) — identical per-file logic and ordering to the old
+ * file-major walk, just scoped to a single file and uncapped (the shared cap
+ * is enforced by the caller's round-robin push, not here).
+ */
+function collectFileNeighborCandidates(
+  sourceFile: string,
+  cwd: string,
+  isDjangoRepo: boolean,
+  testTreeRoots: readonly string[],
+): string[] {
+  const candidates: string[] = []
+
+  // Pass 0 — Django exact-twin (F19), highest rank.
+  if (isDjangoRepo) {
+    for (const command of djangoExactTwinCommands(cwd, sourceFile)) {
+      candidates.push(command)
+    }
+  }
+
+  // Pass 1 — same-file proximity (F11, unchanged).
+  const topic = neighborTopic(sourceFile)
+  if (topic) {
+    if (isDjangoRepo) {
+      for (const dirName of djangoNeighborDirs(cwd, topic)) {
+        candidates.push(`python tests/runtests.py ${dirName} --parallel 1`)
+      }
+    } else {
+      const matches = new Set<string>()
+      collectPytestMatches(join(cwd, "tests"), topic, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
+      collectPytestMatches(dirname(join(cwd, sourceFile)), topic, 0, 0, matches)
+      for (const match of matches) {
+        candidates.push(`python -m pytest ${relative(cwd, match)} -x -q`)
+      }
+    }
+  }
+
+  // Pass 2 — module-package breadth (F17, additive).
+  for (const stem of deriveModuleStems(sourceFile)) {
+    for (const variant of stemVariants(stem)) {
+      if (isDjangoRepo) {
+        for (const dirName of djangoNeighborDirs(cwd, variant)) {
+          candidates.push(`python tests/runtests.py ${dirName} --parallel 1`)
+        }
+        continue
+      }
+
+      const matches = new Set<string>()
+      for (const root of testTreeRoots) {
+        collectPytestMatches(root, variant, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
+      }
+      for (const match of matches) {
+        candidates.push(`python -m pytest ${relative(cwd, match)} -x -q`)
+      }
+    }
+  }
+
+  return candidates
+}
+
+/**
  * Discover a small set of pre-existing test commands whose scope plausibly
- * covers `opts.touchedSourceFiles`. Three passes, same cap, same dedup,
- * ranked front-to-back:
+ * covers `opts.touchedSourceFiles`. Each touched file gets its own
+ * rank-ordered candidate list (`collectFileNeighborCandidates`: Django
+ * exact-twin, then same-file proximity, then module-package breadth — same
+ * per-file ordering as before), and the lists are then filled into the
+ * result ROUND-ROBIN across files — file1's 1st, file2's 1st, file1's 2nd,
+ * ... — instead of file-major: a django-11885 round-C replay showed one
+ * touched file's fuzzy matches (an unrelated scaffolded `models.py`) filling
+ * every slot before a second touched file's real neighbors ever got a turn,
+ * so no single file's candidates can crowd out another's. A single touched
+ * file degenerates to that file's own list in original rank order —
+ * unchanged from before this pass.
  *
- * 0. Django exact-twin (F19, Django repos only) — highest rank: each touched
- *    file's basename stem matched against every `tests/<dir>/test_<stem>.py`
- *    for an exact filename hit, before any fuzzy matching runs.
- * 1. Same-file proximity (F11, unchanged) — Django-style (`tests/runtests.py`
- *    present → matching `tests/<dir>` names) when the repo is shaped that
- *    way, else a pytest-style filename glob under `<cwd>/tests/**` (bounded
- *    depth) and the source file's own directory.
- * 2. Module-package breadth (F17, additive) — only runs while the cap has
- *    room left: each touched file's parent-package name (dropped when it's a
- *    noise stem) plus dumb morphological variants of every stem, searched
- *    across every test tree the repo exposes (root `tests`/`test`, plus one
- *    level below root).
+ * Deduped, capped at `MAX_NEIGHBOR_COMMANDS` overall; a file's own exact
+ * twins are still ranked ahead of its own fuzzy hits, so the cap trims fuzzy
+ * hits first, never a twin. Returns `[]` when nothing matches so the
+ * caller's gate never runs on a guess.
  *
- * Deduped, capped at `MAX_NEIGHBOR_COMMANDS` across all three passes; exact
- * twins are pushed first so the cap trims fuzzy hits first, never a twin.
- * Returns `[]` when nothing matches so the caller's gate never runs on a
- * guess.
+ * @sem domain=routing role=neighbor-discovery
  */
 export function discoverNeighborTests(opts: { touchedSourceFiles: readonly string[]; cwd: string }): VerifyCommand[] {
   const { touchedSourceFiles, cwd } = opts
@@ -263,63 +323,17 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
   }
 
   const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
+  const testTreeRoots = isDjangoRepo ? [] : discoverTestTreeRoots(cwd)
 
-  // Pass 0 — Django exact-twin (F19), highest rank: runs before any fuzzy
-  // matching so MAX_NEIGHBOR_COMMANDS trims fuzzy hits first, never a twin.
-  if (isDjangoRepo) {
-    for (const sourceFile of touchedSourceFiles) {
+  const perFileCandidates = touchedSourceFiles.map((sourceFile) =>
+    collectFileNeighborCandidates(sourceFile, cwd, isDjangoRepo, testTreeRoots),
+  )
+
+  const maxCandidates = perFileCandidates.reduce((max, list) => Math.max(max, list.length), 0)
+  for (let index = 0; index < maxCandidates && commands.length < MAX_NEIGHBOR_COMMANDS; index++) {
+    for (const list of perFileCandidates) {
+      if (index < list.length) pushCommand(list[index]!)
       if (commands.length >= MAX_NEIGHBOR_COMMANDS) break
-      for (const command of djangoExactTwinCommands(cwd, sourceFile)) {
-        pushCommand(command)
-      }
-    }
-  }
-
-  // Pass 1 — same-file proximity (F11, unchanged).
-  for (const sourceFile of touchedSourceFiles) {
-    if (commands.length >= MAX_NEIGHBOR_COMMANDS) break
-    const topic = neighborTopic(sourceFile)
-    if (!topic) continue
-
-    if (isDjangoRepo) {
-      for (const dirName of djangoNeighborDirs(cwd, topic)) {
-        pushCommand(`python tests/runtests.py ${dirName} --parallel 1`)
-      }
-      continue
-    }
-
-    const matches = new Set<string>()
-    collectPytestMatches(join(cwd, "tests"), topic, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
-    collectPytestMatches(dirname(join(cwd, sourceFile)), topic, 0, 0, matches)
-    for (const match of matches) {
-      pushCommand(`python -m pytest ${relative(cwd, match)} -x -q`)
-    }
-  }
-
-  // Pass 2 — module-package breadth (F17, additive), only while cap room remains.
-  if (commands.length < MAX_NEIGHBOR_COMMANDS) {
-    const testTreeRoots = isDjangoRepo ? [] : discoverTestTreeRoots(cwd)
-    outer: for (const sourceFile of touchedSourceFiles) {
-      for (const stem of deriveModuleStems(sourceFile)) {
-        for (const variant of stemVariants(stem)) {
-          if (commands.length >= MAX_NEIGHBOR_COMMANDS) break outer
-
-          if (isDjangoRepo) {
-            for (const dirName of djangoNeighborDirs(cwd, variant)) {
-              pushCommand(`python tests/runtests.py ${dirName} --parallel 1`)
-            }
-            continue
-          }
-
-          const matches = new Set<string>()
-          for (const root of testTreeRoots) {
-            collectPytestMatches(root, variant, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
-          }
-          for (const match of matches) {
-            pushCommand(`python -m pytest ${relative(cwd, match)} -x -q`)
-          }
-        }
-      }
     }
   }
 

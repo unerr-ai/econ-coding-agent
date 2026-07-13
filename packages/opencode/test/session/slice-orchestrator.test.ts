@@ -1783,6 +1783,16 @@ describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixe
     expect(isReproScratchPath("src/session/prompt.ts")).toBe(false)
     expect(isReproScratchPath("tests/auth_tests/test_forms.py")).toBe(false)
   })
+  it("matches a repro-named DIRECTORY segment anywhere in the path (django-11885 round C: a scaffolded scratch app)", () => {
+    expect(isReproScratchPath("_repro_app/models.py")).toBe(true)
+    expect(isReproScratchPath("repro_app/models.py")).toBe(true)
+    expect(isReproScratchPath("repro/conftest.py")).toBe(true)
+  })
+  it("does not match a directory that merely starts with 'repro'/'reproduce' without an underscore break, or real product source", () => {
+    expect(isReproScratchPath("reports/models.py")).toBe(false)
+    expect(isReproScratchPath("reproducibility/utils.py")).toBe(false)
+    expect(isReproScratchPath("django/db/models/deletion.py")).toBe(false)
+  })
 })
 
 describe("reproSpecificity via deriveTurnProbe (S1 — authored repro scripts qualify as pins)", () => {

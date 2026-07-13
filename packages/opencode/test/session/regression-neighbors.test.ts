@@ -332,6 +332,51 @@ describe("discoverNeighborTests — Django exact-twin (F19, highest rank)", () =
   })
 })
 
+describe("discoverNeighborTests — round-robin across touched files (django-11885 round C replay)", () => {
+  it("a scratch file's fuzzy twin matches never crowd out a second touched file's real neighbors", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "delete"), { recursive: true })
+    mkdirSync(join(cwd, "tests", "delete_regress"), { recursive: true })
+    for (const dirName of ["auth_tests", "flatpages_tests", "invalid_models_tests"]) {
+      mkdirSync(join(cwd, "tests", dirName), { recursive: true })
+      writeFileSync(join(cwd, "tests", dirName, "test_models.py"), "")
+    }
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+    mkdirSync(join(cwd, "_repro_app"), { recursive: true })
+    writeFileSync(join(cwd, "_repro_app", "models.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/db/models/deletion.py", "_repro_app/models.py"],
+      cwd,
+    })
+
+    expect(result).toHaveLength(3)
+    expect(result.slice(0, 3).map((c) => c.command)).toContain("python tests/runtests.py delete --parallel 1")
+  })
+
+  it("single touched file is byte-identical to the pre-round-robin behavior", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "delete"), { recursive: true })
+    mkdirSync(join(cwd, "tests", "delete_regress"), { recursive: true })
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/db/models/deletion.py"],
+      cwd,
+    })
+
+    expect(result.map((c) => c.command).sort()).toEqual(
+      ["python tests/runtests.py delete --parallel 1", "python tests/runtests.py delete_regress --parallel 1"].sort(),
+    )
+  })
+})
+
 describe("discoverProjectInterpreter", () => {
   const originalHome = process.env.HOME
 
