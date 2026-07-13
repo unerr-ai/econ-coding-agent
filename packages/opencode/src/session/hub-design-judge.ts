@@ -165,9 +165,11 @@ export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
  * root-most fix site for a hub-shopping turn — no retry, this fires at
  * most once per turn (the caller enforces that). A thrown `complete`
  * degrades to `DEGRADED_HUB_DESIGN` with no `rawHead` (there is no
- * completion text to sample); a parse failure OR a well-formed verdict
- * whose `file` names none of the candidate `definitionSites` (checked via
- * `pathsRefer`, when the list is non-empty) degrades to
+ * completion text to sample); a parse failure, a verdict whose `file` is
+ * not even path-like (no separator or dot — e.g. a hedged "unknown"), OR a
+ * well-formed verdict whose `file` names none of the candidate
+ * `definitionSites` (checked via `pathsRefer`, when the list is non-empty)
+ * degrades to
  * `DEGRADED_HUB_DESIGN` WITH `rawHead` — the first 200 characters of the
  * raw completion — so the caller's degrade log carries evidence of what the
  * judge actually said instead of a bare "degraded" line. The site choice is
@@ -194,6 +196,13 @@ export async function runHubDesignJudge(
   }
   const verdict = parseHubDesignResponse(raw)
   if (!verdict) return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  // Sanity floor: a verdict whose file isn't even path-like (round-A4 live:
+  // the model hedged with literal "unknown" when it had no candidate sites)
+  // carries no design signal — degrade regardless of definitionSites.
+  const verdictFile = verdict.file.trim()
+  if (verdictFile === "" || (!verdictFile.includes("/") && !verdictFile.includes("."))) {
+    return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  }
   if (definitionSites.length > 0 && !definitionSites.some((site) => pathsRefer(site.file, verdict.file))) {
     return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
   }

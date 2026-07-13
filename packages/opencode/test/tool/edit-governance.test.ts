@@ -383,6 +383,7 @@ import {
   hubEditDefiningResolved,
   bandFilterDefiningSites,
   hubEditRetriedAgainstCandidates,
+  memoizeHubEditDefiningSites,
   type HubFanInGraph,
 } from "../../src/tool/edit-governance"
 
@@ -940,5 +941,64 @@ describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate f
 
     setHubEditGate("ses_hub_retry_d", false)
     expect(hubEditRetriedAgainstCandidates("ses_hub_retry_d")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 10 — dispatch-time defining-site memoization: memoizeHubEditDefiningSites
+// applies the same band filter as evaluateHubEditGate's lazy path (Wave 8c)
+// and stores the result through setHubEditGate, so prompt.ts's hub-design
+// trigger can seed the session's allowlist from its own already-resolved
+// sites instead of racing the lazy resolver at the next gate evaluation.
+// ---------------------------------------------------------------------------
+
+describe("Wave 10 — memoizeHubEditDefiningSites", () => {
+  it("band-filters the given sites and memoizes them as the session's allowlist", async () => {
+    const fanIns: Record<string, number> = { "a.py": 1, "b.py": 10 }
+    const graph: HubFanInGraph = { fileFanIn: (file: string) => fanIns[file] }
+    expect(hubEditDefiningResolved("ses_hub_memo_a")).toBe(false)
+
+    await memoizeHubEditDefiningSites(
+      "ses_hub_memo_a",
+      [{ file: "a.py" }, { file: "b.py", kind: "class" }],
+      graph,
+    )
+
+    expect(hubEditDefiningResolved("ses_hub_memo_a")).toBe(true)
+    expect(hubEditDefiningFiles("ses_hub_memo_a")).toEqual(["a.py"])
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_memo_a",
+      filePath: "a.py",
+      graph,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+  })
+
+  it("no-op when the session is already resolved — a different site set never overwrites the allowlist", async () => {
+    setHubEditGate("ses_hub_memo_b", true, ["x.py"])
+    expect(hubEditDefiningResolved("ses_hub_memo_b")).toBe(true)
+
+    await memoizeHubEditDefiningSites("ses_hub_memo_b", [{ file: "y.py" }], { fileFanIn: () => 1 })
+
+    expect(hubEditDefiningFiles("ses_hub_memo_b")).toEqual(["x.py"])
+  })
+
+  it("no-op on empty sites — the session stays unresolved", async () => {
+    await memoizeHubEditDefiningSites("ses_hub_memo_c", [], { fileFanIn: () => 1 })
+    expect(hubEditDefiningResolved("ses_hub_memo_c")).toBe(false)
+  })
+
+  it("a throwing fileFanIn never escapes — bandFilterDefiningSites' own fail-open keeps the unresolvable site rather than excluding it, so the session still resolves", async () => {
+    const throwingGraph: HubFanInGraph = {
+      fileFanIn: () => {
+        throw new Error("graph unavailable")
+      },
+    }
+    await expect(
+      memoizeHubEditDefiningSites("ses_hub_memo_d", [{ file: "a.py" }], throwingGraph),
+    ).resolves.toBeUndefined()
+    expect(hubEditDefiningResolved("ses_hub_memo_d")).toBe(true)
+    expect(hubEditDefiningFiles("ses_hub_memo_d")).toEqual(["a.py"])
   })
 })

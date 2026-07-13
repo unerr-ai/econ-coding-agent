@@ -39,6 +39,7 @@ import {
   hubEditIssueText,
   hubEditDefiningResolved,
   hubEditRetriedAgainstCandidates,
+  memoizeHubEditDefiningSites,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import {
@@ -2759,6 +2760,21 @@ export const layer = Layer.effect(
                 .filter(Boolean)
                 .join("\n")
               const sites = yield* Effect.promise(() => issueSymbolDefinitionSites(issueText))
+              // Wave 10 — dispatch-time memoization: the full-budget
+              // resolution above (issueSymbolDefinitionSites,
+              // RISK_PROBE_INDEX_BUDGET_MS internally) is otherwise thrown
+              // away after this one dispatch — round-A4 django-11964's
+              // timing gap was this resolution going unshared with
+              // evaluateHubEditGate's own lazy resolver, which then had to
+              // redo the same work independently, a gate evaluation later.
+              // When this session's defining-file allowlist isn't resolved
+              // yet and it has stored issue text to resolve against, feed
+              // the sites just fetched into the gate's store so the model's
+              // very next edit attempt sees the resolved allowlist
+              // immediately instead of waiting on a later lazy resolution.
+              if (!hubEditDefiningResolved(sessionID) && hubEditIssueText(sessionID) !== undefined) {
+                yield* Effect.promise(() => memoizeHubEditDefiningSites(sessionID, sites))
+              }
               const hubDesignResult = yield* hubDesignDispatch({
                 issueText,
                 bouncedFiles: bouncedHubFiles,

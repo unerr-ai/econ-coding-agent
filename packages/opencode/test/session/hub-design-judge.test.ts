@@ -227,6 +227,22 @@ describe("runHubDesignJudge", () => {
     expect(suffixResult.verdict).toEqual({ file: "/repo/django/forms/widgets.py", entity: "Widget", change: "fix render" })
     expect(suffixResult.rawHead).toBeUndefined()
   })
+
+  test("round-A4 sanity floor: a hedge like \"unknown\" (no path separator or dot) degrades with rawHead, even with no candidate definition sites to check against", async () => {
+    const raw = JSON.stringify({ file: "unknown", entity: "unknown", change: "x" })
+    const complete: HubDesignComplete = async () => raw
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe(raw.slice(0, 200))
+  })
+
+  test("a blank file value fails parse validation and degrades the same way, with rawHead present", async () => {
+    const raw = JSON.stringify({ file: "   ", entity: "Foo", change: "fix it there" })
+    const complete: HubDesignComplete = async () => raw
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe(raw.slice(0, 200))
+  })
 })
 
 describe("HUB_DESIGN_SYSTEM_PROMPT", () => {

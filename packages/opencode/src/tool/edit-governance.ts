@@ -638,3 +638,59 @@ export async function evaluateHubEditGate(opts: {
     return { action: "allow" }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wave 10 — dispatch-time defining-site memoization. Round-A4 django-11964:
+// the hub-design trigger (prompt.ts) fired its judge dispatch while this
+// gate's own lazy resolution (above) was still unresolved — the graph was
+// cold at bounce time — so the judge got definitionSites=[] and, with the
+// site guard applying only when the list is non-empty, returned a junk
+// verdict. A LATER gate evaluation resolved fine on its own, but by then the
+// judge had already fired. prompt.ts's trigger already runs its own
+// full-budget resolution (issueSymbolDefinitionSites, RISK_PROBE_INDEX_BUDGET_MS
+// internally) to ground the judge's prompt; this memoizes that same result
+// into THIS gate's store — band-filtered exactly like the lazy path above —
+// so the very next gate evaluation (the model's retry after the judge's
+// nudge) sees the resolved allowlist immediately instead of redoing the
+// resolution itself.
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch-time counterpart to `evaluateHubEditGate`'s lazy resolution above:
+ * called by prompt.ts's hub-design trigger right before it runs the judge,
+ * with the `sites` it already resolved for the judge's grounding (no second
+ * graph query here). No-op when the session's allowlist is already resolved
+ * (`hubEditDefiningResolved` — same memoization guard the lazy path uses, so
+ * a session is never re-resolved) or when `sites` is empty. On a non-empty
+ * `sites`, applies `bandFilterDefiningSites` — the SAME narrowing
+ * `evaluateHubEditGate`'s lazy path applies, never a second copy of that
+ * logic — then stores the result through `setHubEditGate`'s
+ * arm-with-definingFiles path, the same store a child session inherits from.
+ * Fails open (leaves the session unresolved for a later
+ * `evaluateHubEditGate` lazy pass to retry) on a thrown fan-in lookup or an
+ * empty band-filtered result.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function memoizeHubEditDefiningSites(
+  sessionID: string,
+  sites: ReadonlyArray<{ file: string; kind?: string }>,
+  graph?: HubFanInGraph,
+): Promise<void> {
+  if (hubEditDefiningResolved(sessionID)) return
+  if (sites.length === 0) return
+  let g: HubFanInGraph | undefined
+  try {
+    g = graph ?? (getGraph() as unknown as HubFanInGraph)
+  } catch {
+    return
+  }
+  try {
+    const filtered = await bandFilterDefiningSites(sites, (file) => g!.fileFanIn(file))
+    if (filtered.length === 0) return
+    setHubEditGate(sessionID, true, filtered)
+  } catch {
+    // Fail open — leave unresolved; evaluateHubEditGate's own lazy path
+    // retries at the next gate evaluation.
+  }
+}
