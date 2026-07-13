@@ -7,7 +7,12 @@
  * long reasoning prose before the JSON -> parses; two JSON objects -> the
  * LAST one wins; garbage/thrown completion -> degrades to
  * `{ verdict: DEGRADED_HUB_DESIGN, rawHead? }`; the completion request
- * carries the issue text, bounced files, and definition sites.
+ * carries the issue text, bounced files, and definition sites; a
+ * well-formed verdict whose `file` names none of the candidate
+ * `definitionSites` also degrades (with `rawHead`) — the judge must not
+ * re-litigate the site choice the graph's band-filtered allowlist already
+ * made — while an empty `definitionSites` list leaves the judge's file
+ * choice unchecked.
  *
  * The `hubDesignDispatch` wiring in prompt.ts (the reasoner-tier dispatch
  * the hub-shopping trigger calls) is an Effect-generator closure over
@@ -187,6 +192,40 @@ describe("runHubDesignJudge", () => {
     }
     await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
     expect(seenUser).toContain("(none found)")
+  })
+
+  test("a verdict naming a file outside the candidate definition sites degrades, with rawHead", async () => {
+    const raw = JSON.stringify({ file: "django/db/models/query_utils.py", entity: "Q", change: "wrong layer" })
+    const complete: HubDesignComplete = async () => raw
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe(raw.slice(0, 200))
+  })
+
+  test("the same out-of-list file is delivered as-is when definitionSites is empty", async () => {
+    const complete: HubDesignComplete = async () =>
+      JSON.stringify({ file: "django/db/models/query_utils.py", entity: "Q", change: "free choice" })
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    expect(result.verdict).toEqual({
+      file: "django/db/models/query_utils.py",
+      entity: "Q",
+      change: "free choice",
+    })
+    expect(result.rawHead).toBeUndefined()
+  })
+
+  test("a verdict naming a listed site — relative exact match or path-boundary-suffix form — is delivered as-is", async () => {
+    const exact: HubDesignComplete = async () =>
+      JSON.stringify({ file: "django/forms/widgets.py", entity: "Widget", change: "fix render" })
+    const exactResult = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete: exact })
+    expect(exactResult.verdict).toEqual({ file: "django/forms/widgets.py", entity: "Widget", change: "fix render" })
+    expect(exactResult.rawHead).toBeUndefined()
+
+    const suffix: HubDesignComplete = async () =>
+      JSON.stringify({ file: "/repo/django/forms/widgets.py", entity: "Widget", change: "fix render" })
+    const suffixResult = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete: suffix })
+    expect(suffixResult.verdict).toEqual({ file: "/repo/django/forms/widgets.py", entity: "Widget", change: "fix render" })
+    expect(suffixResult.rawHead).toBeUndefined()
   })
 })
 

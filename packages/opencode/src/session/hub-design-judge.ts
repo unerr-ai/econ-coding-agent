@@ -16,6 +16,7 @@
  * @sem domain=routing role=hub-design-judge
  */
 import { HUB_DESIGN_SYSTEM_PROMPT } from "./prompts/judges"
+import { pathsRefer } from "../tool/edit-governance"
 
 /**
  * The hub-design verdict: the ROOT-MOST fix site the judge decided on —
@@ -164,11 +165,17 @@ export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
  * root-most fix site for a hub-shopping turn — no retry, this fires at
  * most once per turn (the caller enforces that). A thrown `complete`
  * degrades to `DEGRADED_HUB_DESIGN` with no `rawHead` (there is no
- * completion text to sample); a parse failure degrades to
+ * completion text to sample); a parse failure OR a well-formed verdict
+ * whose `file` names none of the candidate `definitionSites` (checked via
+ * `pathsRefer`, when the list is non-empty) degrades to
  * `DEGRADED_HUB_DESIGN` WITH `rawHead` — the first 200 characters of the
  * raw completion — so the caller's degrade log carries evidence of what the
- * judge actually said instead of a bare "degraded" line. The caller falls
- * back to asking the model to re-derive the site itself, never blocks.
+ * judge actually said instead of a bare "degraded" line. The site choice is
+ * already made upstream by the graph's band-filtered allowlist; this judge
+ * picks WHICH listed site and the concrete change, never a different file —
+ * when `definitionSites` is empty, the judge's file choice stands
+ * unchecked. The caller falls back to asking the model to re-derive the
+ * site itself, never blocks.
  *
  * @sem domain=routing role=hub-design-judge
  */
@@ -186,6 +193,9 @@ export async function runHubDesignJudge(
     return { verdict: DEGRADED_HUB_DESIGN }
   }
   const verdict = parseHubDesignResponse(raw)
-  if (verdict) return { verdict }
-  return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  if (!verdict) return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  if (definitionSites.length > 0 && !definitionSites.some((site) => pathsRefer(site.file, verdict.file))) {
+    return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  }
+  return { verdict }
 }
