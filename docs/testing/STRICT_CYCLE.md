@@ -669,3 +669,32 @@ tell): [failure-taxonomy.md §6.x](../design/failure-taxonomy.md). The hub-desig
 is now a backstop under delete-at-0-for-3-live.
 
 Close-out sweep (round A′) launches on the 8b/8c/8d binary.
+
+## Round A′ (A2) — VOID: two sessions ran the same sweep in the same arena
+
+Round A2 launched on the wave-8d binary (202607130440) — and returned 0/5 with every
+run exiting 1, including the two instances that never fail. That uniformity was the
+tell: a **parallel Claude session** had built its own near-identical binary
+(202607130442, same post-8d code) and started the same difficult-5 sweep in
+`~/econ-swe-arena` twenty minutes earlier. The two drivers interleaved for the whole
+round:
+
+- Their `setup.sh` (`rm -rf arena-<id>`) wiped arenas under our live runs → our five
+  exit-1s and empty-diff FAILED grades (we graded arenas whose agent hadn't run).
+- Our `grade.sh` **planted the gold test_patch into arenas where their agents were
+  still working** → their four OK grades (11790 79-OK, 12039 OK, 11848 OK, 11964
+  17-OK) are oracle-contaminated and cannot count as strict passes.
+- Forensic tells for next time: grade-log mtime earlier than chain-log mtime; a grade
+  showing an empty source diff; a second REAL GRADE section inside one chain log.
+
+**What survives as directional (not green) evidence:** in their four completed runs on
+the full wave-8 binary, every agent fixed at the GOLD site with no gold-site bounce —
+11790 `auth/forms.py` (+3 lines, typed — the 79-OK grade implies no `str()` trap),
+11964 `enums.py`. The 8b/8c/8d allowlist behaved in live fire exactly as the offline
+probe predicted. It just can't be scored.
+
+**Process fix (adopted):** single-owner rule — before any arena run: `ps` for live
+`run.sh`/`opencode run`; never grade or setup while anything is live; when the arena
+is idle, add a lock dir to run.sh + a pgrep guard to grade.sh/setup.sh. Round A′
+re-runs cleanly under one owner once the other session's remainder loop (11790, 11885
+— the only collision-free data of the day) finishes.
