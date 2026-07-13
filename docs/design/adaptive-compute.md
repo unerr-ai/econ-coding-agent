@@ -178,6 +178,14 @@ Control rules:
 3. **Stop at resolved.** The goal is a passing, safe change — not maximal verification. Cap N.
 4. **Log the spend.** Every dial-up emits a savings/receipt event (observability is the product
    surface) so the *cost of accuracy* is visible per task.
+5. **Phase 2 — calibrated deferral as the trigger signal.** Replace/augment heuristic triggers
+   with a UCCI-style calibrated scalar: token-margin uncertainty at the decision point, isotonic
+   regression fit on our own labeled live-fire outcomes, defer to the bigger tier only below the
+   calibrated threshold (~31% cost cut at fixed quality in published production cascades; raw
+   entropy and verbalized confidence are both unreliable without the calibration fit). First step
+   is plumbing, not modeling: verify logprob availability on our provider path, then log margins +
+   outcomes so the curve can be fit. Adoption decision + literature map:
+   [failure-taxonomy.md §6.x](./failure-taxonomy.md).
 
 ---
 

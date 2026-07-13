@@ -5,6 +5,54 @@
 seeds + F18 commits — see "E0 local validation" below). E1–E3 pending. Companion artifact: "econ gap
 report — the 75.8 baseline" (same content, rendered).
 
+## Research backdrop — cheap-model stochastic judgment (added 2026-07-13)
+
+The residual failure class this doc chases (layer choice, type fidelity, sibling propagation —
+the flip-flop set) is a **stochastic design-judgment gap** in the cheap conductor. Waves 5–7
+tried to close it with in-loop judgment machinery (heuristic gate + judge) — re-introducing
+cheap-model judgment one level up. A three-agent literature pass (2026-07-13, ~60 sources; full
+digest in session memory `cheap-judgment-research-2026-07`) says that was *predictably* wrong,
+and ranks the alternatives. Load-bearing findings, kept here because they price this doc's levers:
+
+**Why in-loop small judges fail (documented, mechanistic):**
+
+- **52pp self-preference recall bias** in LLM-as-judge ([arXiv 2410.21819](https://arxiv.org/html/2410.21819v2));
+  **13–85pp swing from option order alone**, triggered exactly when the top-2 choices are close —
+  i.e. on the stochastic tail ([ACL Findings 2024](https://aclanthology.org/2024.findings-naacl.130/)).
+- Instruction tuning *degrades* calibration; strict JSON-schema output harms reasoning-heavy
+  judgment ([Let Me Speak Freely, arXiv 2408.02442](https://arxiv.org/html/2408.02442v1)).
+- Self-consistency voting buys only ~0.5–1pp on judgment-style tasks (plateau ~k=8) — it helps
+  math, not design calls ([arXiv 2505.10772](https://arxiv.org/html/2505.10772v1)).
+- Consensus: **LLMs cannot self-correct reasoning without external feedback**
+  ([TACL](https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00713/125177/)).
+
+**What works, evidence-ranked (all dumber and cheaper than a judge):**
+
+| # | Mechanism | Evidence | Maps to (this doc) |
+|---|---|---|---|
+| 1 | **Check-time ground-truth enforcement** (not decode-time: type-constrained decoding cuts compiler errors 74.8% but pays a reasoning "format tax") | execution-grounded critique 11.76% vs 8.97% raw ([ReVeal](https://arxiv.org/pdf/2506.11442)); hybrid static gate + LLM filter −25% FP ([KNighter](https://arxiv.org/pdf/2503.09002)); AST hallucination checks 100% precision; speculative-apply + typecheck re-run guarantees diagnostic reduction ([ts-repair](https://ts-repair.github.io/), [PLDI 2025](https://arxiv.org/abs/2504.09246)) | F17/F18 finish gates; edit-time governance; a mechanical **type-weakening detector** would have caught the 11790 stringify miss |
+| 2 | **Seeded priors / enumerate-then-apply** — convert discovery tasks into fill-in-the-decision tasks | seeded location context +21–30% localization ([arXiv 2404.11595](https://arxiv.org/html/2404.11595v1)); co-change mining 83.1%P/81.2%R on propagation targets ([CloneRipples](https://arxiv.org/pdf/2504.18511)); FixMiner 80% correctness; Coccinelle-style one-pattern-all-sites | spec-prior FIX/REPRO seeds (the 11790 fix landed); F17 neighbor breadth; graph `get_references` enumeration for sibling sites |
+| 3 | **Calibrated deferral — a scalar, not a judge**: token-margin uncertainty + isotonic regression, defer only low-confidence decisions upward | 31% cost cut at fixed quality in production, beats raw-entropy threshold by 11% and learned FrugalGPT threshold by 8% ([UCCI, arXiv 2605.18796](https://arxiv.org/html/2605.18796)). Calibration is the load-bearing part; verbalized confidence and raw entropy are both unreliable | the trigger for the **best-of-N** and **hard-tail escalation** levers below — fit the isotonic curve on our logged decision outcomes |
+| 4 | **$0 prompt hygiene** on remaining in-loop decisions | reason-then-decide (answer-first −8pp); loose format + post-hoc extraction; enumerate options, debias order (~8pp recoverable) | conductor decision prompts |
+| 5 | **Negative-constraint rubrics** — constraints beat guidance | removing "do not refactor unrelated code" alone −20pp on SWE-bench Verified; positive "do X" directives *hurt*; polarity split p=0.029 ([Guardrails Beat Guidance, arXiv 2604.11088](https://arxiv.org/html/2604.11088)). Frontier-model study — needs a conductor A/B | prompt registry (F4b-adjacent); matches the F4b scope-gate experience |
+| 6 | **Step-level DPO on decision pairs** (later; highest ceiling) | Agent Q node-level DPO 75.2% vs trajectory-level 40.6% vs 18.6% baseline ([arXiv 2408.07199](https://arxiv.org/html/2408.07199)); needs ~10k+ pairs. Warning: rationale-SFT distills format, not judgment ([RLKD](https://arxiv.org/pdf/2505.16142)) — capture ruled-out alternatives, not just the choice | our logged routing/arming/layer decisions + graded outcomes are exactly this dataset (Phase-2 conductor training) |
+
+**Per failure mode:** type fidelity is *fully substitutable* with check-time ground truth
+(any-casts / widening / dropped generics are AST-detectable at 100% precision); sibling
+propagation is *fully substitutable* with deterministic enumeration (never ask the model to
+remember sites); **layer choice is the partially-irreducible one** — no rules-vs-judge
+head-to-head exists, and 2026 work concedes layer choice is sometimes design-intent-dependent
+([arXiv 2606.14948](https://arxiv.org/html/2606.14948v2)). The evidenced hybrid: rules enumerate
+legal candidate layers, commit-history precedent seeds the prior, and the calibrated-deferral
+scalar escalates the low-margin residue — consistent with the s9-ceiling-probe finding that
+whole-turn reasoner takeover doesn't fix the coin-flip (2.6× cost, same draw).
+
+**Boundaries:** over-rigid deterministic gates over-reject valid designs (fail-open-loud stays
+right), and the literature has a hole where our problem lives — no published work on durably
+reducing design-judgment *variance* in small models for repeated decision classes. Our
+live-fire loop is ahead of the literature here: no recipe to copy, but every adjacent result
+points at enforcement + seeded priors + calibrated deferral, not judges.
+
 ## The datum that triggered this
 
 SWE-bench Verified leaderboard: **MiniMax M2.5 (high reasoning) — 75.80%, $0.07/task**, 3rd behind

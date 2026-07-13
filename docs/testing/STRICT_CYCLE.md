@@ -637,3 +637,35 @@ ddl_references.py ALLOW, 11964 unchanged (enums ALLOW, fields/base BOUNCE).
 
 **Method note:** the probe costs ~1 minute and answers "would this wave change the
 sweep?" before the sweep. It should precede every future gate/allowlist wave.
+
+## Waves 8b + 8c — probe-driven repair of the allowlist (committed 7bc559c72)
+
+**8b (lazy resolution + evidence quality):** arming now stores the issue text; the
+allowlist resolves at first gate evaluation (graph warm by then), memoized, children
+inherit the resolved set or the text. Extraction drops ALL-CAPS keywords and URL
+domains; `*.py` filenames pass through as direct file sites; resolution keeps only
+exact-name non-test matches (junk here = a free hub bypass) and retries dotted symbols
+by last segment. Probe after 8b: all four round-A false positives fixed — but exact-name
+matching resolved `CharField` correctly to fields/__init__.py (fan-in 26), handing
+11964's wrong-layer trap a bypass. The quality fix re-opened the hole wave 8 closed.
+
+**8c (root-most band):** measured fan-ins across all 5 instances showed the gold fix
+site is ALWAYS the minimum-fan-in resolved site (enums 1, ddl 6, forms 7, deletion 12,
+http 27-single) and pollutants are ≥3.7× the min. Rule: keep sites with fan-in ≤ 3× the
+minimum; filename sites always kept; single-site lists trivially kept. This is the
+"root-most layer" doctrine computed mechanically from the graph instead of asserted in
+prose.
+
+**Probe verdict on 8b+8c (real checkouts, all 5):** every gold fix site ALLOW —
+11790 auth/forms.py, 11885 deletion.py, 12039 ddl_references.py, 11848 http.py
+(historical bounce tax gone), 11964 enums.py — and BOTH 11964 traps still BOUNCE
+(fields/__init__.py 26, base.py 4). Exit check passed exactly as specified.
+
+**Wave 8d (research-adopted, same arc):** enumeration-over-doctrine — the band-filtered
+candidates are threaded into the denial message and the shopping-tell fallback nudge
+("the symbols this issue names are defined in: …"), replacing abstract root-most prose.
+Adoption analysis + deferred instruments (calibrated deferral, sibling tell, coercion
+tell): [failure-taxonomy.md §6.x](../design/failure-taxonomy.md). The hub-design judge
+is now a backstop under delete-at-0-for-3-live.
+
+Close-out sweep (round A′) launches on the 8b/8c/8d binary.

@@ -372,6 +372,56 @@ should-not-happen assertions, skip-count surfacing). → B5, B6.
 
 ---
 
+### 6.x Decision-quality research pass (2026-07-13) — what we adopt, defer, skip
+
+A ~60-source literature pass (arXiv/ACL/PLDI 2024–2026) on cheap-model in-loop judgment,
+run after the wave-5–7 hub-gate/judge arc (live-fire record:
+[STRICT_CYCLE.md](../testing/STRICT_CYCLE.md)). Headline: the literature predicts our
+result — small/same-tier LLM-as-judge carries systematic bias (52pp self-preference,
+13–85pp position-order swing that triggers exactly when the model is uncertain), strict
+JSON output harms reasoning-heavy judgment ("Let Me Speak Freely"), and prompt-only
+self-correction doesn't improve without external feedback. The two things print ranks
+highest are the two things our scoreboard already shows working: execution-grounded
+enforcement (ReVeal: 11.76% vs 8.97% for execution-grounded vs self critique) and seeded
+priors (+21–30% localization from seeded location context; CloneRipples 83/81
+precision/recall on propagation targets).
+
+**Adopted immediately (wave 8d):** enumeration-over-doctrine — FixMiner/CloneRipples-style
+"hand the model the enumerated candidate sites, don't ask it to re-derive them." The
+gate's band-filtered root-most defining sites are threaded into the bounce denial message
+and the shopping-tell fallback nudge. Zero added model calls. The hub-design judge remains
+a rarely-reachable backstop under a standing delete-at-0-for-3-live rule.
+
+**Already practiced (confirmed, no rebuild):** check-time ground-truth enforcement (test-
+edit gate, seen-red gate, real-grader loop — the ts-repair shape; decode-time constraints
+rejected for the format tax), loose-format + post-hoc extraction where a judge degraded
+(wave 8's last-balanced-JSON parser), seeded priors (UTC, type-fidelity, root-most).
+
+**Deferred with explicit triggers:**
+- **Calibrated deferral (UCCI-style)** — token-margin uncertainty + isotonic calibration
+  as the escalation trigger; 31% cost cut at fixed quality in production cascades. The
+  right long-term instrument (it is the risk-router thesis restated as a measurement
+  problem) but needs logprob plumbing + labeled-outcome volume. Phase-2 item #1; design
+  home: [adaptive-compute.md](./adaptive-compute.md) Part C.
+- **Sibling-propagation enumeration tell** (12039's miss-the-sibling class): one graph
+  query post-edit enumerating same-named methods in sibling classes. Trigger: 12039 red
+  in round A′.
+- **Type-coercion tell** (11790's `str()`-wrap): trigger: 11790 red in round A′ with the
+  seed prior having failed.
+- **Negative-constraint prompt audit** ("Guardrails Beat Guidance": negative rules help,
+  positive directives hurt, p=0.029 — frontier-model study, needs our own A/B): after
+  Phase-1 exit only; prompt churn re-rolls every trajectory.
+- **Step-level decision-pair logging** (Agent Q: node-level DPO 75.2% vs 40.6%
+  trajectory-level): when next touching dispatch logging, capture ruled-out alternatives +
+  criteria, not just the chosen answer (RLKD: rationale-SFT teaches format, not judgment).
+
+**Skipped:** self-consistency voting on judges (~0.5–1pp for an N× cost multiplier),
+verbalized confidence (unreliable in print), decode-time constrained generation.
+
+**Standing rule distilled from the arc + the literature:** no new two-sided gates (ones
+that can block a correct action) and no new in-loop cheap-model judges; enforcement must
+be ground-truth-grounded or enumerative.
+
 ## 7. Improvement plan (leverage order)
 
 Extends the three engine follow-ups already tracked in
