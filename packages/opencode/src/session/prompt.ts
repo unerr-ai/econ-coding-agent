@@ -74,17 +74,31 @@ import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
   applyAssertionTeethGap,
+  applyRenderedAssertGap,
+  applyRequiredLiteralsGap,
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
 import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
 import { triagePreamble, TEST_EDIT_GATE_RULE } from "./prompts/preambles"
 import {
+  DEFERRAL_SLICE_PREFIX,
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REPRO_SLICE_CONTENT,
+  buildDeferralSliceContent,
+  type DeferralBrief,
 } from "./prompts/seeds"
+import {
+  deferralAvailable,
+  interactiveSession,
+  markDeferralUsed,
+  publishSignalFx,
+  resetSignals,
+  summaryLogLine,
+} from "./signal-bus"
+import { detectOracleInversion, extractIssueExpectations } from "./issue-expectations"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
   STRUCTURED_OUTPUT_SYSTEM_PROMPT,
@@ -102,6 +116,7 @@ import {
   discoverNeighborTests,
   discoverProjectInterpreter,
   rewriteInterpreter,
+  rewriteInterpreterCommand,
   projectInterpreterCandidateCount,
   deriveTopLevelPackage,
   selectRegressionPinCandidate,
@@ -112,6 +127,7 @@ import {
   hasPendingTypedSlices,
   GRIND_DESIGN_PREPASS_TODO,
   LOCALIZATION_PREPASS_TODO,
+  deferralPrepassTodo,
   extractTrajectory,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
@@ -160,6 +176,8 @@ import {
   researchShapedTurn,
   setTurnFiles,
   getTurnFiles,
+  setIssueExpectations,
+  getIssueExpectations,
   recordGateBlock,
   clearGateBlock,
   getGateBlocks,
@@ -1799,6 +1817,11 @@ export const layer = Layer.effect(
         let turnPinnedProbe: Awaited<ReturnType<typeof deriveTurnProbe>>
         let probeGateRetries = 0
         const MAX_PROBE_GATE_RETRIES = 3
+        // RF-2 §5 — once the oracle-inversion escape has fired, the pin stops
+        // binding for the rest of the turn: detection runs once, the verdict
+        // is on record, and later finish arrivals pass through loud instead
+        // of re-entering the reject ladder.
+        let oracleInversionNoted = false
         // S3 — the done-time fallback bar's own bounded retry: up to
         // MAX_UNVERIFIED_FINISH_ATTEMPTS reject-with-nudge cycles for a
         // bug-shaped turn finishing with no verified reproduction/source
@@ -1923,13 +1946,34 @@ export const layer = Layer.effect(
             return { gap: false }
           }
           const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent })
-          const verdict = applyAssertionTeethGap(fidelityOutcome.verdict, reproContent)
+          // RF-4 §8 — the deterministic teeth stack: assertion teeth (F14b),
+          // the rendered-assert detector (11790's `'maxlength="254"' in html`
+          // face, judged repro_fidelity_ok on 0713), and required-literal
+          // coverage from the issue-derived expectations (12039's ignored
+          // `'"name" DESC'` witness) — each merges as a forced gap exactly
+          // like the teeth gap; the LLM verdict still covers what mechanics
+          // can't see.
+          const requiredLiterals = getIssueExpectations(sessionID)
+            .filter((l) => l.kind === "expected")
+            .map((l) => l.value)
+          const verdict = applyRequiredLiteralsGap(
+            applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+            reproContent,
+            requiredLiterals,
+          )
           const degradedReason = verdict === fidelityOutcome.verdict ? fidelityOutcome.degradedReason : undefined
           if (degradedReason) {
             yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: degradedReason })
             return { gap: false }
           }
           if (!verdict.faithful) {
+            yield* publishSignalFx({
+              name: "fidelity_gap",
+              sessionID,
+              severity: "info",
+              decision: "convert",
+              evidence: { probe: probeCommand, gaps: verdict.gaps.length },
+            })
             yield* Effect.logInfo("repro_fidelity_gap", { "session.id": sessionID, gaps: verdict.gaps })
             const fidelityNudge: SessionV1.User = {
               id: MessageID.ascending(),
@@ -2145,7 +2189,16 @@ export const layer = Layer.effect(
             // deletion-guard drift kind, and the observability log right
             // here — one extraction, several consumers.
             const pinnedScriptFilename = turnPinnedProbe ? extractScriptFilename(turnPinnedProbe.probe.command) : undefined
-            for (const block of scanGateBlocks(stepParts)) recordGateBlock(sessionID, block.file, block.reason)
+            for (const block of scanGateBlocks(stepParts)) {
+              recordGateBlock(sessionID, block.file, block.reason)
+              yield* publishSignalFx({
+                name: "gate_block",
+                sessionID,
+                severity: "info",
+                decision: "convert",
+                evidence: { file: block.file, reason: block.reason },
+              })
+            }
             for (const event of extractTrajectory(stepParts).events) {
               if (event.kind === "file-edit") clearGateBlock(sessionID, event.filePath)
               // S8 — cheap running flag for the converge-now check below:
@@ -2217,6 +2270,13 @@ export const layer = Layer.effect(
                       .update({ sessionID, todos: [...currentTodos, LOCALIZATION_PREPASS_TODO] })
                       .pipe(Effect.ignore)
                   }
+                  yield* publishSignalFx({
+                    name: "repro_unresolved",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { observedSteps: reproObservedSteps, settled: reproSettled },
+                  })
                   yield* Effect.logWarning("repro_unresolved", {
                     "session.id": sessionID,
                     reproObservedSteps,
@@ -2263,6 +2323,13 @@ export const layer = Layer.effect(
                 const freshKind = driftKinds.find((k) => !reproDriftKindsNudged.has(k))
                 if (!reproDriftTier2Fired && reproDriftEvents >= REPRO_DRIFT_ESCALATION_THRESHOLD) {
                   reproDriftTier2Fired = true
+                  yield* publishSignalFx({
+                    name: "repro_drift",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { kinds: driftKinds.join(","), events: reproDriftEvents, tier2: true },
+                  })
                   yield* Effect.logWarning("repro_drift_escalation", {
                     "session.id": sessionID,
                     reproDriftEvents,
@@ -2288,6 +2355,13 @@ export const layer = Layer.effect(
                   continue
                 } else if (freshKind) {
                   reproDriftKindsNudged.add(freshKind)
+                  yield* publishSignalFx({
+                    name: "repro_drift",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { kind: freshKind },
+                  })
                   yield* Effect.logInfo("repro_drift", { "session.id": sessionID, kind: freshKind })
                   const driftNudge: SessionV1.User = {
                     id: MessageID.ascending(),
@@ -2755,10 +2829,17 @@ export const layer = Layer.effect(
                 mechanism: "sm-backstop",
                 bouncedFiles: bouncedHubFiles,
               })
-              const issueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
-                .map((p) => (p.type === "text" ? p.text : ""))
-                .filter(Boolean)
-                .join("\n")
+              // RF-7 §10 — the judge's issue text comes from the turn-open
+              // STORE (the user's original prompt), never from lastUser:
+              // lastUser can be a synthetic injected nudge, and the 11815
+              // forensics caught the judge chewing on an injected "ECONOMY
+              // CHECK" meta-prompt as if it were the issue.
+              const issueText =
+                hubEditIssueText(sessionID) ??
+                (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                  .map((p) => (p.type === "text" ? p.text : ""))
+                  .filter(Boolean)
+                  .join("\n")
               const sites = yield* Effect.promise(() => issueSymbolDefinitionSites(issueText))
               // Wave 10 — dispatch-time memoization: the full-budget
               // resolution above (issueSymbolDefinitionSites,
@@ -2963,16 +3044,208 @@ export const layer = Layer.effect(
             // continuation re-entry primitive; bounded by MAX_PROBE_GATE_RETRIES,
             // after which it exits LOUDLY (turn_probe_unresolved), never as a
             // silent success.
+            // Round F — ONE root-only finish-scan shared by every gate below
+            // (M4's interpreter discovery included), preserving F11's
+            // "same trajectory scan, never a second one" rule: it moved up
+            // here from the S3 block so the M4 gate can also read it.
+            const finishAssistantParts = !session.parentID
+              ? msgs
+                  .filter((m) => m.info.role === "assistant" && m.info.id > (turnOpenUserID ?? lastUser.id))
+                  .flatMap((m) => m.parts)
+              : []
+            const finishLandedSourceEditFiles = [
+              ...new Set(
+                extractTrajectory(finishAssistantParts).events.flatMap((e) =>
+                  // Scratch repro scripts are evidence, not fixes — counting
+                  // one here would blind both the zero-source-edit arm and
+                  // the repro-tamper arm to a repro-only turn.
+                  e.kind === "file-edit" && !isTestFilePath(e.filePath) && !isReproScratchPath(e.filePath)
+                    ? [e.filePath]
+                    : [],
+                ),
+              ),
+            ]
+            const finishLandedSourceEdits = finishLandedSourceEditFiles.length > 0
+            // Round F §3 — the hard-tail deferral consumer (the calibrated-
+            // deferral gap: 8/8 forensic reds ran 0-escalation while every
+            // deterministic tail signal fired and was discarded). A finish
+            // gate that exhausts its bounded rejects now plants ONE
+            // enumerate-then-choose escalation slice (reasoner-floored via
+            // the grind valve's proven design-seed path) instead of going
+            // straight to fail-open-loud; the second exhausted gate in the
+            // same turn goes loud exactly as before round F.
+            const armDeferral = (brief: DeferralBrief) =>
+              Effect.gen(function* () {
+                markDeferralUsed(sessionID)
+                const deferralContent = buildDeferralSliceContent(brief)
+                const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                if (!currentTodos.some((t) => t.content.startsWith(DEFERRAL_SLICE_PREFIX))) {
+                  yield* todoStore
+                    .update({ sessionID, todos: [...currentTodos, deferralPrepassTodo(deferralContent)] })
+                    .pipe(Effect.ignore)
+                }
+                yield* publishSignalFx({
+                  name: "deferral_armed",
+                  sessionID,
+                  severity: "tail",
+                  decision: "defer",
+                  evidence: { consumed: brief.signal },
+                })
+                const deferralNudge: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(deferralNudge)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: deferralNudge.id,
+                  sessionID,
+                  type: "text",
+                  text:
+                    "A hard-tail verification signal fired at finish — a one-shot escalation slice has been planted with the full evidence brief. " +
+                    "STOP editing; the slice will run and hand back its verdict. Fold that design in, re-run the pinned verification, then finish.",
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+              })
             if (turnPinnedProbe && !session.parentID) {
+              // RF-6 §9 — interpreter discipline: the same F14a discovery the
+              // regression gate uses now also governs the pinned-probe run; a
+              // bare `python`/`python3` head is rewritten to the discovered
+              // project interpreter (11964-A's phantom root cause was a base
+              // conda py3.11 running the py3.6 testbed's repro).
+              if (
+                turnDiscoveredInterpreter === undefined &&
+                finishLandedSourceEdits &&
+                /^python3?\b/.test(turnPinnedProbe.probe.command)
+              ) {
+                const probePackage = deriveTopLevelPackage(finishLandedSourceEditFiles[0], process.cwd())
+                if (probePackage) {
+                  turnDiscoveredInterpreter = yield* Effect.promise(() =>
+                    discoverProjectInterpreter({
+                      cwd: process.cwd(),
+                      topLevelPackage: probePackage,
+                      runner: makeShellCommandRunner({ timeoutMs: 5000 }),
+                    }),
+                  )
+                }
+              }
+              const gateCommand =
+                typeof turnDiscoveredInterpreter === "string"
+                  ? rewriteInterpreterCommand(turnPinnedProbe.probe.command, turnDiscoveredInterpreter)
+                  : turnPinnedProbe.probe.command
+              if (gateCommand !== turnPinnedProbe.probe.command) {
+                yield* publishSignalFx({
+                  name: "interpreter_mismatch",
+                  sessionID,
+                  severity: "info",
+                  decision: "convert",
+                  evidence: { pinned: turnPinnedProbe.probe.command, rewritten: gateCommand },
+                })
+              }
               const gate = yield* Effect.promise(() =>
                 runTurnProbeGate({
-                  probe: turnPinnedProbe!.probe,
+                  probe: { ...turnPinnedProbe!.probe, command: gateCommand },
                   noTestEdit: testEditGateArmed(sessionID),
                 }),
               )
               if (gate.reject) {
-                if (probeGateRetries < MAX_PROBE_GATE_RETRIES) {
+                // RF-2 §5 — oracle-inversion escape, checked BEFORE any
+                // reject-nudge: when the red shows the code PRODUCING the
+                // issue's stated desired value while the pinned assertion
+                // still expects the value the issue calls wrong, the pin must
+                // not bind as green-required — the 0713 11815 runs applied the
+                // gold-equivalent fix and this exact chain (pin-green pressure
+                // + no-test-edit deny + "do not edit the test" nudge) forced
+                // the retreat to the failing patch. Never re-checked once
+                // noted; the pin then stops binding for the rest of the turn.
+                const inversion = oracleInversionNoted
+                  ? { inverted: false as const }
+                  : detectOracleInversion(gate.outputTail, getIssueExpectations(sessionID))
+                if (inversion.inverted) {
+                  oracleInversionNoted = true
+                  const surfaceRoute = interactiveSession()
+                  yield* publishSignalFx({
+                    name: "oracle_inversion",
+                    sessionID,
+                    severity: "tail",
+                    decision: surfaceRoute ? "surface" : deferralAvailable(sessionID) ? "defer" : "none-loud",
+                    evidence: {
+                      probe: turnPinnedProbe.probe.command,
+                      desired: inversion.desiredLiteral ?? null,
+                      buggy: inversion.buggyLiteral ?? null,
+                    },
+                  })
+                  yield* Effect.logWarning("turn_probe_inversion", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    desired: inversion.desiredLiteral ?? null,
+                    buggy: inversion.buggyLiteral ?? null,
+                  })
+                  if (!surfaceRoute && deferralAvailable(sessionID)) {
+                    yield* armDeferral({
+                      signal: "oracle_inversion",
+                      gateEvidence:
+                        `The pinned probe went red because the code now PRODUCES the issue's stated desired value ` +
+                        `\`${inversion.desiredLiteral}\` while the visible test still expects \`${inversion.buggyLiteral}\` — ` +
+                        `the visible test appears to encode the bug.`,
+                      probeCommand: turnPinnedProbe.probe.command,
+                      redTail: gate.outputTail,
+                      candidates: [...hubEditDefiningFiles(sessionID), ...getTurnFiles(sessionID)],
+                      expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                    })
+                    continue
+                  }
+                  // SURFACE (interactive) or deferral spent: state the
+                  // conflict as the turn's verdict — never the "make the
+                  // buggy assertion pass" nudge — and let the model write its
+                  // final answer around it; the next finish arrival passes
+                  // through loud (oracleInversionNoted).
+                  const inversionNote: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(inversionNote)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: inversionNote.id,
+                    sessionID,
+                    type: "text",
+                    text:
+                      `Verification conflict: the pinned visible test expects \`${inversion.buggyLiteral}\` but the issue's ` +
+                      `stated desired output is \`${inversion.desiredLiteral}\` — the visible test appears to ENCODE the bug. ` +
+                      `Keep your fix; do NOT weaken it to satisfy the contradicting assertion, and do NOT edit the test. ` +
+                      `State this conflict plainly in your final answer` +
+                      (surfaceRoute ? ` and ask the user which of the two is the ground-truth spec.` : `.`),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+                if (oracleInversionNoted) {
+                  // The pin no longer binds — loud pass-through with the
+                  // inversion verdict on record, never the retry ladder.
+                  yield* Effect.logWarning("turn_probe_unresolved", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    retries: probeGateRetries,
+                    inversion: true,
+                  })
+                } else if (probeGateRetries < MAX_PROBE_GATE_RETRIES) {
                   probeGateRetries++
+                  yield* publishSignalFx({
+                    name: "probe_gate_reject",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { probe: turnPinnedProbe.probe.command, rung: gate.rung ?? null, exit: gate.exitCode ?? null, retry: probeGateRetries },
+                  })
                   yield* Effect.logInfo("turn_probe_gate", {
                     "session.id": sessionID,
                     rung: gate.rung ?? null,
@@ -2997,12 +3270,37 @@ export const layer = Layer.effect(
                     synthetic: true,
                   } satisfies SessionV1.TextPart)
                   continue
+                } else if (deferralAvailable(sessionID)) {
+                  yield* publishSignalFx({
+                    name: "probe_gate_exhausted",
+                    sessionID,
+                    severity: "tail",
+                    decision: "defer",
+                    evidence: { probe: turnPinnedProbe.probe.command, retries: probeGateRetries, exit: gate.exitCode ?? null },
+                  })
+                  yield* armDeferral({
+                    signal: "probe_gate_exhausted",
+                    gateEvidence: gate.reason ?? `pinned probe still failing after ${probeGateRetries} bounded rejects`,
+                    probeCommand: turnPinnedProbe.probe.command,
+                    redTail: gate.outputTail,
+                    candidates: [...hubEditDefiningFiles(sessionID), ...getTurnFiles(sessionID)],
+                    expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                  })
+                  continue
+                } else {
+                  yield* publishSignalFx({
+                    name: "probe_gate_exhausted",
+                    sessionID,
+                    severity: "tail",
+                    decision: "none-loud",
+                    evidence: { probe: turnPinnedProbe.probe.command, retries: probeGateRetries },
+                  })
+                  yield* Effect.logWarning("turn_probe_unresolved", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    retries: probeGateRetries,
+                  })
                 }
-                yield* Effect.logWarning("turn_probe_unresolved", {
-                  "session.id": sessionID,
-                  probe: turnPinnedProbe.probe.command,
-                  retries: probeGateRetries,
-                })
               } else {
                 // S1 — the accept fall-through: the pin's red evidence (logged
                 // at pin time) and this green run's output tail form the
@@ -3032,27 +3330,13 @@ export const layer = Layer.effect(
               const bugShaped =
                 (storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
                 testEditGateArmed(sessionID)
-              // F11 — hoisted out of the `bugShaped` branch below so the
-              // regression gate further down can reuse this SAME trajectory
-              // scan (never a second one) on every root turn's finish, not
-              // just a bug-shaped one.
-              const turnStartID = turnOpenUserID ?? lastUser.id
-              const turnAssistantParts = msgs
-                .filter((m) => m.info.role === "assistant" && m.info.id > turnStartID)
-                .flatMap((m) => m.parts)
-              const landedSourceEditFiles = [
-                ...new Set(
-                  extractTrajectory(turnAssistantParts).events.flatMap((e) =>
-                    // Scratch repro scripts are evidence, not fixes — counting
-                    // one here would blind both the zero-source-edit arm and
-                    // the repro-tamper arm to a repro-only turn.
-                    e.kind === "file-edit" && !isTestFilePath(e.filePath) && !isReproScratchPath(e.filePath)
-                      ? [e.filePath]
-                      : [],
-                  ),
-                ),
-              ]
-              const landedSourceEdits = landedSourceEditFiles.length > 0
+              // F11 — the shared trajectory scan is hoisted ABOVE the M4 gate
+              // (round F): one scan per finish arrival, reused by M4's
+              // interpreter discovery and every gate here — the "never a
+              // second one" rule preserved.
+              const turnAssistantParts = finishAssistantParts
+              const landedSourceEditFiles = finishLandedSourceEditFiles
+              const landedSourceEdits = finishLandedSourceEdits
               // F18 — seen-red must re-verify: a turn that LANDED source
               // edits while a mid-turn test/repro run it saw fail red was
               // never re-run green must not ship silently — the gap that let
@@ -3076,6 +3360,13 @@ export const layer = Layer.effect(
                 if (unresolvedSeenRed.length > 0) {
                   if (!turnSeenRedNudged) {
                     turnSeenRedNudged = true
+                    yield* publishSignalFx({
+                      name: "seen_red_unresolved",
+                      sessionID,
+                      severity: "info",
+                      decision: "convert",
+                      evidence: { unresolved: unresolvedSeenRed.length },
+                    })
                     yield* Effect.logWarning("turn_seen_red_nudge", {
                       "session.id": sessionID,
                       unresolved: unresolvedSeenRed,
@@ -3099,9 +3390,28 @@ export const layer = Layer.effect(
                     } satisfies SessionV1.TextPart)
                     continue
                   }
-                  // Second arrival still unresolved — loud, never a second
-                  // nudge and never a deadlock; the turn is allowed to end
-                  // (fail-open-loud, same discipline as every sibling gate).
+                  // Second arrival still unresolved — round F: one deferral
+                  // rung before the loud pass (fail-open-loud discipline
+                  // unchanged once the budget is spent).
+                  yield* publishSignalFx({
+                    name: "seen_red_unresolved",
+                    sessionID,
+                    severity: "tail",
+                    decision: deferralAvailable(sessionID) ? "defer" : "none-loud",
+                    evidence: { unresolved: unresolvedSeenRed.length },
+                  })
+                  if (deferralAvailable(sessionID)) {
+                    yield* armDeferral({
+                      signal: "seen_red_unresolved",
+                      gateEvidence:
+                        `This turn landed source edits while these test/repro runs it SAW fail red were never re-run green:\n` +
+                        unresolvedSeenRed.join("\n"),
+                      probeCommand: turnPinnedProbe?.probe.command,
+                      candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
+                      expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                    })
+                    continue
+                  }
                   yield* Effect.logWarning("turn_seen_red_unverified", {
                     "session.id": sessionID,
                     unresolved: unresolvedSeenRed,
@@ -3139,6 +3449,13 @@ export const layer = Layer.effect(
                       probeSliceVerifyCommands(landedSourceEditFiles),
                     )
                     const testCommand = verifyCommands.find((c) => c.kind === "test")?.command
+                    yield* publishSignalFx({
+                      name: "unverified_finish",
+                      sessionID,
+                      severity: "info",
+                      decision: "convert",
+                      evidence: { rung: "wave-10", command: testCommand ?? null },
+                    })
                     yield* Effect.logInfo("finish_gate_unverified_denied", {
                       "session.id": sessionID,
                       command: testCommand ?? null,
@@ -3194,6 +3511,13 @@ export const layer = Layer.effect(
                     })
                   } else if (unverifiedFinishAttempts < MAX_UNVERIFIED_FINISH_ATTEMPTS) {
                     unverifiedFinishAttempts++
+                    yield* publishSignalFx({
+                      name: "unverified_finish",
+                      sessionID,
+                      severity: "info",
+                      decision: "convert",
+                      evidence: { rung: "s3", attempt: unverifiedFinishAttempts, hadPin: turnPinnedProbe !== undefined },
+                    })
                     // S4 — fold any still-unresolved governance-gate block
                     // into the same nudge, first rejection only
                     // (django-12039: blocked twice, never re-landed).
@@ -3231,8 +3555,31 @@ export const layer = Layer.effect(
                     continue
                   } else {
                     // MAX_UNVERIFIED_FINISH_ATTEMPTS rejections spent and no
-                    // cancellation on record — loud, never a further nudge
-                    // and never a deadlock; the break below fires.
+                    // cancellation on record — round F: one deferral rung
+                    // before the loud break (12039's terminal
+                    // turn_completed_unverified with landed source edits was
+                    // the named advisory-only anti-pattern).
+                    yield* publishSignalFx({
+                      name: "unverified_finish",
+                      sessionID,
+                      severity: "tail",
+                      decision: deferralAvailable(sessionID) ? "defer" : "none-loud",
+                      evidence: { rung: "s3-exhausted", hadPin: turnPinnedProbe !== undefined, landedSourceEdits },
+                    })
+                    if (deferralAvailable(sessionID)) {
+                      yield* armDeferral({
+                        signal: "unverified_finish",
+                        gateEvidence:
+                          `Bug-shaped turn is finishing UNVERIFIED after ${unverifiedFinishAttempts} bounded rejects: ` +
+                          (turnPinnedProbe
+                            ? `a pin exists (\`${turnPinnedProbe.probe.command}\`) but no source edit landed.`
+                            : `no reproduction was ever pinned${landedSourceEdits ? " despite landed source edits" : " and no source edit landed"}.`),
+                        probeCommand: turnPinnedProbe?.probe.command,
+                        candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
+                        expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                      })
+                      continue
+                    }
                     yield* Effect.logWarning("turn_completed_unverified", {
                       "session.id": sessionID,
                       hadPin: turnPinnedProbe !== undefined,
@@ -3357,6 +3704,13 @@ export const layer = Layer.effect(
                             redTail: pinCandidate.outputTail,
                           })
                         }
+                        yield* publishSignalFx({
+                          name: "regression_red",
+                          sessionID,
+                          severity: "info",
+                          decision: "convert",
+                          evidence: { failing: failingNeighbors.length, promoted: pinCandidate?.command ?? null },
+                        })
                         yield* Effect.logWarning("turn_regression_gate", {
                           "session.id": sessionID,
                           failing: failingNeighbors,
@@ -3380,8 +3734,28 @@ export const layer = Layer.effect(
                         } satisfies SessionV1.TextPart)
                         continue
                       }
-                      // Second arrival still regressed — loud, never a second
-                      // nudge and never a deadlock; the break below fires.
+                      // Second arrival still regressed — round F: one
+                      // deferral rung before the loud break.
+                      yield* publishSignalFx({
+                        name: "regression_red",
+                        sessionID,
+                        severity: "tail",
+                        decision: deferralAvailable(sessionID) ? "defer" : "none-loud",
+                        evidence: { failing: failingNeighbors.length },
+                      })
+                      if (deferralAvailable(sessionID)) {
+                        yield* armDeferral({
+                          signal: "regression_red",
+                          gateEvidence:
+                            `The landed fix still regresses previously-passing neighbor tests after one bounded reject:\n` +
+                            failingNeighbors.map((f) => `\`${f.command}\` (exit ${f.exitCode}):\n${f.outputTail}`).join("\n\n"),
+                          probeCommand: turnPinnedProbe?.probe.command,
+                          redTail: failingNeighbors[0]?.outputTail,
+                          candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
+                          expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                        })
+                        continue
+                      }
                       yield* Effect.logWarning("turn_regression_unresolved", {
                         "session.id": sessionID,
                         failing: failingNeighbors,
@@ -3397,6 +3771,11 @@ export const layer = Layer.effect(
               }
             }
 
+            // Round F — the turn's one-line signal history: counts by name +
+            // the deferral budget state; `grep '\[signal\]' engine.log`
+            // replays the whole decision chain.
+            const turnSignalSummary = summaryLogLine(sessionID)
+            yield* Effect.logInfo(turnSignalSummary.message, turnSignalSummary.payload)
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
             break
           }
@@ -3561,6 +3940,10 @@ export const layer = Layer.effect(
                 // S4 — likewise the governance-gate block ledger: a new task
                 // starts with a clean slate, not a prior task's abandonment.
                 clearGateBlocks(sessionID)
+                // Round F — the signal bus and its once-per-turn deferral
+                // budget reset with the other fresh-turn stores; continuation
+                // turns inherit, matching the pin/arming inheritance above.
+                resetSignals(sessionID)
               }
 
               if (turnOpen.triage && !turnContinuation) {
@@ -3624,6 +4007,26 @@ export const layer = Layer.effect(
                 setTurnFiles(sessionID, [
                   ...new Set([...extractSliceFiles(userText), ...resolveDottedPyModules(userText, ctx.directory)]),
                 ])
+                // Round F §6 — issue-derived expectations, extracted
+                // mechanically alongside the M4 probe derivation below: the
+                // issue's stated expected/actual literals become the fidelity
+                // judge's required-coverage list, the oracle-inversion
+                // detector's evidence, and a binding preamble line the
+                // conductor sees every step.
+                const issueLiterals = extractIssueExpectations(userText).literals
+                setIssueExpectations(sessionID, issueLiterals)
+                if (issueLiterals.length > 0) {
+                  yield* Effect.logInfo("turn_issue_expectations", {
+                    "session.id": sessionID,
+                    count: issueLiterals.length,
+                    literals: issueLiterals.map((l) => `${l.kind}:${l.value}`),
+                  })
+                  turnPreamble =
+                    (turnPreamble ?? "") +
+                    `\n\nISSUE-STATED VALUES (binding): your reproduction must assert these with typed equality — ` +
+                    issueLiterals.map((l) => `${l.kind === "actual" ? "current/buggy" : l.kind}: \`${l.value}\``).join(" · ") +
+                    `\nA repro that only prints or substring-matches rendered output does not count as asserting them.`
+                }
 
                 // M4 — the probe pin keys on the VERDICT: a diagnosis-shaped
                 // goal arms the turn-end prove-it gate with the most-specific
@@ -3688,6 +4091,7 @@ export const layer = Layer.effect(
                 setNoEditsGate(sessionID, false)
                 setTurnVerdict(sessionID, null)
                 setTurnFiles(sessionID, [])
+                setIssueExpectations(sessionID, [])
                 if (turnOpen.triage) {
                   turnReadNulls++
                   yield* Effect.logInfo("turn_read_degraded", {

@@ -18,6 +18,7 @@ per-topic design notes live in [../design/](../design/).
 | [05](./05-long-horizon.md) | Long-horizon orchestration | proactive checkpointing, restart-surviving task tree, goal-judge / doom-loop gate |
 | [06](./06-observability.md) | Observability — the proof surface | telemetry store, status line, honest savings receipt (double-pay subtracted), unified-login seam |
 | [07](./07-hardening-hosting-ship.md) | Hardening, in-region hosting & ship | safe defaults, in-region inference + data residency, single-binary packaging, dogfood runbook, GA gate checklist |
+| [08](./08-signal-bus.md) | Signal bus & round-F variance hardening | unified signal bus (CONVERT/DEFER/SURFACE), hard-tail deferral consumer, oracle-inversion escape, evidence-bearing gate hatches, issue-derived expectations, fidelity teeth, interpreter discipline |
 
 ## Integration model — the three zones
 

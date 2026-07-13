@@ -332,6 +332,9 @@ const hubEditGate = new Set<string>()
 /** Per-session set of file paths already bounced once — an identical retry on the same file passes. */
 const hubEditBounced = new Map<string, Set<string>>()
 
+/** Round-F §7 sibling store to `hubEditBounced`: per-session set of file paths already bounced a SECOND time (the evidence-bearing rung — a retry landing outside a non-empty resolved defining-site allowlist) — a further identical retry on the same file passes (fail-open, bounded to at most 2 denies per file). Same lifecycle as `hubEditBounced` — not cleared on disarm. */
+const hubEditSecondBounced = new Map<string, Set<string>>()
+
 /** Per-session set of graph-reported defining-module paths for the symbols the issue names (from `issueSymbolDefinitionSites`/`issueSymbolDefinitionSitesIfReady`, resolved either at arming time — a child inheriting an already-resolved parent, or a test — or lazily at first gate evaluation, see `evaluateHubEditGate`) — an edit landing on one of these is the redirect doctrine's own answer, so `evaluateHubEditGate` allows it even over the fan-in threshold. Cleared whenever the gate disarms. */
 const hubEditDefiningFilesStore = new Map<string, Set<string>>()
 
@@ -424,6 +427,14 @@ export function hubEditDenialMessage(relPath: string, importers: number, rootMos
   return (
     base +
     ` Per the code graph, the symbols this issue names are defined in: ${rootMostCandidates.join(", ")} — the root-most fix site is one of these; fix the behavior there.`
+  )
+}
+
+/** Round-F §7 — the reason string thrown when the hub-edit gate denies a SECOND time: a bounced-retry landed on a file outside a non-empty resolved defining-site allowlist, so the model was shown the graph's named candidates and re-issued a non-candidate edit anyway. Names the defining sites concretely and states the fail-open floor: a third identical attempt (or a re-issue asserting this genuinely IS the defining site) is allowed. */
+export function hubEditSecondDenialMessage(relPath: string, definingSites: readonly string[]): string {
+  return (
+    `This is the second time this edit has landed on ${relPath}, which is NOT one of the defining sites the code graph resolved for this issue: ${definingSites.join(", ")}. ` +
+    `Move the fix to one of those defining sites. If you have concrete evidence that ${relPath} genuinely IS the correct fix site despite the graph's candidates, re-issue this exact edit once more and it will be allowed.`
   )
 }
 
@@ -533,14 +544,20 @@ export async function bandFilterDefiningSites(
  * root-most-layer redirect message, enumerating the session's resolved
  * defining-file allowlist in that message when one exists (Wave 8d) so the
  * model gets concrete candidates instead of having to re-derive them. Wave
- * 9: when that bounced-retry passes and the allowlist is non-empty, the
- * filePath already failed the allowlist match above — so a retry landing
- * here against a non-empty allowlist means the model saw the named
- * candidates and re-issued a non-candidate edit anyway; that session is
- * flagged via `hubEditRetriedAgainstCandidates`, the same hub-shopping tell
- * prompt.ts's trigger otherwise needs a second distinct bounced file to see.
- * Logging-free by design — edit.ts/write.ts log at the call site, inside
- * their own Effect.
+ * 9: when that bounced-retry lands against a non-empty allowlist, the
+ * filePath already failed the allowlist match above — so the model saw the
+ * named candidates and re-issued a non-candidate edit anyway; that session
+ * is flagged via `hubEditRetriedAgainstCandidates`, the same hub-shopping
+ * tell prompt.ts's trigger otherwise needs a second distinct bounced file to
+ * see. Round F §7 adds one more evidence-bearing rung on THAT SAME
+ * bounced-retry: a non-empty resolved allowlist is graph evidence the model
+ * was shown and ignored, so — once per (session, file) — this denies a
+ * SECOND time (`second: true`, naming the defining sites) instead of
+ * allowing; a further identical retry on that file then passes
+ * (`hubEditSecondBounced`, fail-open, mirrors `hubEditBounced`'s own
+ * lifecycle). An EMPTY allowlist still allows on retry exactly as before
+ * round F — there is no graph evidence to hold the model to. Logging-free by
+ * design — edit.ts/write.ts log at the call site, inside their own Effect.
  *
  * @sem domain=intelligence role=analysis
  */
@@ -551,7 +568,7 @@ export async function evaluateHubEditGate(opts: {
   resolveDefiningSites?: (issueText: string) => Promise<Array<{ file: string; kind?: string }> | null>
 }): Promise<
   | { action: "allow"; retried?: boolean; definingSite?: boolean }
-  | { action: "deny"; message: string; importers: number }
+  | { action: "deny"; message: string; importers?: number; second?: boolean; definingSites?: string[] }
 > {
   if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
   if (isTestFilePath(opts.filePath)) return { action: "allow" }
@@ -612,6 +629,23 @@ export async function evaluateHubEditGate(opts: {
     // for, one bounce earlier.
     if (definingFiles && definingFiles.size > 0) {
       hubEditRetryAgainstCandidatesSet.add(opts.sessionID)
+
+      // Round F §7 — the non-empty allowlist above IS the evidence: deny a
+      // SECOND time, once per (session, file); a further identical retry on
+      // this same file then passes (fail-open).
+      const secondBounced = hubEditSecondBounced.get(opts.sessionID)
+      if (secondBounced?.has(opts.filePath)) {
+        return { action: "allow", retried: true }
+      }
+      if (!hubEditSecondBounced.has(opts.sessionID)) hubEditSecondBounced.set(opts.sessionID, new Set())
+      hubEditSecondBounced.get(opts.sessionID)!.add(opts.filePath)
+      const resolvedDefiningSites = hubEditDefiningFiles(opts.sessionID)
+      return {
+        action: "deny",
+        second: true,
+        definingSites: resolvedDefiningSites,
+        message: hubEditSecondDenialMessage(opts.filePath, resolvedDefiningSites),
+      }
     }
     return { action: "allow", retried: true }
   }

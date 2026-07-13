@@ -482,3 +482,32 @@ export function rewriteInterpreter(commands: string[], interpreter: string): str
     return command.slice(0, match[1].length) + interpreter + command.slice(match[0].length)
   })
 }
+
+/** Swaps a segment's leading whitespace + first token for `interpreter` when that token is exactly `python`/`python3`; any other head leaves the segment untouched. Private helper for `rewriteInterpreterCommand`. */
+function rewriteSegmentHead(segment: string, interpreter: string): string {
+  const match = segment.match(/^(\s*)(\S+)([\s\S]*)$/)
+  if (!match) return segment
+  const [, leading, head, rest] = match
+  if (head !== "python" && head !== "python3") return segment
+  return `${leading}${interpreter}${rest}`
+}
+
+/**
+ * Swaps a bare `python`/`python3` command-position head token for the discovered interpreter in
+ * every top-level `&&`/`;` segment of `command` — the single rewrite point RF-6 gives the M4
+ * finish gate, the F13d engine probe, and pin re-runs to share instead of each re-deriving the
+ * swap. A missing/empty `interpreter` passes the command through unchanged, as does any command
+ * containing a pipe, backtick, or `$(` (shell shapes out of this helper's no-parsing scope); an
+ * absolute/relative, non-python, or env-prefixed head is left alone since only the exact bare
+ * token is matched.
+ *
+ * @sem domain=routing role=interpreter-rewrite
+ */
+export function rewriteInterpreterCommand(command: string, interpreter: string | undefined): string {
+  if (!interpreter) return command
+  if (/[|`]/.test(command) || command.includes("$(")) return command
+  return command
+    .split(/(&&|;)/)
+    .map((part) => (part === "&&" || part === ";" ? part : rewriteSegmentHead(part, interpreter)))
+    .join("")
+}

@@ -374,6 +374,7 @@ import {
   setHubEditGate,
   hubEditGateArmed,
   hubEditDenialMessage,
+  hubEditSecondDenialMessage,
   hubEditBouncedFiles,
   hubEditDefiningFiles,
   evaluateHubEditGate,
@@ -431,6 +432,16 @@ describe("Wave 5 — hubEditDenialMessage", () => {
         "Moving the same change to a DIFFERENT shared file is not the fix — the defining module is. " +
         "If this hub file genuinely is the root-most layer, re-issue this exact edit and it will be allowed.",
     )
+  })
+})
+
+describe("round-F §7 — hubEditSecondDenialMessage", () => {
+  it("names the file and the resolved defining sites, and states the fail-open floor", () => {
+    const msg = hubEditSecondDenialMessage("django/db/models/query_utils.py", ["django/db/models/enums.py"])
+    expect(msg).toContain("django/db/models/query_utils.py")
+    expect(msg).toContain("django/db/models/enums.py")
+    expect(msg).toContain("second time")
+    expect(msg).toContain("re-issue this exact edit once more")
   })
 })
 
@@ -873,7 +884,7 @@ describe("Wave 8c — evaluateHubEditGate applies the band filter to resolved si
 describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate file", () => {
   const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 25 }
 
-  it("a resolved allowlist + a retry on a non-candidate file: deny, then allow+retried with the flag set", async () => {
+  it("round F §7: a resolved allowlist + a retry on a non-candidate file denies a SECOND time, flag still set; a third identical attempt passes", async () => {
     setHubEditGate("ses_hub_retry_a", true, ["django/db/models/enums.py"])
     expect(hubEditRetriedAgainstCandidates("ses_hub_retry_a")).toBe(false)
 
@@ -890,8 +901,22 @@ describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate f
       filePath: "/repo/django/db/models/query_utils.py",
       graph: overThresholdGraph,
     })
-    expect(second).toEqual({ action: "allow", retried: true })
+    expect(second.action).toBe("deny")
+    if (second.action === "deny") {
+      expect(second.second).toBe(true)
+      expect(second.definingSites).toEqual(["django/db/models/enums.py"])
+      expect(second.message).toContain("django/db/models/enums.py")
+    }
+    // Wave 9's own flag must still fire on this same path (it dispatches the
+    // synchronous hub-design judge — that behavior must survive round F).
     expect(hubEditRetriedAgainstCandidates("ses_hub_retry_a")).toBe(true)
+
+    const third = await evaluateHubEditGate({
+      sessionID: "ses_hub_retry_a",
+      filePath: "/repo/django/db/models/query_utils.py",
+      graph: overThresholdGraph,
+    })
+    expect(third).toEqual({ action: "allow", retried: true })
   })
 
   it("an empty allowlist retry never sets the flag (nothing was named to shop against)", async () => {

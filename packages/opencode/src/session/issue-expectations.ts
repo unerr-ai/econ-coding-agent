@@ -1,0 +1,252 @@
+// Round-F wave, §6 (docs/features/08-signal-bus.md) — pure, mechanical, no LLM.
+
+const MAX_LITERALS = 8
+const MIN_VALUE_LEN = 2
+const MAX_VALUE_LEN = 120
+const MAX_SOURCE_LEN = 160
+
+/** Prose markers that signal a quoted/backticked span nearby is the DESIRED value. */
+const EXPECTED_MARKER_RE = /\bexpected\b|\bshould\s+(?:be|return|render|print|produce)\b/gi
+/** Prose markers that signal a quoted/backticked span nearby is the CURRENT (buggy) value. */
+const ACTUAL_MARKER_RE = /\binstead of\b|\brather than\b|\bgot\b|\bactual\b|\breturns\b/gi
+
+/** A fenced-code line shaped like an assertion — its quoted/backticked literal(s) are the expected value under test. */
+const ASSERTION_LINE_RE = /\bassert\b|assertEqual|==|!=/i
+/** A fenced-code line ending in an "expected:"-style header — the NEXT line is taken whole as the expected value. */
+const EXPECTED_BLOCK_HEADER_RE = /\b(?:expected(?:\s+output)?|should\s+be)\s*:\s*$/i
+/** A fenced-code traceback line naming the raised error class — the final match in the text wins. */
+const ERROR_LINE_RE = /^[A-Za-z_][\w.]*(?:Error|Exception)\s*:\s*.+$/
+
+/** Common words that survive quoting/backticking but never name a value — dropped per the conservative extraction rule. */
+const STOPWORDS = new Set([
+  "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "on", "for",
+  "and", "or", "not", "this", "that", "it", "will", "with", "as", "at", "by", "if",
+])
+
+/**
+ * A single mechanically-extracted issue literal — its value, whether it names
+ * the expected value, the current (actual) value, or a raised error, and the
+ * trimmed source line it was pulled from. Feeds the repro seed contract, the
+ * fidelity judge's required-literal coverage check, and the oracle-inversion
+ * detector (§5/§8 of the signal-bus doc).
+ *
+ * @sem domain=routing role=type
+ */
+export interface IssueExpectation {
+  value: string
+  kind: "expected" | "actual" | "error"
+  source: string
+}
+
+/** True when the trimmed value is a bare single-digit number, a stopword, or outside the 2-120 char window — never a real literal. */
+function isValidValue(value: string): boolean {
+  if (value.length < MIN_VALUE_LEN || value.length > MAX_VALUE_LEN) return false
+  if (/^\d$/.test(value)) return false
+  if (STOPWORDS.has(value.toLowerCase())) return false
+  return true
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text
+}
+
+/** Non-overlapping quoted/backticked spans in one line, in left-to-right order, with their start offset for marker-distance ranking. Backticks are claimed first (an issue author fencing text as code is the strongest signal) so a quote mark inside a backtick span is never re-split. */
+function extractLiteralSpans(line: string): Array<{ value: string; start: number }> {
+  const spans: Array<{ value: string; start: number }> = []
+  const claimed: Array<[number, number]> = []
+  const overlapsClaimed = (start: number, end: number) => claimed.some(([cs, ce]) => start < ce && end > cs)
+
+  const backtickRe = /`([^`]+)`/g
+  let m: RegExpExecArray | null
+  while ((m = backtickRe.exec(line))) {
+    spans.push({ value: m[1], start: m.index })
+    claimed.push([m.index, m.index + m[0].length])
+  }
+
+  const doubleQuoteRe = /"([^"\n]+)"/g
+  while ((m = doubleQuoteRe.exec(line))) {
+    const end = m.index + m[0].length
+    if (overlapsClaimed(m.index, end)) continue
+    spans.push({ value: m[1], start: m.index })
+    claimed.push([m.index, end])
+  }
+
+  const singleQuoteRe = /'([^'\n]+)'/g
+  while ((m = singleQuoteRe.exec(line))) {
+    const end = m.index + m[0].length
+    if (overlapsClaimed(m.index, end)) continue
+    spans.push({ value: m[1], start: m.index })
+    claimed.push([m.index, end])
+  }
+
+  return spans.sort((a, b) => a.start - b.start)
+}
+
+function markerPositions(line: string, marker: RegExp): number[] {
+  const positions: number[] = []
+  const localRe = new RegExp(marker.source, marker.flags)
+  let m: RegExpExecArray | null
+  while ((m = localRe.exec(line))) positions.push(m.index)
+  return positions
+}
+
+/** The kind of the nearest marker (by character distance) to a literal span's start, or null when the line carries neither marker type. */
+function nearestMarkerKind(
+  spanStart: number,
+  expectedPositions: number[],
+  actualPositions: number[],
+): "expected" | "actual" | null {
+  let bestKind: "expected" | "actual" | null = null
+  let bestDist = Infinity
+  for (const p of expectedPositions) {
+    const d = Math.abs(p - spanStart)
+    if (d < bestDist) {
+      bestDist = d
+      bestKind = "expected"
+    }
+  }
+  for (const p of actualPositions) {
+    const d = Math.abs(p - spanStart)
+    if (d < bestDist) {
+      bestDist = d
+      bestKind = "actual"
+    }
+  }
+  return bestKind
+}
+
+/**
+ * Conservative, precision-over-recall mechanical extraction of issue-derived
+ * expected/actual/error literals — no LLM, no graph. Pulls marker-adjacent
+ * quoted/backticked spans from prose ("expected `X`", "actual output `Y`"),
+ * assertion-shaped and expected-block lines inside fenced code, and the
+ * traceback's final error line, deduped and capped at 8 values 2-120 chars
+ * long. Recon confirmed nothing parses issue text for values today
+ * (`extractIssueSymbols` at graph-tools.ts extracts graph symbols only).
+ *
+ * @sem domain=routing role=analysis
+ */
+export function extractIssueExpectations(issueText: string): { literals: IssueExpectation[] } {
+  const out: IssueExpectation[] = []
+  const seen = new Set<string>()
+
+  const add = (rawValue: string, kind: IssueExpectation["kind"], rawSource: string) => {
+    if (out.length >= MAX_LITERALS) return
+    const value = rawValue.trim()
+    if (!isValidValue(value)) return
+    if (seen.has(value)) return
+    seen.add(value)
+    out.push({ value, kind, source: truncate(rawSource.trim(), MAX_SOURCE_LEN) })
+  }
+
+  if (!issueText) return { literals: [] }
+
+  const lines = issueText.split("\n")
+  let inCodeBlock = false
+  let lastErrorLine: string | null = null
+
+  for (let i = 0; i < lines.length && out.length < MAX_LITERALS; i++) {
+    const rawLine = lines[i]
+    const trimmedLine = rawLine.trim()
+
+    if (trimmedLine.startsWith("```")) {
+      inCodeBlock = !inCodeBlock
+      continue
+    }
+
+    if (inCodeBlock) {
+      if (EXPECTED_BLOCK_HEADER_RE.test(trimmedLine) && i + 1 < lines.length) {
+        const nextLine = lines[i + 1].trim()
+        if (nextLine.length > 0) {
+          add(nextLine, "expected", nextLine)
+          i++
+          continue
+        }
+      }
+      if (ERROR_LINE_RE.test(trimmedLine)) lastErrorLine = trimmedLine
+      if (ASSERTION_LINE_RE.test(rawLine)) {
+        for (const span of extractLiteralSpans(rawLine)) add(span.value, "expected", trimmedLine)
+      }
+      continue
+    }
+
+    const spans = extractLiteralSpans(rawLine)
+    if (spans.length === 0) continue
+    const expectedPositions = markerPositions(rawLine, EXPECTED_MARKER_RE)
+    const actualPositions = markerPositions(rawLine, ACTUAL_MARKER_RE)
+    if (expectedPositions.length === 0 && actualPositions.length === 0) continue
+    for (const span of spans) {
+      const kind = nearestMarkerKind(span.start, expectedPositions, actualPositions)
+      if (!kind) continue
+      add(span.value, kind, trimmedLine)
+    }
+  }
+
+  if (lastErrorLine) add(lastErrorLine, "error", lastErrorLine)
+
+  return { literals: out.slice(0, MAX_LITERALS) }
+}
+
+/**
+ * The oracle-inversion verdict (§5): whether a failing assertion's output
+ * shows the code PRODUCING the issue's stated desired value while the
+ * assertion still expects the value the issue calls wrong — the 11815 trap
+ * where the pin-green pressure chain rejects the gold-equivalent fix.
+ *
+ * @sem domain=routing role=type
+ */
+export interface OracleInversionVerdict {
+  inverted: boolean
+  /** The issue-stated desired literal found on the failure's produced side. */
+  desiredLiteral?: string
+  /** The issue-stated buggy literal the failing assertion still expects. */
+  buggyLiteral?: string
+}
+
+/** A red-tail line that is part of an assertion-comparison failure (unittest one-line `X != Y`, pytest `E assert`, or the unified-diff pair unittest prints for long strings). */
+const COMPARISON_FAILURE_RE = /AssertionError|assertEqual|^\s*E?\s*assert\b|!=|^\s*[-+]\s/m
+
+/**
+ * Pure ordering heuristic over the M4 gate's red output tail: inversion is
+ * declared only when (a) the tail is a comparison failure — a crash or import
+ * error never qualifies, (b) BOTH an issue-stated desired ("expected"-kind)
+ * literal AND an issue-stated buggy ("actual"-kind) literal appear inside the
+ * assertion region, and (c) the desired literal appears FIRST — unittest and
+ * pytest print the computed/produced side before the assertion's expectation
+ * (`AssertionError: <computed> != <expected>`, diff `-` line = first arg), so
+ * desired-before-buggy means the fix already produces what the issue asked
+ * for and the visible test encodes the bug. Any ambiguity (missing side,
+ * no comparison shape, tie) returns inverted:false — the gate then behaves
+ * exactly as before round F.
+ *
+ * @sem domain=routing role=analysis
+ */
+export function detectOracleInversion(
+  redOutputTail: string | undefined,
+  literals: readonly IssueExpectation[],
+): OracleInversionVerdict {
+  if (!redOutputTail) return { inverted: false }
+  const desired = literals.filter((l) => l.kind === "expected")
+  const buggy = literals.filter((l) => l.kind === "actual")
+  if (desired.length === 0 || buggy.length === 0) return { inverted: false }
+
+  const lines = redOutputTail.split("\n")
+  const firstComparisonLine = lines.findIndex((line) => COMPARISON_FAILURE_RE.test(line))
+  if (firstComparisonLine < 0) return { inverted: false }
+  const assertionRegion = lines.slice(firstComparisonLine).join("\n")
+
+  const firstIndexOf = (candidates: readonly IssueExpectation[]): { index: number; value: string } | null => {
+    let best: { index: number; value: string } | null = null
+    for (const candidate of candidates) {
+      const index = assertionRegion.indexOf(candidate.value)
+      if (index >= 0 && (best === null || index < best.index)) best = { index, value: candidate.value }
+    }
+    return best
+  }
+
+  const desiredHit = firstIndexOf(desired)
+  const buggyHit = firstIndexOf(buggy)
+  if (!desiredHit || !buggyHit) return { inverted: false }
+  if (desiredHit.index >= buggyHit.index) return { inverted: false }
+  return { inverted: true, desiredLiteral: desiredHit.value, buggyLiteral: buggyHit.value }
+}

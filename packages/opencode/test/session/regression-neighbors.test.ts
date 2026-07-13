@@ -16,7 +16,9 @@
  * the exact cwd-stripping probe one-liner, and rewriteInterpreter's leading-token swap — and
  * F16's selectRegressionPinCandidate: picks the first assertion-shaped (non-env-red, non-zero
  * exit) regression-gate failure to pin, skipping MISSING_FILE/MODULE_MISSING-shaped and
- * exit-0 entries, `null` on an empty list.
+ * exit-0 entries, `null` on an empty list — and RF-6's rewriteInterpreterCommand: the shared
+ * per-command rewrite point (bare python/python3 head swap across `&&`/`;` segments, pipe/
+ * backtick/`$(` bail-out, undefined-interpreter passthrough, idempotence on a second pass).
  */
 
 import { describe, it, expect, afterEach } from "bun:test"
@@ -28,6 +30,7 @@ import {
   discoverProjectInterpreter,
   projectInterpreterCandidateCount,
   rewriteInterpreter,
+  rewriteInterpreterCommand,
   deriveTopLevelPackage,
   selectRegressionPinCandidate,
 } from "../../src/session/regression-neighbors"
@@ -497,6 +500,49 @@ describe("rewriteInterpreter", () => {
   it("leaves a non-python command untouched", () => {
     const result = rewriteInterpreter(["bun test packages/foo"], "/repo/.venv/bin/python")
     expect(result).toEqual(["bun test packages/foo"])
+  })
+})
+
+describe("rewriteInterpreterCommand", () => {
+  it("rewrites a bare python head", () => {
+    const result = rewriteInterpreterCommand("python repro_issue.py", "/repo/.venv/bin/python")
+    expect(result).toBe("/repo/.venv/bin/python repro_issue.py")
+  })
+
+  it("rewrites a bare python3 head, leaving the rest of the command alone", () => {
+    const result = rewriteInterpreterCommand("python3 -m pytest tests/x.py", "/repo/.venv/bin/python")
+    expect(result).toBe("/repo/.venv/bin/python -m pytest tests/x.py")
+  })
+
+  it("rewrites only the segment whose head is python, after a `&&`", () => {
+    const result = rewriteInterpreterCommand("cd /x && python repro.py", "/repo/.venv/bin/python")
+    expect(result).toBe("cd /x && /repo/.venv/bin/python repro.py")
+  })
+
+  it("leaves an already-absolute interpreter head untouched", () => {
+    const result = rewriteInterpreterCommand("/usr/bin/python3 x.py", "/repo/.venv/bin/python")
+    expect(result).toBe("/usr/bin/python3 x.py")
+  })
+
+  it("leaves a non-python head untouched", () => {
+    const result = rewriteInterpreterCommand("pytest tests/x.py", "/repo/.venv/bin/python")
+    expect(result).toBe("pytest tests/x.py")
+  })
+
+  it("bails out unchanged on a piped command", () => {
+    const result = rewriteInterpreterCommand("python x.py | tee log", "/repo/.venv/bin/python")
+    expect(result).toBe("python x.py | tee log")
+  })
+
+  it("passes the command through unchanged when interpreter is undefined", () => {
+    const result = rewriteInterpreterCommand("python x.py", undefined)
+    expect(result).toBe("python x.py")
+  })
+
+  it("is idempotent — rewriting an already-rewritten command changes nothing", () => {
+    const once = rewriteInterpreterCommand("python repro_issue.py", "/repo/.venv/bin/python")
+    const twice = rewriteInterpreterCommand(once, "/repo/.venv/bin/python")
+    expect(twice).toBe(once)
   })
 })
 

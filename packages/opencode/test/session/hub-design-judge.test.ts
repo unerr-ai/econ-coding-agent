@@ -12,7 +12,11 @@
  * `definitionSites` also degrades (with `rawHead`) — the judge must not
  * re-litigate the site choice the graph's band-filtered allowlist already
  * made — while an empty `definitionSites` list leaves the judge's file
- * choice unchecked.
+ * choice unchecked. RF-7 adds a grounding floor: `verdictGroundedInIssue`'s
+ * token-overlap check, and `runHubDesignJudge`'s use of it when `issueText`
+ * is provided (degrades to `DEGRADED_HUB_DESIGN` + `rawHead` when the
+ * verdict shares no token with the issue; skipped entirely when
+ * `issueText` is omitted).
  *
  * The `hubDesignDispatch` wiring in prompt.ts (the reasoner-tier dispatch
  * the hub-shopping trigger calls) is an Effect-generator closure over
@@ -25,6 +29,7 @@ import { describe, test, expect } from "bun:test"
 import {
   parseHubDesignResponse,
   runHubDesignJudge,
+  verdictGroundedInIssue,
   DEGRADED_HUB_DESIGN,
   type HubDesignComplete,
 } from "../../src/session/hub-design-judge"
@@ -205,7 +210,10 @@ describe("runHubDesignJudge", () => {
   test("the same out-of-list file is delivered as-is when definitionSites is empty", async () => {
     const complete: HubDesignComplete = async () =>
       JSON.stringify({ file: "django/db/models/query_utils.py", entity: "Q", change: "free choice" })
-    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    // issueText omitted here on purpose: this test isolates the empty-definitionSites
+    // allowlist bypass from the RF-7 grounding floor (a "free choice"/"Q" verdict
+    // would not ground against `issueText` below and is covered separately).
+    const result = await runHubDesignJudge({ issueText: undefined, bouncedFiles, definitionSites: [], complete })
     expect(result.verdict).toEqual({
       file: "django/db/models/query_utils.py",
       entity: "Q",
@@ -242,6 +250,67 @@ describe("runHubDesignJudge", () => {
     const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
     expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
     expect(result.rawHead).toBe(raw.slice(0, 200))
+  })
+
+  test("RF-7: a well-formed, allowlist-passing verdict that fails grounding against a provided issueText degrades, with rawHead", async () => {
+    const raw = JSON.stringify({
+      file: "django/db/models/query_utils.py",
+      entity: "Q.__invert__",
+      change: "apply De Morgan's laws when inverting a compound Q object",
+    })
+    const complete: HubDesignComplete = async () => raw
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe(raw.slice(0, 200))
+  })
+
+  test("RF-7: omitting issueText skips the grounding floor — the same verdict is delivered as-is", async () => {
+    const raw = JSON.stringify({
+      file: "django/db/models/query_utils.py",
+      entity: "Q.__invert__",
+      change: "apply De Morgan's laws when inverting a compound Q object",
+    })
+    const complete: HubDesignComplete = async () => raw
+    const result = await runHubDesignJudge({ issueText: undefined, bouncedFiles, definitionSites: [], complete })
+    expect(result.verdict).toEqual({
+      file: "django/db/models/query_utils.py",
+      entity: "Q.__invert__",
+      change: "apply De Morgan's laws when inverting a compound Q object",
+    })
+    expect(result.rawHead).toBeUndefined()
+  })
+})
+
+describe("verdictGroundedInIssue", () => {
+  const djangoChoicesIssueText =
+    "Model field with Choices renders str(instance.field) as its label instead of the raw enum value — the Choices/enum __str__ leaks through the ORM."
+
+  test("rejects a fixture verdict about Q.__invert__ / De Morgan's laws against an unrelated issue", () => {
+    const verdict = {
+      file: "django/db/models/query_utils.py",
+      entity: "Q.__invert__",
+      change: "apply De Morgan's laws when inverting a compound Q object",
+    }
+    expect(verdictGroundedInIssue(verdict, djangoChoicesIssueText)).toBe(false)
+  })
+
+  test("accepts a verdict mentioning Choices against the same issue", () => {
+    const verdict = {
+      file: "django/db/models/enums.py",
+      entity: "Choices",
+      change: "override __str__ to return the raw value, not the label",
+    }
+    expect(verdictGroundedInIssue(verdict, djangoChoicesIssueText)).toBe(true)
+  })
+
+  test("no token of length >= 4 across entity/change means ungrounded", () => {
+    const verdict = { file: "a.py", entity: "Q", change: "fix it" }
+    expect(verdictGroundedInIssue(verdict, djangoChoicesIssueText)).toBe(false)
+  })
+
+  test("matching is case-insensitive", () => {
+    const verdict = { file: "a.py", entity: "choices", change: "fix it there" }
+    expect(verdictGroundedInIssue(verdict, djangoChoicesIssueText)).toBe(true)
   })
 })
 

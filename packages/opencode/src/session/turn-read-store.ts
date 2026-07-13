@@ -11,6 +11,7 @@
  */
 import type { VerifyCommand } from "@opencode-ai/code-intelligence"
 import type { TriageVerdict } from "./turn-triage"
+import type { IssueExpectation } from "./issue-expectations"
 
 /** M4/S1 — the turn-end pinned reproduction, plus (only for a runner-confirmed red) the exit/tail evidence that proved it red. Structurally identical to slice-orchestrator's `TurnProbePin` (colocated here rather than imported, so this store stays dependency-free of the orchestrator module). */
 export interface TurnProbePin {
@@ -85,4 +86,18 @@ export function setTurnFiles(sessionID: string, files: readonly string[]): void 
 /** M2 — the turn's file evidence, the probe fallback for slices whose own text names no file. */
 export function getTurnFiles(sessionID: string): readonly string[] {
   return filesBySession.get(sessionID) ?? []
+}
+
+/** Round F §6 — issue-derived expectations, extracted mechanically at fresh-turn open: sessionID → the issue's stated expected/actual/error literals. */
+const expectationsBySession = new Map<string, readonly IssueExpectation[]>()
+
+/** Record (or, on empty, clear) the fresh turn's issue-derived expectations. Continuation turns inherit; a degraded turn clears. */
+export function setIssueExpectations(sessionID: string, literals: readonly IssueExpectation[]): void {
+  if (literals.length > 0) expectationsBySession.set(sessionID, literals)
+  else expectationsBySession.delete(sessionID)
+}
+
+/** The turn's issue-stated literals — the fidelity judge's required-coverage list and the oracle-inversion detector's evidence. */
+export function getIssueExpectations(sessionID: string): readonly IssueExpectation[] {
+  return expectationsBySession.get(sessionID) ?? []
 }

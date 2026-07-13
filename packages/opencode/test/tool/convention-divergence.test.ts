@@ -9,13 +9,17 @@
 import { describe, it, expect } from "bun:test"
 import {
   detectReceiverMethodDivergence,
+  detectFamilyConflictEvidence,
+  SEMANTIC_METHOD_FAMILIES,
   addedLines,
   evaluateConventionDivergenceGate,
   shouldDenyConventionDivergence,
   hasDeniedConventionDivergence,
   markConventionDivergenceDenied,
+  hasDeniedConventionDivergenceSecond,
+  markConventionDivergenceDeniedSecond,
 } from "../../src/tool/convention-divergence"
-import { conventionDivergenceNudgeText } from "../../src/session/prompts/nudges"
+import { conventionDivergenceNudgeText, conventionDivergenceSecondDenyNudgeText } from "../../src/session/prompts/nudges"
 
 describe("detectReceiverMethodDivergence", () => {
   it("11848 shape: before has datetime.datetime(...), added has datetime.datetime.now( — FIRES with receiverSites", () => {
@@ -179,6 +183,126 @@ describe("shouldDenyConventionDivergence", () => {
   })
 })
 
+// -- round-F §7 stage 3: evaluateConventionDivergenceGate's evidence-bearing second rung --
+
+describe("evaluateConventionDivergenceGate / shouldDenyConventionDivergence — round-F second rung", () => {
+  const divergence = { receiver: "datetime.datetime", method: "now", receiverSites: [4] }
+  const retryBase = { armed: true, isTestPath: false, isNewFile: false, divergence, alreadyDenied: true }
+  const callEvidence = { family: "time/tz", kind: "call" as const, member: "utcnow", lines: [7] }
+
+  it("alreadyDenied + family evidence present + not yet second-denied → deny-second", () => {
+    expect(evaluateConventionDivergenceGate({ ...retryBase, familyEvidence: callEvidence })).toBe("deny-second")
+    expect(shouldDenyConventionDivergence({ ...retryBase, familyEvidence: callEvidence })).toBe(true)
+  })
+
+  it("no familyEvidence (no family match or no opposite-member evidence) → pass-retry, exactly as before round F", () => {
+    expect(evaluateConventionDivergenceGate({ ...retryBase, familyEvidence: null })).toBe("pass-retry")
+    expect(evaluateConventionDivergenceGate(retryBase)).toBe("pass-retry")
+    expect(shouldDenyConventionDivergence({ ...retryBase, familyEvidence: null })).toBe(false)
+  })
+
+  it("familyEvidence present but the second deny is already spent → pass-retry (third+ attempt, fail-open)", () => {
+    expect(
+      evaluateConventionDivergenceGate({ ...retryBase, familyEvidence: callEvidence, alreadyDeniedSecond: true }),
+    ).toBe("pass-retry")
+  })
+
+  it("familyEvidence is irrelevant before the first deny — the FIRST attempt always denies plain", () => {
+    expect(
+      evaluateConventionDivergenceGate({ ...retryBase, alreadyDenied: false, familyEvidence: callEvidence }),
+    ).toBe("deny")
+  })
+})
+
+// -- round-F §7 stage 3: hasDeniedConventionDivergenceSecond / markConventionDivergenceDeniedSecond --
+
+describe("hasDeniedConventionDivergenceSecond / markConventionDivergenceDeniedSecond", () => {
+  it("a fresh session has not spent its second deny; marking it flips the flag for that session only", () => {
+    const sessionA = "conv-div-second-store-session-a"
+    const sessionB = "conv-div-second-store-session-b"
+    expect(hasDeniedConventionDivergenceSecond(sessionA)).toBe(false)
+    markConventionDivergenceDeniedSecond(sessionA)
+    expect(hasDeniedConventionDivergenceSecond(sessionA)).toBe(true)
+    expect(hasDeniedConventionDivergenceSecond(sessionB)).toBe(false)
+  })
+})
+
+// -- round-F §7 stage 3: SEMANTIC_METHOD_FAMILIES / detectFamilyConflictEvidence --
+
+describe("SEMANTIC_METHOD_FAMILIES", () => {
+  it("the first family is time/tz with now/utcnow/localtime/today", () => {
+    expect(SEMANTIC_METHOD_FAMILIES["time/tz"]).toEqual(["now", "utcnow", "localtime", "today"])
+  })
+})
+
+describe("detectFamilyConflictEvidence", () => {
+  it("null when the method isn't in any known family", () => {
+    const out = detectFamilyConflictEvidence({
+      beforeContent: "import path\nconst p = path.join(root, 'a')",
+      receiver: "path",
+      method: "resolve",
+    })
+    expect(out).toBeNull()
+  })
+
+  it("call evidence: another family member already called on the same receiver — 11848 shape (utcnow beside now)", () => {
+    const beforeContent = [
+      "import datetime",
+      "def parse_http_date(date):",
+      "    epoch = datetime.datetime.utcnow()",
+      "    return epoch",
+    ].join("\n")
+    const out = detectFamilyConflictEvidence({ beforeContent, receiver: "datetime.datetime", method: "now" })
+    expect(out).not.toBeNull()
+    expect(out?.family).toBe("time/tz")
+    expect(out?.kind).toBe("call")
+    expect(out?.member).toBe("utcnow")
+    expect(out?.lines).toEqual([3])
+  })
+
+  it('docstring evidence: "UTC" inside a multi-line docstring body (not the opening-quote line) when no opposite-member call exists', () => {
+    const beforeContent = [
+      "import datetime",
+      "def parse_http_date(date):",
+      '    """',
+      "    Parse an HTTP date.",
+      "",
+      "    Return an integer expressed in seconds since the epoch, in UTC.",
+      '    """',
+      "    epoch = datetime.datetime(1970, 1, 1)",
+      "    return epoch",
+    ].join("\n")
+    const out = detectFamilyConflictEvidence({ beforeContent, receiver: "datetime.datetime", method: "now" })
+    expect(out).not.toBeNull()
+    expect(out?.family).toBe("time/tz")
+    expect(out?.kind).toBe("docstring")
+    expect(out?.token).toBe("UTC")
+  })
+
+  it('a bare "UTC" appearing only in plain (non-comment, non-docstring) code is NOT evidence', () => {
+    const beforeContent = [
+      "import datetime",
+      "def f():",
+      "    UTC_LABEL = 'not a docstring'",
+      "    epoch = datetime.datetime(1970, 1, 1)",
+      "    return epoch",
+    ].join("\n")
+    const out = detectFamilyConflictEvidence({ beforeContent, receiver: "datetime.datetime", method: "now" })
+    expect(out).toBeNull()
+  })
+
+  it("no evidence at all (family match, but no opposite-member call and no UTC token) → null", () => {
+    const beforeContent = [
+      "import datetime",
+      "def f():",
+      "    epoch = datetime.datetime(1970, 1, 1)",
+      "    return epoch",
+    ].join("\n")
+    const out = detectFamilyConflictEvidence({ beforeContent, receiver: "datetime.datetime", method: "now" })
+    expect(out).toBeNull()
+  })
+})
+
 // -- wave 11 stage 2: per-session store --------------------------------------
 
 describe("hasDeniedConventionDivergence / markConventionDivergenceDenied", () => {
@@ -202,5 +326,31 @@ describe("conventionDivergenceNudgeText", () => {
     expect(text).toContain("line(s) 4")
     expect(text).toContain("fires once per task")
     expect(text).toContain("an identical retry will be accepted")
+  })
+})
+
+// -- round-F §7 stage 3: conventionDivergenceSecondDenyNudgeText --
+
+describe("conventionDivergenceSecondDenyNudgeText", () => {
+  it("quotes the opposite-member call-site line numbers verbatim for call evidence", () => {
+    const text = conventionDivergenceSecondDenyNudgeText("datetime.datetime", "now", {
+      family: "time/tz",
+      kind: "call",
+      member: "utcnow",
+      lines: [3],
+    })
+    expect(text).toContain("datetime.datetime.utcnow(")
+    expect(text).toContain("line(s) 3")
+    expect(text).toContain("An identical retry after this second pause will be accepted")
+  })
+
+  it("quotes the docstring token verbatim for docstring evidence", () => {
+    const text = conventionDivergenceSecondDenyNudgeText("datetime.datetime", "now", {
+      family: "time/tz",
+      kind: "docstring",
+      token: "UTC",
+    })
+    expect(text).toContain('"UTC"')
+    expect(text).toContain("An identical retry after this second pause will be accepted")
   })
 })

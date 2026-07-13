@@ -40,7 +40,8 @@ the checked-out Claude Code source, and the 2026-07 model/reasoning/cost researc
 
 ### `features/` — the build docs
 One doc per feature area (foundations → conductor core → context engine → router → model team
-→ long-horizon → observability → hardening/hosting/ship). Each says what the feature is, the
+→ long-horizon → observability → hardening/hosting/ship → signal bus & variance hardening).
+Each says what the feature is, the
 exact OpenCode seams it touches, and its status. Index + integration-zone model + verified
 seam table: [features/README.md](./features/README.md).
 
@@ -67,6 +68,11 @@ seam table: [features/README.md](./features/README.md).
 - [native-loop-gap.md](./design/native-loop-gap.md) — brainstorm: the mini-swe-agent 75.8%/$0.07
   datum, the five verified engine suppressions (code receipts), the 85% target arithmetic, and
   the E0–E3 measurement plan (null-harness control, un-suppress probe, thin-gate mode).
+- [path-to-85.md](./design/path-to-85.md) — the 85%-consistently verdict + roadmap: the
+  arithmetic (native ~80% + own-goal removal + witnesses + deferral, vs the 2–5pp benchmark
+  noise floor), research additions ranked by cost shape (blanket best-of-N explicitly
+  declined), the ecosystem-adapter layer for any-language generality, and the one-signal-bus
+  framework (convert / defer / surface) unifying benchmark, real-repo, and human-in-the-loop.
 - [tier-prompts.md](./design/tier-prompts.md) — the grounded reference for every tier/persona
   system prompt (verbatim, `file:line`-anchored) and all ~25 runtime prompt-mutation surfaces
   (reasoning gate, preambles, frame seeds, typing, wrappers, escalation briefs, verifier prompts).
@@ -87,6 +93,10 @@ seam table: [features/README.md](./features/README.md).
   orchestration *expectation* separately from econ's actual outcome.
 - [STRICT_CYCLE.md](./testing/STRICT_CYCLE.md) — the build→run→forensic→fix→verify iteration log
   (strict mode, local runs); the mechanism suspect list and per-iteration root-cause verdicts
+- [HARNESS_AND_VARIANCE_REPORT.md](./testing/HARNESS_AND_VARIANCE_REPORT.md) — the full
+  plain-language mechanism walkthrough (turn-open → orchestration → gates → finish, all
+  `file:line`-anchored) + the 2026-07-13 five-run variance forensics: eight instance-failure
+  autopsies, the variance taxonomy, and the ranked round-F fix list.
 - [SWE_BENCH_TRACKER.md](./testing/SWE_BENCH_TRACKER.md) — the working tracker for the SWE-mini-10
   django set: per-instance benchmark verdict + local triage status + root-cause, the laptop run
   recipe, and the real-grader-simulation rule that keeps local runs honest (local "N tests OK" ≠ pass).

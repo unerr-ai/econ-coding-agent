@@ -18,6 +18,7 @@ import type { TriageGoal, TriageVerdict } from "./turn-triage"
 import type { ArmingDecision } from "./arming-judge"
 import { detectPythonHarness } from "../tool/graph-tools"
 import {
+  DEFERRAL_SLICE_PREFIX,
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
@@ -1022,7 +1023,7 @@ export interface TurnProbeGateResult {
   rung?: "probe" | "test-tree"
   exitCode?: number
   reason?: string
-  /** S1 — the accepting (green) run's output tail (≤20 lines), evidence-as-artifact alongside the red pin. Present only when `reject` is false. */
+  /** S1 — the run's output tail (≤20 lines), evidence-as-artifact: the green tail on accept, and (round F) the raw red tail on a probe-rung reject so the oracle-inversion detector reads the failure itself, not the prose-wrapped reason. */
   outputTail?: string
 }
 
@@ -1078,6 +1079,7 @@ export async function runTurnProbeGate(opts: {
       reject: true,
       rung: "probe",
       exitCode: result.exitCode,
+      outputTail: detail,
       reason:
         `The pinned repro file \`${file}\` is missing (it was deleted after pinning) — recreate it exactly as it ` +
         `was and re-run \`${opts.probe.command}\`; a missing file counts as RED, not as done.`,
@@ -1087,6 +1089,7 @@ export async function runTurnProbeGate(opts: {
     reject: true,
     rung: "probe",
     exitCode: result.exitCode,
+    outputTail: detail,
     reason:
       `The pinned reproduction \`${opts.probe.command}\` is STILL FAILING (exit ${result.exitCode}):\n${detail}\n` +
       `You have not fixed the root cause. Do not stop. Fix where the behavior is DEFINED (not where the error surfaces); do not edit the test to make it pass.`,
@@ -1260,6 +1263,27 @@ export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
   sliceType: "design",
   need: "reasoner",
   persona: "researcher",
+}
+
+/**
+ * Round F — the hard-tail deferral seed the finish path plants when a finish
+ * gate exhausts its bounded rejects (feature 08 §3): same edit-free
+ * design/reasoner shape as the grind seed above so the OL-7.3b slice hook
+ * dispatches it through the existing delegation machinery, but its content is
+ * a compiled enumerate-then-choose evidence brief (buildDeferralSliceContent),
+ * never a static prompt — dedupe/filters key on DEFERRAL_SLICE_PREFIX.
+ *
+ * @sem domain=routing role=deferral-seed
+ */
+export function deferralPrepassTodo(content: string): InjectedSliceTodo {
+  return {
+    content,
+    status: "pending",
+    priority: "high",
+    sliceType: "design",
+    need: "reasoner",
+    persona: "researcher",
+  }
 }
 
 // B3 — explicit test-work authorization: an authoring verb with tests as its
@@ -2217,10 +2241,15 @@ export async function runConductorOrchestration(
     // evidence rather than never being able to at all. Gating on the valve todo's
     // own content marker, never a copy of the arming policy.
     const degraded = deps.arming?.degraded === true
+    // Round F: the deferral pre-pass is the second escape hatch — a hard-tail
+    // finish-gate bounce on a degraded turn must still be able to escalate on
+    // evidence, exactly like the grind valve's design seed.
+    const degradedEscapeHatch = (t: OrchestrationTodo): boolean =>
+      t.content === GRIND_DESIGN_SLICE_CONTENT || t.content.startsWith(DEFERRAL_SLICE_PREFIX)
     const orchestratable = (t: OrchestrationTodo): boolean =>
-      isDispatchableSlice(t) && (!degraded || t.content === GRIND_DESIGN_SLICE_CONTENT)
+      isDispatchableSlice(t) && (!degraded || degradedEscapeHatch(t))
     if (degraded) {
-      const heldInline = todos.filter((t) => isDispatchableSlice(t) && t.content !== GRIND_DESIGN_SLICE_CONTENT).length
+      const heldInline = todos.filter((t) => isDispatchableSlice(t) && !degradedEscapeHatch(t)).length
       if (heldInline > 0)
         deps.onDegradedStandDown?.({
           conductorTodos: heldInline,

@@ -8,7 +8,10 @@
  *
  * F14b adds the deterministic assert-teeth backstop: `hasAssertionTeeth`'s
  * truth table, and `applyAssertionTeethGap`'s gap-merge behavior (forces a
- * gap verdict even when the judge said faithful/degraded). The
+ * gap verdict even when the judge said faithful/degraded). RF-4 adds two
+ * more of the same shape: `detectRenderedAssert`/`applyRenderedAssertGap`
+ * (rendered/serialized-surface asserts) and `missingRequiredLiterals`/
+ * `applyRequiredLiteralsGap` (§6 issue-derived literal coverage). The
  * `dispatchPinnedReproFidelity` wiring in prompt.ts (the shared dispatch
  * both pin sites call) is an Effect-generator closure over turn-loop state
  * (sessionID, sessions, lastUser, the per-turn `reproFidelityJudgedThisTurn`
@@ -24,6 +27,11 @@ import {
   hasAssertionTeeth,
   applyAssertionTeethGap,
   ASSERTION_TEETH_GAP,
+  detectRenderedAssert,
+  applyRenderedAssertGap,
+  RENDERED_ASSERT_GAP,
+  missingRequiredLiterals,
+  applyRequiredLiteralsGap,
   DEGRADED_REPRO_FIDELITY,
   REPRO_FIDELITY_MAX_GAPS,
   REPRO_FIDELITY_MAX_GAP_CHARS,
@@ -229,5 +237,83 @@ describe("applyAssertionTeethGap", () => {
     const merged = applyAssertionTeethGap(judgeVerdict, 'print("no teeth here")')
     expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
     expect(merged.gaps).not.toContain(ASSERTION_TEETH_GAP)
+  })
+})
+
+describe("detectRenderedAssert", () => {
+  test("fires on a substring assert against a rendered HTML variable", () => {
+    expect(detectRenderedAssert('assert \'maxlength="254"\' in html')).toBeDefined()
+  })
+
+  test("fires on an assertIn shape against a rendered variable", () => {
+    expect(detectRenderedAssert('assertIn("maxlength=\\"254\\"", rendered)')).toBeDefined()
+  })
+
+  test("fires on a compared expression wrapped in str(...)", () => {
+    expect(detectRenderedAssert("assert str(field.max_length) == '254'")).toBeDefined()
+  })
+
+  test("does NOT fire on a plain typed-equality assert", () => {
+    expect(detectRenderedAssert('assert form.fields["username"].max_length == 254')).toBeUndefined()
+  })
+
+  test("does NOT fire on content with no assert at all", () => {
+    expect(detectRenderedAssert('print("no assertion here")')).toBeUndefined()
+  })
+})
+
+describe("applyRenderedAssertGap", () => {
+  const faithfulVerdict = { faithful: true, gaps: [] }
+
+  test("a rendered-assert hit forces a gap verdict even when the judge said faithful", () => {
+    const merged = applyRenderedAssertGap(faithfulVerdict, 'assert \'maxlength="254"\' in html')
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toEqual([RENDERED_ASSERT_GAP])
+  })
+
+  test("content with no rendered-assert shape is a no-op — same verdict reference returned", () => {
+    const verdict = faithfulVerdict
+    const merged = applyRenderedAssertGap(verdict, 'assert form.fields["username"].max_length == 254')
+    expect(merged).toBe(verdict)
+  })
+})
+
+describe("missingRequiredLiterals / applyRequiredLiteralsGap", () => {
+  const reproContent = "assert response.status_code == 200\n"
+
+  test("a literal present in the repro is not reported missing", () => {
+    expect(missingRequiredLiterals('assert x == "254"', ["254"])).toEqual([])
+  })
+
+  test("a literal absent from the repro is reported missing", () => {
+    expect(missingRequiredLiterals(reproContent, ['"name" DESC'])).toEqual(['"name" DESC'])
+  })
+
+  test("undefined/empty requiredLiterals yields no misses", () => {
+    expect(missingRequiredLiterals(reproContent, undefined)).toEqual([])
+    expect(missingRequiredLiterals(reproContent, [])).toEqual([])
+  })
+
+  test("a missing required literal forces a gap naming it, even when the judge said faithful", () => {
+    const faithfulVerdict = { faithful: true, gaps: [] }
+    const merged = applyRequiredLiteralsGap(faithfulVerdict, reproContent, ['"name" DESC'])
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toHaveLength(1)
+    expect(merged.gaps[0]).toContain('"name" DESC')
+  })
+
+  test("a present required literal is a no-op — same verdict reference returned", () => {
+    const verdict = { faithful: true, gaps: [] }
+    const merged = applyRequiredLiteralsGap(verdict, reproContent, ["status_code"])
+    expect(merged).toBe(verdict)
+  })
+
+  test("the merged gap list is reclamped to REPRO_FIDELITY_MAX_GAPS", () => {
+    const judgeVerdict = {
+      faithful: false,
+      gaps: Array.from({ length: REPRO_FIDELITY_MAX_GAPS }, (_, i) => `gap ${i}`),
+    }
+    const merged = applyRequiredLiteralsGap(judgeVerdict, reproContent, ['"name" DESC'])
+    expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
   })
 })

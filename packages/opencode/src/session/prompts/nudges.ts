@@ -1,6 +1,7 @@
 // Mid-turn corrective nudges the turn driver injects as synthetic user messages.
 import type { StuckSignal } from "../../../../code-intelligence/src/orchestration-fsm"
 import type { ReproDriftKind } from "../repro-drift"
+import type { FamilyConflictEvidence } from "../../tool/convention-divergence"
 
 /**
  * The rethink message injected when the supervisor flags a stuck loop. As a
@@ -255,4 +256,26 @@ export function unverifiedFinishGateNudgeText(command?: string): string {
  */
 export function conventionDivergenceNudgeText(receiver: string, method: string, receiverSites: number[]): string {
   return `Verification pause (fires once per task): this edit calls \`${receiver}.${method}(...)\` — a method this file has never used — while the file already uses \`${receiver}\` at line(s) ${receiverSites.join(", ")}. Re-read the entity you are editing and this file's existing usage, including comments and docstrings, and confirm the right variant for THIS code. Then retry; an identical retry will be accepted.`
+}
+
+/**
+ * Round-F §7 stage 3 — convention-divergence gate's evidence-bearing SECOND
+ * pause: fires once, on the identical retry that follows the first deny,
+ * only when the divergence's method belongs to a known ambiguous semantic
+ * family AND the file itself carries opposite-member evidence
+ * (`detectFamilyConflictEvidence` in convention-divergence.ts). Quotes that
+ * evidence verbatim — the other family member's call-site line numbers, or
+ * the docstring/comment token — so the agent isn't asked to re-derive it,
+ * and states the fail-open floor: a third identical attempt is accepted.
+ */
+export function conventionDivergenceSecondDenyNudgeText(
+  receiver: string,
+  method: string,
+  evidence: FamilyConflictEvidence,
+): string {
+  const evidenceText =
+    evidence.kind === "call"
+      ? `this file also calls \`${receiver}.${evidence.member}(...)\` at line(s) ${(evidence.lines ?? []).join(", ")}`
+      : `this file's own comments/docstring mention "${evidence.token}" near \`${receiver}\`'s existing use`
+  return `Second verification pause: \`${receiver}.${method}(...)\` belongs to a family of mutually-ambiguous variants, and ${evidenceText} — evidence the two are not interchangeable here. Re-read this file's existing usage and confirm \`${method}\` is really the right variant before retrying. An identical retry after this second pause will be accepted.`
 }

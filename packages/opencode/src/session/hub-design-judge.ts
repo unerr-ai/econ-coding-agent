@@ -49,7 +49,8 @@ export const DEGRADED_HUB_DESIGN: HubDesignVerdict = { file: "", entity: "", cha
 export type HubDesignComplete = (request: { system: string; user: string }) => Promise<string>
 
 /**
- * Input to `runHubDesignJudge`: the turn's issue text, the hub files edits
+ * Input to `runHubDesignJudge`: the turn's issue text (also the RF-7
+ * grounding-floor input — omit it to skip that floor), the hub files edits
  * have already bounced on, and the graph-grounded definition sites for the
  * issue's named symbols (from `graph-tools.ts`'s
  * `issueSymbolDefinitionSites` — this module never touches the graph
@@ -58,7 +59,7 @@ export type HubDesignComplete = (request: { system: string; user: string }) => P
  * @sem domain=routing role=hub-design-judge
  */
 export interface RunHubDesignJudgeInput {
-  readonly issueText: string
+  readonly issueText?: string
   readonly bouncedFiles: readonly string[]
   readonly definitionSites: readonly { symbol: string; kind: string; file: string }[]
   readonly complete: HubDesignComplete
@@ -128,6 +129,28 @@ function extractJsonCandidates(raw: string): string[] {
   return candidates
 }
 
+/** Splits on runs of non-alphanumeric characters, dropping empty tokens. */
+function tokenizeAlphanumeric(text: string): string[] {
+  return text.split(/[^a-zA-Z0-9]+/).filter((token) => token.length > 0)
+}
+
+/**
+ * RF-7 sanity floor: whether `verdict`'s `entity`/`change` share at least
+ * one non-trivial token (length >= 4, case-insensitive) with `issueText` —
+ * catches a verdict that names an entity/change the issue never mentions at
+ * all (11964-A's `Q.__invert__`/De Morgan verdict against a Django
+ * Choices/enum `str()` issue fails this trivially). Tokenizes on runs of
+ * non-alphanumeric characters.
+ *
+ * @sem domain=routing role=hub-design-judge
+ */
+export function verdictGroundedInIssue(verdict: HubDesignVerdict, issueText: string): boolean {
+  const tokens = tokenizeAlphanumeric(`${verdict.entity} ${verdict.change}`).filter((token) => token.length >= 4)
+  if (tokens.length === 0) return false
+  const haystack = issueText.toLowerCase()
+  return tokens.some((token) => haystack.includes(token.toLowerCase()))
+}
+
 /**
  * Parse the judge's raw completion into a verdict: scans every top-level
  * balanced JSON object in the response and, walking from the LAST candidate
@@ -177,7 +200,11 @@ export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
  * picks WHICH listed site and the concrete change, never a different file —
  * when `definitionSites` is empty, the judge's file choice stands
  * unchecked. The caller falls back to asking the model to re-derive the
- * site itself, never blocks.
+ * site itself, never blocks. RF-7: when `issueText` is provided, a
+ * well-formed (and allowlist-passing) verdict whose `entity`/`change` share
+ * no non-trivial token with it (`verdictGroundedInIssue`) degrades the same
+ * way, WITH `rawHead` — an unfounded verdict carries no design signal
+ * either. Omitting `issueText` skips this floor entirely.
  *
  * @sem domain=routing role=hub-design-judge
  */
@@ -189,7 +216,7 @@ export async function runHubDesignJudge(
   try {
     raw = await complete({
       system: HUB_DESIGN_SYSTEM_PROMPT,
-      user: buildHubDesignUserPrompt({ issueText, bouncedFiles, definitionSites }),
+      user: buildHubDesignUserPrompt({ issueText: issueText ?? "", bouncedFiles, definitionSites }),
     })
   } catch {
     return { verdict: DEGRADED_HUB_DESIGN }
@@ -204,6 +231,9 @@ export async function runHubDesignJudge(
     return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
   }
   if (definitionSites.length > 0 && !definitionSites.some((site) => pathsRefer(site.file, verdict.file))) {
+    return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
+  }
+  if (issueText !== undefined && !verdictGroundedInIssue(verdict, issueText)) {
     return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
   }
   return { verdict }

@@ -30,12 +30,16 @@ import {
 import { isTestLikePath } from "./graph-tools"
 import {
   detectReceiverMethodDivergence,
+  detectFamilyConflictEvidence,
   addedLines,
   evaluateConventionDivergenceGate,
   hasDeniedConventionDivergence,
   markConventionDivergenceDenied,
+  hasDeniedConventionDivergenceSecond,
+  markConventionDivergenceDeniedSecond,
 } from "./convention-divergence"
-import { conventionDivergenceNudgeText } from "@/session/prompts/nudges"
+import { conventionDivergenceNudgeText, conventionDivergenceSecondDenyNudgeText } from "@/session/prompts/nudges"
+import { publishSignalFx } from "@/session/signal-bus"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -94,11 +98,39 @@ export const WriteTool = Tool.define(
           const hubGateResult = yield* Effect.promise(() =>
             evaluateHubEditGate({ sessionID: ctx.sessionID, filePath: filepath }),
           )
+          if (hubGateResult.action === "deny" && hubGateResult.second) {
+            yield* Effect.logWarning("hub_edit_gate_bounced_second", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filepath),
+              definingSites: (hubGateResult.definingSites ?? []).join(", "),
+            })
+            yield* publishSignalFx({
+              name: "hub_bounce_repeat",
+              sessionID: ctx.sessionID,
+              severity: "tail",
+              decision: "defer",
+              evidence: {
+                file: path.relative(instance.worktree, filepath),
+                definingSites: (hubGateResult.definingSites ?? []).length,
+              },
+            })
+            throw new Error(hubGateResult.message)
+          }
           if (hubGateResult.action === "deny") {
             yield* Effect.logWarning("hub_edit_gate_bounced", {
               "session.id": ctx.sessionID,
               file: path.relative(instance.worktree, filepath),
               importers: hubGateResult.importers,
+            })
+            yield* publishSignalFx({
+              name: "hub_bounce",
+              sessionID: ctx.sessionID,
+              severity: "info",
+              decision: "convert",
+              evidence: {
+                file: path.relative(instance.worktree, filepath),
+                importers: hubGateResult.importers ?? null,
+              },
             })
             throw new Error(hubGateResult.message)
           }
@@ -135,12 +167,22 @@ export const WriteTool = Tool.define(
                   addedText: addedLines(contentOld, contentNew),
                 })
               : null
+          const familyConflictEvidence =
+            conventionDivergence !== null
+              ? detectFamilyConflictEvidence({
+                  beforeContent: contentOld,
+                  receiver: conventionDivergence.receiver,
+                  method: conventionDivergence.method,
+                })
+              : null
           const conventionAction = evaluateConventionDivergenceGate({
             armed: hubEditGateArmed(ctx.sessionID),
             isTestPath: isTestLikePath(filepath),
             isNewFile: !exists,
             divergence: conventionDivergence,
             alreadyDenied: hasDeniedConventionDivergence(ctx.sessionID),
+            familyEvidence: familyConflictEvidence,
+            alreadyDeniedSecond: hasDeniedConventionDivergenceSecond(ctx.sessionID),
           })
           if (conventionAction === "deny") {
             markConventionDivergenceDenied(ctx.sessionID)
@@ -150,11 +192,49 @@ export const WriteTool = Tool.define(
               method: conventionDivergence!.method,
               file: path.relative(instance.worktree, filepath),
             })
+            yield* publishSignalFx({
+              name: "convention_divergence",
+              sessionID: ctx.sessionID,
+              severity: "info",
+              decision: "convert",
+              evidence: {
+                receiver: conventionDivergence!.receiver,
+                method: conventionDivergence!.method,
+                file: path.relative(instance.worktree, filepath),
+              },
+            })
             throw new Error(
               conventionDivergenceNudgeText(
                 conventionDivergence!.receiver,
                 conventionDivergence!.method,
                 conventionDivergence!.receiverSites,
+              ),
+            )
+          }
+          if (conventionAction === "deny-second") {
+            markConventionDivergenceDeniedSecond(ctx.sessionID)
+            yield* Effect.logInfo("convention_divergence_denied_second", {
+              "session.id": ctx.sessionID,
+              receiver: conventionDivergence!.receiver,
+              method: conventionDivergence!.method,
+              file: path.relative(instance.worktree, filepath),
+            })
+            yield* publishSignalFx({
+              name: "convention_divergence_repeat",
+              sessionID: ctx.sessionID,
+              severity: "tail",
+              decision: "defer",
+              evidence: {
+                receiver: conventionDivergence!.receiver,
+                method: conventionDivergence!.method,
+                file: path.relative(instance.worktree, filepath),
+              },
+            })
+            throw new Error(
+              conventionDivergenceSecondDenyNudgeText(
+                conventionDivergence!.receiver,
+                conventionDivergence!.method,
+                familyConflictEvidence!,
               ),
             )
           }

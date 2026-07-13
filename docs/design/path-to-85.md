@@ -1,0 +1,279 @@
+# Path to 85 — can the hardened harness consistently hit 85% on SWE-bench, beyond Django, at econ cost?
+
+**Question** (2026-07-14): with the round-F fixes from the
+[variance forensics](../testing/HARNESS_AND_VARIANCE_REPORT.md), can we consistently
+reach 85% on SWE-bench Verified — and generalize to any language, any repository, and
+human-in-the-loop coding — while holding the cost axis?
+
+**Standing constraint** (user decision, 2026-07-14): **blanket best-of-N is ruled
+out.** Cost is co-equal with score. The variance answer is ranked: deterministic
+conversion first, signal-gated redundancy on the hard tail only, blanket N-draws never.
+
+Companions: [HARNESS_AND_VARIANCE_REPORT.md](../testing/HARNESS_AND_VARIANCE_REPORT.md)
+(what fails today and why), [native-loop-gap.md](./native-loop-gap.md) (the thin-pipe
+baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log).
+
+---
+
+## 0. Verdict up front
+
+1. **85% expected-value on SWE-bench Verified: plausible with the round-F conversions
+   + deferral, unproven until measured on the full 500.** The tier stack's native
+   ceiling is ~80% (reasoner-tier model publishes 80.6% Verified; the conductor-tier
+   M-series claims ~80.5% under a thin harness — user-supplied, unverified by our
+   research pass). The harness must add ~5pp net. The 0713 forensics show it currently
+   *subtracts* on identifiable classes (oracle inversion, gate hatches) — so the first
+   +2-4pp is removing own-goals, which is cheaper than adding machinery.
+2. **"Consistently 85%" (every run ≥85%) has a benchmark noise floor of roughly
+   2–5pp** that no harness work removes: published false-pass/misgrading rates run up
+   to ~11% of reported successes (arXiv:2511.16858), OpenAI has publicly deprecated
+   Verified over instance quality (59.4% of audited problems had material issues), and
+   we found two grading artifacts ourselves in just 8 failures (subTest line-gluing on
+   11848/11964). The honest target: **expected ≥85% with a run-to-run band of ±2pp**,
+   i.e. worst runs land ≥83%. The frontier plateau at 88.6–88.7% is itself evidence of
+   an effective ceiling near 90.
+3. **"85% for any language" is not a near-term target for anyone.** The
+   Python→multilingual drop is ~20–32pp *for frontier models too* (Claude 3.7: 63%→43%
+   on SWE-bench Multilingual; Kimi K2.6: 65.8%→47.3%; pattern is model-agnostic —
+   arXiv:2504.02605, swebench.com/multilingual). The right goal on multilingual sets is
+   **relative position** — within a few points of frontier at a fraction of the cost —
+   and that requires the ecosystem-adapter layer in §4, which is real new work.
+4. Everything recommended below is **cost-neutral or cost-negative except the deferral
+   tail** (one extra constrained draw on the ~10–20% of instances where a deterministic
+   failure signal fires — the double-pay ledger already accounts for exactly this
+   shape).
+
+---
+
+## 1. The arithmetic
+
+500 instances; 85% = 425 resolved, 75 failures allowed.
+
+```
+native tier-stack policy (thin pipe)        ~80%          (≈100 failures)
+− benchmark noise floor (misgrade/flaky)    2–5pp burned  (unfixable by us)
++ remove harness own-goals (report items 2,3)  +2–4pp     (11815-class, hatch-class)
++ witness upgrades (typed asserts, sibling enum, item 4–5) +1–3pp  (11790/12039-class)
++ deferral: hard-tail second draw (item 1)  +1–3pp        (tail-only cost)
+────────────────────────────────────────────────────────────
+plausible band                              83–88% expected
+```
+
+Each increment is grounded in an observed failure class with a counted frequency in
+our own runs (8 fleet failures: ≥6 were deterministic-convertible). The band's floor
+crosses 85% only if all three buckets land — hence the measurement plan in §6.
+
+Reference points for what buys what at the top (research pass, 2026-07-14):
+pass@1→pass@3 ≈ +5pp (Verdent); 5-sample majority ≈ +8–12pp at 5× cost (OpenHands) —
+**declined** per the standing constraint; critic-model pass ≈ +3–6pp at +15–20% tokens;
+Anthropic high-compute ≈ +5pp over baseline. The deferral design targets the same tail
+those buy, paying only on signal.
+
+---
+
+## 2. What the round-F fixes cover (from the forensics report)
+
+| Report item | Failure class it converts | Cost shape |
+|---|---|---|
+| 1. Hard-tail signals → deterministic escalation/decomposition | 8/8 reds ran 0-escalation; denied finishes discarded | tail-only spend |
+| 2. Oracle-inversion escape | 11815 ×2 (gold fix squeezed out by pin + no-test-edit) | ~$0 |
+| 3. Close gate hatches (evidence-bearing retry) | 11848 ×2, 11964-A (identical-retry / re-issue walk-throughs) | ~$0 |
+| 4. Repro-fidelity teeth (typed asserts enforced) | 11790, 12039 (rendered/print witnesses) | ~$0 |
+| 5. Seed precedence + %r + sibling-enumeration priors | 11790 clause conflict, 11815-E, 12039 | ~$0 |
+| 6. Interpreter discipline for agent repros | 11964-A wrong-python, 11848-B missing deps | ~$0 |
+| 7. Hub-judge sanity floor | 11964-A hallucinated verdict | ~$0 |
+
+These are necessary but **not sufficient** for §0.1 — the additions below close the
+rest, in cost order.
+
+---
+
+## 3. What research adds, ranked by cost shape
+
+### Tier 0 — cost-NEGATIVE (do these regardless of the 85% goal)
+
+- **Observation masking over LLM summarization.** JetBrains (SWE-bench Verified, Dec
+  2025): mechanical rolling-window masking of old tool *results* (calls stay visible)
+  cut tokens >50% **and improved solve rate +2.6pp**; LLM summarization *lengthened*
+  trajectories 13–15% by erasing stopping signals. The rule: **masking is the primary
+  line of defense; LLM summarization is strictly the catastrophic-overflow fallback**,
+  never the first response to pressure. Our compaction stack already carries masking
+  machinery (`session/compaction.ts:42-85` — mask floor, protected region, step
+  interval) plus an inherited summarize path (`core/src/session/compaction.ts:12-15`);
+  the audit item is to verify the ordering enforces masking-first and that summaries
+  can never erase the evidence chain of the active pin/probe (the S5
+  evidence-fragmentation suspect). This is the rare knob that is cheaper AND better.
+- **Issue-relevant regression selection (TestPrune-style).** Selecting existing tests
+  by relevance to the issue cut SWE-Agent cost 23% *and* reduced false positives
+  (arXiv:2510.18270). Our F11 neighbor machinery already selects; tightening selection
+  to issue-relevance is a refinement, not new spend.
+
+### Tier 1 — ≈$0 marginal (prompt/gate/code changes)
+
+- The round-F list (§2).
+- **Issue-derived assert compilation.** Every "expected"/"actual" string, value, or
+  error trace quoted in the issue becomes an executable assert in the pinned repro
+  (12039's `'"name" DESC'` was sitting in the issue's expected block; 11790's typed
+  `254`). Extraction is **mechanical and happens at turn-open** — alongside the M4
+  probe derivation (`prompt.ts:3634-3643`), the turn-read's verbatim-quote discipline
+  already isolates the candidate strings — and the compiled asserts ride the repro
+  seed's contract so the fidelity judge enforces their presence, not just their
+  spirit. This is the spec-inference angle the literature flags as underexploited —
+  no system publishes extraction accuracy, but our own failures show the ceiling:
+  3 of 8 reds had the discriminating witness printed in the issue text and ignored
+  it because the repro was print-and-eyeball.
+- **Stale-visible-test detection as a first-class verdict.** The literature names the
+  problem (gold rewrites visible tests; 21.8–33% of agent-generated tests overfit —
+  arXiv:2511.16858) but has no mechanism; our oracle-inversion escape (report item 2)
+  is ahead of published work. Keep the issue text as the senior oracle when the two
+  conflict, and say so in the finish summary.
+
+### Tier 2 — tail-only spend (the deferral machinery)
+
+- **Signal-gated second draw** (report item 1): a denied finish / unresolved repro /
+  2nd hub bounce fires one constrained retry — enumerate-then-choose from named
+  candidates (definition sites, sibling classes, API variants), usually one tier up.
+  This is UCCI-shaped calibrated deferral with *deterministic* signals instead of
+  logprobs — better calibrated than confidence, and free.
+- **Two-candidate selection, execution-free, on the tail only.** When deferral produces
+  a second candidate, pick between the two with the judge tier reading both diffs
+  against the issue (R4P-style patch reasoning: +6.6pp selecting from 16 at ~1s/patch;
+  our case is easier — 2 candidates, evidence attached). No test-execution cost, one
+  small judge call, only on the tail.
+
+### Tier 3 — declined (documented so the decision is explicit)
+
+- **Blanket best-of-N**: +5–12pp at 3–5× generation cost. The frontier's move, not
+  ours. The tail classes it uniquely covers shrink as Tier-1 witnesses improve (a
+  locally-red wrong draw self-corrects; only locally-green wrong draws need N).
+- **MCTS / trajectory tree search** (SWE-Search +23% relative): cost multiplier
+  undisclosed, complexity high; the deferral loop captures the high-value subset.
+- **Standing critic-model pass** on every turn: +3–6pp at +15–20% tokens — poor
+  trade against Tier-0/1 items; and our own record (hub-judge hallucination,
+  judge-degraded rounds) plus the small-judge literature says in-loop cheap judges
+  are the wrong tool except as narrowly-scoped verdicts on the tail.
+
+### Phase-2 (post-85, or with the sovereign path)
+
+- **Step-level DPO / trained conductor** on our logged decision pairs (hub bounces,
+  deferral outcomes, gate conversions are labeled training data we already emit) —
+  the highest-ceiling item in the cheap-judgment research; Fugu validates the
+  trained-conductor topology.
+- **Batch-invariant serving** when we host in-region: vLLM/SGLang now ship
+  batch-invariant kernels (~1.6× throughput cost) — buys substrate-level determinism
+  no API provider sells today. Turns "same input, same output" from hope into config.
+- **AHE (harness-as-optimization-object)**: evolved harnesses transfer +5pp across
+  models (arXiv:2604.25850) — aligns with our strict-cycle practice; automate later.
+
+---
+
+## 4. Any language, any repo — the ecosystem-adapter layer (the real new work)
+
+The multilingual evidence says the gap is **not model capability** (frontier drops the
+same ~20–32pp) — it is environment discipline + oracle parsing + localization quality.
+The component is a **decoupled adapter layer**: language/ecosystem knowledge lives in
+adapters with one interface (discover test command · parse red/green/error output ·
+find twin tests · resolve toolchain · build step), and the gates/seeds/probes consume
+that interface — **no language regex ever lives inside gate logic again**. Our harness
+has Django/pytest specifics baked into exactly the places that must generalize:
+
+| Today (Python/Django-shaped) | Generalized form |
+|---|---|
+| `TEST_SHAPED_COMMAND_RE`, red signatures, laundered-red regexes (`seen-red.ts:33-45`) | **Runner adapters**: per-ecosystem test-command discovery + red/green/error output parsing (pytest, jest/vitest, go test, cargo, gradle/maven, ctest). SWE-rebench V2 synthesizes parsers per repo — we can ship curated adapters for the top 6 ecosystems + an LLM-synthesized fallback (bounded, cached per repo). |
+| F19 "Django exact-twin" neighbor pass, `tests/<dir>` scanning (`regression-neighbors.ts:239-341`) | Twin discovery per ecosystem convention (`__tests__/`, `_test.go`, `src/test/java`, `tests/` crates). |
+| Repro seed assumes interpreted run (`repro_issue.py`) | **Build-first discipline** for compiled targets: the adapter inserts a **compilation-verification rung BEFORE any test/probe rung**, and a build/typecheck failure (`cargo check`, `go vet`, `tsc`, `mvn compile`) is a deterministic gate block — never advisory, never conflated with a test red (the ts-repair result: speculative-apply + immediate typecheck loops erase an entire variance class at compile time). |
+| Python import resolution in the graph (wave-5 fixed Python specifically; edges were 30%→84.7%) | **Per-language edge parity** in BunSqliteGraph via tree-sitter + light type resolution; **measure edge-coverage per language before trusting risk signals there** — pointing the graph at a C++/Java repo without upgraded edges starves the risk router of dependency signals and the engine silently degrades to a blind, unguided cheap-model loop (wave-5's exact failure mode, rediscovered per language). Known floors: C macros (~0.58 quality), C++ templates, Java overloads. Adapter contract: an ecosystem whose edge coverage is unmeasured reports `coupling=unknown`, which routes to the judge rung — degraded-but-loud, never silent. |
+| Interpreter discovery (F14a) for regression gate only | Extend to the agent's own repro/probe runs (report item 6) — per-ecosystem toolchain discovery (venv/conda, nvm, GOPATH, cargo workspace). |
+
+Cautionary datum: graph-*guided localization* overfits (AutoCodeRover 45%→19% under
+stricter tests). Our graph routes **risk and verification strictness**, not
+localization — keep it that way, and validate multilingual claims on the stricter
+suites (Multi-SWE-bench is human-validated).
+
+Yardstick: SWE-bench Multilingual (300 tasks, 9 languages) as the recurring probe once
+the adapter layer exists; expectation set by the frontier's own 43–47%, not by the
+Python number.
+
+---
+
+## 5. One framework: benchmark, real repos, and human-in-the-loop
+
+The unifying principle the 0713 forensics forced: **every mechanism publishes onto one
+signal bus, and the decision layer consumes it three ways** — the same architecture
+serves all three deployment modes:
+
+```
+signals (deterministic):  gate denies · unresolved repro · unpinnable red · hub bounces
+                          · convention divergence · seen-red · regression red
+                     │
+        ┌────────────┼──────────────────┐
+        ▼            ▼                  ▼
+   CONVERT       DEFER                SURFACE
+   (priors,      (escalate tier /     (tell the human;
+   hatch-closed  constrained retry;   interactive ask-user
+   gates, typed  tail-only spend)     branch already exists —
+   witnesses)                         resolution-phase.ts rule 3)
+```
+
+The same signal, routed by environment context:
+
+```
+                    e.g. M4 pin deny · unresolved repro · 2nd hub bounce
+                                        │
+              ┌─────────────────────────┴─────────────────────────┐
+              ▼                                                   ▼
+      [ headless / benchmark ]                        [ human-in-the-loop (IDE/CLI) ]
+      DEFER / ESCALATE                                SURFACE / ASK-USER
+      constrained retry from a lean compiled          pause the loop, render the diff
+      brief; one tier up; double-pay accounted        as advice, ask the human to
+                                                      arbitrate — then continue
+```
+
+- **Benchmark/headless**: SURFACE is unavailable → signals route to CONVERT then DEFER
+  (this is round-F item 1).
+- **Human-powered coding**: the same failure signal routes to SURFACE instead of a
+  blind guess — on an oracle-inversion hit the loop pauses and asks the developer
+  directly: *"the visible test contradicts the issue statement — which one is the
+  ground-truth spec?"* This is strictly better economics than any automated selector:
+  the human arbitration costs zero tokens, stops wheel-spinning on the exact turns
+  that burn the most, and **eliminates the need for multi-candidate LLM selection in
+  interactive mode entirely**. HULA's finding (feedback enriches input context and
+  improves downstream success) says surfacing early beats guessing. The plumbing
+  exists: `resolutionDecision`'s ask-user branch (`resolution-phase.ts:84-140`) and
+  the non-blocking `question.ask` fork (`prompt.ts:4486-4495`) — the work is widening
+  what may route to it beyond turn-open ambiguity.
+- **Real repos**: gates stay bounded-reject-then-fail-open-loud (never wedge a human's
+  session); observation masking and runner adapters serve interactive use identically —
+  nothing in the plan is benchmark-only machinery. The rule that keeps it coherent:
+  **no advisory-only signals** (a signal either converts, defers, or surfaces —
+  12039's `turn_completed_unverified` did none, and that's the anti-pattern).
+
+This also keeps rule 7 of the strict cycle intact: the orchestration is the product;
+the thin pipe is the yardstick. Our structural advantage over mini-swe-agent is not
+more machinery — it is that we *produce* deterministic hard-tail signals a thin pipe
+doesn't have, and (after round F) actually consume them.
+
+---
+
+## 6. Measurement plan (nothing above is claimed until these run)
+
+1. **E1 null-harness control** (still pending from native-loop-gap): thin pipe on our
+   gateway/bindings = the floor every mechanism must beat.
+2. **Full-500 Verified run** at post-round-F HEAD — the Mini-10 is the hard decile;
+   the 85% question is unanswerable from it alone.
+3. **N-run variance band**: ≥3 sequential full runs, report mean ± band per instance
+   class (no leaderboard operator publishes this; we should, internally — it is the
+   "consistently" in the goal).
+4. **Grader-artifact audit** on every red before root-causing (two of our eight
+   "failures" contained a test that actually passed).
+5. **Multilingual probe** (SWE-bench Multilingual, 300 tasks) once the top-3 runner
+   adapters exist — expectation: frontier-relative, not Python-parity.
+
+---
+
+## 7. Explicitly not building
+
+Blanket best-of-N · MCTS/tree-search · standing critic pass on every turn ·
+LLM-summarization-first compaction · new in-loop cheap-model judges (standing rule) ·
+logprob-based deferral while the gateway drops streaming logprobs (#62 — deterministic
+gate signals are better-calibrated and available today).
