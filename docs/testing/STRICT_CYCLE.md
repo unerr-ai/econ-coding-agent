@@ -698,3 +698,40 @@ probe predicted. It just can't be scored.
 is idle, add a lock dir to run.sh + a pgrep guard to grade.sh/setup.sh. Round A′
 re-runs cleanly under one owner once the other session's remainder loop (11790, 11885
 — the only collision-free data of the day) finishes.
+
+## Round A3 (clean-slate re-run, waves 8b/8c/8d binary 202607130442) — 3/5
+
+The first round-A′ attempt was voided by a parallel-session collision (two drivers
+interleaving rm-rf on shared arenas — see the arena single-owner rule); everything was
+killed, wiped, and relaunched as ONE sequential driver.
+
+| Instance | Result | Reading |
+|---|---|---|
+| 11790 | ✅ 79 OK | $0.043, 15 turns. Gate ALLOWED the gold file (1× defining_site_allow); patch assigns maxlength as the INT — the type-fidelity prior held in a bounce-free run. Cheapest 11790 ever. |
+| 11885 | ❌ 2 failures | Right file (deletion.py, allowed 14×), wrong algorithm: a 36-line combine attempt whose query shapes don't match the hidden assertNumQueries/SQL expectations. 51 turns, $0.22. NEW failure class for the ledger: implementation-semantics miss on the set's hardest behavioral change — not layer choice, not type fidelity. |
+| 12039 | ✅ 24 OK | $0.083. Gate ALLOWED ddl_references.py (2×); full-shape fix (8+/5−) covering both Columns and IndexColumns — round A's thin-fix red is gone, no enumeration tell needed. |
+| 11848 | ✅ 45 OK | $0.043. http.py allowed (bounce tax gone). |
+| 11964 | ❌ 15 failures | THIRD wrong layer: query_utils.py (importers=25). Gate bounced it once — and the 8d message RENDERED PERFECTLY ("defined in: django/db/models/enums.py") — the conductor re-issued the exact edit anyway (2× passed_on_retry) and coerced at the descriptor layer. Tell never fired (needs 2 DISTINCT bounced files); judge never reached. 29 turns, $0.08. |
+
+**Wave-8 verdict: fully validated on its own goals.** Zero false-positive bounces
+anywhere; all three previously-bounced gold sites allowed and PASSED; lazy resolution
+worked live on cold arenas (defining_site_allow events on 4 of 5 instances).
+
+**The 11964 lesson (4th confirmation of the oldest law in this log):** advisory text —
+even graph-grounded, enumerated, delivered at the decision moment — does not steer the
+flash conductor. Only mechanism converts. The specific hole: the once-per-file bounce +
+good-faith re-entry ("if this genuinely is the root-most layer, re-issue") lets a
+confident single-file wrong-layer draw pay one bounce and walk through; the
+hub-shopping tell requires a SECOND distinct file that a confident draw never produces.
+
+**Wave-9 candidate (tightening an existing gate, not adding a new one):** when the
+resolved allowlist is non-empty AND excludes the bounced file, re-entry is not free —
+either (a) the re-issue triggers the design-pass/tell path immediately (treat
+"re-issued against named candidates" as shopping), or (b) one additional bounded deny
+(2 max per file, then allow — never wedgeable) that requires visiting an allowlisted
+site first. Decide after the 11885 deep autopsy; 11885's class (implementation
+semantics) is NOT addressable by any gate and caps what sweeps can enforce.
+
+Round A3 = 3/5 → exit bar (two consecutive 5/5) not met; next wave must convert 11964's
+confident-wrong-draw hole and decide honestly whether 11885's class is enforceable at
+all or is the stochastic ceiling of the cheap tier.
