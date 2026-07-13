@@ -12,6 +12,7 @@
  * @sem domain=routing role=gate
  */
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
+import { looksLikeTestExecution } from "./turn-supervisor"
 
 /** One bash execution from the turn's transcript, in chronological order. */
 export interface SeenRedExecution {
@@ -36,6 +37,20 @@ const TEST_SHAPED_COMMAND_RE = /pytest|(?:^|[\s/])tests?(?:[\s/._]|$)|runtests|m
 // enough to count as seen-red.
 const TEST_FAILURE_SIGNATURE_RE = /FAILED|AssertionError|Traceback|FAIL:|ERROR:|[1-9]\d* (failed|errors?)/
 
+// Stricter, summary-line-only signature for the exit-laundered branch: a
+// zero-exit execution may only count as red on the shapes a test RUNNER
+// prints for a red run (django/unittest "FAILED (failures=…)"/"FAIL: ",
+// pytest "FAILED tests/…"/"2 failed") — never on a mere failure-shaped word
+// (Traceback/ERROR:) that legitimately appears in verbose green output.
+const LAUNDERED_FAILURE_SIGNATURE_RE = /FAILED\s*\(|(?:^|\n)\s*FAILED\b|\b[1-9]\d* failed\b|(?:^|\n)FAIL: /
+
+// An interpreter path (`python`, `python3.9`, `.venv/bin/python`) is shared
+// by nearly every command a turn runs — treating it as a test target let any
+// later exit-0 python invocation falsely clear a red (11885 live shape).
+const INTERPRETER_TOKEN_RE = /(?:^|\/)python[\w.]*$/i
+// A bare module label trailing the runner (django's `runtests.py delete`).
+const BARE_LABEL_RE = /^[A-Za-z_]\w*$/
+
 // Token shapes that identify WHAT a command targets, so a later green run of
 // the same test/file/module clears the earlier red without requiring a
 // byte-identical command (a rerun with `-v` or a narrower `-k` still
@@ -49,20 +64,34 @@ const TEST_RUNNER_TOKEN_RE = /^(?:.*\/)?(?:pytest|runtests\.py|manage\.py)$/i
 
 const OUTPUT_TAIL_LINES = 15
 
-/** The path/pytest-id/dotted-label tokens a command names as its test target(s); empty when none are extractable (the caller falls back to exact-command matching). */
+/** The path/pytest-id/dotted-label/bare-module tokens a command names as its test target(s), read from the runner-bearing segment only — pipe filters (`| grep | tail`) and compound trailers (`; python inspect.py`) are output plumbing, not test selection. Empty when none are extractable (the caller falls back to exact-command matching). */
 function extractTestTargetTokens(command: string): string[] {
-  const tokens = command.split(/\s+/).filter(Boolean)
-  const runnerIdx = tokens.findIndex((t) => TEST_RUNNER_TOKEN_RE.test(t))
+  const segments = command
+    .split(/&&|;|\|/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const runnerSegment =
+    segments.find((s) => s.split(/\s+/).some((t) => TEST_RUNNER_TOKEN_RE.test(t.replace(/^['"]|['"]$/g, "")))) ??
+    command
+  const tokens = runnerSegment.split(/\s+/).filter(Boolean)
+  const runnerIdx = tokens.findIndex((t) => TEST_RUNNER_TOKEN_RE.test(t.replace(/^['"]|['"]$/g, "")))
   const targets = new Set<string>()
   tokens.forEach((raw, i) => {
     const token = raw.replace(/^['"]|['"]$/g, "")
     if (TEST_RUNNER_TOKEN_RE.test(token)) return // the runner script itself, never a target
+    if (INTERPRETER_TOKEN_RE.test(token)) return // shared by every command the turn runs — never identifying
     if (PATH_LIKE_TOKEN_RE.test(token) || PY_FILE_TOKEN_RE.test(token) || PYTEST_ID_TOKEN_RE.test(token)) {
       targets.add(token)
-    } else if (runnerIdx !== -1 && i > runnerIdx && DOTTED_LABEL_RE.test(token)) {
-      // A dotted test label (e.g. `app.tests.SomeTest.test_x`) only counts
-      // as a target when it trails the runner — a stray dotted-looking
-      // argument ahead of it (a version pin, a path fragment) must not.
+    } else if (
+      runnerIdx !== -1 &&
+      i > runnerIdx &&
+      !token.startsWith("-") &&
+      (DOTTED_LABEL_RE.test(token) || BARE_LABEL_RE.test(token))
+    ) {
+      // A dotted test label (`app.tests.SomeTest.test_x`) or a bare module
+      // label (django's `runtests.py delete`) only counts as a target when
+      // it trails the runner — a stray identifier ahead of it (a version
+      // pin, a path fragment) must not.
       targets.add(token)
     }
   })
@@ -70,22 +99,33 @@ function extractTestTargetTokens(command: string): string[] {
 }
 
 function isRedTestExecution(exec: SeenRedExecution): boolean {
-  if (exec.exitCode === undefined || exec.exitCode === 0) return false
+  if (exec.exitCode === undefined) return false
   if (!TEST_SHAPED_COMMAND_RE.test(exec.command)) return false
   if (!TEST_FAILURE_SIGNATURE_RE.test(exec.output)) return false
   // Env-red (a missing file/module) is a broken environment, not an
   // unverified fix — the same discipline `selectRegressionPinCandidate`
   // (regression-neighbors.ts) applies to a regression-gate failure.
   if (MISSING_FILE_RE.test(exec.output) || MODULE_MISSING_RE.test(exec.output)) return false
-  return true
+  if (exec.exitCode !== 0) return true
+  // Exit-code laundering (11885 rounds C+C3: 12 of 12 watched reds): a pipe
+  // filter (`2>&1 | grep … | tail -40`) or compound trailer (`; python
+  // inspect.py`) makes the shell report 0 for a failing run. A zero-exit
+  // execution still counts as red when the command actually EXECUTES a test
+  // at command position (never a cat/grep read of test files) and the output
+  // carries a runner's red-run summary line.
+  return /[|;]/.test(exec.command) && looksLikeTestExecution(exec.command) && LAUNDERED_FAILURE_SIGNATURE_RE.test(exec.output)
 }
 
-/** Whether `candidateCommand` clears a red execution's `command`/`targets` — an exact match always clears; a token-shared match only when targets were extractable. */
+/** Whether `candidateCommand` clears a red execution's `command`/`targets` — an exact match always clears; a token-shared match only when targets were extractable. A bare module label and a dotted narrowing of it (`delete` ⇄ `delete.DeletionTests`) count as shared. */
 function clears(targets: readonly string[], command: string, candidateCommand: string): boolean {
   if (candidateCommand === command) return true
   if (targets.length === 0) return false
   const candidateTargets = extractTestTargetTokens(candidateCommand)
-  return targets.some((token) => candidateTargets.includes(token))
+  return targets.some((token) =>
+    candidateTargets.some(
+      (candidate) => candidate === token || candidate.startsWith(token + ".") || token.startsWith(candidate + "."),
+    ),
+  )
 }
 
 function outputTail(output: string): string {
@@ -96,10 +136,13 @@ function outputTail(output: string): string {
  * The turn's red test/repro runs that were never re-run green — the
  * finish-time signal the M4/S3/F11 gates each miss (none of them replay the
  * transcript). A red is cleared by a LATER green execution sharing a test
- * target (or an exact command match), or by `clearedByProbe` (the M4 gate's
- * own re-run, which happens outside the transcript entirely since it shells
- * out directly rather than going through an assistant tool call). Pure: no
- * Effect, no I/O, no commands run. Empty array when nothing is unresolved.
+ * target (or an exact command match) whose own output is not red-signatured
+ * (an exit-laundered re-run that failed again must never clear), or by
+ * `clearedByProbe` (the M4 gate's own re-run, which happens outside the
+ * transcript entirely since it shells out directly rather than going through
+ * an assistant tool call). Pure: no Effect, no I/O, no commands run. Empty
+ * array when nothing is unresolved; at most the LAST 3 otherwise — the most
+ * recent evidence, bounded so a repeated-red turn can't flood the nudge.
  *
  * @sem domain=routing role=gate
  */
@@ -115,9 +158,14 @@ export function findUnresolvedSeenRed(
     if (clearedByProbe && clears(targets, exec.command, clearedByProbe)) continue
     const clearedLater = executions
       .slice(i + 1)
-      .some((later) => later.exitCode === 0 && clears(targets, exec.command, later.command))
+      .some(
+        (later) =>
+          later.exitCode === 0 &&
+          !LAUNDERED_FAILURE_SIGNATURE_RE.test(later.output) &&
+          clears(targets, exec.command, later.command),
+      )
     if (clearedLater) continue
     unresolved.push({ command: exec.command, outputTail: outputTail(exec.output) })
   }
-  return unresolved
+  return unresolved.slice(-3)
 }

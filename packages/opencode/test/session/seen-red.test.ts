@@ -117,4 +117,96 @@ describe("findUnresolvedSeenRed", () => {
       { command: "pytest", outputTail: "FAILED - AssertionError: whole suite broke\n1 failed" },
     ])
   })
+
+  // --- exit-code laundering (11885 rounds C+C3 live replay) ---
+
+  const C3_LAUNDERED_RED =
+    '.venv/bin/python tests/runtests.py delete delete_regress 2>&1 | grep -E "^(test_|FAIL|ERROR|OK|PASS|Ran|FAILED|test_) |^[0-9]+ tests" | tail -40; echo "---INSPECT---"; .venv/bin/python repro_inspect_combined.py'
+  const C3_RED_OUTPUT = "Ran 63 tests in 0.511s\nFAILED (failures=2, errors=7, skipped=3)\n---INSPECT---\ncomposed WHERE clause: (OR: ...)"
+
+  it("(g) flags a piped/compound test run whose exit was laundered to 0 (11885 C3 shape)", () => {
+    const executions: SeenRedExecution[] = [{ command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT }]
+    const unresolved = findUnresolvedSeenRed(executions)
+    expect(unresolved).toHaveLength(1)
+    expect(unresolved[0]!.command).toBe(C3_LAUNDERED_RED)
+  })
+
+  it("(h) flags a tail-piped runtests red with exit 0 (11885 round-C shape)", () => {
+    const executions: SeenRedExecution[] = [
+      {
+        command: "python runtests.py delete --verbosity 1 2>&1 | tail -10",
+        exitCode: 0,
+        output: "Ran 44 tests in 0.443s\n\nFAILED (failures=2, skipped=1)\nDestroying test database for alias 'default'...",
+      },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toHaveLength(1)
+  })
+
+  it("(i) a laundered red is cleared by a later green run sharing its bare module label", () => {
+    const executions: SeenRedExecution[] = [
+      { command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT },
+      {
+        command: "python tests/runtests.py delete --parallel 1",
+        exitCode: 0,
+        output: "Ran 44 tests in 0.4s\n\nOK (skipped=1)",
+      },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toEqual([])
+  })
+
+  it("(j) a later laundered RED re-run must not clear an earlier red", () => {
+    const executions: SeenRedExecution[] = [
+      { command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT },
+      {
+        command: "python tests/runtests.py delete 2>&1 | tail -5",
+        exitCode: 0,
+        output: "Ran 44 tests in 0.4s\n\nFAILED (failures=2, skipped=1)",
+      },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toHaveLength(2)
+  })
+
+  it("(k) reading FAILED text via grep/cat never counts as a red execution", () => {
+    const executions: SeenRedExecution[] = [
+      {
+        command: "grep -n FAILED tests/delete/run.log | tail -3",
+        exitCode: 0,
+        output: "12:FAILED (failures=2, skipped=1)",
+      },
+      { command: "cat tests/runtests.py | head -40", exitCode: 0, output: "FAILED (failures=%d)" },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toEqual([])
+  })
+
+  it("(l) a shared interpreter path never clears a red (interpreter is not a target)", () => {
+    const executions: SeenRedExecution[] = [
+      { command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT },
+      { command: '.venv/bin/python -c "print(1)"', exitCode: 0, output: "1" },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toHaveLength(1)
+  })
+
+  it("(m) unresolved reds are capped at the last 3", () => {
+    const executions: SeenRedExecution[] = Array.from({ length: 5 }, (_, i) => ({
+      command: `pytest tests/test_mod${i}.py`,
+      exitCode: 1,
+      output: `FAILED tests/test_mod${i}.py::test_x - AssertionError`,
+    }))
+    const unresolved = findUnresolvedSeenRed(executions)
+    expect(unresolved).toHaveLength(3)
+    expect(unresolved[0]!.command).toBe("pytest tests/test_mod2.py")
+    expect(unresolved[2]!.command).toBe("pytest tests/test_mod4.py")
+  })
+
+  it("(n) a dotted narrowing of a bare module label clears it", () => {
+    const executions: SeenRedExecution[] = [
+      { command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT },
+      {
+        command: "python tests/runtests.py delete.DeletionTests delete_regress --parallel 1",
+        exitCode: 0,
+        output: "Ran 20 tests in 0.2s\n\nOK",
+      },
+    ]
+    expect(findUnresolvedSeenRed(executions)).toEqual([])
+  })
 })
