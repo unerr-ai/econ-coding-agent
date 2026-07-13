@@ -391,6 +391,80 @@ django instance) draws a wrong-layer trajectory, that becomes its live-fire test
 **Cost note:** the two 11964 passes cost $0.417 (iter-1, escalation-assisted) and
 $0.0808 (iter-6, conductor-only) — the right-layer draw is also the 5× cheaper one.
 
+## Iteration 7 — second-green attempt (same wave-6 binary): ❌ REAL FAIL, and the
+## wave-6 mechanism live-fired for the first time — exposing three defects
+
+15/17 fail, same signature; patch back at base.py (7±) + fields/`__init__.py` (5+).
+$0.2794 / 72 turns conductor + **executor 3 turns / $0.0037**. The telemetry (now on
+the Effect logger — the wave-6 fix worked) plus session db give the complete chain:
+
+1. `hub_edit_gate_bounced` fields/`__init__.py` (importers=26) → retry passed →
+   `hub_edit_gate_bounced` base.py (importers=4) → **`hub_design_prepass` fired**
+   (second distinct file — the tell detected exactly as designed).
+2. **Defect 1 — the DIY race.** The conductor read the hold-edits nudge, then spawned
+   its OWN Task subagent ("You're a reasoner-level design pass for a Django bug…", a
+   paraphrase that DROPPED the no-coercions constraint) instead of waiting for the
+   injected todo's automatic dispatch. The injected design todo is absent from the
+   final todo table (clobbered by a later todowrite; the hub nudge lacked grind's "do
+   not remove the design item" line).
+3. **Defect 2 — the tier miss.** The DIY design ask routed through generic delegation
+   to the EXECUTOR (gpt-oss-120b, 3 turns, $0.0037). The reasoner never saw the
+   question.
+4. **Defect 3 — laundered authority.** The executor's verdict named `Model.__init__` +
+   `field.to_python(val)` — the exact forbidden consumption-site coercion, now dressed
+   as a "root-cause design pass" — and the conductor obediently implemented it (six
+   base.py edits after the verdict). A design question answered by the executor is
+   worse than none.
+
+**Wave-7 design: collapse the three failure points by making the design call
+synchronous.** Replace the todo-plant with a direct one-shot reasoner dispatch at the
+trigger — the codebase's proven judge pattern (`reproFidelityDispatch`: resolveSliceModel
+→ getModel/getLanguage → tool-free temp-0 forced-JSON `generateText`), tier "reasoner".
+Because the one-shot is tool-free, the trigger grounds it: extract the issue-named
+symbols, look up their DEFINITION SITES in the code graph, and hand the reasoner
+issue text + bounced files + definition sites + the verbatim no-coercions constraint.
+The verdict (file + entity + change) is injected directly into the synthetic nudge —
+no todo to clobber, no DIY window, no tier ambiguity. Degrade path (model unresolved /
+unparseable): plain root-most redirect nudge, no false promise of an automatic slice.
+Wave-6's todo plumbing (hubDesignPrepassTodo/content/prefix) is deleted, not shimmed.
+
+## Iteration 7 — second-green attempt (same wave-6 binary): ❌ REAL FAIL, and the
+## wave-6 mechanism live-fired for the first time — exposing three defects
+
+15/17 fail, same signature; patch back at base.py (7±) + fields/`__init__.py` (5+).
+$0.2794 / 72 turns conductor + **executor 3 turns / $0.0037**. The telemetry (now on
+the Effect logger — the wave-6 fix worked) plus session db give the complete chain:
+
+1. `hub_edit_gate_bounced` fields/`__init__.py` (importers=26) → retry passed →
+   `hub_edit_gate_bounced` base.py (importers=4) → **`hub_design_prepass` fired**
+   (second distinct file — the tell detected exactly as designed).
+2. **Defect 1 — the DIY race.** The conductor read the hold-edits nudge, then spawned
+   its OWN Task subagent ("You're a reasoner-level design pass for a Django bug…", a
+   paraphrase that DROPPED the no-coercions constraint) instead of waiting for the
+   injected todo's automatic dispatch. The injected design todo is absent from the
+   final todo table (clobbered by a later todowrite; the hub nudge lacked grind's "do
+   not remove the design item" line).
+3. **Defect 2 — the tier miss.** The DIY design ask routed through generic delegation
+   to the EXECUTOR (gpt-oss-120b, 3 turns, $0.0037). The reasoner never saw the
+   question.
+4. **Defect 3 — laundered authority.** The executor's verdict named `Model.__init__` +
+   `field.to_python(val)` — the exact forbidden consumption-site coercion, now dressed
+   as a "root-cause design pass" — and the conductor obediently implemented it (six
+   base.py edits after the verdict). A design question answered by the executor is
+   worse than none.
+
+**Wave-7 design: collapse the three failure points by making the design call
+synchronous.** Replace the todo-plant with a direct one-shot reasoner dispatch at the
+trigger — the codebase's proven judge pattern (`reproFidelityDispatch`: resolveSliceModel
+→ getModel/getLanguage → tool-free temp-0 forced-JSON `generateText`), tier "reasoner".
+Because the one-shot is tool-free, the trigger grounds it: extract the issue-named
+symbols, look up their DEFINITION SITES in the code graph, and hand the reasoner
+issue text + bounced files + definition sites + the verbatim no-coercions constraint.
+The verdict (file + entity + change) is injected directly into the synthetic nudge —
+no todo to clobber, no DIY window, no tier ambiguity. Degrade path (model unresolved /
+unparseable): plain root-most redirect nudge, no false promise of an automatic slice.
+Wave-6's todo plumbing (hubDesignPrepassTodo/content/prefix) is deleted, not shimmed.
+
 **11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
 prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
 pass came when the reasoner did the diagnosis in dispatched slices. The principled next
