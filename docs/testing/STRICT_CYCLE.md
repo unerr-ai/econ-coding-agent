@@ -735,3 +735,21 @@ semantics) is NOT addressable by any gate and caps what sweeps can enforce.
 Round A3 = 3/5 → exit bar (two consecutive 5/5) not met; next wave must convert 11964's
 confident-wrong-draw hole and decide honestly whether 11885's class is enforceable at
 all or is the stochastic ceiling of the cheap tier.
+
+## Round-A3 root causes, hardened (read-only forensics; wave 9 committed 1edd4cbd7; NOTHING else implemented)
+
+**In-run test executions (from each xdg session db), the cleanest separator of the campaign:**
+11790: 2 ✅ · 12039: 7 ✅ · 11848: 2 ✅ · 11964: 1 ❌ · **11885: 0 ❌** — the only
+zero-verification run is the one that failed on the repo's own pre-existing tests
+(assertNumQueries 25→22, 26→23: its batch-combining over-generalization was visible
+in-arena with zero gold knowledge; the agent's sole "runtests" match was a `cat`).
+11885's deep autopsy: right file, valid-but-over-broad optimization (combines across
+batches of one field; spec shows combining different fields per table); classification
+= unverified finish, deterministically catchable. Wave-10 DESIGN (not built): bounded
+one-shot finish deny on fix-shaped turns with source edits and zero test executions,
+naming the derived module command. 11964 ran 1 execution (its own repro — green at the
+wrong layer) → verification cannot convert that class; wave 9's retry-tell must, and its
+residual risk is the judge (0-for-2 live delivery) + advisory-nudge inertness (4×). Next
+validation before any sweep: offline one-shot probe of runHubDesignJudge with real
+11964 grounding through the real reasoner to confirm the wave-8 parse/budget fix
+delivers {file: enums.py}.
