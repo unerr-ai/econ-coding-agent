@@ -330,3 +330,67 @@ export function createBatchMomentumWatcher(): BatchMomentumWatcher {
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wave 10 — real test-execution detection (unverified-finish gate)
+// ---------------------------------------------------------------------------
+
+const TEST_EXEC_INTERPRETER_RE = /^python(\d+(\.\d+)*)?$/
+const TEST_EXEC_RUNNER_RE = /^runtests(\.py)?$/i
+
+/**
+ * True when `cmd` actually RUNS a python test suite at command position — the
+ * start of the command, or right after `&&`/`;`/`|` — never merely reads or
+ * greps for one. The 11885 autopsy: the agent's one `runtests.py`-matching
+ * command was `cat tests/runtests.py` (a read), and `py_compile` was its only
+ * verification before shipping a 36-line source patch — a plain substring
+ * scan for "runtests.py"/"test" would have called that verified.
+ * `cat`/`head`/`tail`/`sed`/`grep` never qualify no matter what their
+ * arguments name, since only the executable at command position is checked;
+ * a python interpreter additionally needs an argument naming "test" or
+ * "runtests.py" (covers `-m pytest`, `manage.py test`, and a django
+ * `runtests.py` invocation alike), while `pytest`/`runtests(.py)` invoked
+ * directly qualify on the position token alone.
+ *
+ * @sem domain=routing role=gate
+ */
+export function looksLikeTestExecution(cmd: string): boolean {
+  const segments = cmd
+    .split(/&&|;|\|/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  for (const segment of segments) {
+    const tokens = segment.split(/\s+/).filter(Boolean)
+    const head = tokens[0]
+    if (!head) continue
+    const basename = (head.split("/").pop() ?? head).toLowerCase()
+    if (basename === "pytest" || TEST_EXEC_RUNNER_RE.test(basename)) return true
+    if (TEST_EXEC_INTERPRETER_RE.test(basename)) {
+      const rest = tokens.slice(1).join(" ").toLowerCase()
+      if (rest.includes("test")) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Pure gate decision for the unverified-finish gate — a FIX-SHAPED root turn
+ * may not conclude silently after landing a non-test source edit with ZERO
+ * real test executions, but only ONCE per session (`alreadyDenied`, tracked
+ * in unverified-finish-store.ts) and never for a child session, which
+ * inherits the parent's verification rather than owing its own.
+ *
+ * @sem domain=routing role=gate
+ */
+export function shouldDenyUnverifiedFinish(input: {
+  isChildSession: boolean
+  landedSourceEdits: boolean
+  ranRealTest: boolean
+  alreadyDenied: boolean
+}): boolean {
+  if (input.isChildSession) return false
+  if (!input.landedSourceEdits) return false
+  if (input.ranRealTest) return false
+  if (input.alreadyDenied) return false
+  return true
+}

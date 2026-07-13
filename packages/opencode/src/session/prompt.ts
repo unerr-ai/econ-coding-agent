@@ -41,7 +41,13 @@ import {
   hubEditRetriedAgainstCandidates,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
+import {
+  observeStep,
+  createGrindValve,
+  createBatchMomentumWatcher,
+  looksLikeTestExecution,
+  shouldDenyUnverifiedFinish,
+} from "./turn-supervisor"
 import {
   stuckNudgeText,
   grindValveNudgeText,
@@ -56,11 +62,13 @@ import {
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
   unverifiedFinishNudgeText,
+  unverifiedFinishGateNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
+import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
 import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
@@ -3085,6 +3093,63 @@ export const layer = Layer.effect(
                 }
               }
               if (bugShaped) {
+                // Wave 10 — unverified-finish gate: a FIX-SHAPED root turn
+                // that landed a non-test source edit with ZERO real test
+                // executions anywhere in its own transcript (the 11885
+                // autopsy: a 36-line deletion.py patch shipped after only
+                // `py_compile`, whose one `runtests.py`-matching command was
+                // `cat tests/runtests.py` — a read, never a run; neither M4
+                // (needs a pin), S3 below (needs bugShaped+no-pin), nor F18
+                // above (needs a mid-turn RED) catches a turn that simply
+                // never ran a real test at all). Bounded to ONE deny per
+                // session (unverified-finish-store.ts) — the second finish
+                // attempt is always allowed, never a wedge. Child sessions
+                // never reach this branch (the outer `!session.parentID`
+                // guard above already excludes them).
+                if (landedSourceEdits) {
+                  const alreadyDeniedUnverified = hasDeniedUnverifiedFinish(sessionID)
+                  const ranRealTest = extractTurnBashExecutions(turnAssistantParts).some((exec) =>
+                    looksLikeTestExecution(exec.command),
+                  )
+                  const denyUnverifiedFinish = shouldDenyUnverifiedFinish({
+                    isChildSession: Boolean(session.parentID),
+                    landedSourceEdits,
+                    ranRealTest,
+                    alreadyDenied: alreadyDeniedUnverified,
+                  })
+                  if (denyUnverifiedFinish) {
+                    markUnverifiedFinishDenied(sessionID)
+                    const verifyCommands = yield* Effect.promise(() =>
+                      probeSliceVerifyCommands(landedSourceEditFiles),
+                    )
+                    const testCommand = verifyCommands.find((c) => c.kind === "test")?.command
+                    yield* Effect.logInfo("finish_gate_unverified_denied", {
+                      "session.id": sessionID,
+                      command: testCommand ?? null,
+                    })
+                    const unverifiedFinishGateNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(unverifiedFinishGateNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: unverifiedFinishGateNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: unverifiedFinishGateNudgeText(testCommand),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  } else if (!ranRealTest && alreadyDeniedUnverified) {
+                    yield* Effect.logInfo("finish_gate_pass_on_retry", { "session.id": sessionID })
+                  }
+                }
+
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro
                 // cannot legitimately flip green with zero source changes —

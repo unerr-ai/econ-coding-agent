@@ -7,6 +7,8 @@ import {
   GRIND_VALVE_STALL_WINDOW,
   createBatchMomentumWatcher,
   SLOW_COMMAND_MS,
+  looksLikeTestExecution,
+  shouldDenyUnverifiedFinish,
 } from "../../src/session/turn-supervisor"
 import {
   stuckNudgeText,
@@ -16,6 +18,7 @@ import {
   pinGreenFinishNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
+  unverifiedFinishGateNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
@@ -549,5 +552,100 @@ describe("pinGreenFinishNudgeText", () => {
     expect(text.toUpperCase()).toContain("STOP")
     expect(text.toLowerCase()).toContain("untracked")
     expect(text.toLowerCase()).toContain("final answer")
+  })
+})
+
+// -- wave 10: looksLikeTestExecution ------------------------------------------
+// django-11885 autopsy: the agent's one `runtests.py`-matching command was
+// `cat tests/runtests.py` (a read), and `py_compile` was its only
+// verification before shipping a 36-line source patch.
+
+describe("looksLikeTestExecution", () => {
+  it("recognizes a django runtests.py invocation", () => {
+    expect(looksLikeTestExecution("python tests/runtests.py delete.tests.DeletionTests.test_large_delete")).toBe(
+      true,
+    )
+  })
+
+  it("recognizes a direct ./runtests.py invocation with no interpreter prefix", () => {
+    expect(looksLikeTestExecution("./tests/runtests.py delete.tests.DeletionTests.test_large_delete")).toBe(true)
+  })
+
+  it("recognizes a venv python invocation with django settings", () => {
+    expect(looksLikeTestExecution(".venv/bin/python tests/runtests.py delete_tests --settings=test_sqlite")).toBe(
+      true,
+    )
+  })
+
+  it("recognizes python -m pytest", () => {
+    expect(looksLikeTestExecution("python -m pytest -q tests/test_delete.py")).toBe(true)
+  })
+
+  it("recognizes pytest invoked directly", () => {
+    expect(looksLikeTestExecution("pytest -q tests/")).toBe(true)
+  })
+
+  it("checks the segment after && for a real execution too", () => {
+    expect(looksLikeTestExecution("cd repo && python tests/runtests.py delete_tests")).toBe(true)
+  })
+
+  it("does NOT match a cat of the runner file — a read, never a run", () => {
+    expect(looksLikeTestExecution("cat tests/runtests.py")).toBe(false)
+  })
+
+  it("does NOT match head/tail/sed reads of the runner file", () => {
+    expect(looksLikeTestExecution("head -50 tests/runtests.py")).toBe(false)
+    expect(looksLikeTestExecution("tail tests/runtests.py")).toBe(false)
+    expect(looksLikeTestExecution("sed -n '1,20p' tests/runtests.py")).toBe(false)
+  })
+
+  it("does NOT match runtests.py appearing only inside a grep pattern", () => {
+    expect(looksLikeTestExecution("grep -n runtests.py tests/")).toBe(false)
+  })
+
+  it("does NOT match a bare python invocation with no test-shaped argument", () => {
+    expect(looksLikeTestExecution('python -c "import deletion"')).toBe(false)
+  })
+
+  it("does NOT match a read chained after a semicolon", () => {
+    expect(looksLikeTestExecution("echo start; cat tests/runtests.py")).toBe(false)
+  })
+})
+
+// -- wave 10: shouldDenyUnverifiedFinish + unverifiedFinishGateNudgeText -----
+
+describe("shouldDenyUnverifiedFinish", () => {
+  const base = { isChildSession: false, landedSourceEdits: true, ranRealTest: false, alreadyDenied: false }
+
+  it("denies once: source edited, zero real test execution, not yet denied", () => {
+    expect(shouldDenyUnverifiedFinish(base)).toBe(true)
+  })
+
+  it("the second finish attempt is always allowed once already denied, regardless of state", () => {
+    expect(shouldDenyUnverifiedFinish({ ...base, alreadyDenied: true })).toBe(false)
+  })
+
+  it("a turn with no landed source edits never denies", () => {
+    expect(shouldDenyUnverifiedFinish({ ...base, landedSourceEdits: false })).toBe(false)
+  })
+
+  it("a child session never denies", () => {
+    expect(shouldDenyUnverifiedFinish({ ...base, isChildSession: true })).toBe(false)
+  })
+
+  it("a turn that ran a real test execution never denies", () => {
+    expect(shouldDenyUnverifiedFinish({ ...base, ranRealTest: true })).toBe(false)
+  })
+})
+
+describe("unverifiedFinishGateNudgeText", () => {
+  it("names the concrete derived command when one is available", () => {
+    const text = unverifiedFinishGateNudgeText("cd \"/repo\" && python tests/runtests.py delete_tests")
+    expect(text).toContain("python tests/runtests.py delete_tests")
+  })
+
+  it("falls back to a generic ask when no command could be derived", () => {
+    const text = unverifiedFinishGateNudgeText()
+    expect(text.toLowerCase()).toContain("run the project's test suite")
   })
 })

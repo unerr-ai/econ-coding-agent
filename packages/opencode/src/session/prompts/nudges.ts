@@ -226,3 +226,20 @@ export function seenRedUnresolvedNudgeText(unresolved: readonly { command: strin
   const list = unresolved.map((u) => `\`${u.command}\`:\n${u.outputTail}`).join("\n\n")
   return `You saw ${single ? "this command" : "these commands"} fail mid-turn and never re-ran ${single ? "it" : "them"} green:\n${list}\nRe-run ${single ? "it" : "each of them"} now (fixing the underlying issue first if it is still failing) and confirm GREEN before finishing.`
 }
+
+/**
+ * Wave 10 — unverified-finish-gate nudge: prompt.ts's finish-time block
+ * injects this once, when a FIX-SHAPED root turn lands a non-test source
+ * edit with ZERO real test executions anywhere in its own transcript (the
+ * 11885 autopsy: a 36-line deletion.py patch shipped after only
+ * `py_compile`, whose one `runtests.py`-matching command was
+ * `cat tests/runtests.py` — a read, never a run). `command` is the concrete
+ * verify command derived from the edited files (`probeSliceVerifyCommands`,
+ * graph-tools.ts) when the graph can find one; undefined falls back to a
+ * generic ask.
+ */
+export function unverifiedFinishGateNudgeText(command?: string): string {
+  return command
+    ? `You are finishing after making source changes with NO test execution anywhere in this turn. Run \`${command}\` now, confirm the result, and only then give your final answer.`
+    : "You are finishing after making source changes with NO test execution anywhere in this turn. Run the project's test suite for the modules you changed, then finish."
+}
