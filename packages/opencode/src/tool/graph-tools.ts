@@ -397,6 +397,101 @@ export async function probeTurnRisk(prompt: string, graph: BunSqliteGraph = getG
 }
 
 // ---------------------------------------------------------------------------
+// Wave 7 — hub-design grounding: definition sites for issue-named symbols
+// ---------------------------------------------------------------------------
+
+/** Cap on symbols extracted from one issue text — the design pass needs a few sharp candidates, not a wide token pool. */
+const ISSUE_SYMBOL_EXTRACTION_CAP = 8
+/** At most this many graph matches kept per extracted symbol. */
+const ISSUE_SYMBOL_SITES_PER_SYMBOL = 2
+
+/** A bare lowercase word (no case transition, dot, or underscore) — dropped as prose, not a symbol reference. */
+function isPureLowercaseWord(token: string): boolean {
+  return /^[a-z]+$/.test(token)
+}
+
+/**
+ * Mechanical, graph-free symbol extraction for the hub-design judge's
+ * grounding: backtick-quoted spans (taken verbatim — the issue text is
+ * explicitly marking these as code) plus CamelCase/PascalCase or dotted
+ * identifiers found in the plain prose, deduped case-insensitively with
+ * pure-lowercase prose words dropped, capped at
+ * `ISSUE_SYMBOL_EXTRACTION_CAP`. Exported standalone (no graph call) so it
+ * unit-tests without an indexed repo; `issueSymbolDefinitionSites` below is
+ * the half that resolves these to entities.
+ *
+ * @sem domain=routing role=analysis
+ */
+export function extractIssueSymbols(issueText: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  const add = (raw: string) => {
+    const token = raw.trim()
+    if (!token || isPureLowercaseWord(token)) return
+    const key = token.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(token)
+  }
+
+  const backtickRe = /`([^`]+)`/g
+  let bm: RegExpExecArray | null
+  while ((bm = backtickRe.exec(issueText))) add(bm[1])
+
+  const withoutBackticks = issueText.replace(/`[^`]*`/g, " ")
+  const identifierRe =
+    /\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b|\b[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9_]*\b/g
+  let im: RegExpExecArray | null
+  while ((im = identifierRe.exec(withoutBackticks))) add(im[0])
+
+  return out.slice(0, ISSUE_SYMBOL_EXTRACTION_CAP)
+}
+
+/**
+ * Wave 7 — grounding for the hub-design judge (session/hub-design-judge.ts
+ * via prompt.ts's `hubDesignDispatch`): resolves the issue text's candidate
+ * symbols (`extractIssueSymbols`) to their defining entities in the code
+ * graph, so the reasoner-tier design call gets concrete file/kind evidence
+ * instead of guessing from prose alone. Races the same
+ * `RISK_PROBE_INDEX_BUDGET_MS` budget `probeTurnRisk` uses — a cold or slow
+ * index yields `[]` rather than stalling the hub-shopping trigger. Fully
+ * defensive: any error, timeout, or empty extraction yields `[]`, never
+ * throws — the caller degrades to the no-evidence nudge.
+ *
+ * @sem domain=routing role=analysis
+ */
+export async function issueSymbolDefinitionSites(
+  issueText: string,
+  graph: BunSqliteGraph = getGraph(),
+): Promise<Array<{ symbol: string; kind: string; file: string }>> {
+  try {
+    const indexReady = indexReadyFor(graph)
+    if (indexReady) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const budget = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), RISK_PROBE_INDEX_BUDGET_MS)
+      })
+      try {
+        const raced = await Promise.race([indexReady.then(() => "ready" as const), budget])
+        if (raced === "timeout") return []
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+    const symbols = extractIssueSymbols(issueText)
+    if (symbols.length === 0) return []
+    const out: Array<{ symbol: string; kind: string; file: string }> = []
+    for (const symbol of symbols) {
+      const matches = await graph.search(symbol, ISSUE_SYMBOL_SITES_PER_SYMBOL)
+      for (const e of matches) out.push({ symbol, kind: e.kind, file: e.filePath })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // OL-7.9: per-slice coupling + test-strength probes
 // ---------------------------------------------------------------------------
 

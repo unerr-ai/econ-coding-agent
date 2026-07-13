@@ -59,3 +59,18 @@ Output exactly this JSON shape and nothing else:
 or, when (a), (b), or (c) fails:
 {"faithful":false,"gaps":["<one concrete missing assert, <=120 chars>"]}
 At most 3 gaps. Each gap must name the CONCRETE missing assert (the value/expression/object it should check), never a vague restatement.`
+
+// Wave 7 — the hub-design judge's system prompt (hub-design-judge.ts): fires
+// synchronously at the hub-shopping trigger (prompt.ts, right after the L4.2
+// grind valve) when a session has bounced two DISTINCT shared hub files —
+// the tell that the executing agent is moving the same wrong-layer fix to
+// another shared module instead of reconsidering where it belongs. Wave 6's
+// todo-plant let the conductor paraphrase its own (executor-tier, symptom-
+// layer) task instead of reading this design; Wave 7 runs the call itself,
+// at the reasoner tier, grounded with graph evidence, and injects the
+// verdict directly into the nudge.
+
+/** Stable, single-line prefix of `HUB_DESIGN_SYSTEM_PROMPT` — lets a scripted LLM stub in tests recognize a hub-design request by its system message without duplicating the full prompt text. */
+export const HUB_DESIGN_PROMPT_MARKER = "You are the root-cause design pass"
+
+export const HUB_DESIGN_SYSTEM_PROMPT = `${HUB_DESIGN_PROMPT_MARKER} for a code fix. The executing agent's edits keep landing on shared hub modules — files many other modules import — which is the classic symptom-layer mistake. Decide the ROOT-MOST fix site: the module that DEFINES the misbehaving class or function the issue names. Coercions/conversions/wrappers at consumption or assignment sites are NOT acceptable answers; fixing the defining module's own behavior (e.g. its dunder/interface methods) is. Answer STRICT JSON: {"file": "<repo-relative path>", "entity": "<class or function to change>", "change": "<one-sentence concrete change>"}.`

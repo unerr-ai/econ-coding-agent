@@ -16,7 +16,14 @@ import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { planRaiseForTurn, isEconTierAgent } from "./tier-router"
-import { probeTurnRisk, probeSliceCoupling, probeSliceTestStrength, probeSliceVerifyCommands, ensureGraphReady } from "../tool/graph-tools"
+import {
+  probeTurnRisk,
+  probeSliceCoupling,
+  probeSliceTestStrength,
+  probeSliceVerifyCommands,
+  ensureGraphReady,
+  issueSymbolDefinitionSites,
+} from "../tool/graph-tools"
 import { ProviderTransform } from "@/provider/transform"
 import {
   setTestEditGate,
@@ -44,7 +51,8 @@ import {
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
   unverifiedFinishNudgeText,
-  hubDesignPrepassNudgeText,
+  hubDesignVerdictNudgeText,
+  hubDesignDegradedNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
 import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
@@ -55,13 +63,13 @@ import {
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
+import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
 import { triagePreamble, TEST_EDIT_GATE_RULE } from "./prompts/preambles"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REPRO_SLICE_CONTENT,
-  HUB_DESIGN_PREPASS_CONTENT_PREFIX,
 } from "./prompts/seeds"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
@@ -89,7 +97,6 @@ import {
   resolveSliceModel,
   hasPendingTypedSlices,
   GRIND_DESIGN_PREPASS_TODO,
-  hubDesignPrepassTodo,
   LOCALIZATION_PREPASS_TODO,
   extractTrajectory,
   promptAuthorizesTestEdits,
@@ -727,6 +734,52 @@ export const layer = Layer.effect(
       return {
         verdict,
         degradedReason: verdict === DEGRADED_REPRO_FIDELITY ? ("judge-degraded" as const) : undefined,
+      }
+    })
+
+    /**
+     * Wave 7 — the hub-design judge's ONE dispatch: a tool-free,
+     * temperature-0, forced-JSON completion on the reasoner tier (a
+     * root-cause design call needs the strongest available judgement,
+     * unlike reproFidelityDispatch's narrow fidelity check above) — routed
+     * through the same ProviderTransform reasoning/provider-option builder
+     * the small-call paths use. The caller (the hub-shopping trigger below)
+     * fires this at most once per turn and degrades silently to
+     * DEGRADED_HUB_DESIGN on any model/language resolution failure or judge
+     * parse failure — the trigger falls back to hubDesignDegradedNudgeText.
+     *
+     * @sem domain=routing role=hub-design-judge
+     */
+    const hubDesignDispatch = Effect.fn("SessionPrompt.hubDesignDispatch")(function* (input: {
+      issueText: string
+      bouncedFiles: readonly string[]
+      definitionSites: readonly { symbol: string; kind: string; file: string }[]
+    }) {
+      const { issueText, bouncedFiles, definitionSites } = input
+      const m = resolveSliceModel("reasoner")
+      const mdl = Option.getOrUndefined(
+        yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
+      )
+      if (!mdl) return { verdict: DEGRADED_HUB_DESIGN, degradedReason: "model-unresolved" as const }
+      const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
+      if (!language) return { verdict: DEGRADED_HUB_DESIGN, degradedReason: "model-unresolved" as const }
+      const complete: HubDesignComplete = async ({ system, user }) => {
+        const out = await generateText({
+          model: language,
+          system,
+          prompt: user,
+          maxOutputTokens: 700,
+          temperature: 0,
+          providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
+        })
+        return out.text.trim() || (out.reasoningText ?? "")
+      }
+      const verdict = yield* Effect.promise(() =>
+        runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete }),
+      )
+      return {
+        verdict,
+        degradedReason: verdict === DEGRADED_HUB_DESIGN ? ("judge-degraded" as const) : undefined,
       }
     })
 
@@ -2637,7 +2690,7 @@ export const layer = Layer.effect(
               } satisfies SessionV1.TextPart)
               continue
             }
-            // Wave 6 — hub-shopping trigger. Runs AFTER the grind valve above
+            // Wave 7 — hub-shopping trigger. Runs AFTER the grind valve above
             // and BEFORE the stuck ladder below: on a step where the grind
             // valve also fires, its `continue` already exits the loop before
             // this block runs, so grind wins on a shared step — acceptable,
@@ -2648,22 +2701,33 @@ export const layer = Layer.effect(
             // two DISTINCT files this session — the live-fire tell (django-
             // 11964 forensics) that the conductor is moving the same
             // wrong-layer fix to another shared module instead of
-            // reconsidering where the fix belongs. Same dedup-by-content
-            // (here: by stable prefix, since the file list is dynamic) and
-            // plant/log/nudge/continue shape as the grind valve.
+            // reconsidering where the fix belongs. Wave 6's todo-plant let
+            // the conductor clobber/ignore the injected todo, spawn its own
+            // paraphrased Task subagent, have generic delegation route that
+            // to the executor tier, and implement the resulting symptom-
+            // layer verdict — so the design call is now SYNCHRONOUS, at the
+            // reasoner tier, grounded with graph evidence
+            // (issueSymbolDefinitionSites), with the verdict injected
+            // directly into the nudge. Same once-per-turn-loop guard
+            // (hubDesignPrepassPlanted) and log/nudge/continue shape as the
+            // grind valve; no todo-plant anymore.
             const bouncedHubFiles = hubEditBouncedFiles(sessionID)
             if (!hubDesignPrepassPlanted && bouncedHubFiles.length >= 2 && !session.parentID) {
               hubDesignPrepassPlanted = true
-              const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
-              if (!currentTodos.some((t) => t.content.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX))) {
-                yield* todoStore
-                  .update({ sessionID, todos: [...currentTodos, hubDesignPrepassTodo(bouncedHubFiles)] })
-                  .pipe(Effect.ignore)
-              }
               yield* Effect.logWarning("hub_design_prepass", {
                 "session.id": sessionID,
                 mechanism: "sm-backstop",
                 bouncedFiles: bouncedHubFiles,
+              })
+              const issueText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                .map((p) => (p.type === "text" ? p.text : ""))
+                .filter(Boolean)
+                .join("\n")
+              const sites = yield* Effect.promise(() => issueSymbolDefinitionSites(issueText))
+              const hubDesignResult = yield* hubDesignDispatch({
+                issueText,
+                bouncedFiles: bouncedHubFiles,
+                definitionSites: sites,
               })
               const hubNudge: SessionV1.User = {
                 id: MessageID.ascending(),
@@ -2674,14 +2738,34 @@ export const layer = Layer.effect(
                 model: lastUser.model,
               }
               yield* sessions.updateMessage(hubNudge)
-              yield* sessions.updatePart({
-                id: PartID.ascending(),
-                messageID: hubNudge.id,
-                sessionID,
-                type: "text",
-                text: hubDesignPrepassNudgeText(bouncedHubFiles),
-                synthetic: true,
-              } satisfies SessionV1.TextPart)
+              if (hubDesignResult.verdict !== DEGRADED_HUB_DESIGN) {
+                yield* Effect.logWarning("hub_design_verdict", {
+                  "session.id": sessionID,
+                  file: hubDesignResult.verdict.file,
+                  entity: hubDesignResult.verdict.entity,
+                })
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: hubNudge.id,
+                  sessionID,
+                  type: "text",
+                  text: hubDesignVerdictNudgeText(hubDesignResult.verdict, bouncedHubFiles),
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+              } else {
+                yield* Effect.logInfo("hub_design_degraded", {
+                  "session.id": sessionID,
+                  reason: hubDesignResult.degradedReason ?? "judge-degraded",
+                })
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: hubNudge.id,
+                  sessionID,
+                  type: "text",
+                  text: hubDesignDegradedNudgeText(bouncedHubFiles),
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+              }
               continue
             }
             if (stuckSignal && stuckSignal.reason !== "environment-slow" && stuckEscalations < MAX_STUCK_ESCALATIONS) {

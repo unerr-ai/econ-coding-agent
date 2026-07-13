@@ -14,16 +14,16 @@ import {
   reproDriftNudgeText,
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
-  hubDesignPrepassNudgeText,
+  hubDesignVerdictNudgeText,
+  hubDesignDegradedNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
-import { GRIND_DESIGN_PREPASS_TODO, hubDesignPrepassTodo } from "../../src/session/slice-orchestrator"
+import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
 import {
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
-  HUB_DESIGN_PREPASS_CONTENT_PREFIX,
 } from "../../src/session/prompts/seeds"
 
 // SM4 — the root-loop step observer that feeds the stuck supervisor. Pure, so
@@ -381,31 +381,26 @@ describe("createGrindValve", () => {
 // loop's Effect/session/provider harness makes a scoped unit test
 // disproportionate) — typecheck + these shape/content tests carry the wave.
 
-describe("Wave 6 — hubDesignPrepassTodo", () => {
-  it("proposes through the existing delegation shape: a design/reasoner todo naming the bounced files", () => {
-    const todo = hubDesignPrepassTodo(["django/db/models/base.py", "django/forms/widgets.py"])
-    expect(todo.status).toBe("pending")
-    expect(todo.sliceType).toBe("design")
-    expect(todo.need).toBe("reasoner")
-    expect(todo.persona).toBe("researcher")
-    expect(todo.content).toContain("django/db/models/base.py")
-    expect(todo.content).toContain("django/forms/widgets.py")
-    expect(todo.content.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX)).toBe(true)
-  })
-
-  it("dedup-by-prefix keeps it distinct from every other seed's content", () => {
-    for (const other of [GRIND_DESIGN_SLICE_CONTENT, LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT]) {
-      expect(other.startsWith(HUB_DESIGN_PREPASS_CONTENT_PREFIX)).toBe(false)
-    }
+describe("Wave 7 — hubDesignVerdictNudgeText", () => {
+  it("names the bounced files, the decided fix site, and holds edits there", () => {
+    const verdict = { file: "django/forms/widgets.py", entity: "Widget.value_from_datadict", change: "coerce at the source" }
+    const text = hubDesignVerdictNudgeText(verdict, ["django/db/models/base.py", "django/forms/widgets.py"])
+    expect(text).toContain("django/db/models/base.py")
+    expect(text).toContain("django/forms/widgets.py")
+    expect(text).toContain(verdict.file)
+    expect(text).toContain(verdict.entity)
+    expect(text).toContain(verdict.change)
+    expect(text.toLowerCase()).toContain("design")
   })
 })
 
-describe("Wave 6 — hubDesignPrepassNudgeText", () => {
-  it("names the bounced files and holds edits until the design returns", () => {
-    const text = hubDesignPrepassNudgeText(["hub_a.py", "hub_b.py"])
+describe("Wave 7 — hubDesignDegradedNudgeText", () => {
+  it("names the bounced files and asks the model to re-derive the fix site itself", () => {
+    const text = hubDesignDegradedNudgeText(["hub_a.py", "hub_b.py"])
     expect(text).toContain("hub_a.py")
     expect(text).toContain("hub_b.py")
-    expect(text.toLowerCase()).toContain("design")
+    expect(text.toLowerCase()).toContain("defines")
+    expect(text.toLowerCase()).toContain("coercion")
   })
 })
 

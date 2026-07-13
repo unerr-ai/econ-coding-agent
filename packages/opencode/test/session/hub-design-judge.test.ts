@@ -1,0 +1,151 @@
+/**
+ * Tests for the hub-design judge (Wave 7) — the pure parse/validate
+ * pipeline (`parseHubDesignResponse`) plus its one-shot dispatch
+ * (`runHubDesignJudge`), using repro-fidelity-judge's scripted-LLM-stub
+ * pattern: `complete` is a plain mocked callback, never a real provider.
+ * Table: clean JSON verdict -> parses; fenced JSON -> parses; garbage/thrown
+ * completion -> degrades to DEGRADED_HUB_DESIGN; the completion request
+ * carries the issue text, bounced files, and definition sites.
+ *
+ * The `hubDesignDispatch` wiring in prompt.ts (the reasoner-tier dispatch
+ * the hub-shopping trigger calls) is an Effect-generator closure over
+ * turn-loop state (sessionID, sessions, lastUser, the per-turn
+ * `hubDesignPrepassPlanted` flag) — not practical to unit test in isolation
+ * here, same as `dispatchPinnedReproFidelity` in repro-fidelity-judge.test.ts.
+ */
+
+import { describe, test, expect } from "bun:test"
+import {
+  parseHubDesignResponse,
+  runHubDesignJudge,
+  DEGRADED_HUB_DESIGN,
+  type HubDesignComplete,
+} from "../../src/session/hub-design-judge"
+import { HUB_DESIGN_SYSTEM_PROMPT } from "../../src/session/prompts/judges"
+
+describe("parseHubDesignResponse", () => {
+  test("a clean verdict parses", () => {
+    const raw = JSON.stringify({
+      file: "django/forms/widgets.py",
+      entity: "Widget.value_from_datadict",
+      change: "coerce the value at the source, not at the caller",
+    })
+    expect(parseHubDesignResponse(raw)).toEqual({
+      file: "django/forms/widgets.py",
+      entity: "Widget.value_from_datadict",
+      change: "coerce the value at the source, not at the caller",
+    })
+  })
+
+  test("a fenced JSON block parses", () => {
+    const raw =
+      "```json\n" +
+      JSON.stringify({ file: "a.py", entity: "Foo", change: "fix it there" }) +
+      "\n```"
+    expect(parseHubDesignResponse(raw)).toEqual({ file: "a.py", entity: "Foo", change: "fix it there" })
+  })
+
+  test("trailing prose after the JSON object is tolerated", () => {
+    const raw = `${JSON.stringify({ file: "a.py", entity: "Foo", change: "fix it there" })}\n\nLet me know if you need more.`
+    expect(parseHubDesignResponse(raw)).toEqual({ file: "a.py", entity: "Foo", change: "fix it there" })
+  })
+
+  test("a missing field fails validation", () => {
+    const raw = JSON.stringify({ file: "a.py", entity: "Foo" })
+    expect(parseHubDesignResponse(raw)).toBeNull()
+  })
+
+  test("a blank field fails validation", () => {
+    const raw = JSON.stringify({ file: "  ", entity: "Foo", change: "fix it there" })
+    expect(parseHubDesignResponse(raw)).toBeNull()
+  })
+
+  test("malformed JSON fails validation", () => {
+    expect(parseHubDesignResponse("{not valid json")).toBeNull()
+  })
+
+  test("no JSON object at all fails validation", () => {
+    expect(parseHubDesignResponse("I cannot decide this.")).toBeNull()
+  })
+
+  test("empty raw text fails validation", () => {
+    expect(parseHubDesignResponse("")).toBeNull()
+  })
+})
+
+describe("runHubDesignJudge", () => {
+  const issueText = "The bug is in how Field renders its value — `widget.attrs['maxlength']` should be an int."
+  const bouncedFiles = ["django/db/models/base.py", "django/forms/widgets.py"]
+  const definitionSites = [
+    { symbol: "Field", kind: "class", file: "django/db/models/fields/__init__.py" },
+    { symbol: "widget.attrs", kind: "variable", file: "django/forms/widgets.py" },
+  ]
+
+  test("a well-formed verdict is returned as-is", async () => {
+    const complete: HubDesignComplete = async () =>
+      JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field.formfield", change: "cast to int before assigning attrs" })
+    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(verdict).toEqual({
+      file: "django/db/models/fields/__init__.py",
+      entity: "Field.formfield",
+      change: "cast to int before assigning attrs",
+    })
+  })
+
+  test("malformed LLM output degrades to DEGRADED_HUB_DESIGN", async () => {
+    const complete: HubDesignComplete = async () => "{not valid json"
+    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(verdict).toEqual(DEGRADED_HUB_DESIGN)
+  })
+
+  test("a thrown completion degrades to DEGRADED_HUB_DESIGN", async () => {
+    const complete: HubDesignComplete = async () => {
+      throw new Error("provider unavailable")
+    }
+    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(verdict).toEqual(DEGRADED_HUB_DESIGN)
+  })
+
+  test("the completion request carries the issue text, bounced files, and definition sites", async () => {
+    let seenUser = ""
+    let seenSystem = ""
+    const complete: HubDesignComplete = async ({ system, user }) => {
+      seenSystem = system
+      seenUser = user
+      return JSON.stringify({ file: "a.py", entity: "Foo", change: "fix it there" })
+    }
+    await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(seenSystem).toBe(HUB_DESIGN_SYSTEM_PROMPT)
+    expect(seenUser).toContain(issueText)
+    for (const file of bouncedFiles) expect(seenUser).toContain(file)
+    for (const site of definitionSites) {
+      expect(seenUser).toContain(site.symbol)
+      expect(seenUser).toContain(site.kind)
+      expect(seenUser).toContain(site.file)
+    }
+  })
+
+  test("empty definition sites still produce a valid prompt", async () => {
+    let seenUser = ""
+    const complete: HubDesignComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ file: "a.py", entity: "Foo", change: "fix it there" })
+    }
+    await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })
+    expect(seenUser).toContain("(none found)")
+  })
+})
+
+describe("HUB_DESIGN_SYSTEM_PROMPT", () => {
+  test("forbids coercions/conversions at consumption or assignment sites", () => {
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain("NOT acceptable answers")
+    expect(HUB_DESIGN_SYSTEM_PROMPT.toLowerCase()).toContain("coercions/conversions/wrappers at consumption or assignment sites")
+  })
+
+  test("asks for the ROOT-MOST fix site as strict JSON", () => {
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain("ROOT-MOST fix site")
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"file"')
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"entity"')
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"change"')
+  })
+})

@@ -41,15 +41,31 @@ export function grindValveNudgeText(signal: { step: number; stepsSinceGreen: num
 }
 
 /**
- * Wave 6 — the message injected when the hub-shopping trigger fires
- * (prompt.ts's hub-shopping trigger, right after the L4.2 grind valve): the
+ * Wave 7 — the message injected when the hub-shopping trigger's synchronous
+ * design call (prompt.ts's `hubDesignDispatch`) returns a real verdict: the
  * session has now bounced two DISTINCT hub files, the tell that the model is
  * moving the same wrong-layer fix to another shared module instead of
- * reconsidering where it belongs. Same "hold edits, a design is coming"
- * doctrine as grindValveNudgeText above.
+ * reconsidering where it belongs. Unlike Wave 6's todo-plant (which the
+ * conductor could clobber/ignore), the decided fix site is now INSIDE the
+ * nudge itself — file, entity, and change — with a documented-deviation
+ * escape hatch instead of blind compliance.
  */
-export function hubDesignPrepassNudgeText(bouncedFiles: string[]): string {
-  return `Your edits have now landed on TWO different shared hub modules in this turn (${bouncedFiles.join(", ")}) — moving the same fix to another shared file is not a fix, it is avoidance. A root-cause design pre-pass has been added to your todo list and will run automatically; it will name the ROOT-MOST site — the module that DEFINES the misbehaving class or function — and the concrete change to make there. HOLD further source edits until that design comes back, then implement it AT the site it names.`
+export function hubDesignVerdictNudgeText(
+  verdict: { file: string; entity: string; change: string },
+  bouncedFiles: string[],
+): string {
+  return `Your edits have twice landed on shared hub modules (${bouncedFiles.join(", ")}) — that is symptom-layer avoidance. A root-cause design pass (reasoner tier) has decided the fix site: edit ${verdict.file} — ${verdict.entity}: ${verdict.change}. Implement the fix AT this site now. The hub gate stays armed; edits at other shared files will keep bouncing. If this site proves genuinely impossible, state why in one line before deviating.`
+}
+
+/**
+ * Wave 7 — the message injected when the hub-shopping trigger's design call
+ * degrades (model/language unresolved, or the judge itself produced no
+ * verdict): no design to hand back, so the nudge falls back to asking the
+ * model to re-derive the fix site itself under the same never-a-coercion
+ * constraint the judge would otherwise have enforced.
+ */
+export function hubDesignDegradedNudgeText(bouncedFiles: string[]): string {
+  return `Your edits have twice landed on shared hub modules (${bouncedFiles.join(", ")}) — that is symptom-layer avoidance. Re-derive the fix site yourself before any further edit: name the module that DEFINES the misbehaving class or function the issue names, and fix its behavior THERE — never a coercion at a consumption site.`
 }
 
 /**

@@ -61,29 +61,3 @@ export const REPRO_SLICE_CONTENT =
  */
 export const GRIND_DESIGN_SLICE_CONTENT =
   "The inline attempt on this task has ground past its step budget without a passing verification — stop the edit-test churn and DESIGN the fix. Your deliverable is the algorithmic decision, not code: (1) restate the required end state and the invariants the change must preserve (grouping, ordering, batching, error behavior — whatever the touched code guarantees); (2) read just enough (graph search, callers, targeted file reads, the failing test) to name the exact file(s)/function(s) that must change and WHY the approaches tried so far keep failing — the constraint they violate; (3) deliver a concrete minimal design the conductor can execute mechanically: the edit plan per file (what changes, to what), the invariant each edit must respect, and the exact verify command(s) that prove it. Writing code or diffs is forbidden here — the design only."
-
-/**
- * Wave 6 — stable prefix of the hub-shopping design pre-pass content (the
- * dynamic bounced-file list is appended per call by hubDesignPrepassContent).
- * The prompt.ts trigger dedups a planted item by THIS prefix rather than the
- * full string, since the file list differs turn to turn.
- */
-export const HUB_DESIGN_PREPASS_CONTENT_PREFIX =
-  "Root-cause design pre-pass: fixes keep landing on shared hub modules"
-
-/**
- * Wave 6 — content of the hub-shopping design pre-pass (prompt.ts's
- * hub-shopping trigger, wired right after the L4.2 grind valve): planted when
- * a session bounces two DISTINCT hub files in one turn — the tell that the
- * conductor is retreating from a denied edit only to move the same
- * wrong-layer fix to another shared module, rather than reconsidering where
- * the fix belongs (django-11964 live-fire forensics). Names the bounced files
- * so the design slice starts from the concrete evidence.
- */
-export function hubDesignPrepassContent(bouncedFiles: readonly string[]): string {
-  return (
-    `${HUB_DESIGN_PREPASS_CONTENT_PREFIX} (${bouncedFiles.join(", ")}). ` +
-    "Decide the ROOT-MOST fix site — the module that DEFINES the misbehaving class or function the issue names — and return the concrete change: file, entity, and what to change. " +
-    "Coercions/conversions at consumption sites are not acceptable answers."
-  )
-}
