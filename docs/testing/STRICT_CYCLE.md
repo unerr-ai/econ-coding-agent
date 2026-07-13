@@ -179,6 +179,56 @@ miss and exposed a structural delivery gap (fix-discipline priors coupled to
 localization arming). Consecutive-green status: 11790 ✅✅ · 11885 ✅ · 11964 ✅ ·
 12039 ✅ · 11848 ❌. Iteration 3 (on the wave-2 binary): 11848 + 11885 + 11964 + 12039.
 
+### Iteration 3 — 2026-07-13 — validate wave 2 (binary `202607122339`, HEAD `c0c7410a6`)
+
+| Instance | Verdict | Cost / turns | Notes |
+|---|---|---|---|
+| 11848 | ❌ **REAL FAIL** (7 errors — `parse_http_date` raises `ValueError` on every two-digit-year case under gold's mock) | $0.0418 / 14 turns | Third distinct failure on the same one-bit judgment. Autopsy below. |
+| 11885 | ✅ **REAL PASS** (45 ran OK) — **second consecutive green** | $0.3490 / 84 turns, 94.1% cache, 0 escalations | Zero test edits again; clean 25+/5− `deletion.py` patch. The iter-2 cure is stable, not a fluke. |
+| 11964 | ❌ **REAL FAIL** (15/17 — `Vehicle.JET_SKI` repr leaks where the value is expected) — **regression from iter-1's pass** | $0.2915 / 76 turns, **0 escalations** | The conductor alone patched 3 symptom-layer files (`fields/__init__`, `related_descriptors`, `query_utils`) instead of the root-most `__str__` on the enum classes. Iter-1's pass rode the escalation chain (reasoner 28 + oracle 4 turns) whose slice briefs carry the fix discipline; this run stayed 100% inline. Telemetry: `armLocalization=true` yet `seeds=["repro"]` — the seed ladder's either/or (repro precedence) dropped the localization seed even with localization armed. **Second failure from the same either/or** (11848 iter-2 was its location-known arm). Wave-3 K3 queued: co-plant repro + localization when both arm, making the inline path carry the same discipline the escalated path gets. |
+| 12039 | ✅ **REAL PASS** (24 ran OK, same sqlite skips as iter-1) — **second consecutive green** | $0.0702 / 26 turns, 89.8% cache | 10× cheaper than its iter-1 pass ($0.73 → $0.07), single-file patch, zero test edits. |
+
+**Iteration 3 closing verdict:** wave 2 held where it was aimed (11885 stable, zero test
+edits twice) and the pass costs are collapsing (12039 10× cheaper). Both failures trace
+to the same structural theme — **the inline conductor path is under-disciplined relative
+to the escalated path, and the enforcement layer accepts silence**: 11848 shipped with
+no repro after one ignored nudge (S3 fail-open) over a wrong fuzzy neighbor; 11964
+stayed inline (0 escalations), never received the localization discipline (seed-ladder
+either/or), and rebuilt the symptom-layer patch its own history warns about. No new
+machinery needed — wave 3 improves three existing mechanisms: S3 bounded re-rejection
+with the explicit-cancel escape, F19 exact-twin neighbors, seed co-planting.
+Consecutive-green: 11790 ✅✅ · 11885 ✅✅ · 12039 ✅✅ · 11964 reset · 11848 ❌.
+Iteration 4 (wave-3 binary): 11848 + 11964, then the twice-green set re-verifies.
+
+**11848 iter-3 autopsy (the gates fail open, and the clock-read keeps oscillating):**
+
+1. The boundary arithmetic is now EXACTLY gold's (`≤50 → future`), and the agent used the
+   module's existing `datetime` import — wave-2's K1 partially bound (no new import this
+   time). But it read the clock as `datetime.datetime.now()`; gold's test mocks the class
+   and defines ONLY `utcnow`, so `.now()` returns a MagicMock, the arithmetic raises, the
+   module's `except` converts everything to `ValueError` — all 7 parametrized cases error.
+   Three runs, three different clock reads (`<70` pivot / `time.gmtime()` / `now()`): the
+   model keeps guessing the one judgment the hidden test pins (HTTP dates are GMT →
+   `utcnow`, the accessor graders mock).
+2. **No repro was ever built** — seed planted (`frame_seed_planted seeds=["repro"]`, K2's
+   mocked-clock clause included), yet the session db has zero `repro_issue` writes and no
+   red run. 14 turns, $0.04 — the fastest, laziest run of the three.
+3. The gate chain then worked exactly as designed and still shipped it:
+   `repro_unresolved` → `turn_completed_unverified_nudge` (S3's single rejection, ignored)
+   → `turn_completed_unverified` (loud fail-open). The seed's contract offers an explicit
+   escape (cancel the repro todo with a reason); the gate accepts plain silence.
+4. The regression-neighbor gate ran ONE neighbor: `httpwrappers` — a fuzzy stem hit —
+   and missed `utils_tests.test_http`, the actual test twin of `django/utils/http.py`.
+   `turn_regression_green` over the wrong module = green-by-default.
+
+**Verdict:** wave-2's prompt knobs are necessary but not sufficient when the model skips
+the repro entirely — the enforcement layer must not accept silence. **Wave-3 knobs
+(engine, both improvements to existing gates):** (K1) S3 unverified-finish: bounded
+re-rejection (up to 3) with an escalating either/or nudge; explicit repro-todo
+cancellation with a reason = legitimate loud pass — silence is no longer an exit. (K2)
+neighbor derivation: map an edited file to its `<pkg>_tests/test_<stem>` twin and rank
+exact twins above fuzzy stem matches.
+
 **11885 autopsy (root cause chain, fully evidenced from the session store):**
 
 1. The prompt ("Combine fast delete queries") is an **enhancement ticket with zero defect
