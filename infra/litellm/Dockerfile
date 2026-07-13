@@ -22,6 +22,13 @@ COPY patches/fireworks_cost_calculator.py /tmp/fw_cost_override.py
 RUN python3 -c "import litellm.llms.fireworks_ai.cost_calculator as m; f = open(m.__file__, 'a'); f.write('\n\n' + open('/tmp/fw_cost_override.py').read()); f.close(); print('patched', m.__file__)" \
  && python3 -c "import litellm.llms.fireworks_ai.cost_calculator as m; assert getattr(m.cost_per_token, '__econ_override__', False), 'econ fireworks cost override missing'; print('override active:', m.__file__)"
 RUN chmod +x ./docker/entrypoint.sh
+# econ conductor-flip wrapper: a no-op unless CONDUCTOR_DEPLOYMENT_PATH is set, in
+# which case it rewrites the conductor's upstream to a dedicated Fireworks
+# deployment (in the container's config copy only — the committed config.yaml and
+# the OL-8.B2 drift test are untouched) before chaining the base entrypoint above.
+COPY econ-entrypoint.sh /app/econ-entrypoint.sh
+RUN chmod +x /app/econ-entrypoint.sh
+ENTRYPOINT ["/app/econ-entrypoint.sh"]
 EXPOSE 4000/tcp
 # No --detailed_debug in prod (docs warn it slows responses).
 CMD ["--port", "4000", "--config", "config.yaml"]

@@ -81,6 +81,14 @@ model_list:
       model: fireworks_ai/accounts/fireworks/models/minimax-m3
       api_key: os.environ/FIREWORKS_API_KEY
       service_tier: "priority"
+      # When the conductor is flipped to a Fireworks DEDICATED deployment (upstream
+      # rewritten to the #deployments/... form by econ-entrypoint.sh), LiteLLM cannot
+      # resolve that deployment's param support and, with drop_params:false, REJECTS
+      # tool_choice/reasoning_effort (UnsupportedParamsError) — every conductor call
+      # then fails and resolves emit 0B patches. Allow-list them so they forward
+      # verbatim to Fireworks, exactly as the serverless base-model path already does.
+      # Harmless on serverless (those params are forwarded there anyway).
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
       input_cost_per_token: 0.0000003
       output_cost_per_token: 0.0000012
       cache_read_input_token_cost: 0.00000006
