@@ -592,3 +592,48 @@ two full sequential sweeps (round A, round B) of 11790 · 11885 · 12039 · 1184
    JSON as the last line" prompt tail, and log the raw response head on degrade.
 
 Round B is cancelled on this binary; the close-out sweep restarts on the wave-8 binary.
+
+## Wave 8 landed — then the offline probe caught it shipping inert
+
+Wave 8 built cleanly (commit 470816ab9: definition-aware allowlist wired at root
+arming + judge budget 2500 / last-JSON parser / rawHead evidence; typecheck 25/25,
+117 targeted tests green). Before spending a 1.5-hour sweep on it, a new forensic
+instrument — an **offline gate probe** (temporary packages/opencode/probe-wave8.ts) —
+replayed the exact arming path (extractIssueSymbols(PROMPT.txt) → graph.search →
+pathsRefer vs fileFanIn) against real checkouts of all 5 instances at their base
+commits. Verdict: the feared 11964 regression does NOT happen, but **wave 8 as shipped
+would have changed nothing** in the sweep:
+
+| Instance | Probe verdict on the decisive files |
+|---|---|
+| 11790 | auth/forms.py (gold site) **still BOUNCES** — allowlist never contains it |
+| 12039 | ddl_references.py (gold site) **still BOUNCES** — ditto |
+| 11964 | enums.py ALLOW (defining site ✓); fields/__init__.py + base.py still BOUNCE ✓ — safety net intact |
+| 11885 | deletion.py ALLOW (via `models.CASCADE` → CASCADE in deletion.py) — harmless bonus |
+| 11848 | http.py still bounces (fan-in 27) — historically survivable (passed 3× with the bounce) |
+
+**Three root causes, all in the evidence layer, none in the mechanism:**
+1. **Cold-graph inertness (the killer):** the allowlist is computed at root turn-open,
+   racing RISK_PROBE_INDEX_BUDGET_MS = 3s — but a cold django index takes ~11.7s
+   (measured). Every fresh arena run = fresh XDG = cold graph → the allowlist resolves
+   `[]` **on 5 of 5 instances** in real sweeps. (The probe indexes first, so it measured
+   the warm-graph ceiling; the live runs wouldn't even reach it.)
+2. **Extraction junk eats the 8-symbol cap:** the identifier regex matches ALL-CAPS SQL
+   keywords (CREATE, INDEX, ON, DESC — 12039's cap filled with them) and URL domains
+   (code.djangoproject.com, forum.djangoproject.com — 11790 got 3 of 5 slots as URLs).
+3. **Search ranking misses exact definers:** `AuthenticationForm` lost its 2 slots to
+   substring match AdminAuthenticationForm + a test file; dotted
+   `django.db.backends.ddl_references.Columns` and literal `ddl_references.py` resolve
+   to nothing (search matches entity names, not module paths or filenames).
+
+**Wave 8b (in flight):** (a) resolve the allowlist **lazily at first gate evaluation**
+— the graph is warm by the time any agent first edits (it reads for minutes first);
+arming stores the issue text, the gate memoizes resolution once the index is ready,
+children inherit resolved sets or the text; (b) evidence quality — drop ALL-CAPS and
+domain tokens, pass `*.py` filenames through as direct file sites, keep ONLY exact-name
+non-test matches (junk on this list = a free hub bypass), retry dotted symbols by last
+segment. Exit check: probe re-run must show 11790 auth/forms.py ALLOW, 12039
+ddl_references.py ALLOW, 11964 unchanged (enums ALLOW, fields/base BOUNCE).
+
+**Method note:** the probe costs ~1 minute and answers "would this wave change the
+sweep?" before the sweep. It should precede every future gate/allowlist wave.
