@@ -264,12 +264,16 @@ turns, same `django/utils/http.py` 4+/4− shape. **11848 is ✅✅.**
 The junior trace of the escalation path answered "why 0 escalations on a maximal-fan-in
 edit" with three stacked facts, each verified in code:
 
-1. **The graph is cold in arenas.** `getOrCreateEntry()` (graph-tools.ts:141) creates the
-   graph lazily on the FIRST probe and indexes in the background; `probeTurnRisk` /
-   `probeSliceCoupling` wait only `RISK_PROBE_INDEX_BUDGET_MS = 3000` ms and then return
-   0-risk / low-coupling defaults. A fresh django clone cannot index in 3s, so early
-   turns see no signal. (Python IS supported — `.py` is in the extractor's language map —
-   so this is latency, not capability.)
+1. **~~The graph is cold in arenas~~ — CORRECTED by direct measurement.** The first
+   trace blamed the lazy index + 3s probe budget (`RISK_PROBE_INDEX_BUDGET_MS`). We then
+   indexed the actual django arena clone with BunSqliteGraph: **917 files in 1.9 s** —
+   comfortably inside every budget. Latency was never the binding constraint. The real
+   starvation: **70% of Python import edges carry `toFile: null`** — the extractor's
+   Python branch (ast-extractor.ts ~588) literally says "path resolution not attempted —
+   dotted modules" and hardcodes null, and plain `import X` isn't captured at all. Result:
+   django/db/models/base.py — the repo's true hub — measures a fan-in of ONE caller file
+   (enums.py: zero). The risk router is signal-starved at the source on every Python
+   repo, i.e. on all of SWE-bench.
 2. **The inline path has signal but no consumer.** `probeTurnRisk` feeds
    `planRaiseForTurn`, which only raises reasoning effort on the SAME conductor tier —
    and post-E0 the conductor already runs at bounded "high", so the raise is a no-op.
@@ -283,13 +287,21 @@ edit" with three stacked facts, each verified in code:
    (test-edit gate → 11885, bounded S3 → 11848 honesty) that advisory text never steers
    the flash conductor while a bounded hard gate converts it.
 
-**Wave-5 design (task #19):** apply the proven bounce-gate pattern to structural risk —
-first edit to a top-fan-in hub file in a fix-shaped root session is DENIED once with a
-root-most-layer redirect; re-issuing the same edit passes (once-per-file hysteresis);
-fail-open when the graph is cold. Plus a fire-and-forget index kick at root arming so
-fresh clones are warm by edit time. Threshold set from an empirical django measurement
-(riskScore + caller counts for base.py vs enums.py vs the already-passing files, so the
-gate catches the hub spray without taxing legitimate fixes like deletion.py).
+**Wave-5 design (task #19, revised after the measurement):** fix the signal where it is
+born, then consume it with the proven bounce-gate pattern.
+- **Part A — Python import resolution in the extractor:** resolve relative dotted
+  imports (`.base`, `..utils`), absolute dotted imports (via the `__init__.py`
+  package-chain walk-up + repo-root fallback), `from pkg import submodule`, and plain
+  `import x.y` to real file paths. Every downstream risk consumer (turn risk, slice
+  coupling, allocation, the existing callers warning) inherits the fix for free.
+- **Part B — hub-edit bounce gate:** first edit to a top-imported hub file in an armed
+  root session is DENIED once with a root-most-layer redirect; re-issuing the same edit
+  passes (once-per-file hysteresis); fail-open when the graph is cold or slow. Threshold
+  set by re-measuring django post-fix (must separate base.py and fields/__init__.py from
+  enums.py with ≥2× margin). No warm-up kick — 1.9 s indexing needs none.
+The gate is the same shape that already converted 11885 (test-edit gate) and made 11848
+honest (bounded S3): a hard bounce with a re-entry path, where advisory text was proven
+inert on the flash conductor three times.
 
 **11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
 prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
