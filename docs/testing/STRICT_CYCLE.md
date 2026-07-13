@@ -365,7 +365,31 @@ question "which module DEFINES the misbehaving class/function the issue names? r
 the concrete fix (file + entity + change); no coercions at consumption sites" — and
 nudge the conductor to hold edits until it returns. Plus: one anti-circumvention
 sentence in the denial ("moving the same coercion to a different shared file is not
-the fix"), and the telemetry fix.
+the fix"), and the telemetry fix. **Landed as commit `52dcb488a`** (design slice rides
+the existing OL-7.3b dispatch — `sliceType:"design"` floors to the reasoner in the
+allocator; gate telemetry now on the Effect logger at the edit/write call sites).
+
+## Iteration 6 — wave-6 binary (`52dcb488a`, build 202607130150)
+
+| Instance | Result | Cost / shape | What happened |
+|---|---|---|---|
+| 11964 | ✅ **REAL PASS — 17/17 OK, first since iter-1** | $0.0808 / 29 turns, 0 escalations, 100% conductor | Patch is **gold-identical**: `def __str__(self): return str(self.value)` on `Choices` in django/db/models/enums.py (3+/1−). Trajectory pristine: repro → ONE edit, straight to enums.py → repro re-verified green. Seeds co-planted (`["repro","localization"]`), honest `turn_probe_pinned_from_red` → `turn_probe_green`. |
+
+**Honest attribution — wave 6 did NOT convert this run; it never fired.** No
+`hub_edit_gate_bounced`, no `hub_design_prepass` in the logs: the conductor's first
+edit was already at the under-threshold leaf (enums.py, fan-in 1), so neither the
+wave-5 gate nor the wave-6 pre-pass was ever consulted. Nothing in the wave-6 diff
+could have influenced a run that never touched it. The correct reading: the
+conductor's layer choice is **stochastic** — the accumulated seed priors give the
+root-most layer real probability mass (observed conductor-only draws: iters 3/4/5
+wrong-layer, iter 6 right-layer), and waves 5+6 are the **safety net for the
+wrong-layer draws**, not the cause of the right-layer ones. Iter-5 remains the only
+observed gate-mediated trajectory (retreat from base.py under denial), and the design
+pre-pass has NOT yet been observed live — if the second-green run (or any Phase-2
+django instance) draws a wrong-layer trajectory, that becomes its live-fire test.
+
+**Cost note:** the two 11964 passes cost $0.417 (iter-1, escalation-assisted) and
+$0.0808 (iter-6, conductor-only) — the right-layer draw is also the 5× cheaper one.
 
 **11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
 prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
