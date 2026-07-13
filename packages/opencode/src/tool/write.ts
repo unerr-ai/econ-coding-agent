@@ -98,6 +98,12 @@ export const WriteTool = Tool.define(
               file: path.relative(instance.worktree, filepath),
             })
           }
+          if (hubGateResult.action === "allow" && hubGateResult.definingSite) {
+            yield* Effect.logInfo("hub_edit_gate_defining_site_allow", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filepath),
+            })
+          }
 
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
           const next = Bom.split(params.content)

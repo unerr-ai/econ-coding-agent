@@ -138,6 +138,12 @@ export const EditTool = Tool.define(
               file: path.relative(instance.worktree, filePath),
             })
           }
+          if (hubGateResult.action === "allow" && hubGateResult.definingSite) {
+            yield* Effect.logInfo("hub_edit_gate_defining_site_allow", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filePath),
+            })
+          }
 
           let diff = ""
           let contentOld = ""

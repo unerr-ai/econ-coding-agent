@@ -34,6 +34,7 @@ import {
   setHubEditGate,
   hubEditGateArmed,
   hubEditBouncedFiles,
+  hubEditDefiningFiles,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { observeStep, createGrindValve, createBatchMomentumWatcher } from "./turn-supervisor"
@@ -747,6 +748,14 @@ export const layer = Layer.effect(
      * fires this at most once per turn and degrades silently to
      * DEGRADED_HUB_DESIGN on any model/language resolution failure or judge
      * parse failure — the trigger falls back to hubDesignDegradedNudgeText.
+     * Wave 8 (O-J1): raised from a 700-token budget that live-fire evidence
+     * showed the reasoning tier burning before ever emitting the JSON
+     * (`judge-degraded` 2-of-2), and the reasoning/text concatenation order
+     * flipped — reasoning first, final `text` last — so the parser's
+     * last-balanced-JSON scan lands on the model's actual final answer
+     * rather than a stray brace inside its reasoning tail. `rawHead`
+     * threads through so a degrade still carries evidence of what the judge
+     * said.
      *
      * @sem domain=routing role=hub-design-judge
      */
@@ -768,18 +777,19 @@ export const layer = Layer.effect(
           model: language,
           system,
           prompt: user,
-          maxOutputTokens: 700,
+          maxOutputTokens: 2500,
           temperature: 0,
           providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
         })
-        return out.text.trim() || (out.reasoningText ?? "")
+        return [out.reasoningText ?? "", out.text ?? ""].filter(Boolean).join("\n")
       }
-      const verdict = yield* Effect.promise(() =>
+      const result = yield* Effect.promise(() =>
         runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete }),
       )
       return {
-        verdict,
-        degradedReason: verdict === DEGRADED_HUB_DESIGN ? ("judge-degraded" as const) : undefined,
+        verdict: result.verdict,
+        degradedReason: result.verdict === DEGRADED_HUB_DESIGN ? ("judge-degraded" as const) : undefined,
+        rawHead: result.rawHead,
       }
     })
 
@@ -2756,6 +2766,7 @@ export const layer = Layer.effect(
                 yield* Effect.logInfo("hub_design_degraded", {
                   "session.id": sessionID,
                   reason: hubDesignResult.degradedReason ?? "judge-degraded",
+                  rawHead: hubDesignResult.rawHead,
                 })
                 yield* sessions.updatePart({
                   id: PartID.ascending(),
@@ -3331,14 +3342,26 @@ export const layer = Layer.effect(
               setNoEditsGate(sessionID, noEditsGateArmed(session.parentID))
               // Hub-edit bounce gate: child sessions inherit the parent's
               // armed state exactly like the no-edits gate — no prompt
-              // condition, no per-turn re-derivation.
-              setHubEditGate(sessionID, hubEditGateArmed(session.parentID))
+              // condition, no per-turn re-derivation. Also inherit the
+              // parent's defining-file allowlist so a dispatched slice gets
+              // the same redirect-doctrine bypass the root turn computed.
+              setHubEditGate(sessionID, hubEditGateArmed(session.parentID), hubEditDefiningFiles(session.parentID))
             } else {
               const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
               // Hub-edit bounce gate: root sessions arm unconditionally every
               // turn — unlike the no-test-edit gate this doesn't depend on
-              // any prompt-derived fix-shaped signal.
-              setHubEditGate(sessionID, true)
+              // any prompt-derived fix-shaped signal. Defining-file
+              // allowlist: the graph's definition sites for symbols the
+              // issue names are computed once here so a first edit that
+              // lands exactly on the module the redirect doctrine names as
+              // the fix site is never bounced (django/contrib/auth/forms.py,
+              // ddl_references.py forensics).
+              const definingSites = yield* Effect.promise(() => issueSymbolDefinitionSites(userText))
+              setHubEditGate(
+                sessionID,
+                true,
+                definingSites.map((s) => s.file),
+              )
 
               // The turn-read runs on every root turn open (always-on, no
               // feature flag); TurnOpenCalls is the test-only off switch so

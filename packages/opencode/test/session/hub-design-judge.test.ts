@@ -1,10 +1,12 @@
 /**
- * Tests for the hub-design judge (Wave 7) — the pure parse/validate
- * pipeline (`parseHubDesignResponse`) plus its one-shot dispatch
- * (`runHubDesignJudge`), using repro-fidelity-judge's scripted-LLM-stub
- * pattern: `complete` is a plain mocked callback, never a real provider.
- * Table: clean JSON verdict -> parses; fenced JSON -> parses; garbage/thrown
- * completion -> degrades to DEGRADED_HUB_DESIGN; the completion request
+ * Tests for the hub-design judge (Wave 7, Wave 8/O-J1) — the pure
+ * parse/validate pipeline (`parseHubDesignResponse`) plus its one-shot
+ * dispatch (`runHubDesignJudge`), using repro-fidelity-judge's
+ * scripted-LLM-stub pattern: `complete` is a plain mocked callback, never a
+ * real provider. Table: clean JSON verdict -> parses; fenced JSON -> parses;
+ * long reasoning prose before the JSON -> parses; two JSON objects -> the
+ * LAST one wins; garbage/thrown completion -> degrades to
+ * `{ verdict: DEGRADED_HUB_DESIGN, rawHead? }`; the completion request
  * carries the issue text, bounced files, and definition sites.
  *
  * The `hubDesignDispatch` wiring in prompt.ts (the reasoner-tier dispatch
@@ -71,6 +73,39 @@ describe("parseHubDesignResponse", () => {
   test("empty raw text fails validation", () => {
     expect(parseHubDesignResponse("")).toBeNull()
   })
+
+  test("JSON preceded by long reasoning prose parses", () => {
+    const reasoning =
+      "Let me think through this step by step. First, the issue mentions Field rendering its value incorrectly. " +
+      "The widget.attrs dict is populated from the field's formfield() method, so the type coercion must happen there " +
+      "rather than at the template layer. Looking at the definition sites, Field.formfield is the root-most site. " +
+      "I'll answer with that.\n\n"
+    const raw =
+      reasoning +
+      JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field.formfield", change: "cast to int" })
+    expect(parseHubDesignResponse(raw)).toEqual({
+      file: "django/db/models/fields/__init__.py",
+      entity: "Field.formfield",
+      change: "cast to int",
+    })
+  })
+
+  test("JSON inside a ```json fence at the end of a reasoning tail parses", () => {
+    const raw =
+      "Reasoning about the fix first...\n\n" +
+      "```json\n" +
+      JSON.stringify({ file: "a.py", entity: "Foo", change: "fix it there" }) +
+      "\n```"
+    expect(parseHubDesignResponse(raw)).toEqual({ file: "a.py", entity: "Foo", change: "fix it there" })
+  })
+
+  test("two JSON objects — the last one wins", () => {
+    const raw =
+      JSON.stringify({ file: "wrong.py", entity: "Wrong", change: "a discarded first attempt" }) +
+      "\n\nActually, re-checking the graph evidence, the real defining module is different:\n\n" +
+      JSON.stringify({ file: "right.py", entity: "Right", change: "the actual final answer" })
+    expect(parseHubDesignResponse(raw)).toEqual({ file: "right.py", entity: "Right", change: "the actual final answer" })
+  })
 })
 
 describe("runHubDesignJudge", () => {
@@ -84,26 +119,45 @@ describe("runHubDesignJudge", () => {
   test("a well-formed verdict is returned as-is", async () => {
     const complete: HubDesignComplete = async () =>
       JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field.formfield", change: "cast to int before assigning attrs" })
-    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
-    expect(verdict).toEqual({
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual({
       file: "django/db/models/fields/__init__.py",
       entity: "Field.formfield",
       change: "cast to int before assigning attrs",
     })
+    expect(result.rawHead).toBeUndefined()
   })
 
-  test("malformed LLM output degrades to DEGRADED_HUB_DESIGN", async () => {
+  test("malformed LLM output degrades to DEGRADED_HUB_DESIGN with rawHead present", async () => {
     const complete: HubDesignComplete = async () => "{not valid json"
-    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
-    expect(verdict).toEqual(DEGRADED_HUB_DESIGN)
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe("{not valid json")
   })
 
-  test("a thrown completion degrades to DEGRADED_HUB_DESIGN", async () => {
+  test("garbage prose with no JSON degrades to DEGRADED_HUB_DESIGN with rawHead present", async () => {
+    const complete: HubDesignComplete = async () => "I cannot decide this."
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe("I cannot decide this.")
+  })
+
+  test("a very long degraded response is truncated to 200 chars in rawHead", async () => {
+    const longRaw = "x".repeat(500)
+    const complete: HubDesignComplete = async () => longRaw
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBe(longRaw.slice(0, 200))
+    expect(result.rawHead?.length).toBe(200)
+  })
+
+  test("a thrown completion degrades to DEGRADED_HUB_DESIGN with no rawHead", async () => {
     const complete: HubDesignComplete = async () => {
       throw new Error("provider unavailable")
     }
-    const verdict = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
-    expect(verdict).toEqual(DEGRADED_HUB_DESIGN)
+    const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
+    expect(result.rawHead).toBeUndefined()
   })
 
   test("the completion request carries the issue text, bounced files, and definition sites", async () => {
@@ -147,5 +201,9 @@ describe("HUB_DESIGN_SYSTEM_PROMPT", () => {
     expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"file"')
     expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"entity"')
     expect(HUB_DESIGN_SYSTEM_PROMPT).toContain('"change"')
+  })
+
+  test("instructs the model to end with the JSON object on its own final line", () => {
+    expect(HUB_DESIGN_SYSTEM_PROMPT).toContain("End your response with the JSON object on its own final line.")
   })
 })

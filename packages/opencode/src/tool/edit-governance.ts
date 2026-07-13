@@ -319,20 +319,41 @@ const hubEditGate = new Set<string>()
 /** Per-session set of file paths already bounced once — an identical retry on the same file passes. */
 const hubEditBounced = new Map<string, Set<string>>()
 
+/** Per-session set of graph-reported defining-module paths for the symbols the issue names (from `issueSymbolDefinitionSites`, computed once at root turn-open and inherited by child sessions) — an edit landing on one of these is the redirect doctrine's own answer, so `evaluateHubEditGate` allows it even over the fan-in threshold. Cleared whenever the gate disarms. */
+const hubEditDefiningFilesStore = new Map<string, Set<string>>()
+
 /** The session's bounced file set as an array (insertion order) — empty for an unknown or never-bounced session. Read by prompt.ts's hub-shopping trigger to detect a second DISTINCT bounced file in one turn (the tell that the model is moving the same fix to another hub instead of reconsidering where it belongs). */
 export function hubEditBouncedFiles(sessionID: string): string[] {
   return Array.from(hubEditBounced.get(sessionID) ?? [])
 }
 
-/** Arm or disarm the hub-edit bounce gate for a session — set once per turn at turn open (root sessions decide unconditionally; child sessions inherit). */
-export function setHubEditGate(sessionID: string, armed: boolean): void {
-  if (armed) hubEditGate.add(sessionID)
-  else hubEditGate.delete(sessionID)
+/**
+ * Arm or disarm the hub-edit bounce gate for a session — set once per turn
+ * at turn open (root sessions decide unconditionally; child sessions
+ * inherit). `definingFiles`, when the gate arms, replaces the session's
+ * stored defining-module allowlist wholesale (a fresh turn's graph read
+ * fully supersedes the last); disarming clears it. Path shape is whatever
+ * the caller passes as-is — matching against an edit's absolute filePath
+ * happens later, in `evaluateHubEditGate`, via `pathsRefer`.
+ */
+export function setHubEditGate(sessionID: string, armed: boolean, definingFiles?: readonly string[]): void {
+  if (armed) {
+    hubEditGate.add(sessionID)
+    hubEditDefiningFilesStore.set(sessionID, new Set(definingFiles ?? []))
+  } else {
+    hubEditGate.delete(sessionID)
+    hubEditDefiningFilesStore.delete(sessionID)
+  }
 }
 
 /** Is the hub-edit bounce gate armed for this session? */
 export function hubEditGateArmed(sessionID: string): boolean {
   return hubEditGate.has(sessionID)
+}
+
+/** The session's stored defining-file allowlist (insertion order) — empty for a session with none recorded. Read by prompt.ts's child-inherit arming call so a dispatched slice gets the same redirect-doctrine bypass the root turn computed. */
+export function hubEditDefiningFiles(sessionID: string): string[] {
+  return Array.from(hubEditDefiningFilesStore.get(sessionID) ?? [])
 }
 
 /** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. */
@@ -352,15 +373,35 @@ export interface HubFanInGraph {
 }
 
 /**
+ * True when `a` and `b` refer to the same file, tolerating an absolute vs.
+ * repo-relative path shape mismatch (the graph's `issueSymbolDefinitionSites`
+ * returns repo-relative paths — `BunSqliteGraph.search` normalizes via
+ * `relative(root, ...)` — while `evaluateHubEditGate` receives an absolute
+ * `filePath` from edit.ts/write.ts). Exact match, or one string is a
+ * path-boundary suffix of the other (the character before the suffix start
+ * must be `/`) — so `"forms.py"` never falsely matches `"userforms.py"`.
+ */
+export function pathsRefer(a: string, b: string): boolean {
+  if (a === b) return true
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a]
+  if (shorter.length === 0 || !longer.endsWith(shorter)) return false
+  const boundaryIndex = longer.length - shorter.length
+  return boundaryIndex === 0 || longer[boundaryIndex - 1] === "/"
+}
+
+/**
  * The hub-edit bounce gate's ONE decision point. Not armed or a test file →
- * allow; a file already bounced this session → allow with `retried: true` so
- * the call site can log the pass-through distinctly from a fresh allow.
- * Otherwise races the graph's fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS
- * (same fail-open pattern as callersAtRiskWarning: timeout/throw/cold graph →
- * allow, never block on a cold graph); a fan-in clearing
- * HUB_IMPORTER_THRESHOLD records the file as bounced (so an identical retry
- * passes) and denies with the root-most-layer redirect message. Logging-free
- * by design — edit.ts/write.ts log at the call site, inside their own Effect.
+ * allow; a file matching the session's stored defining-file allowlist (see
+ * `setHubEditGate`) → allow with `definingSite: true` — the redirect
+ * doctrine's own answer, never bounced regardless of fan-in; a file already
+ * bounced this session → allow with `retried: true` so the call site can log
+ * the pass-through distinctly from a fresh allow. Otherwise races the
+ * graph's fileFanIn against GOVERNANCE_GRAPH_BUDGET_MS (same fail-open
+ * pattern as callersAtRiskWarning: timeout/throw/cold graph → allow, never
+ * block on a cold graph); a fan-in clearing HUB_IMPORTER_THRESHOLD records
+ * the file as bounced (so an identical retry passes) and denies with the
+ * root-most-layer redirect message. Logging-free by design — edit.ts/write.ts
+ * log at the call site, inside their own Effect.
  *
  * @sem domain=intelligence role=analysis
  */
@@ -368,9 +409,19 @@ export async function evaluateHubEditGate(opts: {
   sessionID: string
   filePath: string
   graph?: HubFanInGraph
-}): Promise<{ action: "allow"; retried?: boolean } | { action: "deny"; message: string; importers: number }> {
+}): Promise<
+  | { action: "allow"; retried?: boolean; definingSite?: boolean }
+  | { action: "deny"; message: string; importers: number }
+> {
   if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
   if (isTestFilePath(opts.filePath)) return { action: "allow" }
+
+  const definingFiles = hubEditDefiningFilesStore.get(opts.sessionID)
+  if (definingFiles) {
+    for (const f of definingFiles) {
+      if (pathsRefer(opts.filePath, f)) return { action: "allow", definingSite: true }
+    }
+  }
 
   const bounced = hubEditBounced.get(opts.sessionID)
   if (bounced?.has(opts.filePath)) {

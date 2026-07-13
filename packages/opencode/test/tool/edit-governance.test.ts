@@ -375,7 +375,9 @@ import {
   hubEditGateArmed,
   hubEditDenialMessage,
   hubEditBouncedFiles,
+  hubEditDefiningFiles,
   evaluateHubEditGate,
+  pathsRefer,
   type HubFanInGraph,
 } from "../../src/tool/edit-governance"
 
@@ -514,5 +516,77 @@ describe("Wave 5 — evaluateHubEditGate", () => {
     await expect(
       evaluateHubEditGate({ sessionID: "ses_hub_throw", filePath: "hub.py", graph: throwingGraph }),
     ).resolves.toEqual({ action: "allow" })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 8 — definition-aware gate allowlist: a file the graph reports as the
+// defining module for the issue's named symbols is allowed even over the
+// fan-in threshold, child sessions inherit the parent's defining-file set,
+// and pathsRefer tolerates an absolute-vs-repo-relative path shape mismatch
+// without a false match on a partial path segment.
+// ---------------------------------------------------------------------------
+
+describe("Wave 8 — evaluateHubEditGate defining-site allowlist", () => {
+  const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 5 }
+
+  it("a defining-file edit allows even over threshold", async () => {
+    setHubEditGate("ses_hub_defining", true, ["django/contrib/auth/forms.py"])
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_defining",
+      filePath: "/repo/django/contrib/auth/forms.py",
+      graph: overThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+  })
+
+  it("a non-defining file over threshold still bounces", async () => {
+    setHubEditGate("ses_hub_nondefining", true, ["django/contrib/auth/forms.py"])
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_nondefining",
+      filePath: "/repo/django/db/models/base.py",
+      graph: overThresholdGraph,
+    })
+    expect(result.action).toBe("deny")
+  })
+
+  it("a child session inherits the parent's defining files", async () => {
+    setHubEditGate("ses_hub_parent", true, ["django/db/models/fields/__init__.py"])
+    expect(hubEditDefiningFiles("ses_hub_parent")).toEqual(["django/db/models/fields/__init__.py"])
+
+    setHubEditGate("ses_hub_child", hubEditGateArmed("ses_hub_parent"), hubEditDefiningFiles("ses_hub_parent"))
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_hub_child",
+      filePath: "/repo/django/db/models/fields/__init__.py",
+      graph: overThresholdGraph,
+    })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+  })
+
+  it("disarming clears the stored defining-file set", () => {
+    setHubEditGate("ses_hub_clear", true, ["a.py"])
+    expect(hubEditDefiningFiles("ses_hub_clear")).toEqual(["a.py"])
+    setHubEditGate("ses_hub_clear", false)
+    expect(hubEditDefiningFiles("ses_hub_clear")).toEqual([])
+  })
+})
+
+describe("Wave 8 — pathsRefer", () => {
+  it("equal paths match", () => {
+    expect(pathsRefer("django/forms.py", "django/forms.py")).toBe(true)
+  })
+
+  it("an absolute path matches a repo-relative suffix on a '/' boundary", () => {
+    expect(pathsRefer("/repo/django/contrib/auth/forms.py", "django/contrib/auth/forms.py")).toBe(true)
+    expect(pathsRefer("django/contrib/auth/forms.py", "/repo/django/contrib/auth/forms.py")).toBe(true)
+  })
+
+  it("no false match on a partial path segment", () => {
+    expect(pathsRefer("forms.py", "userforms.py")).toBe(false)
+    expect(pathsRefer("userforms.py", "forms.py")).toBe(false)
+  })
+
+  it("unrelated paths do not match", () => {
+    expect(pathsRefer("django/db/models/base.py", "django/forms/widgets.py")).toBe(false)
   })
 })

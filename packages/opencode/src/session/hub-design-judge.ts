@@ -15,7 +15,6 @@
  *
  * @sem domain=routing role=hub-design-judge
  */
-import { extractJsonObject } from "../util/json-extract"
 import { HUB_DESIGN_SYSTEM_PROMPT } from "./prompts/judges"
 
 /**
@@ -83,45 +82,99 @@ function buildHubDesignUserPrompt(input: {
 }
 
 /**
- * Parse the judge's raw completion into a verdict: extracts the first
- * balanced JSON object and validates `file`, `entity`, and `change` are
- * all non-empty (after trim) strings. Any missing/blank/non-string field,
- * no balanced JSON, or malformed JSON returns `null` — never throws.
+ * Collects every top-level balanced `{...}` block in `raw`, in order of
+ * appearance — brace-matching is string-aware (a quoted `{`/`}` never
+ * miscounts depth), so a fenced block, reasoning prose, or trailing
+ * commentary around any candidate is tolerated. An unbalanced trailing `{`
+ * (no matching `}`) stops the scan there rather than emitting a partial
+ * candidate.
+ */
+function extractJsonCandidates(raw: string): string[] {
+  const candidates: string[] = []
+  let cursor = 0
+  while (cursor < raw.length) {
+    const start = raw.indexOf("{", cursor)
+    if (start === -1) break
+    let depth = 0
+    let inString = false
+    let escaped = false
+    let end = -1
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i]
+      if (inString) {
+        if (escaped) escaped = false
+        else if (ch === "\\") escaped = true
+        else if (ch === '"') inString = false
+        continue
+      }
+      if (ch === '"') {
+        inString = true
+        continue
+      }
+      if (ch === "{") depth++
+      else if (ch === "}") {
+        depth--
+        if (depth === 0) {
+          end = i
+          break
+        }
+      }
+    }
+    if (end === -1) break
+    candidates.push(raw.slice(start, end + 1))
+    cursor = end + 1
+  }
+  return candidates
+}
+
+/**
+ * Parse the judge's raw completion into a verdict: scans every top-level
+ * balanced JSON object in the response and, walking from the LAST candidate
+ * backward, returns the first one that parses and validates `file`,
+ * `entity`, and `change` as all non-empty (after trim) strings — the reasoner
+ * may emit reasoning prose, a fenced block, or even a discarded earlier
+ * attempt before its final answer, and the final answer is what should win.
+ * No candidate validates → returns `null` — never throws.
  *
  * @sem domain=routing role=hub-design-judge
  */
 export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
   if (!raw) return null
-  const jsonText = extractJsonObject(raw)
-  if (!jsonText) return null
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(jsonText)
-  } catch {
-    return null
+  const candidates = extractJsonCandidates(raw)
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(candidates[i])
+    } catch {
+      continue
+    }
+    if (typeof parsed !== "object" || parsed === null) continue
+    const candidate = parsed as Record<string, unknown>
+    const file = typeof candidate.file === "string" ? candidate.file.trim() : ""
+    const entity = typeof candidate.entity === "string" ? candidate.entity.trim() : ""
+    const change = typeof candidate.change === "string" ? candidate.change.trim() : ""
+    if (!file || !entity || !change) continue
+    return { file, entity, change }
   }
-
-  if (typeof parsed !== "object" || parsed === null) return null
-  const candidate = parsed as Record<string, unknown>
-  const file = typeof candidate.file === "string" ? candidate.file.trim() : ""
-  const entity = typeof candidate.entity === "string" ? candidate.entity.trim() : ""
-  const change = typeof candidate.change === "string" ? candidate.change.trim() : ""
-  if (!file || !entity || !change) return null
-
-  return { file, entity, change }
+  return null
 }
 
 /**
  * Run the hub-design judge: ONE forced-JSON completion deciding the
  * root-most fix site for a hub-shopping turn — no retry, this fires at
- * most once per turn (the caller enforces that). A thrown `complete`, or
- * any parse failure, degrades to `DEGRADED_HUB_DESIGN` — the caller falls
+ * most once per turn (the caller enforces that). A thrown `complete`
+ * degrades to `DEGRADED_HUB_DESIGN` with no `rawHead` (there is no
+ * completion text to sample); a parse failure degrades to
+ * `DEGRADED_HUB_DESIGN` WITH `rawHead` — the first 200 characters of the
+ * raw completion — so the caller's degrade log carries evidence of what the
+ * judge actually said instead of a bare "degraded" line. The caller falls
  * back to asking the model to re-derive the site itself, never blocks.
  *
  * @sem domain=routing role=hub-design-judge
  */
-export async function runHubDesignJudge(input: RunHubDesignJudgeInput): Promise<HubDesignVerdict> {
+export async function runHubDesignJudge(
+  input: RunHubDesignJudgeInput,
+): Promise<{ verdict: HubDesignVerdict; rawHead?: string }> {
   const { issueText, bouncedFiles, definitionSites, complete } = input
   let raw: string
   try {
@@ -130,7 +183,9 @@ export async function runHubDesignJudge(input: RunHubDesignJudgeInput): Promise<
       user: buildHubDesignUserPrompt({ issueText, bouncedFiles, definitionSites }),
     })
   } catch {
-    return DEGRADED_HUB_DESIGN
+    return { verdict: DEGRADED_HUB_DESIGN }
   }
-  return parseHubDesignResponse(raw) ?? DEGRADED_HUB_DESIGN
+  const verdict = parseHubDesignResponse(raw)
+  if (verdict) return { verdict }
+  return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
 }
