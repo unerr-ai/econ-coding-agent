@@ -329,8 +329,43 @@ inert on the flash conductor three times.
   shared infrastructure…" (the original "one of this repo's most-imported modules"
   reads absurd at N=3 and would cost the gate credibility with the conductor).
 
-**Iteration 5 run for 11964 (wave-5 binary): launched.** Forensic keys for the grade:
-did `hub_edit_gate_bounced` fire on base.py/fields, and did the patch land in enums.py.
+**Iteration 5 run for 11964 (wave-5 binary): ❌ REAL FAIL (15/17, same signature) — but
+the gate fired, was read, and was circumvented.** $0.2971 / 67 turns, 0 escalations.
+The session db shows the exact sequence:
+
+1. repro written → edit `base.py` → **DENIED by the hub gate** → re-issued (hysteresis
+   pass) → two completed base.py edits (applied, later reverted) →
+2. new repro → edit `fields/__init__.py` → **DENIED again** → re-issued → descriptor
+   coercion built there (4 edits). Final patch: fields/`__init__.py` only.
+3. The smoking gun: the agent's own patch comment reads *"avoid touching the
+   module-level import surface, which is shared infrastructure imported by many other
+   modules"* — the denial message's vocabulary, verbatim. The conductor read the gate,
+   obeyed its LETTER (retreated from base.py, used a local import), and violated its
+   spirit: still a coercion at the consumption layer (a `DeferredAttribute` descriptor
+   coercing Choices on assignment), never `__str__` on the enum in enums.py.
+
+**What this proves:** the gate detects the right moment and changes behavior — the
+conductor now treats hubs as costly — but "shared infrastructure" was interpreted as
+*avoid heavy files*, not *find the defining module*. Moving the coercion between hubs
+(base.py → fields) is hub-shopping, and the SECOND distinct-file bounce is its tell.
+Fourth consecutive symptom-layer choice, now under seeds + priors + a hard bounce.
+
+**Also found:** `hub_edit_gate_bounced` telemetry (console.error) reaches NO log — not
+the chain log, not opencode.log; forensics needed db spelunking. Telemetry must ride
+the Effect logger at the edit.ts/write.ts call sites.
+
+**Wave-6 design.** Two facts bound it: (a) a whole-turn reasoner takeover was already
+probed on this instance (2026-07-12) and failed the SAME layer choice — the class is
+tier-immune to blanket takeover; (b) iter-1's only 11964 pass came from narrow
+dispatched reasoner diagnosis slices, and the grind valve already owns that plumbing
+(plant a reasoner design pre-pass todo → OL-7.3b dispatches it → design folds back).
+So: **on the second distinct hub-file bounce in a session, plant a root-cause-site
+design pre-pass** — dispatched to the reasoner with the bounced files and the narrow
+question "which module DEFINES the misbehaving class/function the issue names? return
+the concrete fix (file + entity + change); no coercions at consumption sites" — and
+nudge the conductor to hold edits until it returns. Plus: one anti-circumvention
+sentence in the denial ("moving the same coercion to a different shared file is not
+the fix"), and the telemetry fix.
 
 **11964 iter-4 verdict — the instance is now a structural-risk-router test case.** The
 prompt-side levers are exhausted: the prior is delivered and ignored inline. Iter-1's
