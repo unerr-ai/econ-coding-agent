@@ -19,39 +19,41 @@ const PERSONA_DESCRIPTION: Record<EconPersona, string> = {
 /**
  * Permission deltas for each persona, layered on top of econ's global `permission` defaults
  * below (which already sets read/list/glob/grep/lsp to allow and edit/bash/webfetch/websearch
- * to ask) — only what a persona needs to differ from that baseline is listed here. `task` and
- * `question` are denied for every persona (OL-9.3d): only the conductor plans and delegates.
+ * to ask). All six personas are equally capable now — no persona-specific override is listed
+ * here; `task` and `question` are denied for every persona (OL-9.3d, injected by the wiring
+ * below) and the childSlicePermission overlay (slice-orchestrator.ts) grants edit/bash/web at
+ * dispatch and re-denies the danger bash patterns for every seat alike.
  *
  * @sem domain=configuration role=config
  */
 const PERSONA_PERMISSION: Record<EconPersona, Record<string, "allow" | "ask" | "deny">> = {
-  explorer: { edit: "deny", bash: "deny" },
-  runner: { edit: "deny", bash: "allow" },
-  applier: { edit: "allow", bash: "allow" },
-  author: { edit: "allow", bash: "allow" },
-  researcher: { edit: "deny", bash: "deny", webfetch: "allow", websearch: "allow" },
-  procedure: { edit: "allow", bash: "allow" },
+  explorer: {},
+  runner: {},
+  applier: {},
+  author: {},
+  researcher: {},
+  procedure: {},
 }
 
 /**
  * Physical per-persona toolset trims (OL-9.4a) — `false` here drops the tool from the agent's
  * advertised set entirely, unlike `PERSONA_PERMISSION` above which only gates execution while
- * still listing the tool in the prompt. `task`, `question`, and `todowrite` are dropped for every
- * persona (OL-9.5e — run-8 post-mortem: a procedure child wrote its own typed slices and became a
- * recursive orchestrator, parenting 43 grandchildren, because typing a `todowrite` item is the
- * explicit opt-in to decomposition and personas still had the tool); explorer/runner/researcher
- * additionally drop the edit-family tools (`edit`, `write`, `apply_patch`) and, for
- * explorer/researcher, `bash`. Ids are the canonical ones the tool registry defines
- * (packages/opencode/src/tool/*.ts).
+ * still listing the tool in the prompt. All six personas are equally capable now, so no
+ * persona-specific trim remains here: `task`, `question`, and `todowrite` are dropped for every
+ * persona by the wiring below (OL-9.5e — run-8 post-mortem: a procedure child wrote its own
+ * typed slices and became a recursive orchestrator, parenting 43 grandchildren, because typing a
+ * `todowrite` item is the explicit opt-in to decomposition and personas still had the tool); no
+ * persona drops the edit-family or bash tools any longer — every persona shares the full
+ * executor toolset, differing only by prompt delta and step budget.
  *
  * @sem domain=configuration role=config
  */
 const PERSONA_TOOLS: Record<EconPersona, Record<string, boolean>> = {
-  explorer: { bash: false, edit: false, write: false, apply_patch: false },
-  runner: { edit: false, write: false, apply_patch: false },
+  explorer: {},
+  runner: {},
   applier: {},
   author: {},
-  researcher: { bash: false, edit: false, write: false, apply_patch: false },
+  researcher: {},
   procedure: {},
 }
 
@@ -144,9 +146,12 @@ export function econDefaultConfig(): ConfigV1.Info {
         tools: { todowrite: false },
       },
       // OL-9.1c — six stateless executor-persona intern agents, all backed by the executor
-      // tier's model but with their own prompt delta (session/prompts/personas.ts PERSONA_DELTA) and a
-      // reduced, persona-specific toolset so a slice child can't silently escalate (e.g. a
-      // recon slice spawning a "fixer") the way an unrestricted conductor-prompted child could.
+      // tier's model with their own prompt delta (session/prompts/personas.ts PERSONA_DELTA) but
+      // the same full executor toolset — every persona is equally capable, differing only by
+      // prompt delta and step budget. task/question/todowrite stay dropped for every persona
+      // (a slice child still can't itself fan out or decompose); the childSlicePermission
+      // overlay (slice-orchestrator.ts) grants edit/bash/web at dispatch and re-denies the
+      // danger bash patterns for every seat alike.
       ...Object.fromEntries(
         ECON_PERSONAS.map((persona) => [
           persona,

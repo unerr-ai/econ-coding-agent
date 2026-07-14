@@ -53,30 +53,32 @@
 
     // OL-9.1c — six stateless executor-persona intern agents (persona-deltas-design.md), all
     // backed by the executor tier's model with their own prompt delta (session/prompts/personas.ts
-    // PERSONA_DELTA) and a reduced toolset — mirrors econ-defaults.ts econDefaultConfig()
-    // (drift test: packages/opencode/test/config/econ-defaults.test.ts).
+    // PERSONA_DELTA) and the full executor toolset — mirrors econ-defaults.ts econDefaultConfig()
+    // (drift test: packages/opencode/test/config/econ-defaults.test.ts). Personas differ only by
+    // prompt delta and step budget; the childSlicePermission overlay (slice-orchestrator.ts) grants
+    // edit/bash/web at dispatch and re-denies the danger bash patterns for every seat alike.
     "explorer": {
       "model": "litellm/openai/gpt-oss-120b",
       "description": "econ persona — read-only recon intern: investigates one question, returns a digest, never edits.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "deny" },
-      "tools": { "task": false, "question": false, "todowrite": false, "bash": false, "edit": false, "write": false, "apply_patch": false }
+      "permission": { "task": "deny", "question": "deny" },
+      "tools": { "task": false, "question": false, "todowrite": false }
     },
     "runner": {
       "model": "litellm/openai/gpt-oss-120b",
       "description": "econ persona — command intern: runs the brief's exact commands in order and reports what happened.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "allow" },
-      "tools": { "task": false, "question": false, "todowrite": false, "edit": false, "write": false, "apply_patch": false }
+      "permission": { "task": "deny", "question": "deny" },
+      "tools": { "task": false, "question": false, "todowrite": false }
     },
     "applier": {
       "model": "litellm/openai/gpt-oss-120b",
       "description": "econ persona — edit intern: applies exactly the specified change, verifies it, and reports.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "permission": { "task": "deny", "question": "deny" },
       "tools": { "task": false, "question": false, "todowrite": false }
     },
     "author": {
@@ -84,7 +86,7 @@
       "description": "econ persona — scoped creation intern: writes new tests/docstrings/scaffolds, never touches existing behavior.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "permission": { "task": "deny", "question": "deny" },
       "tools": { "task": false, "question": false, "todowrite": false }
     },
     "researcher": {
@@ -92,15 +94,15 @@
       "description": "econ persona — docs/web lookup intern: answers a lookup question from sources it actually fetched.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "deny", "bash": "deny", "webfetch": "allow", "websearch": "allow" },
-      "tools": { "task": false, "question": false, "todowrite": false, "bash": false, "edit": false, "write": false, "apply_patch": false }
+      "permission": { "task": "deny", "question": "deny" },
+      "tools": { "task": false, "question": false, "todowrite": false }
     },
     "procedure": {
       "model": "litellm/openai/gpt-oss-120b",
       "description": "econ persona — step-by-step intern: executes the brief's numbered procedure and reports per step.",
       "mode": "subagent",
       "hidden": true,
-      "permission": { "task": "deny", "question": "deny", "edit": "allow", "bash": "allow" },
+      "permission": { "task": "deny", "question": "deny" },
       "tools": { "task": false, "question": false, "todowrite": false }
     }
   },

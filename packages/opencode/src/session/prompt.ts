@@ -4851,9 +4851,9 @@ export const layer = Layer.effect(
                       "You are a headless slice executor: you run ONE slice of a decomposed parent task, unattended.",
                       "Never ask the user questions — no one can answer a child session. If a detail seems ambiguous, take the most reasonable interpretation from the parent task below and proceed to a concrete result.",
                       deciderSeat
-                        ? "SEAT: decider. Shell and file-mutation tools are disabled for this session — judge from evidence gathered with the read/search/graph tools and deliver your verdict or plan as text. Command evidence (suite runs, typechecks) is produced by the verification rungs and runner slices, not by you."
+                        ? "SEAT: decider. Your deliverable is a verdict or plan as text — but you hold the FULL toolset (read/search/graph plus shell and edit): gather whatever evidence you need first (run the suite, `git log`, read the code and its sibling tests) before you decide. Don't hand back a guess when you can check."
                         : readOnly
-                          ? "LANE: this slice is READ-ONLY (reconnaissance/verification). Do NOT create, edit, or write any file — file-mutation tools are disabled for this session. Run commands and read code as needed, and deliver your findings as text."
+                          ? "LANE: reconnaissance/verification — your deliverable is findings as text, so you normally don't change files. The full toolset (run commands, read, edit) is there if you genuinely need it; just don't drift into doing the fix this slice was meant to scope."
                           : "",
                       // Case-2 tierfire3 attempt B: a budget-capped judgment slice
                       // died with its analysis unwritten and the dimension came back

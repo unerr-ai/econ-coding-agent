@@ -227,23 +227,15 @@ describe("econ persona agents (OL-9.1c/9.3d)", () => {
     }
   })
 
-  it("explorer/runner/researcher physically drop the edit-family tools; explorer/researcher also drop bash", () => {
-    for (const persona of ["explorer", "runner", "researcher"] as const) {
-      const tools = (defaults.agent as any)[persona].tools
-      expect(tools.edit, `${persona} tools must drop edit`).toBe(false)
-      expect(tools.write, `${persona} tools must drop write`).toBe(false)
-      expect(tools.apply_patch, `${persona} tools must drop apply_patch`).toBe(false)
+  it("every persona's tools record is exactly {task:false, question:false, todowrite:false} — no persona drops edit/bash/web", () => {
+    for (const persona of ECON_PERSONAS) {
+      expect((defaults.agent as any)[persona].tools).toEqual({ task: false, question: false, todowrite: false })
     }
-    for (const persona of ["explorer", "researcher"] as const) {
-      expect((defaults.agent as any)[persona].tools.bash, `${persona} tools must drop bash`).toBe(false)
-    }
-    // runner keeps bash (it is the command intern)
-    expect((defaults.agent as any).runner.tools.bash).toBeUndefined()
   })
 
-  it("applier/author/procedure carry no tool removals beyond task/question/todowrite (already permission-denied)", () => {
-    for (const persona of ["applier", "author", "procedure"] as const) {
-      expect((defaults.agent as any)[persona].tools).toEqual({ task: false, question: false, todowrite: false })
+  it("every persona's permission record is exactly {task:deny, question:deny} — no persona-specific edit/bash/web overrides", () => {
+    for (const persona of ECON_PERSONAS) {
+      expect((defaults.agent as any)[persona].permission).toEqual({ task: "deny", question: "deny" })
     }
   })
 })
