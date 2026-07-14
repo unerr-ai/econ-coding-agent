@@ -114,6 +114,50 @@ export function econDefaultConfig(): ConfigV1.Info {
     default_agent: "conductor",
     small_model: tierModelRef("executor"),
     model: tierModelRef("conductor"),
+    // econ permission floor — mirrors opencode.json's `permission` block (drift-guarded in
+    // econ-defaults.test.ts) so a headless `opencode run` in ANY cwd (arena, a user's repo) is
+    // fully capable, not just runs inside the econ repo. Without it, bash/edit/web match no rule →
+    // evaluate() default `ask` → the headless backstop denies them. Read + edit + bash + web are
+    // ALLOW so every tier (root conductor included) can act headless; delegate is slice-seat-only;
+    // the bash danger floor (deletes/disk-wipe/privilege/system-power) and out-of-project are DENY.
+    permission: {
+      read: "allow",
+      list: "allow",
+      glob: "allow",
+      grep: "allow",
+      lsp: "allow",
+      todowrite: "allow",
+      question: "allow",
+      task: "allow",
+      delegate: "deny",
+      edit: "allow",
+      webfetch: "allow",
+      websearch: "allow",
+      doom_loop: "ask",
+      skill: "ask",
+      external_directory: "deny",
+      bash: {
+        "*": "allow",
+        "git push*": "ask",
+        "curl *": "ask",
+        "wget *": "ask",
+        "sudo *": "deny",
+        "su *": "deny",
+        "doas *": "deny",
+        "rm -rf *": "deny",
+        "rm -fr *": "deny",
+        "rm -r *": "deny",
+        "dd *": "deny",
+        "mkfs*": "deny",
+        "shutdown*": "deny",
+        "reboot*": "deny",
+        "halt*": "deny",
+        "poweroff*": "deny",
+        "init 0*": "deny",
+        "init 6*": "deny",
+        "git clean -f*": "deny",
+      },
+    },
     agent: {
       // Disable OpenCode's native model-less primary agents so nothing resolves through the catalog fallback.
       build: { disable: true },

@@ -107,10 +107,15 @@
     }
   },
 
-  // econ safe permission defaults (S8.3 hardening). Read-only tools are allowed; mutating,
-  // network, and out-of-project actions require confirmation or are denied. Precedence is
-  // last-match-wins (findLast in src/permission/index.ts), so the bash wildcard is first and the
-  // specific deny patterns that override it come after. Loosen per-project as trust is established.
+  // econ safe permission defaults (S8.3 hardening; bash broadened 2026-07-15). Read-only tools
+  // and the majority of bash commands are ALLOW so a headless `opencode run` can build/test/run
+  // (the permission/index.ts headless backstop turns every `ask` into a deny, so an ask-by-default
+  // bash starves the agent). Edit and web (webfetch/websearch) are ALLOW too, so every tier — the
+  // root conductor included — is fully capable headless; out-of-project access and delegate are
+  // denied (delegate is slice-seat-only). The bash danger floor (destructive deletes, disk wipes,
+  // privilege escalation, system-power) is DENY —
+  // see the bash block. Precedence is last-match-wins (findLast in src/permission/index.ts), so the
+  // bash wildcard is first and the specific deny/ask patterns that override it come after.
   "permission": {
     "read": "allow",
     "list": "allow",
@@ -124,27 +129,39 @@
     // (childSlicePermission in slice-orchestrator.ts flips it to allow per seat). The root
     // session and every persona/raw-task child never see it.
     "delegate": "deny",
-    "edit": "ask",
-    "webfetch": "ask",
-    "websearch": "ask",
+    "edit": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
     "doom_loop": "ask",
     "skill": "ask",
     "external_directory": "deny",
     "bash": {
-      // Reading/searching/listing code goes through econ's read tools, never bash — so `ls`/`cat`
-      // are intentionally NOT allowed here (they fall to the "*" ask, which a denial then bounces
-      // back to the model so it switches to read/search). bash stays for running things only.
-      "*": "ask",
-      "pwd": "allow",
-      "git status": "allow",
-      "git diff*": "allow",
-      "git log*": "allow",
+      // The majority of commands are ALLOW so the agent can build/test/run in a headless
+      // `opencode run`. Reading the codebase still routes through econ's read tools — `cat`/`ls`/
+      // `grep` are intercepted and bounced by shell.ts bashReadRedirect regardless of this allow.
+      // Explicit danger floor below (DENY): destructive deletes, disk wipes, privilege escalation,
+      // system-power. Outward/network (git push, curl, wget) stay ASK so an interactive root can
+      // approve them while headless denies them. Mirror any change here into childSlicePermission
+      // (slice-orchestrator.ts) so slice children carry the same floor.
+      "*": "allow",
       "git push*": "ask",
       "curl *": "ask",
       "wget *": "ask",
       "sudo *": "deny",
+      "su *": "deny",
+      "doas *": "deny",
       "rm -rf *": "deny",
-      "rm -fr *": "deny"
+      "rm -fr *": "deny",
+      "rm -r *": "deny",
+      "dd *": "deny",
+      "mkfs*": "deny",
+      "shutdown*": "deny",
+      "reboot*": "deny",
+      "halt*": "deny",
+      "poweroff*": "deny",
+      "init 0*": "deny",
+      "init 6*": "deny",
+      "git clean -f*": "deny"
     }
   },
 

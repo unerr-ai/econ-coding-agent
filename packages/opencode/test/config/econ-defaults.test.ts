@@ -99,6 +99,13 @@ describe("econDefaultConfig vs opencode.json (drift guard — one source of trut
     expect(defaults.default_agent).toBe(config.default_agent)
   })
 
+  // The embedded default must carry the SAME permission floor as opencode.json, or a headless
+  // `opencode run` OUTSIDE the econ repo (arena, a user's repo) silently loses bash/edit/web —
+  // matched no rule → evaluate() default `ask` → the headless backstop denies it. This ties them.
+  it("root permission floor is byte-identical to opencode.json (bash danger floor + edit/web capability)", () => {
+    expect(defaults.permission).toEqual(config.permission)
+  })
+
   it("each tier agent model pin matches opencode.json", () => {
     for (const name of ["conductor", "oracle", "reasoner", "executor"]) {
       expect((defaults.agent as any)[name].model).toBe(config.agent[name].model)
