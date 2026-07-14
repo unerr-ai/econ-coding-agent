@@ -1834,6 +1834,11 @@ export const layer = Layer.effect(
         // assert-anchored detector while keeping the misconception. One bounded
         // deny, then loud pass-through — never a wedge.
         let fidelityFinishDenied = false
+        // Round-G — a promoted pin reaching green arms the deferral consumer at
+        // most once per turn: the regressed-then-appeased finish (11815's
+        // retreat signature) is a hard-tail moment, but only its FIRST green
+        // arrival may spend the budget; later arrivals pass through normally.
+        let promotedPinGreenNoted = false
         // RF-2 §5 — once the oracle-inversion escape has fired, the pin stops
         // binding for the rest of the turn: detection runs once, the verdict
         // is on record, and later finish arrivals pass through loud instead
@@ -3190,7 +3195,14 @@ export const layer = Layer.effect(
                 // noted; the pin then stops binding for the rest of the turn.
                 const inversion = oracleInversionNoted
                   ? { inverted: false as const }
-                  : detectOracleInversion(gate.outputTail, getIssueExpectations(sessionID))
+                  : detectOracleInversion(gate.outputTail, getIssueExpectations(sessionID), {
+                      // Round-G: the form rung (name-form vs value-form on the
+                      // same enum) is sound only against a promoted pin — a
+                      // previously-green tracked test; on the agent's own
+                      // repro the desired form legitimately sits on the
+                      // expectation side of an honest red.
+                      promotedPin: turnPinnedProbe.promoted === true,
+                    })
                 if (inversion.inverted) {
                   oracleInversionNoted = true
                   const surfaceRoute = interactiveSession()
@@ -3383,12 +3395,81 @@ export const layer = Layer.effect(
                   } satisfies SessionV1.TextPart)
                   continue
                 }
+                if (finishTypeGap !== undefined && deferralAvailable(sessionID)) {
+                  // Round-G §A1 — the convert FAILED: the bounded deny already
+                  // fired (fidelityFinishDenied) and the on-disk repro is
+                  // STILL type-unfaithful at the next finish (the 11790 red:
+                  // the agent swapped `str(expected_max_length)` for
+                  // `str(field.max_length)`, obeying the "natural source"
+                  // clause while keeping the stringified mirror). The probe is
+                  // green-on-wrong for this class, so no other gate can ever
+                  // see it — this detection IS the hard-tail signal. Arm the
+                  // one deferral instead of warn-and-pass-through.
+                  yield* publishSignalFx({
+                    name: "fidelity_finish_reject",
+                    sessionID,
+                    severity: "tail",
+                    decision: "defer",
+                    evidence: { probe: turnPinnedProbe.probe.command, gap: finishTypeGap, convertFailed: true },
+                  })
+                  yield* armDeferral({
+                    signal: "fidelity_finish_reject",
+                    gateEvidence:
+                      `The pinned reproduction ran GREEN but is still TYPE-UNFAITHFUL after one bounded deny: ${finishTypeGap} ` +
+                      `A green run over a stringified/numeric-string mirror proves nothing — hidden graders assert the TYPED value. ` +
+                      `Decide the correct TYPE at the source (does the source assign the typed value or a string?), fix the source ` +
+                      `accordingly, and rewrite the reproduction to assert typed equality against the value's natural source.`,
+                    probeCommand: turnPinnedProbe.probe.command,
+                    candidates: [...finishLandedSourceEditFiles, ...getTurnFiles(sessionID)],
+                    expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                    statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
+                  })
+                  continue
+                }
                 if (finishTypeGap !== undefined) {
                   yield* Effect.logWarning("finish_fidelity_unresolved", {
                     "session.id": sessionID,
                     probe: turnPinnedProbe.probe.command,
                     gap: finishTypeGap,
                   })
+                }
+                if (turnPinnedProbe.promoted === true && !promotedPinGreenNoted) {
+                  // Round-G §A2 — the regressed-then-appeased signature: this
+                  // pin exists because the turn's fix regressed a previously-
+                  // green tracked neighbor (F16 promotion), and the turn is
+                  // now finishing GREEN against that stand-in oracle. On the
+                  // 11815 class the green was bought by NARROWING the fix
+                  // (Promise-conditional) until the visible suite — which
+                  // encodes the bug — passed again. One deferral verifies the
+                  // fix is the general root-cause fix before the finish is
+                  // accepted; a legitimately-repaired regression costs one
+                  // bounded slice and proceeds.
+                  promotedPinGreenNoted = true
+                  const promotedDeferralOpen = deferralAvailable(sessionID)
+                  yield* publishSignalFx({
+                    name: "promoted_pin_green",
+                    sessionID,
+                    severity: "tail",
+                    decision: promotedDeferralOpen ? "defer" : "none-loud",
+                    evidence: { probe: turnPinnedProbe.probe.command, redExit: turnPinnedProbe.redEvidence?.exitCode ?? null },
+                  })
+                  if (promotedDeferralOpen) {
+                    yield* armDeferral({
+                      signal: "promoted_pin_green",
+                      gateEvidence:
+                        `This turn's fix regressed a previously-passing neighbor suite; that suite was promoted to the binding pin ` +
+                        `and is NOW GREEN. Verify the landed fix is the GENERAL root-cause fix — not narrowed (e.g. made type- or ` +
+                        `flag-conditional) merely to appease the visible suite. Visible tests can ENCODE the bug the issue describes; ` +
+                        `the issue's stated behavior is the senior oracle. If the general fix makes the promoted suite red again ` +
+                        `while matching the issue's stated expectations, keep the general fix and state that conflict as the verdict.`,
+                      probeCommand: turnPinnedProbe.probe.command,
+                      redTail: turnPinnedProbe.redEvidence?.outputTail,
+                      candidates: [...finishLandedSourceEditFiles, ...getTurnFiles(sessionID)],
+                      expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                      statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
+                    })
+                    continue
+                  }
                 }
                 // S1 — the accept fall-through: the pin's red evidence (logged
                 // at pin time) and this green run's output tail form the
@@ -3784,6 +3865,11 @@ export const layer = Layer.effect(
                           const regressionPin = {
                             probe: { kind: "test" as const, command: pinCandidate.command },
                             redEvidence: { exitCode: pinCandidate.exitCode, outputTail: pinCandidate.outputTail },
+                            // Round-G provenance: a promoted pin is a tracked,
+                            // previously-green neighbor — the oracle-inversion
+                            // form rung and the promoted-pin-green finish
+                            // check apply ONLY to pins carrying this flag.
+                            promoted: true as const,
                           }
                           turnPinnedProbe = regressionPin
                           setPinnedProbe(sessionID, regressionPin)

@@ -108,7 +108,7 @@ export const WriteTool = Tool.define(
               name: "hub_bounce_repeat",
               sessionID: ctx.sessionID,
               severity: "tail",
-              decision: "defer",
+              decision: "convert",
               evidence: {
                 file: path.relative(instance.worktree, filepath),
                 definingSites: (hubGateResult.definingSites ?? []).length,
@@ -223,7 +223,7 @@ export const WriteTool = Tool.define(
               name: "convention_divergence_repeat",
               sessionID: ctx.sessionID,
               severity: "tail",
-              decision: "defer",
+              decision: "convert",
               evidence: {
                 receiver: conventionDivergence!.receiver,
                 method: conventionDivergence!.method,

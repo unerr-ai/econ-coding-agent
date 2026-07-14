@@ -20,10 +20,11 @@ export type EconSignalName =
   | "seen_red_unresolved" // F18 at finish (2nd arrival = tail)
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
+  | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail
   | "repro_unresolved" // S2 deadline abstention
   | "repro_drift" // drift detector (kind in evidence)
   | "fidelity_gap" // repro-fidelity judge/teeth rejection
-  | "fidelity_finish_reject" // RF-8 finish-time type-fidelity re-check denied a probe-green finish (bounded once)
+  | "fidelity_finish_reject" // RF-8 finish-time type-fidelity re-check: 1st hit converts (bounded deny), 2nd hit = the convert failed — hard tail
   | "hub_bounce" // hub gate 1st bounce
   | "hub_bounce_repeat" // evidence-bearing 2nd deny — hard tail
   | "convention_divergence" // wave-11 first pause

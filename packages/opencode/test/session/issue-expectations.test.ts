@@ -134,6 +134,102 @@ describe("detectOracleInversion", () => {
   })
 })
 
+describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", () => {
+  // The issue extractor stores a single expected-kind literal here (no
+  // "actual"-kind counterpart) — the live 11815 shape where the literal rung
+  // is structurally blind and only the form rung can fire.
+  const promotedLiterals: IssueExpectation[] = [
+    {
+      value: "('status', models.CharField(default=Status['GOOD'], max_length=128))",
+      kind: "expected",
+      source: "It should be: ('status', models.CharField(default=Status['GOOD'], max_length=128))",
+    },
+  ]
+  const redTail = [
+    "FAIL: test_serialize_enum (migrations.test_writer.WriterTests)",
+    "Traceback (most recent call last):",
+    '  File "tests/migrations/test_writer.py", line 283, in test_serialize_enum',
+    "AssertionError: Tuples differ: (\"TextEnum['A']\", 1) != (\"migrations.test_writer.TextEnum('a-value')\", 1)",
+    "",
+    "First differing element 0:",
+    "\"TextEnum['A']\"",
+    "\"migrations.test_writer.TextEnum('a-value')\"",
+    "",
+    "- (\"TextEnum['A']\", 1)",
+    "+ (\"migrations.test_writer.TextEnum('a-value')\", 1)",
+  ].join("\n")
+
+  test("promotedPin:true, no literal-rung actual pair — subscript-vs-call same identifier fires as inversion", () => {
+    const verdict = detectOracleInversion(redTail, promotedLiterals, { promotedPin: true })
+    expect(verdict.inverted).toBe(true)
+    expect(verdict.desiredLiteral).toBe("TextEnum['A']")
+    expect(verdict.buggyLiteral).toContain("TextEnum('a-value')")
+  })
+
+  test("opts absent — never fires even with the identical inverting shape", () => {
+    expect(detectOracleInversion(redTail, promotedLiterals).inverted).toBe(false)
+  })
+
+  test("promotedPin:false — never fires (an agent's own repro legitimately expects the desired form pre-fix)", () => {
+    expect(detectOracleInversion(redTail, promotedLiterals, { promotedPin: false }).inverted).toBe(false)
+  })
+
+  test("no subscript-form literal among expected literals — rung never applies", () => {
+    const literals: IssueExpectation[] = [
+      { value: "the migration should use the enum name, not its value", kind: "expected", source: "..." },
+    ]
+    expect(detectOracleInversion(redTail, literals, { promotedPin: true }).inverted).toBe(false)
+  })
+
+  test("subscript and call forms on DIFFERENT identifiers — no match", () => {
+    const differentIdentTail = "AssertionError: (\"TextEnum['A']\", 1) != (\"OtherEnum('v')\", 1)"
+    expect(detectOracleInversion(differentIdentTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+  })
+
+  test("only one of the two forms present in the region — no match", () => {
+    const onlySubscriptTail = "AssertionError: expected \"TextEnum['A']\" but got something else"
+    expect(detectOracleInversion(onlySubscriptTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+  })
+
+  test("mirror ordering: call form BEFORE subscript form — code still PRODUCES the value form, test expects the desired form; never inversion", () => {
+    // Produced-side-prints-first (rung-1's own heuristic): call-form first
+    // means the fix is wrong and the test agrees with the issue — firing here
+    // would tell the agent to keep a broken fix.
+    const mirrorTail = [
+      "AssertionError: Tuples differ: (\"migrations.test_writer.TextEnum('a-value')\", 1) != (\"TextEnum['A']\", 1)",
+      "",
+      "First differing element 0:",
+      "\"migrations.test_writer.TextEnum('a-value')\"",
+      "\"TextEnum['A']\"",
+    ].join("\n")
+    expect(detectOracleInversion(mirrorTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+  })
+
+  test("no comparison-failure line (plain traceback/ImportError) — no match", () => {
+    const crashTail = [
+      "Traceback (most recent call last):",
+      '  File "migrations/writer.py", line 12, in <module>',
+      "ImportError: cannot import name 'TextEnum' from 'migrations.test_writer'",
+    ].join("\n")
+    expect(detectOracleInversion(crashTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+  })
+
+  test("ordering: literal rung wins first — identical result with and without promotedPin:true", () => {
+    const literalRungLiterals: IssueExpectation[] = [
+      { value: "TextEnum['A']", kind: "expected", source: "serialization should be `TextEnum['A']`" },
+      { value: "TextEnum('a-value')", kind: "actual", source: "currently got `TextEnum('a-value')`" },
+    ]
+    const literalRungRedTail = [
+      "AssertionError: \"migrations.test_writer.TextEnum['A']\" != \"migrations.test_writer.TextEnum('a-value')\"",
+    ].join("\n")
+
+    const withoutOpts = detectOracleInversion(literalRungRedTail, literalRungLiterals)
+    const withPromotedPin = detectOracleInversion(literalRungRedTail, literalRungLiterals, { promotedPin: true })
+    expect(withoutOpts).toEqual(withPromotedPin)
+    expect(withoutOpts.inverted).toBe(true)
+  })
+})
+
 // Round-F strict-sweep forensics: the ten real django-issue prompts from the
 // Mini-10 ladder, embedded verbatim (trimmed to the relevant excerpt) so the
 // extractors are proven against real prose, not hand-shaped synthetic text.

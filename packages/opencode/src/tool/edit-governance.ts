@@ -415,7 +415,7 @@ export function hubEditRetriedAgainstCandidates(sessionID: string): boolean {
   return hubEditRetryAgainstCandidatesSet.has(sessionID)
 }
 
-/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining sites concretely instead of leaving the model to re-derive them. */
+/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining-site candidates to check first — framed as candidates, not a verdict, since the graph resolves symbol NAMES and cannot see whether the issue's BEHAVIOR is actually implemented at this hub file (round-F post-mortem on django-11815: the gate bounced the correct fix site and the old wording told the model the candidates WERE the root-most site, actively misdirecting it). */
 export function hubEditDenialMessage(relPath: string, importers: number, rootMostCandidates: readonly string[] = []): string {
   const base =
     `${importers} other modules import ${relPath} directly — it is shared infrastructure. ` +
@@ -426,15 +426,15 @@ export function hubEditDenialMessage(relPath: string, importers: number, rootMos
   if (rootMostCandidates.length === 0) return base
   return (
     base +
-    ` Per the code graph, the symbols this issue names are defined in: ${rootMostCandidates.join(", ")} — the root-most fix site is one of these; fix the behavior there.`
+    ` Per the code graph, the symbols this issue names are DEFINED in: ${rootMostCandidates.join(", ")} — check those candidates first. But note the graph resolves symbol NAMES, not behavior: if the BEHAVIOR the issue describes is implemented in ${relPath} itself (not merely passing through it), then ${relPath} IS the root-most layer — re-issue this exact edit and it will be allowed.`
   )
 }
 
-/** Round-F §7 — the reason string thrown when the hub-edit gate denies a SECOND time: a bounced-retry landed on a file outside a non-empty resolved defining-site allowlist, so the model was shown the graph's named candidates and re-issued a non-candidate edit anyway. Names the defining sites concretely and states the fail-open floor: a third identical attempt (or a re-issue asserting this genuinely IS the defining site) is allowed. */
+/** Round-F §7 — the reason string thrown when the hub-edit gate denies a SECOND time: a bounced-retry landed on a file outside a non-empty resolved defining-site allowlist, so the model was shown the graph's named candidates and re-issued a non-candidate edit anyway. Names the defining-site candidates concretely and states the fail-open floor: a re-issue naming the concrete evidence that the behavior lives in `relPath` itself is allowed — the candidates are symbol-name hits, not a behavior verdict (round-F post-mortem on django-11815). */
 export function hubEditSecondDenialMessage(relPath: string, definingSites: readonly string[]): string {
   return (
-    `This is the second time this edit has landed on ${relPath}, which is NOT one of the defining sites the code graph resolved for this issue: ${definingSites.join(", ")}. ` +
-    `Move the fix to one of those defining sites. If you have concrete evidence that ${relPath} genuinely IS the correct fix site despite the graph's candidates, re-issue this exact edit once more and it will be allowed.`
+    `This is the second time this edit has landed on ${relPath}, which is not one of the SYMBOL-definition sites the code graph resolved for this issue: ${definingSites.join(", ")}. ` +
+    `Prefer one of those candidates — but the graph resolves symbol names, not behavior. If the behavior the issue describes is implemented in ${relPath} itself, ${relPath} is the correct root-most site: re-issue this exact edit once more, stating that evidence, and it will be allowed.`
   )
 }
 

@@ -916,6 +916,8 @@ export const TEST_TREE_GUARD_COMMAND: VerifyCommand = {
 export interface TurnProbePin {
   readonly probe: VerifyCommand
   readonly redEvidence?: { readonly exitCode: number; readonly outputTail: string }
+  /** True when this pin is an F16 regression promotion (a previously-green tracked neighbor suite standing in for the turn's own repro) — the provenance the oracle-inversion form rung and the promoted-pin-green finish check key on. Mirrors turn-read-store's colocated twin. */
+  readonly promoted?: boolean
 }
 
 /**

@@ -412,15 +412,23 @@ describe("Wave 5 — hubEditDenialMessage", () => {
     expect(msg).toContain("DIFFERENT shared file")
   })
 
-  it("wave 8d: lists the resolved root-most candidates when provided", () => {
+  it("wave 8d: lists the resolved root-most candidates as candidates, not a verdict (round-F post-mortem on django-11815)", () => {
     const msg = hubEditDenialMessage("django/db/models/fields/__init__.py", 26, [
       "django/db/models/enums.py",
       "django/db/models/base.py",
     ])
-    expect(msg).toContain("Per the code graph, the symbols this issue names are defined in:")
+    expect(msg).toContain("Per the code graph, the symbols this issue names are DEFINED in:")
     expect(msg).toContain("django/db/models/enums.py")
     expect(msg).toContain("django/db/models/base.py")
-    expect(msg).toContain("root-most fix site is one of these")
+    expect(msg).toContain("check those candidates first")
+    // The graph resolves symbol names, not behavior — the message must not tell
+    // the model the candidates ARE the root-most site, only that they're worth
+    // checking; a re-issue naming this file as the true fix site is allowed.
+    expect(msg).toContain("the graph resolves symbol NAMES, not behavior")
+    expect(msg).toContain(
+      "if the BEHAVIOR the issue describes is implemented in django/db/models/fields/__init__.py itself",
+    )
+    expect(msg).toContain("re-issue this exact edit and it will be allowed")
   })
 
   it("wave 8d: byte-identical to the legacy message when no candidates are given", () => {
@@ -442,6 +450,15 @@ describe("round-F §7 — hubEditSecondDenialMessage", () => {
     expect(msg).toContain("django/db/models/enums.py")
     expect(msg).toContain("second time")
     expect(msg).toContain("re-issue this exact edit once more")
+  })
+
+  it("frames the defining sites as symbol-definition candidates, not a behavior verdict (round-F post-mortem on django-11815)", () => {
+    const msg = hubEditSecondDenialMessage("django/db/models/query_utils.py", ["django/db/models/enums.py"])
+    expect(msg).toContain("django/db/models/query_utils.py")
+    expect(msg).toContain("django/db/models/enums.py")
+    expect(msg).toContain("SYMBOL-definition sites")
+    expect(msg).toContain("the graph resolves symbol names, not behavior")
+    expect(msg).toContain("If the behavior the issue describes is implemented in django/db/models/query_utils.py itself")
   })
 })
 
