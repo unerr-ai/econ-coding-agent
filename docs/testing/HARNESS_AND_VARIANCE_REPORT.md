@@ -380,6 +380,19 @@ token. Preventable without seeing the hidden test.
 actually **passes** at runtime — its verbose "ok" line gets glued into rfc850's
 subTest-ERROR output line, and the log parser records absent ⇒ failing.
 
+**Update (2026-07-14, strict full Mini-10 sweep):** this class re-surfaced red.
+The agent wrote `datetime.datetime.now(tz=datetime.timezone.utc)` —
+production-correct (same UTC year as `utcnow()`) — and the hidden test's
+`utcnow`-only mock turned it into the same MagicMock→ValueError cascade. The
+convention gate fired (`convention_divergence` + `_repeat`) but the agent
+finished on the production-correct `now()` choice; it escalated hard (reasoner
+×11, decomposition ×5, 68t) and still drew the wrong-for-the-mock token.
+Confirms classification (c): a systematic prior on an *unobservable* test-mock
+seam — the same meta-class as 11790 (the hidden test pins an internal detail
+two equivalent choices differ on). **Not a regression** from the deferral/hub
+wave (`82bd20d48`): 11848 has failed in sweeps predating it, and the wave only
+*adds* arming (11848 escalated more, not less).
+
 ### III.3 django-11964 (Choices member leaks enum type) — failed 1859 + 2058
 
 Same build previously passed this instance via the full escalation chain and (iter-6)
@@ -457,6 +470,22 @@ the RF-8 finish-time re-check fired (`fidelity_finish_reject`, decision
 `convert`) and converted a false-green finish into a real pass: the first
 live conversion of this mechanism. Total band cost $1.3128, 0 double-pay.
 Full per-attempt breakdown: [STRICT_CYCLE.md](./STRICT_CYCLE.md).
+
+**Further update (2026-07-14, strict full Mini-10 sweep, binary `82bd20d48`):**
+11790 drew the *conditional* pinned form — chain aliased to a bare local
+(`widget_maxlength = widget.attrs.get(...)`), compared behind
+`if widget_maxlength != str(expected):` gating `errors.append` — the one shape
+`388cf3255`'s assert-only str-alias tooth cannot see, and it went red. Commit
+`33245816e` extends `detectStringifiedMirrorAssert` to `if`/`elif` gates +
+symmetric chain-side aliasing (unit 97/97), closing this last assert-dodge;
+live re-validation on the rebuilt binary pending. This sharpens the autopsy's
+core: 11790's *repro form* is what varies draw-to-draw, and each new
+assert-dodge shape needs the deterministic tooth to follow it. The failing
+draw was `armLocalization=true` and carried the explicit typed-mirror prior
+(`254` not `'254'`; "never via a rendering helper that stringifies
+internally") — and the model wrote the stringifying helper anyway. Direct
+confirmation (see Part VI) that on this class the prompt is not the lever; the
+check-time tooth is.
 
 ### III.5 django-12039 (CREATE INDEX whitespace) — failed 1859
 
