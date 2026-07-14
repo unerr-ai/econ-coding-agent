@@ -615,6 +615,79 @@ cycle: improve the orchestration, don't amputate it).
 
 ---
 
+## Part VI — post-forensic addendum (2026-07-14): the web-format-default stringification class
+
+**Trigger.** A round-G strict re-run of 11790 on binary `82bd20d48` failed again
+(`failures=2`, 48 turns, $0.15) on a face the round-G deferral arming does not
+cover. The autopsy sharpened the III.4 "weighted coin" into a *systematic* cause,
+directed by the user: the conductor defaults to the **web / rendered / string
+representation of a typed value**, because that is its prime training format. On
+11790 it re-applied Django's `widget_attrs()` (which returns `{'maxlength':
+str(max_length)}` — a **string**) so the widget attr became `'254'`; the hidden
+test asserts the **int** `254`. Same root as 12039 (rendered SQL over the typed
+construct) and as 11790's own repro (rendered-HTML asserts over typed values).
+
+**The class, stated precisely.** It is NOT literal HTML/markdown in the emitted
+code — `'254'` contains zero HTML characters, and `attrs['maxlength'] = '254'`
+raises no `TypeError` and passes `mypy` (Python dicts accept either type). It is a
+**semantic type-fidelity miss**: the model collapses a value to its rendered/string
+form where the API keeps it typed until render. This is why neither an
+HTML-character scanner nor a generic type-checker fires — only a *typed-equality*
+oracle (the hidden test, or the agent's own repro if it asserts typed equality
+against the value's natural source) distinguishes `254` from `'254'`.
+
+**Literature (2026-07-14 research pass).**
+- Typed↔stringified is a documented failure mode: "Conversion Error… incorrect
+  handling of int→float, string→int" and "string-valued state failures are
+  disproportionately present… syntactically well-formed but semantically
+  incorrect" — arXiv:2512.00215 (53–343 conversion errors per benchmark on
+  HumanEval+/LiveCodeBench). Confirms the class is systematic, not variance.
+- Every "no markdown / return raw code" system-prompt line real agents ship
+  (Cursor, Aider, SWE-agent parsers) targets **output wrapping** (fences/XML), a
+  *different* problem from **value fidelity**. No surveyed agent (Cursor, Aider,
+  SWE-agent, OpenHands, Cline, Continue, Claude Code) uses a system prompt for
+  typed-value fidelity.
+- **Negative constraints backfire** ("Pink Elephant": naming the forbidden token
+  primes it; positive framing wins) — so "NEVER stringify / do not use HTML"
+  is the wrong wording. eval.16x.engineer / arXiv:2603.16417.
+- The **write tool is not the lever**: models hallucinate wrong-typed args inside
+  structured write/edit tools regardless of schema (lucumr.pocoo.org
+  "Better Models: Worse Tools"). A "code-only write" primitive does not address it.
+- The strongest lever per the literature is a **check-time detector + corrective
+  feedback** ("check-time > decode-time"), aligning with our existing repro-fidelity
+  direction and the cheap-judgment finding (isotonic deferral / check-time type
+  enforcement).
+
+**Mechanism decision (ranked; primary is check-time, per the evidence).**
+1. **PRIMARY — widen the check-time typed-fidelity detector to the conditional
+   form.** RF-4/RF-8's `detectTypeUnfaithfulRepro` is **assert-anchored**
+   (`assert`/`assertEqual` lines only). 11790's repro gates its error list with
+   `if widget_maxlength != str(expected_maxlength): errors.append(...)` — a
+   conditional-comparison with the value aliased to a plain local
+   (`widget_maxlength = widget.attrs.get(...)`), which dodges every assert-anchored
+   detector. Extend the stringified-mirror / numeric-string teeth to scan
+   `if A (==|!=) B` comparisons AND to follow one hop of **value** aliasing
+   (symmetric to the `str()`-alias hop added in `388cf3255`), preserving the
+   asymmetric guard (one side `str(...)`/alias, other side an attr/subscript chain
+   or its alias) so legit `__str__`/string-typed comparisons stay silent. This is
+   the third surface of the stringified-mirror misconception, after inline-assert
+   and one-hop str()-alias.
+2. **SECONDARY — a positively-framed, syntax-aware discipline line in the base
+   preamble** (applies to every code-writing turn, not just diagnosis): *emit each
+   value in the target file's native type; a value whose source is typed carries
+   that type through — don't collapse it to its rendered/string form.* Cheap,
+   positive (avoids the Pink-Elephant trap), reinforces the existing typed-mirror
+   seed prior. A reinforcement, not the primary lever.
+3. **REJECTED** — negative "no HTML / never stringify" wording (backfires); a
+   blanket HTML/markdown-character detector (finds nothing on this class and
+   over-blocks legitimate HTML/JSX/template code); a code-only write primitive
+   (not the lever).
+
+**Status:** documented; implementation deferred to the post-sweep rebuild so the
+binary rebuilds once, then re-validated against 11790's class.
+
+---
+
 ## Appendix — bundle paths
 
 ```
