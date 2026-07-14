@@ -280,13 +280,27 @@ assertion-teeth → rendered-assert → required-literals → stringified-mirror
 2. **Required-literal coverage** (§6): any §6 literal/threshold absent from the repro
    content → forced gap naming the missing literals (converts 12039's ignored
    `'"name" DESC'`-style witness into a binding requirement).
-3. **Stringified-mirror tooth** (new round F): `detectStringifiedMirrorAssert` fires when
-   an assert's expected side stringifies the value under test (`== str(x)`,
+3. **Stringified-mirror tooth** (new round F; extended 2026-07-14 commit `388cf3255`
+   to follow one hop of `str()` variable-indirection): `detectStringifiedMirrorAssert`
+   fires when an assert's expected side stringifies the value under test (`== str(x)`,
    `assertEqual(chain, str(chain))`) — proves representation, not type. Does NOT fire on
    subject-stringify (`assert str(x) == 'literal'`), membership asserts, strftime, non-assert
    lines. Forced gap: *"the prior forbids stringifying — you are asserting the mirror"*
    (addresses 11790's typed-equality anti-pattern). Publish `STRINGIFIED_MIRROR_GAP` with
-   context of the mirrored expression.
+   context of the mirrored expression. **One-hop alias extension (`388cf3255`):** closes
+   the gap where the `str()` call and the assert sit on separate lines —
+   `expected = str(form.fields['username'].max_length)` then a plain
+   `assert widget_attrs['maxlength'] == expected` evaded both the single-line `== str(`
+   regex above and `detectNumericStringConflict`'s quoted-literal requirement. Mechanism:
+   (1) pre-scan `IDENT = str(...)` bindings into a str-alias set, (2) new
+   `extractAssertComparisonSides` extracts operands of plain `assert A ==/!= B`
+   statements, (3) fire when one side is a str-or-alias and the OTHER is an
+   attr/subscript chain — the asymmetric chain requirement is the false-fire guard (a
+   legit aliased `__str__`, `actual = str(member); assert actual == '1'`, stays silent
+   because the literal side isn't a chain; a plain-var comparison, `out3 = str(ic);
+   assert out3 == expected3`, stays silent because `expected3` isn't a chain either).
+   Unit-proven: 91/91 tests green (+4 fixtures), typecheck clean; full live-fire record
+   in [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md).
 4. **Numeric-string-conflict tooth** (new RF-8, 2026-07-14): `detectNumericStringConflict`
    fires when a quoted pure-integer literal (`'150'`, `'255'`) is compared/assert-tested
    on one line while the same digit sequence appears bare elsewhere in the repro script,
@@ -330,9 +344,18 @@ while RF-8 fires on none. The three on-disk final repros confirm it directly: 11
 11848 clean (asserts `datetime` objects), 12039 clean (asserts letter/quote strings plus
 the protected `assert str(c) == '"name"'` subject-stringify).
 
-**Live re-fire of 11790 on rebuilt binary pending** — the hole is sealed; the gate is
-now bidirectional (repro integrity at pin time + content integrity at finish time);
-the enforcement chain is stronger.
+**Live-validated (2026-07-14, 5-attempt strict fresh-arena re-fire hunt, binary
+`388cf3255`):** 5/5 REAL PASS on django-11790; attempt 5 hit
+`fidelity_finish_reject` (decision `convert`) — the finish-time re-read found
+`attrs["maxlength"] == "150"` (quoted), the deny nudge fired, the agent
+rewrote to typed equality against the natural source, then passed. Attribution
+is honest: attempt 5's catch was the pre-existing `detectNumericStringConflict`
+half of the composite, not the one-hop `str()`-alias extension above — the
+indirection shape did not recur across the 5 draws. The finish-re-check +
+conversion mechanism is now live-fire proven; the alias extension itself
+remains unit-proven (0/5 recurrence). The gate is bidirectional (repro
+integrity at pin time + content integrity at finish time); full per-attempt
+record in [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md).
 
 Recon sites: `repro-fidelity-judge.ts:31-37` (mechanism documented), `prompt.ts:3345-3358`
 (finish-check wiring + fidelityFinishDenied flag), `signal-bus.ts:26` (signal definition).

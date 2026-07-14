@@ -1130,3 +1130,59 @@ two deterministic repro-teeth above (RF-4/T1 extensions), then re-fire the diffi
 **11790 residual — the one-shot finish-denial lever (BUILT, RF-8, 2026-07-14):** the mirror tooth fired correctly on the agent's repro but as a *convert* did not gate the false-green finish. A nudge can't convert a value-model misconception that is self-consistent across the agent's source (`str(...)`) and its own repro (`== str(...)`). RF-8 implements the finish-time type-fidelity re-check: at M4 green finish, re-read the pinned repro from disk (not cache), run `detectTypeUnfaithfulRepro` composite (numeric-string-conflict + stringified-mirror, the high-precision subset), and on hit, deny once with nudge naming the conflict + demanding typed equality. One bounded deny then loud pass-through (`fidelity_finish_reject` signal, CONVERT decision). **False-fire audit (5 of 7 round-F *passing* runs logged fidelity gaps — 11815/11951/11964/11999/12050):** all 5 gaps were rendered-tooth static text (11815/11964/12050 — the "'255' vs 255" line) or LLM-judge prose (11951 bulk_create, 11999 tool-batch), NOT numeric-string/mirror conflicts — the finish-denier consumes only the high-precision composite, so a naive any-gap denier would have false-fired on all 5 while RF-8 fires on none. On-disk final repros confirm it: 11848 asserts `datetime` objects, 12039 asserts letter/quote strings plus the protected `assert str(c) == '"name"'` subject-stringify — both silent; only 11790 fires. **Verification:** typecheck + 150 targeted tests (including high-precision mock/render/gate-sequence checks) 0 fail. **Verification:** typecheck + 150 targeted tests (including high-precision mock/render/gate-sequence checks) 0 fail.
 
 **Live re-fire result (2026-07-14, RF-8 binary `0.0.0-main-202607141002`, commit `941b64546`, strict mode):** django-11790 **PASSED** — `auth_tests.test_forms` 79 tests OK; agent shipped the correct bare-int fix (`attrs['maxlength'] = username_max_length`, not `str(...)`), $0.0436, 17 turns, 100% conductor, 0 escalations. **Attribution is honest and partial:** the agent drew the *same* rendered-assert repro as round F (`assert 'maxlength=' in html`), the **pin-time RF-4 rendered-assert tooth fired** the "assert the API-LEVEL value with ==" nudge (line 528), and **this run the agent complied correctly** — rewrote into `assert ... max_length == expected_max_length` (typed, natural source) instead of round-F's evasive `== '150'`. Because the rewritten repro was type-faithful, **RF-8's finish re-check correctly stayed SILENT** (no `fidelity_finish_reject`) — validating RF-8 **non-interference on the exact target instance's passing run**, but leaving its **conversion path not live-exercised** (no evasion recurred to catch). The pass is attributable to the pin-time tooth + a compliant variance draw, NOT to RF-8. 11790 is a known input-identical stochastic fork (3/5 in the 0713 fleet — [Part III.4](../testing/HARNESS_AND_VARIANCE_REPORT.md)), so one green is within its variance band, not proof of convergence; RF-8's conversion path remains proven *deterministically* by its unit test (the real round-F evasion repro is a must-fire fixture). Mini-10 this run: **10/10** (single run, not a stabilized streak).
+
+---
+
+## RF-8 str()-alias extension — 5-run strict fresh-arena re-fire (2026-07-14, commit `388cf3255`)
+
+**What changed:** commit `388cf3255` extended `detectStringifiedMirrorAssert`
+(`repro-fidelity-judge.ts`) to follow ONE hop of `str()` variable-indirection —
+the shape a strict fresh-arena evasion hunt reproduced on django-11790: the
+agent pins `expected = str(form.fields['username'].max_length)` then asserts a
+plain `widget_attrs['maxlength'] == expected`, a one-hop indirection the old
+single-line teeth missed (`detectStringifiedMirrorAssert` only read
+`assertEqual()` call args + a whole-line `== str(` regex; `detectNumericStringConflict`
+needs a quoted literal). The draw graded FAILED `'255' != 255` with both
+`pin_gap=0` and `rf8_finish_fired=0`. Fix: (1) pre-scan `IDENT = str(...)`
+bindings into a str-alias set, (2) new `extractAssertComparisonSides` helper
+extracts operands of plain `assert A ==/!= B` statements, (3) fire when one
+side is a str-or-alias and the OTHER is an attr/subscript chain — the
+asymmetric chain requirement is the false-fire guard (a legit aliased
+`__str__`, `actual = str(member); assert actual == '1'`, stays silent because
+the literal side isn't a chain; arena-12039's real `out3 = str(ic); assert
+out3 == expected3` stays silent because `expected3` is a plain var, not a
+chain). `detectTypeUnfaithfulRepro` composes it automatically. Unit-proven:
+91/91 tests green (+4 fixtures incl. the real attempt-2 aliased repro as a
+must-fire fixture), typecheck clean.
+
+**Live result — 5-attempt strict fresh-arena re-fire hunt on binary `388cf3255`
+(django-11790, each attempt: fresh arena+xdg, no gold tests planted during the
+run, grade reverts to gold + F2P∪P2P at module level AFTER):**
+
+| Attempt | Result | Cost | Turns | Tier shape | RF-8 finish re-check |
+|---|---|---|---|---|---|
+| 1 | ✅ REAL PASS | $0.0329 | 14 | conductor-only | silent — pin-time fidelity_gap complied |
+| 2 | ✅ REAL PASS | $0.0590 | 22 | conductor-only | silent — drew the typed shape `max_length == model_max_length` |
+| 3 | ✅ REAL PASS | $0.5260 | 78 | reasoner-escalated (31/78 turns above conductor) | silent — hard draw |
+| 4 | ✅ REAL PASS | $0.6318 | 95 | reasoner-escalated (42/95 above conductor) | silent — hardest draw |
+| 5 | ✅ REAL PASS | $0.0631 | 26 | conductor-only | **FIRED** (`fidelity_finish_reject`, decision=convert) → converted → PASS |
+
+**5/5 REAL PASS** (all "Ran 79 tests ... OK"). Total $1.3128, 0 double-pay (0
+escalations counted as waste) on every run.
+
+**Attempt 5 arc:** the agent pinned `assert username_widget.attrs["maxlength"]
+== "150"` (150 as a STRING) plus a bare `150` in a rendered-HTML check →
+`fidelity_finish_reject` fired → typed-equality nudge injected → agent
+rewrote to `assert username_widget.attrs["maxlength"] == username_field.max_length`
+(typed, natural source) → REAL PASS.
+
+**Honest attribution (do not overclaim):** attempt 5's live catch fired via the
+PRE-EXISTING `detectNumericStringConflict` tooth (the quoted-literal `"150"`
+shape), NOT today's one-hop-alias extension — the indirection shape did not
+recur in the 5 draws. Commit `388cf3255` stands **unit-proven**, not
+live-fire-proven on its own extension; attempt 5 instead validates the broader
+RF-8 finish-re-check + conversion **mechanism** that `388cf3255` extends. 4/5
+healthy draws passed with RF-8 correctly silent — no false fire, no
+regression. Variance framing (cost spread, conductor-only vs
+reasoner-escalated split) is synthesized in
+[HARNESS_AND_VARIANCE_REPORT.md](./HARNESS_AND_VARIANCE_REPORT.md).
