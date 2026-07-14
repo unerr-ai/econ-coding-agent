@@ -440,6 +440,44 @@ assert widget_attrs['maxlength'] == expected, (
     const reproContent = ["expected = str(obj.value)", "assert rendered == expected"].join("\n")
     expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
   })
+
+  test("MUST-FIRE: django-11790's final conditional+alias evasion — a value-alias local compared against a str()-wrapped chain in an `if` gate", () => {
+    const reproContent = [
+      "widget_maxlength = widget.attrs.get(\"maxlength\")",
+      "expected_maxlength = form.fields['username'].max_length",
+      "errors = []",
+      "if widget_maxlength != str(expected_maxlength):",
+      "    errors.append('mismatch')",
+      "if expected_attr not in rendered:",
+      "    errors.append('missing')",
+    ].join("\n")
+    const line = detectStringifiedMirrorAssert(reproContent)
+    expect(line).toBe("if widget_maxlength != str(expected_maxlength):")
+    expect(detectTypeUnfaithfulRepro(reproContent)).toBe(line)
+  })
+
+  test("MUST-FIRE: a direct conditional (no alias) comparing an attr/subscript chain against a str()-wrapped value", () => {
+    const line = "if obj.attrs['maxlength'] == str(expected):"
+    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+  })
+
+  test("MUST-NOT-FIRE: arena-12039's aliased-vs-plain-var shape — a str()-alias compared against a plain var with no chain alias", () => {
+    const reproContent = ["out3 = str(ic)", "if out3 != expected3:"].join("\n")
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: the legit __str__ alias shape in conditional form", () => {
+    const reproContent = ["actual = str(member)", "if actual != '1':"].join("\n")
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: a both-plain-vars conditional", () => {
+    expect(detectStringifiedMirrorAssert("if a != b:")).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: a membership conditional (the 11790 repro's other `if` line) never trips the comparison split", () => {
+    expect(detectStringifiedMirrorAssert("if expected_attr not in rendered:")).toBeUndefined()
+  })
 })
 
 describe("applyStringifiedMirrorGap", () => {

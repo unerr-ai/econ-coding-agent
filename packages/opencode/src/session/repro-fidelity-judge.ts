@@ -35,6 +35,15 @@
  * cannot resolve. `applyNumericStringConflictGap` merges it the same way as
  * RF-5, and `detectTypeUnfaithfulRepro` composes the two into the
  * high-precision subset a finish-time re-check can safely gate on.
+ * `detectStringifiedMirrorAssert` itself was later widened to close a
+ * narrower RF-8-shaped gap directly: it now also scans `if`/`elif`
+ * error-gating conditionals (not just `assert`/`assertEqual`) and follows a
+ * second alias hop symmetric to the str()-alias one — a bare local bound to
+ * an attr/subscript chain counts as the chain itself — so django-11790's
+ * final pinned form (`widget_maxlength = widget.attrs.get(...)` then
+ * `if widget_maxlength != str(expected_maxlength):`) fires on the mirror
+ * check alone, without needing `detectNumericStringConflict`'s broader
+ * digit-co-occurrence heuristic.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -377,16 +386,15 @@ function extractAssertEqualArgs(line: string): [string, string] | undefined {
 }
 
 /**
- * Extract the two operands of a plain `assert A == B` / `assert A != B`
- * statement — the assert-statement form `extractAssertEqualArgs` does NOT
- * cover (that one is for `assertEqual(...)`/`assertNotEqual(...)` calls).
- * Splits on the first top-level `==`/`!=` (bracket depth 0), then drops a
- * trailing `, "<message>"` off the RHS. Returns `undefined` when the line is
- * not a plain `assert` comparison.
+ * Split a comparison BODY (whatever remains after a caller has stripped its
+ * own prefix/suffix — `assert `, `if `/`elif ` + trailing `:`, etc.) into its
+ * two operands on the first top-level `==`/`!=` (bracket depth 0), then drop
+ * a trailing `, "<message>"` off the RHS. Shared by `extractAssertComparisonSides`
+ * and `extractConditionalComparisonSides` below so the depth-tracking split
+ * logic lives in exactly one place. Returns `undefined` when no top-level
+ * `==`/`!=` is found.
  */
-function extractAssertComparisonSides(line: string): [string, string] | undefined {
-  if (!/^assert\s/.test(line)) return undefined
-  const body = line.replace(/^assert\s+/, "")
+function splitComparisonSides(body: string): [string, string] | undefined {
   let depth = 0
   let opIndex = -1
   for (let i = 0; i < body.length - 1; i++) {
@@ -414,6 +422,38 @@ function extractAssertComparisonSides(line: string): [string, string] | undefine
   return [lhs, rhs.trim()]
 }
 
+/**
+ * Extract the two operands of a plain `assert A == B` / `assert A != B`
+ * statement — the assert-statement form `extractAssertEqualArgs` does NOT
+ * cover (that one is for `assertEqual(...)`/`assertNotEqual(...)` calls).
+ * Delegates the actual split to `splitComparisonSides` once the leading
+ * `assert ` is stripped. Returns `undefined` when the line is not a plain
+ * `assert` comparison.
+ */
+function extractAssertComparisonSides(line: string): [string, string] | undefined {
+  if (!/^assert\s/.test(line)) return undefined
+  return splitComparisonSides(line.replace(/^assert\s+/, ""))
+}
+
+/** Matches an error-gating `if`/`elif` conditional line ending in `:` — `(?:el)?if` matches both keywords since "elif" is literally "el" + "if". */
+const CONDITIONAL_GATE = /^(?:el)?if\s+(.+):$/
+
+/**
+ * Extract the two operands of an `if A == B:` / `if A != B:` / `elif ...:`
+ * error-gating conditional — a script that gates an `errors.append(...)` (or
+ * similar) behind a plain comparison instead of an `assert`, django-11790's
+ * final pinned form. Same split as `extractAssertComparisonSides`, just
+ * stripping the `if `/`elif ` prefix and the trailing `:` instead of
+ * `assert `. Returns `undefined` when the line is not such a conditional, or
+ * has no top-level `==`/`!=` to split on — a membership `in`/`not in` gate,
+ * or a bare truthy check (`if failures:`), never matches.
+ */
+function extractConditionalComparisonSides(line: string): [string, string] | undefined {
+  const match = CONDITIONAL_GATE.exec(line)
+  if (!match) return undefined
+  return splitComparisonSides(match[1])
+}
+
 /** Whether `arg` is a bare `str(...)` wrap — the coercion side of the stringified-mirror pattern. */
 function isStrWrap(arg: string): boolean {
   return /^str\(.*\)$/.test(arg)
@@ -430,53 +470,69 @@ function isAttrOrSubscriptChain(arg: string): boolean {
 }
 
 /**
- * RF-5 — detect whether an assertion line's EXPECTED side is coerced to a
- * string instead of comparing the typed source value directly: a plain
- * `assert x == str(y)` / `assert x != str(y)`, or an `assertEqual(A, B)` /
- * `assertNotEqual(A, B)` where one arg is `str(<chain>)` and the other is an
- * attribute/subscript access chain (not a literal). Also resolves ONE hop of
- * variable indirection: an `expected = str(<chain>)` binding followed by a
- * plain `assert <chain> == expected` — django-11790's evasion draw pinned
- * exactly this aliased form to keep `str(` off the assertion line, while a
- * `str()` source fix passed it and the hidden test's typed assert then failed.
+ * RF-5 — detect whether an assertion or error-gating conditional's EXPECTED
+ * side is coerced to a string instead of comparing the typed source value
+ * directly: a plain `assert x == str(y)` / `assert x != str(y)`, an
+ * `assertEqual(A, B)` / `assertNotEqual(A, B)` call, or an `if A == str(y):`
+ * / `elif A != str(y):` error-gating conditional — one side is `str(<chain>)`
+ * and the other is an attribute/subscript access chain (not a literal).
+ * Resolves ONE hop of variable indirection on EITHER side: an
+ * `expected = str(<chain>)` binding lets a later `assert <chain> ==
+ * expected` / `if <chain> != expected:` fire the same as the inline
+ * `== str(...)` form (django-11790's first evasion), and — symmetrically — a
+ * `local = <chain>` binding (`widget_maxlength = widget.attrs.get(...)`) lets
+ * a later `if local != str(<chain>):` fire the same as comparing the chain
+ * directly (11790's final pinned form, which also swapped the assert for an
+ * `if`/`errors.append` gate specifically to dodge assert-anchored detectors).
  * Returns the offending line, trimmed, or `undefined` when nothing matches.
  * Conservative on purpose: stringifying the SUBJECT under test
  * (`assert str(x) == '1'`, `assertEqual(str(member), 'value')`, or the aliased
- * `actual = str(member); assert actual == '1'`) is legitimate
- * `__str__`/rendering coverage and never fires — the literal side is not an
- * attribute/subscript chain, so the asymmetric guard stays silent — and a bare
- * `str(` outside an assert/assertEqual/assertNotEqual line (a print, an
- * f-string) never fires either.
+ * `actual = str(member); if actual != '1':`) is legitimate `__str__`/rendering
+ * coverage and never fires — the other side is a literal or a plain var with
+ * no chain alias, so the asymmetric guard stays silent; a plain-var-vs-plain-var
+ * conditional (`if a != b:`) never fires either; a membership `in`/`not in`
+ * gate has no top-level `==`/`!=` to split on, so it is skipped outright; and
+ * a bare `str(` outside an assert/assertEqual/assertNotEqual/if/elif line (a
+ * print, an f-string) never fires.
  *
  * @sem domain=routing role=repro-judge
  */
 export function detectStringifiedMirrorAssert(reproContent: string): string | undefined {
   const lines = reproContent.split("\n")
-  // One-hop indirection: identifiers bound to a bare `str(...)` wrap
-  // (`expected = str(field.max_length)`), so an assert comparing that alias
-  // against a typed chain (`assert attr == expected`) is caught the same as
-  // the inline `== str(...)` form.
+  // One-hop indirection on the str() side: identifiers bound to a bare
+  // `str(...)` wrap (`expected = str(field.max_length)`), so a comparison
+  // against that alias is caught the same as the inline `== str(...)` form.
   const strAliases = new Set<string>()
+  // Symmetric one-hop indirection on the CHAIN side: identifiers bound to a
+  // bare attr/subscript chain (`widget_maxlength = widget.attrs.get(...)`),
+  // so a comparison against that alias is caught the same as the chain
+  // itself. A binding goes to exactly one of the two sets, never both — the
+  // str() branch is checked first.
+  const valueAliases = new Set<string>()
   for (const rawLine of lines) {
-    const bind = /^(\w+)\s*=\s*(str\(.*\))$/.exec(rawLine.trim())
-    if (bind && isStrWrap(bind[2])) strAliases.add(bind[1])
+    const bind = /^(\w+)\s*=\s*(.+)$/.exec(rawLine.trim())
+    if (!bind) continue
+    if (isStrWrap(bind[2])) strAliases.add(bind[1])
+    else if (isAttrOrSubscriptChain(bind[2])) valueAliases.add(bind[1])
   }
   const isStrOrAlias = (arg: string) => isStrWrap(arg) || strAliases.has(arg)
+  const isChainOrAlias = (arg: string) => isAttrOrSubscriptChain(arg) || valueAliases.has(arg)
+  const isMirrorPair = (a: string, b: string) =>
+    (isStrOrAlias(a) && isChainOrAlias(b)) || (isStrOrAlias(b) && isChainOrAlias(a))
 
   for (const rawLine of lines) {
     const line = rawLine.trim()
     if (!line) continue
-    const isAssertionLine = /^assert\s+/.test(line) || ASSERT_EQUAL_CALL.test(line)
-    if (!isAssertionLine) continue
 
-    if (STRINGIFIED_EXPECTED_SIDE.test(line)) return line
-
-    const args = extractAssertEqualArgs(line) ?? extractAssertComparisonSides(line)
-    if (!args) continue
-    const [first, second] = args
-    if ((isStrOrAlias(first) && isAttrOrSubscriptChain(second)) || (isStrOrAlias(second) && isAttrOrSubscriptChain(first))) {
-      return line
+    if (/^assert\s+/.test(line) || ASSERT_EQUAL_CALL.test(line)) {
+      if (STRINGIFIED_EXPECTED_SIDE.test(line)) return line
+      const args = extractAssertEqualArgs(line) ?? extractAssertComparisonSides(line)
+      if (args && isMirrorPair(args[0], args[1])) return line
+      continue
     }
+
+    const condArgs = extractConditionalComparisonSides(line)
+    if (condArgs && isMirrorPair(condArgs[0], condArgs[1])) return line
   }
   return undefined
 }
