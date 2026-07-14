@@ -376,6 +376,44 @@ function extractAssertEqualArgs(line: string): [string, string] | undefined {
   return [line.slice(start, commaIndex).trim(), line.slice(commaIndex + 1, end).trim()]
 }
 
+/**
+ * Extract the two operands of a plain `assert A == B` / `assert A != B`
+ * statement — the assert-statement form `extractAssertEqualArgs` does NOT
+ * cover (that one is for `assertEqual(...)`/`assertNotEqual(...)` calls).
+ * Splits on the first top-level `==`/`!=` (bracket depth 0), then drops a
+ * trailing `, "<message>"` off the RHS. Returns `undefined` when the line is
+ * not a plain `assert` comparison.
+ */
+function extractAssertComparisonSides(line: string): [string, string] | undefined {
+  if (!/^assert\s/.test(line)) return undefined
+  const body = line.replace(/^assert\s+/, "")
+  let depth = 0
+  let opIndex = -1
+  for (let i = 0; i < body.length - 1; i++) {
+    const ch = body[i]
+    if (ch === "(" || ch === "[" || ch === "{") depth++
+    else if (ch === ")" || ch === "]" || ch === "}") depth--
+    else if (depth === 0 && (body.slice(i, i + 2) === "==" || body.slice(i, i + 2) === "!=")) {
+      opIndex = i
+      break
+    }
+  }
+  if (opIndex === -1) return undefined
+  const lhs = body.slice(0, opIndex).trim()
+  let rhs = body.slice(opIndex + 2)
+  let d = 0
+  for (let i = 0; i < rhs.length; i++) {
+    const ch = rhs[i]
+    if (ch === "(" || ch === "[" || ch === "{") d++
+    else if (ch === ")" || ch === "]" || ch === "}") d--
+    else if (ch === "," && d === 0) {
+      rhs = rhs.slice(0, i)
+      break
+    }
+  }
+  return [lhs, rhs.trim()]
+}
+
 /** Whether `arg` is a bare `str(...)` wrap — the coercion side of the stringified-mirror pattern. */
 function isStrWrap(arg: string): boolean {
   return /^str\(.*\)$/.test(arg)
@@ -396,20 +434,36 @@ function isAttrOrSubscriptChain(arg: string): boolean {
  * string instead of comparing the typed source value directly: a plain
  * `assert x == str(y)` / `assert x != str(y)`, or an `assertEqual(A, B)` /
  * `assertNotEqual(A, B)` where one arg is `str(<chain>)` and the other is an
- * attribute/subscript access chain (not a literal) — django-11790's shape,
- * where the repro's own pinned assert stringified the mirror and a `str()`
- * fix passed it while the hidden test's typed assert then failed. Returns
- * the offending line, trimmed, or `undefined` when nothing matches.
+ * attribute/subscript access chain (not a literal). Also resolves ONE hop of
+ * variable indirection: an `expected = str(<chain>)` binding followed by a
+ * plain `assert <chain> == expected` — django-11790's evasion draw pinned
+ * exactly this aliased form to keep `str(` off the assertion line, while a
+ * `str()` source fix passed it and the hidden test's typed assert then failed.
+ * Returns the offending line, trimmed, or `undefined` when nothing matches.
  * Conservative on purpose: stringifying the SUBJECT under test
- * (`assert str(x) == '1'`, `assertEqual(str(member), 'value')`) is
- * legitimate `__str__`/rendering coverage and never fires, and a bare
+ * (`assert str(x) == '1'`, `assertEqual(str(member), 'value')`, or the aliased
+ * `actual = str(member); assert actual == '1'`) is legitimate
+ * `__str__`/rendering coverage and never fires — the literal side is not an
+ * attribute/subscript chain, so the asymmetric guard stays silent — and a bare
  * `str(` outside an assert/assertEqual/assertNotEqual line (a print, an
  * f-string) never fires either.
  *
  * @sem domain=routing role=repro-judge
  */
 export function detectStringifiedMirrorAssert(reproContent: string): string | undefined {
-  for (const rawLine of reproContent.split("\n")) {
+  const lines = reproContent.split("\n")
+  // One-hop indirection: identifiers bound to a bare `str(...)` wrap
+  // (`expected = str(field.max_length)`), so an assert comparing that alias
+  // against a typed chain (`assert attr == expected`) is caught the same as
+  // the inline `== str(...)` form.
+  const strAliases = new Set<string>()
+  for (const rawLine of lines) {
+    const bind = /^(\w+)\s*=\s*(str\(.*\))$/.exec(rawLine.trim())
+    if (bind && isStrWrap(bind[2])) strAliases.add(bind[1])
+  }
+  const isStrOrAlias = (arg: string) => isStrWrap(arg) || strAliases.has(arg)
+
+  for (const rawLine of lines) {
     const line = rawLine.trim()
     if (!line) continue
     const isAssertionLine = /^assert\s+/.test(line) || ASSERT_EQUAL_CALL.test(line)
@@ -417,10 +471,10 @@ export function detectStringifiedMirrorAssert(reproContent: string): string | un
 
     if (STRINGIFIED_EXPECTED_SIDE.test(line)) return line
 
-    const args = extractAssertEqualArgs(line)
+    const args = extractAssertEqualArgs(line) ?? extractAssertComparisonSides(line)
     if (!args) continue
     const [first, second] = args
-    if ((isStrWrap(first) && isAttrOrSubscriptChain(second)) || (isStrWrap(second) && isAttrOrSubscriptChain(first))) {
+    if ((isStrOrAlias(first) && isAttrOrSubscriptChain(second)) || (isStrOrAlias(second) && isAttrOrSubscriptChain(first))) {
       return line
     }
   }

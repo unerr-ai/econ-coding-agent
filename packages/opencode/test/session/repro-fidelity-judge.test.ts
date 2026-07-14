@@ -422,6 +422,24 @@ assertEqual(widget.attrs["maxlength"], 254)
 `
     expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
   })
+
+  test("django-11790's ALIASED evasion fires — expected = str(...) one hop up, plain assert compares the alias", () => {
+    const reproContent = `expected = str(form.fields['username'].max_length)
+assert widget_attrs['maxlength'] == expected, (
+    "Expected maxlength=%r, got %r" % (expected, widget_attrs['maxlength'])
+)`
+    expect(detectStringifiedMirrorAssert(reproContent)).toBe("assert widget_attrs['maxlength'] == expected, (")
+  })
+
+  test("does NOT fire on the aliased SUBJECT-stringify __str__ shape (actual = str(member); assert actual == '1')", () => {
+    const reproContent = ["actual = str(member)", "assert actual == '1'"].join("\n")
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+  })
+
+  test("does NOT fire when the aliased str() is compared against a plain (non-chain) rendered variable", () => {
+    const reproContent = ["expected = str(obj.value)", "assert rendered == expected"].join("\n")
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+  })
 })
 
 describe("applyStringifiedMirrorGap", () => {
@@ -689,5 +707,21 @@ c = Columns(qtable, ['a', 'b'], qn)
 assert str(c) == '"a", "b"'
 `
     expect(detectTypeUnfaithfulRepro(reproContent)).toBeUndefined()
+  })
+
+  test("REAL-FIXTURE — fires on arena-11790's attempt-2 aliased evasion repro via the mirror path", () => {
+    const reproContent = `form = AuthenticationForm()
+widget_attrs = form.fields['username'].widget.attrs
+assert 'maxlength' in widget_attrs, (
+    "Regression: missing 'maxlength'. attrs=%r" % dict(widget_attrs)
+)
+expected = str(form.fields['username'].max_length)
+assert widget_attrs['maxlength'] == expected, (
+    "Expected maxlength=%r, got %r" % (expected, widget_attrs['maxlength'])
+)`
+    const result = detectTypeUnfaithfulRepro(reproContent)
+    expect(result).toBeDefined()
+    expect(result).toBe(detectStringifiedMirrorAssert(reproContent))
+    expect(result).toBe("assert widget_attrs['maxlength'] == expected, (")
   })
 })
