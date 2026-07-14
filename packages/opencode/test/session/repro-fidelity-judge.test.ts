@@ -15,7 +15,12 @@
  * a third tooth of the same shape — `detectStringifiedMirrorAssert`/
  * `applyStringifiedMirrorGap` (django-11790's stringified-expected-side
  * assert) — plus prompt-plumbing coverage for `runReproFidelityJudge`'s
- * optional `statedRules` boundary rubric. The
+ * optional `statedRules` boundary rubric. RF-8 adds a fifth tooth,
+ * `detectNumericStringConflict`/`applyNumericStringConflictGap`, for
+ * django-11790's later `if`/`failures.append` evasion (a quoted pure-int
+ * literal on one line vs. the same digit sequence bare elsewhere), plus
+ * `detectTypeUnfaithfulRepro`, the mirror+conflict composite consumed by
+ * a finish-time re-check. The
  * `dispatchPinnedReproFidelity` wiring in prompt.ts (the shared dispatch
  * both pin sites call) is an Effect-generator closure over turn-loop state
  * (sessionID, sessions, lastUser, the per-turn `reproFidelityJudgedThisTurn`
@@ -39,6 +44,10 @@ import {
   detectStringifiedMirrorAssert,
   applyStringifiedMirrorGap,
   STRINGIFIED_MIRROR_GAP,
+  detectNumericStringConflict,
+  applyNumericStringConflictGap,
+  NUMERIC_STRING_CONFLICT_GAP,
+  detectTypeUnfaithfulRepro,
   DEGRADED_REPRO_FIDELITY,
   REPRO_FIDELITY_MAX_GAPS,
   REPRO_FIDELITY_MAX_GAP_CHARS,
@@ -449,5 +458,236 @@ describe("applyStringifiedMirrorGap", () => {
     const merged = applyStringifiedMirrorGap(judgeVerdict, "assert x == str(y)")
     expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
     expect(merged.gaps[0]).toContain(STRINGIFIED_MIRROR_GAP)
+  })
+})
+
+describe("detectNumericStringConflict", () => {
+  test("MUST-FIRE: django-11790's final if/failures.append pair — quoted '150' vs bare 150 elsewhere", () => {
+    const reproContent = [
+      "if field.max_length != 150:",
+      '    failures.append(f"field.max_length = {field.max_length!r}, expected 150")',
+      "",
+      "if widget.attrs.get('maxlength') != '150':",
+      "    failures.append(",
+      "        f\"widget.attrs['maxlength'] = {widget.attrs.get('maxlength')!r}, \"",
+      "        f\"expected '150'. all widget attrs = {dict(widget.attrs)}\"",
+      "    )",
+    ].join("\n")
+    const result = detectNumericStringConflict(reproContent)
+    expect(result).toBeDefined()
+    expect(result).toContain("if widget.attrs.get('maxlength') != '150':")
+    expect(result).toContain("if field.max_length != 150:")
+  })
+
+  test("MUST-FIRE: assert-style quoted numeral vs a bare integer elsewhere", () => {
+    const reproContent = ["expected_code = 254", "assert response_code == '254'"].join("\n")
+    const result = detectNumericStringConflict(reproContent)
+    expect(result).toBeDefined()
+    expect(result).toContain("assert response_code == '254'")
+    expect(result).toContain("expected_code = 254")
+  })
+
+  test("MUST-FIRE: assertEqual(...) call with a quoted numeral vs a bare integer elsewhere", () => {
+    const reproContent = [
+      "assertEqual(widget.attrs.get('maxlength'), '150')",
+      "assert field.max_length == 150",
+    ].join("\n")
+    const result = detectNumericStringConflict(reproContent)
+    expect(result).toBeDefined()
+    expect(result).toContain("assertEqual(widget.attrs.get('maxlength'), '150')")
+    expect(result).toContain("assert field.max_length == 150")
+  })
+
+  test("does NOT fire when str(...) wraps the SUBJECT, even with a bare match elsewhere", () => {
+    const reproContent = ["choice_value = 1", "assert str(choice) == '1'"].join("\n")
+    expect(detectNumericStringConflict(reproContent)).toBeUndefined()
+  })
+
+  test("does NOT fire on a quoted numeral with no bare co-occurrence — could be a legitimately string-typed API value", () => {
+    expect(detectNumericStringConflict("assert x == '150'")).toBeUndefined()
+  })
+
+  test("does NOT fire on a version-string literal", () => {
+    const reproContent = ["minor = 39", "assert django.VERSION_STR == '3.9'"].join("\n")
+    expect(detectNumericStringConflict(reproContent)).toBeUndefined()
+  })
+
+  test("does NOT fire on a quoted literal with embedded quote marks around non-numeral text (12039's real shape)", () => {
+    const reproContent = [
+      'expected1 = \'CREATE INDEX "idx" ON "schema_author" ("name" DESC)\'',
+      "assert out1 == expected1, (out1, expected1)",
+      "count = 150",
+    ].join("\n")
+    expect(detectNumericStringConflict(reproContent)).toBeUndefined()
+  })
+
+  test("does NOT fire on a construction-only line — no comparison at all", () => {
+    const reproContent = ["attrs = {'maxlength': '150'}", "count = 150"].join("\n")
+    expect(detectNumericStringConflict(reproContent)).toBeUndefined()
+  })
+
+  test("does NOT fire on a repr-formatted line", () => {
+    const reproContent = ["count = 150", "assert f\"{x!r}\" == \"'150'\""].join("\n")
+    expect(detectNumericStringConflict(reproContent)).toBeUndefined()
+  })
+
+  test("REAL-FIXTURE — fires on django-11790's actual arena repro_issue.py", () => {
+    const reproContent = `"""
+Regression per #27515 followup / forum report:
+AuthenticationForm's username field does not render with a maxlength
+HTML attribute on its <input>. Per the issue, the username widget MUST
+carry a \`maxlength\` HTML attribute whose value mirrors the User model's
+USERNAME_FIELD max_length (150 for the default User).
+
+Checks below cover the issue's expectation at the API level so the
+underlying value (150) is compared exactly, not just inferred from
+rendered HTML.
+"""
+import django
+from django.conf import settings
+
+settings.configure(
+    DEBUG=True,
+    DATABASES={
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': ':memory:',
+        }
+    },
+    INSTALLED_APPS=[
+        'django.contrib.auth',
+        'django.contrib.contenttypes',
+    ],
+    USE_TZ=True,
+)
+django.setup()
+
+from django.contrib.auth.forms import AuthenticationForm
+
+form = AuthenticationForm()
+field = form.fields['username']
+widget = field.widget
+rendered_html = str(form['username'])
+
+failures = []
+
+if field.max_length != 150:
+    failures.append(f"field.max_length = {field.max_length!r}, expected 150")
+
+if widget.attrs.get('maxlength') != '150':
+    failures.append(
+        f"widget.attrs['maxlength'] = {widget.attrs.get('maxlength')!r}, "
+        f"expected '150'. all widget attrs = {dict(widget.attrs)}"
+    )
+
+if 'maxlength' not in rendered_html:
+    failures.append(f"rendered HTML has no maxlength attr: {rendered_html!r}")
+
+if failures:
+    print('REPRO RED — bug present:')
+    for line in failures:
+        print('  -', line)
+    raise SystemExit(1)
+
+print('REPRO GREEN — no bug.')
+`
+    expect(detectNumericStringConflict(reproContent)).toBeDefined()
+  })
+})
+
+describe("applyNumericStringConflictGap", () => {
+  const faithfulVerdict = { faithful: true, gaps: [] }
+
+  test("a numeral/string conflict forces a gap verdict even when the judge said faithful, naming both lines", () => {
+    const reproContent = ["expected_code = 254", "assert response_code == '254'"].join("\n")
+    const merged = applyNumericStringConflictGap(faithfulVerdict, reproContent)
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toHaveLength(1)
+    expect(merged.gaps[0]).toContain("assert response_code == '254'")
+    expect(merged.gaps[0]).toContain("expected_code = 254")
+    expect(merged.gaps[0]).toContain(NUMERIC_STRING_CONFLICT_GAP)
+  })
+
+  test("content with no conflict is a no-op — same verdict reference returned", () => {
+    const verdict = faithfulVerdict
+    const merged = applyNumericStringConflictGap(verdict, "assert x == '150'")
+    expect(merged).toBe(verdict)
+  })
+
+  test("applying twice on the same content dedupes — the gap is not added a second time", () => {
+    const reproContent = ["expected_code = 254", "assert response_code == '254'"].join("\n")
+    const once = applyNumericStringConflictGap(faithfulVerdict, reproContent)
+    const twice = applyNumericStringConflictGap(once, reproContent)
+    expect(twice.gaps).toHaveLength(1)
+    expect(twice.gaps).toEqual(once.gaps)
+  })
+
+  test("the merged gap list is reclamped to REPRO_FIDELITY_MAX_GAPS, with the conflict gap surviving at index 0", () => {
+    const judgeVerdict = {
+      faithful: false,
+      gaps: Array.from({ length: REPRO_FIDELITY_MAX_GAPS }, (_, i) => `gap ${i}`),
+    }
+    const reproContent = ["expected_code = 254", "assert response_code == '254'"].join("\n")
+    const merged = applyNumericStringConflictGap(judgeVerdict, reproContent)
+    expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
+    expect(merged.gaps[0]).toContain(NUMERIC_STRING_CONFLICT_GAP)
+  })
+})
+
+describe("detectTypeUnfaithfulRepro", () => {
+  test("mirror-fires case returns the stringified-mirror line", () => {
+    const line = "assert widget_maxlength == str(expected_max_length), ("
+    expect(detectTypeUnfaithfulRepro(line)).toBe(line)
+  })
+
+  test("conflict-fires case falls through to the numeral/string conflict when the mirror check finds nothing", () => {
+    const reproContent = [
+      "if field.max_length != 150:",
+      "    failures.append('nope')",
+      "if widget.attrs.get('maxlength') != '150':",
+      "    failures.append('nope')",
+    ].join("\n")
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    const result = detectTypeUnfaithfulRepro(reproContent)
+    expect(result).toBeDefined()
+    expect(result).toEqual(detectNumericStringConflict(reproContent))
+  })
+
+  test("neither check fires on a plain typed-equality assert", () => {
+    expect(detectTypeUnfaithfulRepro("assert response.status_code == 200")).toBeUndefined()
+  })
+
+  test("REAL-FIXTURE — does NOT fire on arena-11848's passing-run assert/comparison lines", () => {
+    const reproContent = `def check(label, actual, expected):
+    assert actual == expected, (
+        f"{label}: expected {expected!r}, got {actual!r}"
+    )
+`
+    expect(detectTypeUnfaithfulRepro(reproContent)).toBeUndefined()
+  })
+
+  test("REAL-FIXTURE — does NOT fire on arena-12039's passing-run assert/comparison lines", () => {
+    const reproContent = `c = Columns(qtable, ['name'], qn, col_suffixes=['DESC'])
+out1 = 'CREATE INDEX "idx" ON "schema_author" (' + str(c) + ')'
+expected1 = 'CREATE INDEX "idx" ON "schema_author" ("name" DESC)'
+assert out1 == expected1, (out1, expected1)
+
+ic = IndexColumns(qtable, ['name'], qn, col_suffixes=[''], opclasses=['text_pattern_ops'])
+out2 = 'CREATE INDEX "idx" ON "schema_author" (' + str(ic) + ')'
+expected2 = 'CREATE INDEX "idx" ON "schema_author" ("name" text_pattern_ops)'
+assert out2 == expected2, (out2, expected2)
+
+ic = IndexColumns(qtable, ['name'], qn, col_suffixes=['DESC'], opclasses=['text_pattern_ops'])
+out3 = str(ic)
+expected3 = '"name" text_pattern_ops DESC'
+assert out3 == expected3, (out3, expected3)
+
+c = Columns(qtable, ['name'], qn, col_suffixes=[''])
+assert str(c) == '"name"'
+
+c = Columns(qtable, ['a', 'b'], qn)
+assert str(c) == '"a", "b"'
+`
+    expect(detectTypeUnfaithfulRepro(reproContent)).toBeUndefined()
   })
 })

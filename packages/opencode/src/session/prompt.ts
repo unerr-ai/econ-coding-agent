@@ -77,6 +77,8 @@ import {
   applyRenderedAssertGap,
   applyRequiredLiteralsGap,
   applyStringifiedMirrorGap,
+  applyNumericStringConflictGap,
+  detectTypeUnfaithfulRepro,
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
@@ -1824,6 +1826,14 @@ export const layer = Layer.effect(
         let turnPinnedProbe: Awaited<ReturnType<typeof deriveTurnProbe>>
         let probeGateRetries = 0
         const MAX_PROBE_GATE_RETRIES = 3
+        // RF-8 — finish-time type-fidelity re-check state: probe-green may not
+        // conclude over a pinned repro whose CURRENT on-disk content carries a
+        // type-unfaithful shape (stringified mirror / quoted-numeral conflict).
+        // The 11790 re-fire proved the pin-time judge runs once on the FIRST
+        // pin, and a nudge-prompted rewrite into if/failures style evades every
+        // assert-anchored detector while keeping the misconception. One bounded
+        // deny, then loud pass-through — never a wedge.
+        let fidelityFinishDenied = false
         // RF-2 §5 — once the oracle-inversion escape has fired, the pin stops
         // binding for the rest of the turn: detection runs once, the verdict
         // is on record, and later finish arrivals pass through loud instead
@@ -1966,11 +1976,14 @@ export const layer = Layer.effect(
           const requiredLiterals = getIssueExpectations(sessionID)
             .filter((l) => l.kind === "expected")
             .map((l) => l.value)
-          const verdict = applyStringifiedMirrorGap(
-            applyRequiredLiteralsGap(
-              applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+          const verdict = applyNumericStringConflictGap(
+            applyStringifiedMirrorGap(
+              applyRequiredLiteralsGap(
+                applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+                reproContent,
+                requiredLiterals,
+              ),
               reproContent,
-              requiredLiterals,
             ),
             reproContent,
           )
@@ -3317,6 +3330,66 @@ export const layer = Layer.effect(
                   })
                 }
               } else {
+                // RF-8 — finish-time type-fidelity re-check (pure code, no
+                // LLM call): the 11790 re-fire finished green over a repro
+                // rewritten AFTER the pin-time judgment — quoted-numeral
+                // expectation ('150') mirroring the agent's own str() source
+                // fix, in if/failures style no assert-anchored detector sees.
+                // Re-read the pin's CURRENT content and deny once on the
+                // HIGH-PRECISION teeth only (stringified mirror +
+                // numeric-string conflict); rendered/teeth classes stay
+                // pin-time converts — a repro may legitimately assert rendered
+                // output when the issue is about rendered output (12039's SQL).
+                const finishScriptPath = extractScriptPath(turnPinnedProbe.probe.command)
+                const finishReproContent =
+                  finishScriptPath === undefined ? undefined : readPinnedReproFile(process.cwd(), finishScriptPath)
+                const finishTypeGap =
+                  finishReproContent === undefined ? undefined : detectTypeUnfaithfulRepro(finishReproContent)
+                if (finishTypeGap !== undefined && !fidelityFinishDenied) {
+                  fidelityFinishDenied = true
+                  yield* publishSignalFx({
+                    name: "fidelity_finish_reject",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { probe: turnPinnedProbe.probe.command, gap: finishTypeGap },
+                  })
+                  yield* Effect.logInfo("turn_probe_green_type_unfaithful", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    gap: finishTypeGap,
+                  })
+                  const typeNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(typeNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: typeNudge.id,
+                    sessionID,
+                    type: "text",
+                    text:
+                      `Your pinned reproduction ran GREEN but its assertions are type-unfaithful: ${finishTypeGap} ` +
+                      `A quoted numeral asserts the STRING representation — hidden graders assert the TYPED value. ` +
+                      `Rewrite the reproduction to assert the mirrored entry with typed equality against its natural ` +
+                      `source (e.g. \`== field.max_length\`, never \`== '150'\`), re-run it red→green under your fix, ` +
+                      `then finish. Do NOT delete the assertion instead of typing it.`,
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+                if (finishTypeGap !== undefined) {
+                  yield* Effect.logWarning("finish_fidelity_unresolved", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    gap: finishTypeGap,
+                  })
+                }
                 // S1 — the accept fall-through: the pin's red evidence (logged
                 // at pin time) and this green run's output tail form the
                 // done-time evidence pair.

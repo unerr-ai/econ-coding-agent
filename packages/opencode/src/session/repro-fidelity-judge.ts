@@ -25,7 +25,16 @@
  * stringified the mirror and a `str()` fix passed it while the hidden
  * test's typed assert then failed) — plus an optional `statedRules` rubric
  * threaded through `runReproFidelityJudge` that asks the judge to check
- * both sides of an issue-stated numeric boundary are exercised.
+ * both sides of an issue-stated numeric boundary are exercised. RF-8 adds a
+ * fifth tooth for the same repro's later evasion: after a fidelity nudge,
+ * the agent rewrote the pinned assert into `if`/`failures.append` form,
+ * dodging every assert-anchored detector above. `detectNumericStringConflict`
+ * is shape-independent — it flags a quoted pure-integer literal (`'150'`)
+ * compared/assertEqual'd on one line while the same digit sequence appears
+ * bare elsewhere in the script, the internal type conflict a `str()` fix
+ * cannot resolve. `applyNumericStringConflictGap` merges it the same way as
+ * RF-5, and `detectTypeUnfaithfulRepro` composes the two into the
+ * high-precision subset a finish-time re-check can safely gate on.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -450,4 +459,124 @@ export function applyStringifiedMirrorGap(verdict: ReproFidelityVerdict, reproCo
     faithful: false,
     gaps: [gap, ...verdict.gaps].slice(0, REPRO_FIDELITY_MAX_GAPS),
   }
+}
+
+/** A `==`/`!=` comparison operator — half the gate (alongside an assertEqual/assertNotEqual call) for the numeral/string conflict check below. */
+const EQUALITY_OP = /==|!=/
+/** A full quoted token that is ONLY digits — `'150'`, `"254"` — never `'3.9'`, `'"name" DESC'`, `'foo'`; the "compared as a string" side of the conflict. */
+const QUOTED_PURE_INT = /(['"])(\d+)\1/
+/** Lines protected from the check below — subject-stringify (`assert str(choice) == '1'`) and repr shapes are the desired discriminator for enum/repr bugs, never flagged. */
+const NUMERIC_CONFLICT_PROTECTED = /\bstr\(|repr\(|!r|%r/
+
+/** Blank out quoted string literals (no escape handling, same simplicity as the rest of this file) so a digit-sequence match afterward is guaranteed to be a BARE token, never one living inside a string literal. */
+function stripQuotedLiterals(content: string): string {
+  return content.replace(/'[^'\n]*'|"[^"\n]*"/g, (quoted) => " ".repeat(quoted.length))
+}
+
+/**
+ * RF-8 — detect a comparison that asserts a numeral as a STRING on one line
+ * while the same digit sequence is compared/assigned/passed as a BARE
+ * integer elsewhere in the repro: a `==`/`!=` comparison (or an
+ * `assertEqual`/`assertNotEqual(` call) whose one side is a full quoted
+ * pure-integer token (`'150'`, never `'3.9'` or `'"name" DESC'`), where that
+ * same digit sequence also appears, unquoted and word-boundary-matched,
+ * anywhere else in the script — django-11790's final pinned repro, rewritten
+ * to `if`/`failures.append` after a fidelity nudge specifically to dodge
+ * every assert-anchored detector in this file: `if field.max_length != 150`
+ * (bare int) alongside `if widget.attrs.get('maxlength') != '150'` (the same
+ * numeral, quoted) is exactly the internal type conflict the hidden test's
+ * typed assert catches and a `str()` source fix does not. Works on any line
+ * shape (if-condition, assert, unittest call) — that is the point, since the
+ * evasion was structural, not assert-specific. Skips a line containing
+ * `str(`, `repr(`, `!r`, or `%r` — stringifying the SUBJECT
+ * (`assert str(choice) == '1'`) is the desired shape for enum/repr coverage
+ * and never fires. Returns a message naming both the quoted-side line and
+ * the bare-int line it conflicts with, verbatim, or `undefined` when nothing
+ * matches. Known limitation (accepted): relatedness of the two occurrences is
+ * approximated by whole-repro digit co-occurrence, so two genuinely unrelated
+ * values sharing a numeral (`status_code == '200'` + `bytes_written = 200`)
+ * can trip it — a same-variable requirement would MISS 11790, whose conflict
+ * spans different attributes (`field.max_length` vs `attrs['maxlength']`). The
+ * cost of a false positive is bounded: the finish re-check denies once with a
+ * nudge and then passes loud, never a wrong verdict.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function detectNumericStringConflict(reproContent: string): string | undefined {
+  const rawLines = reproContent.split("\n")
+  const strippedLines = rawLines.map(stripQuotedLiterals)
+  const strippedContent = strippedLines.join("\n")
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim()
+    if (!line) continue
+    if (NUMERIC_CONFLICT_PROTECTED.test(line)) continue
+    if (!EQUALITY_OP.test(line) && !ASSERT_EQUAL_CALL.test(line)) continue
+
+    const quotedIntPattern = new RegExp(QUOTED_PURE_INT.source, "g")
+    let match: RegExpExecArray | null
+    while ((match = quotedIntPattern.exec(line)) !== null) {
+      const digits = match[2]
+      const bareRegex = new RegExp(`\\b${digits}\\b`)
+      if (!bareRegex.test(strippedContent)) continue
+      const bareLineIndex = strippedLines.findIndex((stripped, idx) => idx !== i && bareRegex.test(stripped))
+      const bareLine = (bareLineIndex === -1 ? rawLines[i] : rawLines[bareLineIndex]).trim()
+      return `type conflict: "${line}" asserts ${digits} as a STRING, while "${bareLine}" compares the same ${digits} as a bare integer`
+    }
+  }
+  return undefined
+}
+
+/**
+ * RF-8 — the static explanation appended after `detectNumericStringConflict`'s
+ * message in the gap `applyNumericStringConflictGap` merges — same
+ * discriminator as `STRINGIFIED_MIRROR_GAP`: assert the typed value against
+ * its natural source, not the quoted numeral.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export const NUMERIC_STRING_CONFLICT_GAP =
+  "the quoted-numeral side asserts the STRING representation; assert the typed value against its natural source instead (e.g. == field.max_length, not == '150')."
+
+/**
+ * RF-8 — force a fidelity gap when the pinned script asserts the same
+ * numeral as a string on one line and a bare integer on another, regardless
+ * of what the LLM judge said: a no-op (same reference returned) when
+ * `detectNumericStringConflict` finds nothing, otherwise overrides to
+ * `faithful:false` with a gap naming the conflict verbatim, PREPENDED to any
+ * existing gaps (deduped against an identical gap already present anywhere
+ * in the list) and reclamped to `REPRO_FIDELITY_MAX_GAPS` — same prepend
+ * pattern as `applyStringifiedMirrorGap` so its gap survives the cap; chained
+ * outside it, this is the new outermost tooth.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function applyNumericStringConflictGap(
+  verdict: ReproFidelityVerdict,
+  reproContent: string,
+): ReproFidelityVerdict {
+  const conflict = detectNumericStringConflict(reproContent)
+  if (conflict === undefined) return verdict
+  const gap = `${conflict} — ${NUMERIC_STRING_CONFLICT_GAP}`
+  if (verdict.gaps.includes(gap)) return verdict
+  return {
+    faithful: false,
+    gaps: [gap, ...verdict.gaps].slice(0, REPRO_FIDELITY_MAX_GAPS),
+  }
+}
+
+/**
+ * RF-8 — the finish-time re-check's HIGH-PRECISION composite:
+ * `detectStringifiedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)`.
+ * Both are structural, assert-shape-independent conflicts between a typed
+ * value and its stringified mirror. The rendered/serialized-surface (RF-4)
+ * and assertion-teeth (F14b) classes are deliberately excluded here — a
+ * repro may legitimately assert rendered output when the issue IS about
+ * rendered output (e.g. a SQL-string DDL bug), so those stay judge-only /
+ * pin-time-only rather than blocking a finish.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function detectTypeUnfaithfulRepro(reproContent: string): string | undefined {
+  return detectStringifiedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)
 }

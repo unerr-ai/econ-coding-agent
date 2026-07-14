@@ -267,9 +267,9 @@ evidence) → retry passes as today; we hold nothing without evidence.
 
 ## 8. Repro-fidelity teeth (RF-4 — the 11790/12039 class)
 
-Four deterministic checks merged into the verdict exactly like the existing F14b
+Five deterministic checks merged into the verdict exactly like the existing F14b
 `applyAssertionTeethGap` (`repro-fidelity-judge.ts:178-184`), chained in order:
-assertion-teeth → rendered-assert → required-literals → stringified-mirror:
+assertion-teeth → rendered-assert → required-literals → stringified-mirror → numeric-string-conflict:
 
 1. **Rendered-assert detector**: substring/`assertIn` asserts against
    rendered/serialized values (`in html`-shaped, `str(…)`/f-string/`render()` on the
@@ -287,10 +287,55 @@ assertion-teeth → rendered-assert → required-literals → stringified-mirror
    lines. Forced gap: *"the prior forbids stringifying — you are asserting the mirror"*
    (addresses 11790's typed-equality anti-pattern). Publish `STRINGIFIED_MIRROR_GAP` with
    context of the mirrored expression.
+4. **Numeric-string-conflict tooth** (new RF-8, 2026-07-14): `detectNumericStringConflict`
+   fires when a quoted pure-integer literal (`'150'`, `'255'`) is compared/assert-tested
+   on one line while the same digit sequence appears bare elsewhere in the repro script,
+   signaling an internal type conflict a `str()` fix cannot resolve. Does NOT fire on
+   `\bstr\(` subject-stringify (11964/12039's legit `assert str(c) == '"name"'` shape),
+   non-numeric strings (`'3.9'`, `'"name" DESC'`, `'foo'`), or repr/format tokens (`%r`,
+   `%s`, `f"..."`). Forced gap: *"typed-integer literal discrepancy: you are comparing
+   a quoted string where the issue and code show the unquoted number"*. Merges via
+   `applyNumericStringConflictGap` alongside RF-5. `detectTypeUnfaithfulRepro` composes
+   stringified-mirror + numeric-string-conflict into the high-precision subset a
+   finish-time re-check gates on.
 
-All four publish `fidelity_gap`; the LLM fidelity judge still runs for what mechanics can't
+All five publish `fidelity_gap`; the LLM fidelity judge still runs for what mechanics can't
 see. Gaps → existing `reproFidelityNudgeText` render, unchanged. All are converts (nudge),
 never blocks.
+
+---
+
+## 8.1 RF-8 finish-time type-fidelity re-check (2026-07-14, IMPLEMENTED)
+
+**The hole it closes:** the 11790 re-fire showed the agent can evade pin-time fidelity
+detection by rewriting a pinned repro between judgment and finish — from `assert maxlength != 254`
+(fails on `'254'` fix) into `if val != '150': failures.append(...)` form, dodging every
+assert-anchored detector. The pinned-repro-judged-once-per-turn discipline meant no
+re-judgment, and the M4 finish gate accepted the probe-green result with zero content
+re-check. The fix adds one bounded re-check at M4 green finish inside prompt.ts (lines
+3345–3358): extract the on-disk pinned repro's CURRENT content (not memory-cached),
+re-run `detectTypeUnfaithfulRepro` composite (the high-precision subset), and on a
+positive hit (numeric-string conflict OR stringified-mirror), deny once with a nudge
+naming the offending line and demanding typed equality against the natural source.
+Subsequent green finish passes loud (no re-entry wedge). One `fidelity_finish_reject`
+signal publishes per turn, decision `"convert"`.
+
+**False-fire audit (5 of 7 round-F *passing* runs logged fidelity gaps — 11815/11951/11964/11999/12050):**
+all 5 gap records were either rendered-tooth static text (11815/11964/12050 — the
+"'255' vs 255" line) or LLM-judge prose (11951 bulk_create, 11999 tool-batch), NOT
+numeric-string or stringified-mirror conflicts — the finish-denier consumes only the
+high-precision composite, so a naive all-gaps denier would have false-fired on all 5
+while RF-8 fires on none. The three on-disk final repros confirm it directly: 11790 FIRES
+(`field.max_length != 150` bare vs `attrs.get('maxlength') != '150'` quoted — the target),
+11848 clean (asserts `datetime` objects), 12039 clean (asserts letter/quote strings plus
+the protected `assert str(c) == '"name"'` subject-stringify).
+
+**Live re-fire of 11790 on rebuilt binary pending** — the hole is sealed; the gate is
+now bidirectional (repro integrity at pin time + content integrity at finish time);
+the enforcement chain is stronger.
+
+Recon sites: `repro-fidelity-judge.ts:31-37` (mechanism documented), `prompt.ts:3345-3358`
+(finish-check wiring + fidelityFinishDenied flag), `signal-bus.ts:26` (signal definition).
 
 ---
 
