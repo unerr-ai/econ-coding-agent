@@ -11,7 +11,7 @@
  */
 import type { VerifyCommand } from "@opencode-ai/code-intelligence"
 import type { TriageVerdict } from "./turn-triage"
-import type { IssueExpectation } from "./issue-expectations"
+import type { IssueExpectation, IssueThreshold } from "./issue-expectations"
 
 /** M4/S1 — the turn-end pinned reproduction, plus (only for a runner-confirmed red) the exit/tail evidence that proved it red. Structurally identical to slice-orchestrator's `TurnProbePin` (colocated here rather than imported, so this store stays dependency-free of the orchestrator module). */
 export interface TurnProbePin {
@@ -100,4 +100,18 @@ export function setIssueExpectations(sessionID: string, literals: readonly Issue
 /** The turn's issue-stated literals — the fidelity judge's required-coverage list and the oracle-inversion detector's evidence. */
 export function getIssueExpectations(sessionID: string): readonly IssueExpectation[] {
   return expectationsBySession.get(sessionID) ?? []
+}
+
+/** Round F fix-wave — issue-stated numeric boundary rules (11848's "more than 50 years… MUST"): sessionID → the rules the fidelity judge must see asserted on BOTH sides. */
+const thresholdsBySession = new Map<string, readonly IssueThreshold[]>()
+
+/** Record (or, on empty, clear) the fresh turn's issue-stated boundary rules. Extracted by pure code, so this runs even on a degraded turn-read. */
+export function setIssueThresholds(sessionID: string, thresholds: readonly IssueThreshold[]): void {
+  if (thresholds.length > 0) thresholdsBySession.set(sessionID, thresholds)
+  else thresholdsBySession.delete(sessionID)
+}
+
+/** The turn's issue-stated boundary rules — rendered into the fidelity judge's rubric as stated-rule coverage. */
+export function getIssueThresholds(sessionID: string): readonly IssueThreshold[] {
+  return thresholdsBySession.get(sessionID) ?? []
 }

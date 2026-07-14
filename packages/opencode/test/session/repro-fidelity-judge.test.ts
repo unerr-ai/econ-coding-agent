@@ -11,7 +11,11 @@
  * gap verdict even when the judge said faithful/degraded). RF-4 adds two
  * more of the same shape: `detectRenderedAssert`/`applyRenderedAssertGap`
  * (rendered/serialized-surface asserts) and `missingRequiredLiterals`/
- * `applyRequiredLiteralsGap` (§6 issue-derived literal coverage). The
+ * `applyRequiredLiteralsGap` (§6 issue-derived literal coverage). RF-5 adds
+ * a third tooth of the same shape — `detectStringifiedMirrorAssert`/
+ * `applyStringifiedMirrorGap` (django-11790's stringified-expected-side
+ * assert) — plus prompt-plumbing coverage for `runReproFidelityJudge`'s
+ * optional `statedRules` boundary rubric. The
  * `dispatchPinnedReproFidelity` wiring in prompt.ts (the shared dispatch
  * both pin sites call) is an Effect-generator closure over turn-loop state
  * (sessionID, sessions, lastUser, the per-turn `reproFidelityJudgedThisTurn`
@@ -32,6 +36,9 @@ import {
   RENDERED_ASSERT_GAP,
   missingRequiredLiterals,
   applyRequiredLiteralsGap,
+  detectStringifiedMirrorAssert,
+  applyStringifiedMirrorGap,
+  STRINGIFIED_MIRROR_GAP,
   DEGRADED_REPRO_FIDELITY,
   REPRO_FIDELITY_MAX_GAPS,
   REPRO_FIDELITY_MAX_GAP_CHARS,
@@ -140,6 +147,38 @@ describe("runReproFidelityJudge", () => {
     expect(seenSystem).toContain("repro-fidelity judge")
     expect(seenUser).toContain(issueText)
     expect(seenUser).toContain(reproContent)
+  })
+
+  test("statedRules renders each rule and the both-sides instruction into the prompt", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    const statedRules = ["more than 50 years in the future MUST interpret as past"]
+    await runReproFidelityJudge({ issueText, reproContent, complete, statedRules })
+    expect(seenUser).toContain(statedRules[0])
+    expect(seenUser).toContain("assert behavior on BOTH sides of the stated boundary")
+  })
+
+  test("absent statedRules leaves the prompt byte-for-byte unchanged", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({ issueText, reproContent, complete })
+    expect(seenUser).toBe(`## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}`)
+  })
+
+  test("empty statedRules array also leaves the prompt unchanged", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({ issueText, reproContent, complete, statedRules: [] })
+    expect(seenUser).toBe(`## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}`)
   })
 })
 
@@ -315,5 +354,100 @@ describe("missingRequiredLiterals / applyRequiredLiteralsGap", () => {
     }
     const merged = applyRequiredLiteralsGap(judgeVerdict, reproContent, ['"name" DESC'])
     expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
+  })
+})
+
+describe("detectStringifiedMirrorAssert", () => {
+  test("django-11790's exact line fires", () => {
+    const line = "assert widget_maxlength == str(expected_max_length), ("
+    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+  })
+
+  test("assertEqual with the str(...) mirror on the second arg fires", () => {
+    const line = "assertEqual(widget.attrs['maxlength'], str(max_length))"
+    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+  })
+
+  test("does NOT fire when str(...) wraps the SUBJECT, not the expected side (plain assert)", () => {
+    expect(detectStringifiedMirrorAssert("assert str(Suit.HEART) == '1'")).toBeUndefined()
+  })
+
+  test("does NOT fire when str(...) wraps the subject and the other arg is a literal (assertEqual)", () => {
+    expect(detectStringifiedMirrorAssert("assertEqual(str(member), 'value')")).toBeUndefined()
+  })
+
+  test("does NOT fire on a plain typed-equality assert", () => {
+    expect(detectStringifiedMirrorAssert("assert form.fields['username'].max_length == 255")).toBeUndefined()
+  })
+
+  test("does NOT fire on a membership assert", () => {
+    expect(detectStringifiedMirrorAssert("assert 'maxlength' in attrs")).toBeUndefined()
+  })
+
+  test("does NOT fire on str() outside an assert line", () => {
+    expect(detectStringifiedMirrorAssert('print(f"{str(x)}")')).toBeUndefined()
+  })
+
+  test("does NOT fire on a bare typed-equality assert with no str() at all", () => {
+    expect(detectStringifiedMirrorAssert("assert value == expected")).toBeUndefined()
+  })
+
+  test("does NOT fire on a strftime line", () => {
+    expect(
+      detectStringifiedMirrorAssert('assert event.created_at.strftime("%Y-%m-%d") == "2024-01-01"'),
+    ).toBeUndefined()
+  })
+
+  test("does NOT fire anywhere in a full realistic multi-line repro with typed asserts", () => {
+    const reproContent = `
+import django
+from myapp.models import Widget
+
+widget = Widget.objects.get(pk=1)
+field = widget._meta.get_field("name")
+assert field.max_length == 254
+assert isinstance(field.max_length, int)
+print(f"max_length type: {type(field.max_length)}")
+assert widget.name.startswith("test")
+assertEqual(widget.attrs["maxlength"], 254)
+`
+    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+  })
+})
+
+describe("applyStringifiedMirrorGap", () => {
+  const faithfulVerdict = { faithful: true, gaps: [] }
+
+  test("a stringified-mirror hit forces a gap verdict even when the judge said faithful, naming the offending line", () => {
+    const reproContent = "assert widget_maxlength == str(expected_max_length), ("
+    const merged = applyStringifiedMirrorGap(faithfulVerdict, reproContent)
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toHaveLength(1)
+    expect(merged.gaps[0]).toContain(reproContent)
+    expect(merged.gaps[0]).toContain(STRINGIFIED_MIRROR_GAP)
+  })
+
+  test("content with no stringified-mirror shape is a no-op — same verdict reference returned", () => {
+    const verdict = faithfulVerdict
+    const merged = applyStringifiedMirrorGap(verdict, "assert form.fields['username'].max_length == 254")
+    expect(merged).toBe(verdict)
+  })
+
+  test("applying twice on the same content dedupes — the gap is not added a second time", () => {
+    const reproContent = "assert x == str(y)"
+    const once = applyStringifiedMirrorGap(faithfulVerdict, reproContent)
+    const twice = applyStringifiedMirrorGap(once, reproContent)
+    expect(twice.gaps).toHaveLength(1)
+    expect(twice.gaps).toEqual(once.gaps)
+  })
+
+  test("the merged gap list is reclamped to REPRO_FIDELITY_MAX_GAPS, with the mirror gap surviving at index 0", () => {
+    const judgeVerdict = {
+      faithful: false,
+      gaps: Array.from({ length: REPRO_FIDELITY_MAX_GAPS }, (_, i) => `gap ${i}`),
+    }
+    const merged = applyStringifiedMirrorGap(judgeVerdict, "assert x == str(y)")
+    expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
+    expect(merged.gaps[0]).toContain(STRINGIFIED_MIRROR_GAP)
   })
 })

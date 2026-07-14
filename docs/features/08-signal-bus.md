@@ -213,15 +213,33 @@ assertion-shaped lines (`==`, `assert`, `!=`) inside code blocks; traceback last
 No LLM call — recon confirmed nothing parses issue text for values today
 (`extractIssueSymbols` at `graph-tools.ts:442-466` extracts graph symbols only).
 
+**New in round F:** `extractIssueThresholds` captures sentence-scoped numeric bounds:
+`IssueThreshold = { value: number, quote: string }` from patterns like "more than 50 years",
+"at least N", "up to X", gated on rule-force words (must/should/interpret/treat/consider/required).
+Cap 3 per issue. Extracted 11848's "more than 50 years … MUST interpret" rule. Also: prose-block
+extraction via `EXPECTED_PROSE_BLOCK_RE` (lines with "would be expected:", "should be:", etc.)
+and `ACTUAL_PROSE_BLOCK_RE` ("instead of:", "rather than:", "currently generates:", "will generate")
+— extracts same-line-after-colon or next-non-empty-non-fence line. Captured both CREATE INDEX
+variants in 12039's expected block. Fixture-tested against all 10 Mini-10 PROMPT.txt files; 0 false
+fires on the 7 passing cases.
+
 Stored at turn-open next to the pin (`turn-read-store.ts` pattern, keyed by session).
-Three consumers:
+Four consumers:
 
 1. **Repro seed contract**: skeleton build appends one line to the repro todo — *"your
    repro MUST assert these issue-stated values with typed equality: …"* (the compiled
-   list).
+   list). For thresholds: *"assert BOTH sides of each stated boundary"* binding preamble.
 2. **Fidelity judge** (§8): the literals ride in as `requiredLiterals` — quote-coverage
    becomes deterministic, not judge discretion.
-3. **Oracle-inversion detector** (§5).
+3. **Stated boundary rules rubric**: `RunReproFidelityJudgeInput.statedRules?: readonly string[]` 
+   threads the threshold quotes into the judge prompt as a "Stated boundary rules" both-sides-of-boundary
+   rubric (byte-identical when absent).
+4. **Oracle-inversion detector** (§5).
+
+**P5 turn-read degrade behavior**: when the LLM turn-read returns null, the mechanical
+extractors still run (`extractIssueExpectations`, `extractIssueThresholds`) — literals +
+thresholds are facts not guesses. The binding preamble lines are planted verbatim. Extraction
+failures never block the turn.
 
 ---
 
@@ -249,8 +267,9 @@ evidence) → retry passes as today; we hold nothing without evidence.
 
 ## 8. Repro-fidelity teeth (RF-4 — the 11790/12039 class)
 
-Two deterministic checks merged into the verdict exactly like the existing F14b
-`applyAssertionTeethGap` (`repro-fidelity-judge.ts:178-184`):
+Four deterministic checks merged into the verdict exactly like the existing F14b
+`applyAssertionTeethGap` (`repro-fidelity-judge.ts:178-184`), chained in order:
+assertion-teeth → rendered-assert → required-literals → stringified-mirror:
 
 1. **Rendered-assert detector**: substring/`assertIn` asserts against
    rendered/serialized values (`in html`-shaped, `str(…)`/f-string/`render()` on the
@@ -258,16 +277,24 @@ Two deterministic checks merged into the verdict exactly like the existing F14b
    API-LEVEL value with == — rendered output hides type differences like '255' vs
    255."* This flips 11790's exact face (`'maxlength="254"' in html`, judged
    `repro_fidelity_ok` on 0713).
-2. **Required-literal coverage**: any §6 literal absent from the repro content →
-   forced gap naming the missing literals (converts 12039's ignored
+2. **Required-literal coverage** (§6): any §6 literal/threshold absent from the repro
+   content → forced gap naming the missing literals (converts 12039's ignored
    `'"name" DESC'`-style witness into a binding requirement).
+3. **Stringified-mirror tooth** (new round F): `detectStringifiedMirrorAssert` fires when
+   an assert's expected side stringifies the value under test (`== str(x)`,
+   `assertEqual(chain, str(chain))`) — proves representation, not type. Does NOT fire on
+   subject-stringify (`assert str(x) == 'literal'`), membership asserts, strftime, non-assert
+   lines. Forced gap: *"the prior forbids stringifying — you are asserting the mirror"*
+   (addresses 11790's typed-equality anti-pattern). Publish `STRINGIFIED_MIRROR_GAP` with
+   context of the mirrored expression.
 
-Both publish `fidelity_gap`; the LLM fidelity judge still runs for what mechanics can't
-see. Gap → existing `reproFidelityNudgeText` render, unchanged.
+All four publish `fidelity_gap`; the LLM fidelity judge still runs for what mechanics can't
+see. Gaps → existing `reproFidelityNudgeText` render, unchanged. All are converts (nudge),
+never blocks.
 
 ---
 
-## 9. Interpreter discipline (RF-6 — the 11964-A/11848-B class)
+## 9. Interpreter discipline + script-path fix (RF-6 — the 11964-A/11848-B class)
 
 F14a discovery (`regression-neighbors.ts:458-469`, `discoverProjectInterpreter`) governs
 only the regression gate today; the M4 finish gate runs the pinned command **as-is**
@@ -279,6 +306,12 @@ using the turn-cached `turnDiscoveredInterpreter` (`prompt.ts:1831`). When a rew
 changes the command, publish `interpreter_mismatch` and CONVERT-nudge the agent once to
 use the discovered interpreter for its own runs (11964-A's phantom `ChoicesMeta`
 TypeError came from base-conda py3.11 vs testbed py3.6).
+
+**New in round F:** `extractScriptPath` (repro-drift.ts) replaces basename extraction in
+`dispatchPinnedReproFidelity` + `toothlessPinScript`. Returns the full script token as
+written, honoring absolute paths — round-F 11848's repro lived at `/var/folders/…/T/opencode/`
+and the old basename-only extraction degraded to file-missing. Used by both the drift
+detector and the fidelity dispatcher.
 
 ---
 

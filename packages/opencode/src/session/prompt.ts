@@ -67,7 +67,7 @@ import {
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
 } from "./prompts/nudges"
-import { classifyReproDrift, extractScriptFilename, type ReproDriftKind } from "./repro-drift"
+import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
 import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
 import {
@@ -76,6 +76,7 @@ import {
   applyAssertionTeethGap,
   applyRenderedAssertGap,
   applyRequiredLiteralsGap,
+  applyStringifiedMirrorGap,
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
@@ -98,7 +99,7 @@ import {
   resetSignals,
   summaryLogLine,
 } from "./signal-bus"
-import { detectOracleInversion, extractIssueExpectations } from "./issue-expectations"
+import { detectOracleInversion, extractIssueExpectations, extractIssueThresholds } from "./issue-expectations"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
   STRUCTURED_OUTPUT_SYSTEM_PROMPT,
@@ -178,6 +179,8 @@ import {
   getTurnFiles,
   setIssueExpectations,
   getIssueExpectations,
+  setIssueThresholds,
+  getIssueThresholds,
   recordGateBlock,
   clearGateBlock,
   getGateBlocks,
@@ -401,7 +404,10 @@ const REPRO_FIDELITY_MAX_FILE_BYTES = 8 * 1024
  * judge silently, never blocking the pin.
  */
 function readPinnedReproFile(cwd: string, filename: string): string | undefined {
-  const target = path.join(cwd, filename)
+  // An agent may pin a repro at an absolute path outside the worktree (round F
+  // caught /var/folders/…/T/opencode/repro_parse_http_date.py) — joining that
+  // onto cwd fabricates a missing path and blinds the fidelity judge.
+  const target = path.isAbsolute(filename) ? filename : path.join(cwd, filename)
   if (!existsSync(target)) return undefined
   try {
     const raw = readFileSync(target, "utf8")
@@ -423,7 +429,7 @@ function readPinnedReproFile(cwd: string, filename: string): string | undefined 
  */
 function toothlessPinScript(cwd: string, command: string): string | undefined {
   if (!isReproScratchPath(command)) return undefined
-  const filename = extractScriptFilename(command)
+  const filename = extractScriptPath(command)
   if (!filename) return undefined
   const content = readPinnedReproFile(cwd, filename)
   if (content === undefined) return undefined
@@ -742,8 +748,9 @@ export const layer = Layer.effect(
     const reproFidelityDispatch = Effect.fn("SessionPrompt.reproFidelityDispatch")(function* (input: {
       issueText: string
       reproContent: string
+      statedRules?: readonly string[]
     }) {
-      const { issueText, reproContent } = input
+      const { issueText, reproContent, statedRules } = input
       const m = resolveSliceModel("executor")
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
@@ -762,7 +769,7 @@ export const layer = Layer.effect(
         })
         return out.text.trim() || (out.reasoningText ?? "")
       }
-      const verdict = yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, complete }))
+      const verdict = yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, statedRules, complete }))
       return {
         verdict,
         degradedReason: verdict === DEGRADED_REPRO_FIDELITY ? ("judge-degraded" as const) : undefined,
@@ -1935,31 +1942,37 @@ export const layer = Layer.effect(
           if (reproFidelityJudgedThisTurn) return { gap: false }
           reproFidelityJudgedThisTurn = true
           const { sessionID, cwd, probeCommand, issueText, lastUser } = input
-          const fidelityScriptFilename = extractScriptFilename(probeCommand)
-          if (!fidelityScriptFilename) {
+          const fidelityScriptPath = extractScriptPath(probeCommand)
+          if (!fidelityScriptPath) {
             yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: "no-script-filename" })
             return { gap: false }
           }
-          const reproContent = readPinnedReproFile(cwd, fidelityScriptFilename)
+          const reproContent = readPinnedReproFile(cwd, fidelityScriptPath)
           if (reproContent === undefined) {
             yield* Effect.logInfo("repro_fidelity_degraded", { "session.id": sessionID, reason: "file-missing" })
             return { gap: false }
           }
-          const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent })
+          const statedRules = getIssueThresholds(sessionID).map((t) => t.quote)
+          const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent, statedRules })
           // RF-4 §8 — the deterministic teeth stack: assertion teeth (F14b),
           // the rendered-assert detector (11790's `'maxlength="254"' in html`
-          // face, judged repro_fidelity_ok on 0713), and required-literal
+          // face, judged repro_fidelity_ok on 0713), required-literal
           // coverage from the issue-derived expectations (12039's ignored
-          // `'"name" DESC'` witness) — each merges as a forced gap exactly
-          // like the teeth gap; the LLM verdict still covers what mechanics
-          // can't see.
+          // `'"name" DESC'` witness), and the stringified-mirror detector
+          // (round F 11790's `== str(created.pk)` — an assert whose expected
+          // side stringifies the very value under test proves representation,
+          // not type) — each merges as a forced gap exactly like the teeth
+          // gap; the LLM verdict still covers what mechanics can't see.
           const requiredLiterals = getIssueExpectations(sessionID)
             .filter((l) => l.kind === "expected")
             .map((l) => l.value)
-          const verdict = applyRequiredLiteralsGap(
-            applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+          const verdict = applyStringifiedMirrorGap(
+            applyRequiredLiteralsGap(
+              applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+              reproContent,
+              requiredLiterals,
+            ),
             reproContent,
-            requiredLiterals,
           )
           const degradedReason = verdict === fidelityOutcome.verdict ? fidelityOutcome.degradedReason : undefined
           if (degradedReason) {
@@ -3196,6 +3209,7 @@ export const layer = Layer.effect(
                       redTail: gate.outputTail,
                       candidates: [...hubEditDefiningFiles(sessionID), ...getTurnFiles(sessionID)],
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                      statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                     })
                     continue
                   }
@@ -3285,6 +3299,7 @@ export const layer = Layer.effect(
                     redTail: gate.outputTail,
                     candidates: [...hubEditDefiningFiles(sessionID), ...getTurnFiles(sessionID)],
                     expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                    statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                   })
                   continue
                 } else {
@@ -3409,6 +3424,7 @@ export const layer = Layer.effect(
                       probeCommand: turnPinnedProbe?.probe.command,
                       candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                      statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                     })
                     continue
                   }
@@ -3577,6 +3593,7 @@ export const layer = Layer.effect(
                         probeCommand: turnPinnedProbe?.probe.command,
                         candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
                         expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                        statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                       })
                       continue
                     }
@@ -3753,6 +3770,7 @@ export const layer = Layer.effect(
                           redTail: failingNeighbors[0]?.outputTail,
                           candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
                           expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                          statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                         })
                         continue
                       }
@@ -4015,17 +4033,29 @@ export const layer = Layer.effect(
                 // conductor sees every step.
                 const issueLiterals = extractIssueExpectations(userText).literals
                 setIssueExpectations(sessionID, issueLiterals)
-                if (issueLiterals.length > 0) {
+                const issueThresholds = extractIssueThresholds(userText)
+                setIssueThresholds(sessionID, issueThresholds)
+                if (issueLiterals.length > 0 || issueThresholds.length > 0) {
                   yield* Effect.logInfo("turn_issue_expectations", {
                     "session.id": sessionID,
                     count: issueLiterals.length,
                     literals: issueLiterals.map((l) => `${l.kind}:${l.value}`),
+                    thresholds: issueThresholds.map((t) => t.value),
                   })
+                }
+                if (issueLiterals.length > 0) {
                   turnPreamble =
                     (turnPreamble ?? "") +
                     `\n\nISSUE-STATED VALUES (binding): your reproduction must assert these with typed equality — ` +
                     issueLiterals.map((l) => `${l.kind === "actual" ? "current/buggy" : l.kind}: \`${l.value}\``).join(" · ") +
                     `\nA repro that only prints or substring-matches rendered output does not count as asserting them.`
+                }
+                if (issueThresholds.length > 0) {
+                  turnPreamble =
+                    (turnPreamble ?? "") +
+                    `\n\nISSUE-STATED RULES (binding): the issue states boundary rules — your reproduction must ` +
+                    `assert BOTH sides of each boundary (the value at the limit AND the value past it):\n` +
+                    issueThresholds.map((t) => `- "${t.quote}"`).join("\n")
                 }
 
                 // M4 — the probe pin keys on the VERDICT: a diagnosis-shaped
@@ -4080,18 +4110,47 @@ export const layer = Layer.effect(
                   yield* todoStore.update({ sessionID, todos: skeleton }).pipe(Effect.ignore)
                 }
               } else {
-                // P5 NEUTRAL DEGRADE — a null turn plants NOTHING: no
-                // preamble, no skeleton, no probe pin, no no-edits gate, and
-                // the continuation store CLEARS (a degraded turn has no goal
-                // tree to continue). A wrong guess steers the conductor worse
-                // than no guess. Only the governance regexes still arm the
-                // no-test-edit gate.
+                // P5 NEUTRAL DEGRADE — a null turn plants no LLM-derived
+                // guesses: no triage preamble, no skeleton, no probe pin, no
+                // no-edits gate, and the continuation store CLEARS (a degraded
+                // turn has no goal tree to continue). A wrong guess steers the
+                // conductor worse than no guess. But the MECHANICAL extractors
+                // below still run — issue-stated literals/thresholds are
+                // verbatim quotes (facts, not guesses), and round F's 11848
+                // showed the whole witness pipeline dying when they stood down
+                // with the LLM.
                 setTestEditGate(sessionID, regexDenyTestEdits)
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
                 setNoEditsGate(sessionID, false)
                 setTurnVerdict(sessionID, null)
                 setTurnFiles(sessionID, [])
-                setIssueExpectations(sessionID, [])
+                const degradedLiterals = extractIssueExpectations(userText).literals
+                setIssueExpectations(sessionID, degradedLiterals)
+                const degradedThresholds = extractIssueThresholds(userText)
+                setIssueThresholds(sessionID, degradedThresholds)
+                if (degradedLiterals.length > 0 || degradedThresholds.length > 0) {
+                  yield* Effect.logInfo("turn_issue_expectations", {
+                    "session.id": sessionID,
+                    count: degradedLiterals.length,
+                    literals: degradedLiterals.map((l) => `${l.kind}:${l.value}`),
+                    thresholds: degradedThresholds.map((t) => t.value),
+                    degraded: true,
+                  })
+                }
+                if (degradedLiterals.length > 0) {
+                  turnPreamble =
+                    (turnPreamble ?? "") +
+                    `\n\nISSUE-STATED VALUES (binding): your reproduction must assert these with typed equality — ` +
+                    degradedLiterals.map((l) => `${l.kind === "actual" ? "current/buggy" : l.kind}: \`${l.value}\``).join(" · ") +
+                    `\nA repro that only prints or substring-matches rendered output does not count as asserting them.`
+                }
+                if (degradedThresholds.length > 0) {
+                  turnPreamble =
+                    (turnPreamble ?? "") +
+                    `\n\nISSUE-STATED RULES (binding): the issue states boundary rules — your reproduction must ` +
+                    `assert BOTH sides of each boundary (the value at the limit AND the value past it):\n` +
+                    degradedThresholds.map((t) => `- "${t.quote}"`).join("\n")
+                }
                 if (turnOpen.triage) {
                   turnReadNulls++
                   yield* Effect.logInfo("turn_read_degraded", {

@@ -572,15 +572,8 @@ cycle: improve the orchestration, don't amputate it).
    resolutions: loud-red finish with a stated visible-test-encodes-bug verdict, or
    escalation (item 1), never "make the buggy assertion pass." The *tests-are-spec*
    seed needs the same carve-out sentence.
-3. **Close the hatches with evidence requirements.** Convention gate: for time/tz (and
-   similar semantic families), an identical retry is accepted only with cited in-file
-   evidence (existing `utcnow` sites, docstring domain) — otherwise require the variant
-   switch. Hub gate: re-issue must name why the bounced file is the defining site
-   (quote the definition), not merely repeat the edit. (11848 ×2, 11964-A.)
-4. **Give the repro-fidelity judge teeth on assert shape.** Enforce the seed's own
-   point (2): typed API-level asserts, refuse print-only and rendered-output probes
-   (11790, 12039). This converts the 11790 fork from silent to self-correcting and
-   turns 12039's printed red into a binding red.
+3. **Close the hatches with evidence requirements, P5 degrade reach + mechanical extraction (2026-07-14, IMPLEMENTED).** Convention gate: for time/tz (and similar semantic families), an identical retry is accepted only with cited in-file evidence (existing `utcnow` sites, docstring domain) — otherwise require the variant switch. Hub gate: re-issue must name why the bounced file is the defining site (quote the definition), not merely repeat the edit. (11848 ×2, 11964-A.) **New in round F:** P5 turn-read-degrade branch (null LLM verdict) no longer stands down mechanical extractors — literals + thresholds still extracted from raw issue text, preamble lines still planted (verbatim quotes are facts not guesses). `extractScriptPath` (repro-drift.ts) replaces basename extraction, honoring absolute /var/folders/… paths round-F 11848 encountered. Thresholds stored via `setIssueThresholds`/`getIssueThresholds` (turn-read-store.ts), quotes threaded as statedRules. New ISSUE-STATED RULES (binding) preamble: assert BOTH sides of each stated boundary. All three are converts, never blocks.
+4. **Give the repro-fidelity judge teeth on assert shape — RF-4 deterministic tooth (2026-07-14, IMPLEMENTED).** Enforce the seed's own point (2): typed API-level asserts, refuse print-only and rendered-output probes (11790, 12039). New `detectStringifiedMirrorAssert` fires when an assert's expected side stringifies the value under test (`== str(x)`), chained 4th in the verdict chain (after assertion-teeth, rendered-assert, required-literals). Does NOT fire on subject-stringify, membership asserts, non-assert lines. Converts the 11790 fork from silent to self-correcting; turns 12039's printed red into a binding red. Also: `RunReproFidelityJudgeInput.statedRules?: readonly string[]` renders a "Stated boundary rules" rubric (byte-identical prompt when absent). Both are converts (gap/nudge), never blocks.
 5. **Seed precedence + the two cheap priors.** One sentence: *typed-mirror overrides
    idiom-mirror even when a neighboring helper stringifies* (11790). Plus the `%r`/repr
    line (round-E 11815 face; near-zero cost) and the sibling-propagation enumeration

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { classifyReproDrift, extractScriptFilename } from "../../src/session/repro-drift"
+import { classifyReproDrift, extractScriptFilename, extractScriptPath } from "../../src/session/repro-drift"
 
 // Table tests over synthetic step inputs — the shape prompt.ts's SM4 block
 // passes: `stepObs.failedCommands` (from turn-supervisor's observeStep) and
@@ -165,5 +165,25 @@ describe("extractScriptFilename", () => {
 
   it("returns undefined when the command names no file", () => {
     expect(extractScriptFilename("bun test")).toBeUndefined()
+  })
+})
+
+describe("extractScriptPath", () => {
+  it("preserves an absolute path verbatim — round-F 11848's basename-extraction miss made readPinnedReproFile join cwd+basename and degrade to file-missing", () => {
+    const command = "python /var/folders/ab/T/opencode/repro_parse_http_date.py"
+    expect(extractScriptPath(command)).toBe("/var/folders/ab/T/opencode/repro_parse_http_date.py")
+  })
+
+  it("returns a relative path token as-is", () => {
+    expect(extractScriptPath("python scripts/repro.py")).toBe("scripts/repro.py")
+  })
+
+  it("contrasts with extractScriptFilename, which returns only the basename for the same absolute-path command", () => {
+    const command = "python /var/folders/ab/T/opencode/repro_parse_http_date.py"
+    expect(extractScriptFilename(command)).toBe("repro_parse_http_date.py")
+  })
+
+  it("returns undefined when the command names no file", () => {
+    expect(extractScriptPath("bun test")).toBeUndefined()
   })
 })

@@ -63,11 +63,24 @@ const SCRIPT_FILE_RE = /[\w./-]+\.(?:py|js|ts|mjs|sh|rb)\b/
 
 /** Extract the basename of the script file a shell command names, e.g. `.venv/bin/python repro_issue.py` -> `repro_issue.py`; `undefined` when the command names no file. */
 export function extractScriptFilename(command: string): string | undefined {
-  const match = command.match(SCRIPT_FILE_RE)
-  if (!match) return undefined
-  const token = match[0]
+  const token = extractScriptPath(command)
+  if (!token) return undefined
   const idx = token.lastIndexOf("/")
   return idx === -1 ? token : token.slice(idx + 1)
+}
+
+/**
+ * The script token AS WRITTEN in the command — absolute paths survive intact.
+ * The fidelity judge resolves this against cwd only when relative; round F
+ * found a repro pinned at an absolute /var/folders/…/T/opencode/ path that a
+ * cwd-joined basename lookup could never read (`repro_fidelity_degraded
+ * reason=file-missing`), leaving the judge structurally blind on that run.
+ *
+ * @sem domain=routing role=digest
+ */
+export function extractScriptPath(command: string): string | undefined {
+  const match = command.match(SCRIPT_FILE_RE)
+  return match ? match[0] : undefined
 }
 
 /**

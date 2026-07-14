@@ -18,7 +18,14 @@
  * `applyRenderedAssertGap` catch a repro whose asserts only pin a
  * rendered/serialized surface, and `missingRequiredLiterals` +
  * `applyRequiredLiteralsGap` force a gap for any issue-derived literal
- * (§6, `requiredLiterals`) the repro never asserts.
+ * (§6, `requiredLiterals`) the repro never asserts. RF-5 adds a third
+ * deterministic tooth of the same shape — `detectStringifiedMirrorAssert` +
+ * `applyStringifiedMirrorGap` catch an assert whose EXPECTED side is
+ * coerced through `str(...)` (django-11790: the repro's own pinned assert
+ * stringified the mirror and a `str()` fix passed it while the hidden
+ * test's typed assert then failed) — plus an optional `statedRules` rubric
+ * threaded through `runReproFidelityJudge` that asks the judge to check
+ * both sides of an issue-stated numeric boundary are exercised.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -66,7 +73,11 @@ export type ReproFidelityComplete = (request: { system: string; user: string }) 
  * touches the filesystem), the injected completion port, plus the optional
  * §6 issue-derived `requiredLiterals` the caller wires in once the
  * issue-expectations extractor runs — `applyRequiredLiteralsGap` reads it
- * directly, `runReproFidelityJudge` itself never consumes it.
+ * directly, `runReproFidelityJudge` itself never consumes it. The optional
+ * `statedRules` (issue-stated numeric boundary rules, e.g. django-11848's
+ * "more than 50 years in the future") IS consumed by `runReproFidelityJudge`
+ * itself — rendered into the judge prompt as a rubric asking it to check
+ * both sides of each boundary are exercised; absent/empty changes nothing.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -75,6 +86,7 @@ export interface RunReproFidelityJudgeInput {
   readonly reproContent: string
   readonly complete: ReproFidelityComplete
   readonly requiredLiterals?: readonly string[]
+  readonly statedRules?: readonly string[]
 }
 
 /**
@@ -114,21 +126,41 @@ export function parseReproFidelityResponse(raw: string): ReproFidelityVerdict | 
 }
 
 /**
+ * Render the optional `statedRules` rubric block appended to the judge
+ * prompt — one instruction covering every quoted rule, asking the judge to
+ * check both sides of each issue-stated numeric boundary are exercised.
+ * Returns `""` when `statedRules` is absent/empty, so the prompt is
+ * byte-for-byte unchanged for callers that never pass it.
+ */
+function renderStatedRulesRubric(statedRules: readonly string[] | undefined): string {
+  if (!statedRules || statedRules.length === 0) return ""
+  const quoted = statedRules.map((rule) => `- "${rule}"`).join("\n")
+  return (
+    `\n\n## Stated boundary rules\n` +
+    `The issue states these numeric boundary rules. For each, a faithful repro must ` +
+    `assert behavior on BOTH sides of the stated boundary; if it exercises only one ` +
+    `side (or neither), report a gap naming the missing side.\n${quoted}`
+  )
+}
+
+/**
  * Run the repro-fidelity judge: ONE forced-JSON completion checking the
  * pinned repro's asserts against the issue text — no retry, this fires at
- * most once per turn (the caller enforces that). A thrown `complete`, or any
- * parse failure, degrades to `DEGRADED_REPRO_FIDELITY` (assume faithful) —
- * never blocks the pin, never throws.
+ * most once per turn (the caller enforces that). When `statedRules` is
+ * non-empty, the prompt gains a rubric section naming each rule (pure
+ * plumbing — no new call, no behavior change when absent/empty). A thrown
+ * `complete`, or any parse failure, degrades to `DEGRADED_REPRO_FIDELITY`
+ * (assume faithful) — never blocks the pin, never throws.
  *
  * @sem domain=routing role=repro-judge
  */
 export async function runReproFidelityJudge(input: RunReproFidelityJudgeInput): Promise<ReproFidelityVerdict> {
-  const { issueText, reproContent, complete } = input
+  const { issueText, reproContent, complete, statedRules } = input
   let raw: string
   try {
     raw = await complete({
       system: REPRO_FIDELITY_SYSTEM_PROMPT,
-      user: `## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}`,
+      user: `## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}${renderStatedRulesRubric(statedRules)}`,
     })
   } catch {
     return DEGRADED_REPRO_FIDELITY
@@ -296,5 +328,126 @@ export function applyRequiredLiteralsGap(
       0,
       REPRO_FIDELITY_MAX_GAPS,
     ),
+  }
+}
+
+/** Locates a single `assertEqual`/`assertNotEqual(` call — the gate for both the assertion-line check and the arg extractor below. */
+const ASSERT_EQUAL_CALL = /\bassert(?:Not)?Equal\s*\(/
+/** `== str(` or `!= str(` anywhere on the line — the expected side of a comparison coerced to a string. */
+const STRINGIFIED_EXPECTED_SIDE = /(?:==|!=)\s*\bstr\(/
+
+/**
+ * Extract the two comma-separated arguments of a single assertEqual/
+ * assertNotEqual(...) call on one line, tracking paren/bracket depth so a
+ * nested `str(...)` call or a `[...]` subscript doesn't split at the wrong
+ * comma. Returns `undefined` when the line has no such call or its
+ * parens/brackets don't balance.
+ */
+function extractAssertEqualArgs(line: string): [string, string] | undefined {
+  const match = ASSERT_EQUAL_CALL.exec(line)
+  if (!match) return undefined
+  const start = match.index + match[0].length
+  let depth = 1
+  let commaIndex = -1
+  let end = -1
+  for (let i = start; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === "(" || ch === "[") depth++
+    else if (ch === ")" || ch === "]") {
+      depth--
+      if (depth === 0) {
+        end = i
+        break
+      }
+    } else if (ch === "," && depth === 1 && commaIndex === -1) {
+      commaIndex = i
+    }
+  }
+  if (commaIndex === -1 || end === -1) return undefined
+  return [line.slice(start, commaIndex).trim(), line.slice(commaIndex + 1, end).trim()]
+}
+
+/** Whether `arg` is a bare `str(...)` wrap — the coercion side of the stringified-mirror pattern. */
+function isStrWrap(arg: string): boolean {
+  return /^str\(.*\)$/.test(arg)
+}
+
+/** Whether `arg` is a bare string/number literal — never the "typed source" side of the pattern. */
+function isLiteral(arg: string): boolean {
+  return /^['"]/.test(arg) || /^-?\d+(?:\.\d+)?$/.test(arg)
+}
+
+/** Whether `arg` is an attribute/subscript access chain (`x.y`, `x['y']`) and not a literal. */
+function isAttrOrSubscriptChain(arg: string): boolean {
+  return (arg.includes(".") || arg.includes("[")) && !isLiteral(arg)
+}
+
+/**
+ * RF-5 — detect whether an assertion line's EXPECTED side is coerced to a
+ * string instead of comparing the typed source value directly: a plain
+ * `assert x == str(y)` / `assert x != str(y)`, or an `assertEqual(A, B)` /
+ * `assertNotEqual(A, B)` where one arg is `str(<chain>)` and the other is an
+ * attribute/subscript access chain (not a literal) — django-11790's shape,
+ * where the repro's own pinned assert stringified the mirror and a `str()`
+ * fix passed it while the hidden test's typed assert then failed. Returns
+ * the offending line, trimmed, or `undefined` when nothing matches.
+ * Conservative on purpose: stringifying the SUBJECT under test
+ * (`assert str(x) == '1'`, `assertEqual(str(member), 'value')`) is
+ * legitimate `__str__`/rendering coverage and never fires, and a bare
+ * `str(` outside an assert/assertEqual/assertNotEqual line (a print, an
+ * f-string) never fires either.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function detectStringifiedMirrorAssert(reproContent: string): string | undefined {
+  for (const rawLine of reproContent.split("\n")) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const isAssertionLine = /^assert\s+/.test(line) || ASSERT_EQUAL_CALL.test(line)
+    if (!isAssertionLine) continue
+
+    if (STRINGIFIED_EXPECTED_SIDE.test(line)) return line
+
+    const args = extractAssertEqualArgs(line)
+    if (!args) continue
+    const [first, second] = args
+    if ((isStrWrap(first) && isAttrOrSubscriptChain(second)) || (isStrWrap(second) && isAttrOrSubscriptChain(first))) {
+      return line
+    }
+  }
+  return undefined
+}
+
+/**
+ * RF-5 — the static explanation appended after the offending line in the
+ * gap `applyStringifiedMirrorGap` merges — demands the typed source value
+ * over a stringified mirror of it.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export const STRINGIFIED_MIRROR_GAP =
+  "assert the typed source value instead (e.g. == field.max_length, the int), never str(...) of it; string coercion hides exactly the type difference hidden tests assert."
+
+/**
+ * RF-5 — force a fidelity gap when the pinned script's asserts stringify
+ * the expected side of a typed comparison, regardless of what the LLM judge
+ * said: a no-op (same reference returned) when `detectStringifiedMirrorAssert`
+ * finds nothing, otherwise overrides to `faithful:false` with a gap naming
+ * the offending line verbatim, PREPENDED to any existing gaps (deduped
+ * against an identical gap already present anywhere in the list) and
+ * reclamped to `REPRO_FIDELITY_MAX_GAPS` — as the outermost tooth in the
+ * verdict chain this one must survive the cap, so it goes first and lets
+ * earlier teeth's gaps be the ones evicted.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function applyStringifiedMirrorGap(verdict: ReproFidelityVerdict, reproContent: string): ReproFidelityVerdict {
+  const line = detectStringifiedMirrorAssert(reproContent)
+  if (line === undefined) return verdict
+  const gap = `your repro asserts a STRINGIFIED mirror (\`${line}\`) — ${STRINGIFIED_MIRROR_GAP}`
+  if (verdict.gaps.includes(gap)) return verdict
+  return {
+    faithful: false,
+    gaps: [gap, ...verdict.gaps].slice(0, REPRO_FIDELITY_MAX_GAPS),
   }
 }

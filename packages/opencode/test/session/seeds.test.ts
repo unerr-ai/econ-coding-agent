@@ -46,6 +46,7 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
     redTail: "AssertionError: '254' != 254",
     candidates: ["widgets.py Widget.render_attrs", "forms.py BoundField.build_widget_attrs"],
     expectations: ["widget.attrs['maxlength'] == field.max_length (typed, not rendered)"],
+    statedRules: ["more than 50 years ... MUST interpret"],
   }
 
   it("starts with DEFERRAL_SLICE_PREFIX", () => {
@@ -89,5 +90,18 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
     const content = buildDeferralSliceContent(brief)
     expect(content).toContain("ROOT-MOST fix")
     expect(content).toContain("do not force it green")
+  })
+
+  it("includes every stated rule quoted, with an instruction to assert both sides of the boundary", () => {
+    const content = buildDeferralSliceContent(brief)
+    expect(content).toContain("STATED RULES (issue-stated boundary rules, binding — the repro must assert BOTH sides of each):")
+    for (const rule of brief.statedRules) {
+      expect(content).toContain(rule)
+    }
+  })
+
+  it("omits the STATED RULES section when there are no stated rules", () => {
+    const content = buildDeferralSliceContent({ ...brief, statedRules: [] })
+    expect(content).not.toContain("STATED RULES")
   })
 })

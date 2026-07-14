@@ -74,8 +74,9 @@ export const DEFERRAL_SLICE_PREFIX = "HARD-TAIL ESCALATION: "
 /**
  * Compiled evidence for one deferral slice — the deterministic signal that
  * fired, its gate evidence verbatim, the pinned probe/red tail if present,
- * enumerated candidates, and the issue-stated expectations
- * `buildDeferralSliceContent` renders into the planted brief.
+ * enumerated candidates, the issue-stated expectations, and the issue-stated
+ * boundary-rule quotes (from `getIssueThresholds`) `buildDeferralSliceContent`
+ * renders into the planted brief.
  */
 export interface DeferralBrief {
   signal: string
@@ -84,15 +85,17 @@ export interface DeferralBrief {
   redTail?: string
   candidates: readonly string[]
   expectations: readonly string[]
+  statedRules: readonly string[]
 }
 
 /**
  * §3/§11 — renders a `DeferralBrief` into the one-shot escalation pre-pass
  * slice the hard-tail signal consumer plants: which deterministic signal
  * fired and its evidence, the pinned probe (+ red tail) if present, an
- * enumerate-then-choose candidate list, the issue's binding expectations, and
- * the root-most-fix instruction with the oracle-inversion escape. The brief
- * is compiled from gathered evidence, never freshly prompted.
+ * enumerate-then-choose candidate list, the issue's binding expectations and
+ * stated boundary rules, and the root-most-fix instruction with the
+ * oracle-inversion escape. The brief is compiled from gathered evidence,
+ * never freshly prompted.
  *
  * @sem domain=routing role=deferral-brief
  */
@@ -111,6 +114,12 @@ export function buildDeferralSliceContent(brief: DeferralBrief): string {
     "EXPECTATIONS (issue-stated, binding — assert these, typed, not rendered):",
     ...brief.expectations.map((e) => `  - ${e}`),
   )
+  if (brief.statedRules.length > 0) {
+    lines.push(
+      "STATED RULES (issue-stated boundary rules, binding — the repro must assert BOTH sides of each):",
+      ...brief.statedRules.map((r) => `  - "${r}"`),
+    )
+  }
   lines.push(
     "Derive the ROOT-MOST fix among the candidates above, apply it, and PROVE it by re-running the pinned probe to green. If the evidence shows the pinned assertion itself contradicts the issue's stated behavior, do not force it green — state that as your verdict instead.",
   )

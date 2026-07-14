@@ -10,6 +10,11 @@ const EXPECTED_MARKER_RE = /\bexpected\b|\bshould\s+(?:be|return|render|print|pr
 /** Prose markers that signal a quoted/backticked span nearby is the CURRENT (buggy) value. */
 const ACTUAL_MARKER_RE = /\binstead of\b|\brather than\b|\bgot\b|\bactual\b|\breturns\b/gi
 
+/** A worked-example marker line introducing the DESIRED statement — value is whatever follows the marker's colon on the same line, or, when that's empty, the next non-empty line taken whole (the 12039 shape: a bare unquoted CREATE INDEX line after "The following would be expected:"). */
+const EXPECTED_PROSE_BLOCK_RE = /\b(?:would be expected|should be|should generate|expected output)\b.*?:\s*(.*)$/i
+/** The CURRENT (buggy) mirror of EXPECTED_PROSE_BLOCK_RE — e.g. "Will generate ... statement:\n<bare buggy line>". */
+const ACTUAL_PROSE_BLOCK_RE = /\b(?:instead of|rather than|currently generates?|will generate)\b.*?:\s*(.*)$/i
+
 /** A fenced-code line shaped like an assertion — its quoted/backticked literal(s) are the expected value under test. */
 const ASSERTION_LINE_RE = /\bassert\b|assertEqual|==|!=/i
 /** A fenced-code line ending in an "expected:"-style header — the NEXT line is taken whole as the expected value. */
@@ -119,10 +124,11 @@ function nearestMarkerKind(
  * Conservative, precision-over-recall mechanical extraction of issue-derived
  * expected/actual/error literals — no LLM, no graph. Pulls marker-adjacent
  * quoted/backticked spans from prose ("expected `X`", "actual output `Y`"),
- * assertion-shaped and expected-block lines inside fenced code, and the
- * traceback's final error line, deduped and capped at 8 values 2-120 chars
- * long. Recon confirmed nothing parses issue text for values today
- * (`extractIssueSymbols` at graph-tools.ts extracts graph symbols only).
+ * assertion-shaped and expected-block lines inside fenced code, prose-marker
+ * worked examples whose statement line carries no quotes at all ("The
+ * following would be expected:" / "Will generate ...:", 12039's bare
+ * CREATE INDEX pair), and the traceback's final error line — deduped and
+ * capped at 8 values 2-120 chars long.
  *
  * @sem domain=routing role=analysis
  */
@@ -170,6 +176,26 @@ export function extractIssueExpectations(issueText: string): { literals: IssueEx
       continue
     }
 
+    // Prose-marker worked example: "The following would be expected:" / "Will
+    // generate ... statement:" introducing a bare (unquoted) statement line —
+    // the 12039 shape a quoted/backticked-span scan below never sees.
+    const expectedBlock = trimmedLine.match(EXPECTED_PROSE_BLOCK_RE)
+    const actualBlock = expectedBlock ? null : trimmedLine.match(ACTUAL_PROSE_BLOCK_RE)
+    if (expectedBlock || actualBlock) {
+      const blockKind: IssueExpectation["kind"] = expectedBlock ? "expected" : "actual"
+      const inlineValue = (expectedBlock ?? actualBlock)![1].trim()
+      if (inlineValue) {
+        add(inlineValue, blockKind, trimmedLine)
+        continue
+      }
+      const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : ""
+      if (nextLine.length > 0 && !nextLine.startsWith("```")) {
+        add(nextLine, blockKind, `${trimmedLine} ${nextLine}`)
+        i++
+        continue
+      }
+    }
+
     const spans = extractLiteralSpans(rawLine)
     if (spans.length === 0) continue
     const expectedPositions = markerPositions(rawLine, EXPECTED_MARKER_RE)
@@ -185,6 +211,73 @@ export function extractIssueExpectations(issueText: string): { literals: IssueEx
   if (lastErrorLine) add(lastErrorLine, "error", lastErrorLine)
 
   return { literals: out.slice(0, MAX_LITERALS) }
+}
+
+const MAX_THRESHOLDS = 3
+const MAX_QUOTE_LEN = 200
+
+/** A numeric-boundary rule word — without one of these in the SAME sentence as the number, a threshold pattern is just an example count, never a stated rule. */
+const RULE_FORCE_RE = /\b(?:must|should|interpret|treat|consider|required)\b/i
+/** A stated numeric boundary: "more than/at least/less than/over N" or "N or more". Group 1 or group 2 holds the digits depending on which side of the alternation matched. */
+const THRESHOLD_VALUE_RE = /\b(?:more than|at least|less than|over)\s+(\d+)\b|\b(\d+)\s+or\s+more\b/gi
+
+/** The [start, end) offsets of the sentence containing `index` — bounded by the nearest ".", "!", "?", or ":" on either side (":" only opens a sentence, so a lead-in like "the following quote:" doesn't drag the whole preceding paragraph into the match). Whitespace (including hard line-wraps mid-sentence, as RFC 7231 prose does) is assumed already collapsed by the caller. */
+function sentenceBounds(text: string, index: number): { start: number; end: number } {
+  let start = 0
+  for (const ch of [".", "!", "?", ":"]) {
+    const p = text.lastIndexOf(ch, index)
+    if (p + 1 > start) start = p + 1
+  }
+  let end = text.length
+  for (const ch of [".", "!", "?"]) {
+    const p = text.indexOf(ch, index)
+    if (p !== -1 && p + 1 < end) end = p + 1
+  }
+  return { start, end }
+}
+
+/**
+ * A stated numeric-boundary rule pulled from issue prose — its value and the
+ * containing sentence, quoted verbatim. Feeds the fidelity judge's
+ * required-coverage list alongside `IssueExpectation` (11848's RFC 7231
+ * "more than 50 years ... MUST interpret" two-digit-year rule).
+ *
+ * @sem domain=routing role=type
+ */
+export interface IssueThreshold {
+  readonly value: number
+  readonly quote: string
+}
+
+/**
+ * Conservative extraction of stated numeric threshold/boundary rules: a
+ * "more than/at least/less than/over N" or "N or more" match only counts
+ * when its own sentence also carries rule-force wording (MUST/should/
+ * interpret/treat/consider/required) — an incidental count never qualifies.
+ * Deduped by value and capped at 3. No LLM, no graph.
+ *
+ * @sem domain=routing role=analysis
+ */
+export function extractIssueThresholds(issueText: string): readonly IssueThreshold[] {
+  if (!issueText) return []
+  const flattened = issueText.replace(/\s+/g, " ")
+  const out: IssueThreshold[] = []
+  const seen = new Set<number>()
+
+  const re = new RegExp(THRESHOLD_VALUE_RE.source, THRESHOLD_VALUE_RE.flags)
+  let m: RegExpExecArray | null
+  while ((m = re.exec(flattened))) {
+    if (out.length >= MAX_THRESHOLDS) break
+    const value = Number(m[1] ?? m[2])
+    if (!Number.isFinite(value) || seen.has(value)) continue
+    const { start, end } = sentenceBounds(flattened, m.index)
+    const sentence = flattened.slice(start, end).trim()
+    if (!RULE_FORCE_RE.test(sentence)) continue
+    seen.add(value)
+    out.push({ value, quote: truncate(sentence, MAX_QUOTE_LEN) })
+  }
+
+  return out
 }
 
 /**
