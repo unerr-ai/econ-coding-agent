@@ -130,11 +130,12 @@ export interface SlicePermissionRule {
  * slice can never re-orchestrate by spawning a subagent of its own, no matter
  * what the agent/config ruleset says, because delegation is the conductor's
  * job alone. The read-only lane (recon/verify) lands last of all and beats
- * the edit allow. Two personas run tighter than their lane: the researcher's
- * job is read+fetch only (webfetch/websearch flip to allow, bash+edit to
- * deny), and the explorer's job is read/search only (bash+edit deny — recon
- * happens through the read tools; probing with shell commands is the runner's
- * shape), so neither can ever touch the working tree or a shell. P11b: the
+ * the edit allow. Shell is open to every seat now (evidence-gathering decides
+ * the right fix — see the `noEdit` note below), but two personas still run
+ * tighter than the executor lane on edit + network: the researcher's job is
+ * read+fetch (webfetch/websearch flip to allow, edit tool denied), and the
+ * explorer's job is read/search (edit tool denied — recon happens through the
+ * read tools), so neither can touch the working tree via the edit tool. P11b: the
  * `delegate` tool is the ONE downward door — allowed only for a delegating
  * seat (a reasoner/oracle slice child that is not itself a delegate child,
  * `isDelegatingSeat`), denied everywhere else, so an executor seat or a
@@ -150,22 +151,27 @@ export function childSlicePermission(
   deciderSeat = false,
   delegatingSeat = false,
 ): SlicePermissionRule[] {
-  const isResearcher = persona === "researcher"
-  // F6 seat-scoping (casting rule 4): a decider seat loses the grind surfaces
-  // by construction — not advisory prompt text. Judgment slices at reasoner/
-  // oracle were burning the whole tool cap re-running suites and sweeping
-  // files inline; their product is a verdict/plan, and command evidence
-  // arrives from the sound rung and runner slices instead.
-  const noShell = isResearcher || persona === "explorer" || deciderSeat
+  // Every seat gets the four core tools — bash, edit, webfetch, websearch — as
+  // ALLOW (2026-07-15). A slice that can gather evidence and act does its job;
+  // denying shell to judgment seats starved django-11848's escalated reasoner of
+  // the sibling test's `utcnow` seam and it guessed the wrong callable. Seat and
+  // persona no longer scope these four — the only limits are the floors below:
+  // the danger set, the interactive `question` surface, `task` re-orchestration,
+  // and `delegate` reserved for the conductor. (readOnly/persona/deciderSeat stay
+  // on the signature for callers + future per-seat policy; they no longer gate
+  // the core tools.)
+  void readOnly
+  void persona
+  void deciderSeat
   return [
     ...(parent ?? []),
-    { permission: "bash", pattern: "*", action: noShell ? "deny" : "allow" },
-    { permission: "edit", pattern: "*", action: noShell ? "deny" : "allow" },
+    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "edit", pattern: "*", action: "allow" },
     { permission: "question", pattern: "*", action: "deny" },
     { permission: "task", pattern: "*", action: "deny" },
     { permission: "delegate", pattern: "*", action: delegatingSeat ? "allow" : "deny" },
-    { permission: "webfetch", pattern: "*", action: isResearcher ? "allow" : "deny" },
-    { permission: "websearch", pattern: "*", action: isResearcher ? "allow" : "deny" },
+    { permission: "webfetch", pattern: "*", action: "allow" },
+    { permission: "websearch", pattern: "*", action: "allow" },
     { permission: "skill", pattern: "*", action: "deny" },
     { permission: "doom_loop", pattern: "*", action: "deny" },
     { permission: "bash", pattern: "sudo *", action: "deny" },
@@ -174,7 +180,6 @@ export function childSlicePermission(
     { permission: "bash", pattern: "git push*", action: "deny" },
     { permission: "bash", pattern: "curl *", action: "deny" },
     { permission: "bash", pattern: "wget *", action: "deny" },
-    ...(readOnly && !isResearcher ? [{ permission: "edit", pattern: "*", action: "deny" as const }] : []),
   ]
 }
 
