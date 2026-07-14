@@ -903,3 +903,203 @@ the arena (12039).
 two consecutive clean sweeps, pending the round-F decision (leading candidate: deterministic
 escalation/decomposition arming when a finish gate bounces a turn — a denied finish IS the
 hard-tail signal the risk router exists for; 11815 D-vs-E is the direct evidence pair).
+
+## Round F (2026-07-14, binary `0.0.0-main-202607132012`, commit `3a1f4802e`) — the signal-bus wave, sweep IN PROGRESS
+
+The round-F decision landed as code: the **unified signal bus** ([docs/features/08-signal-bus.md](../features/08-signal-bus.md)).
+Every gate/judge/detector now publishes a typed signal with a CONVERT/DEFER/SURFACE decision;
+hard-tail signals (probe-gate exhaustion, seen-red 2nd arrival, S3 exhaustion, regression
+re-arrival, oracle-inversion) arm **one** reasoner escalation slice per turn instead of going
+straight to a loud-but-inert warning. Plus RF-2..RF-7 deterministic conversions. Every decision
+is one grep-able `[signal] <name>` line — this round is the first with a machine-readable
+decision trace, and the autopsies below are built from it.
+
+Sweep is the full Mini-10, sequential single-owner (`sweepF-driver.sh`, clone of the D/E driver
++ a per-instance signal-trace section). Partial scoreboard (updated as instances land):
+
+| Instance | Result | Cost / turns | Signal story |
+|---|---|---|---|
+| 11790 | ❌ **REAL FAIL** (failures=2) | $0.047 / 19, 100% conductor | self-consistent-wrong-oracle; autopsy below |
+| 11815 | ✅ **REAL PASS** (46 OK) | ~long / 144, 4 tiers | **deferral consumer live-fire — cured the round-E fail**; autopsy below |
+| 11848 | ❌ **REAL FAIL** (failures=1) | ~fast / 36 | boundary-direction bug; RF-6 + retry fired; autopsy below |
+| 11880 | ✅ **REAL PASS** (115 OK) | — | clean |
+| 11885 | ✅ **REAL PASS** (45 OK, sk=1) | — | the grind instance, converged |
+| 11951 | ✅ **REAL PASS** (27 OK, sk=5) | — | clean |
+| 11964 | ✅ **REAL PASS** (17 OK) | — | clean |
+| 11999 | ✅ **REAL PASS** (31 OK) | — | clean |
+| 12039 | ❌ **REAL FAIL** (failures=1, sk=12) | ~fast / 24 | space-before-DESC face; self-consistent green over incomplete repro; autopsy below |
+| 12050 | ✅ **REAL PASS** (11 OK) | — | clean |
+
+**Final: 7/10.** Fails: 11790, 11848, 12039 — **all three the same no-in-arena-witness class**
+(a fix that passes the agent's own repro but is subtly incomplete/wrong on a face the hidden test
+asserts and no arena test covers). Zero gateway errors across all 10. vs round E (8/10: 11815 +
+12039 red) the net is −1, but the *composition* is the story: the wave **converted its exact target**
+(11815 E❌→F✅ via the deferral consumer) and every residual failure is one class the wave does not
+claim to address. 11790 and 11848 both passed D and E — their F reds are **variance within the
+no-witness class**, not wave regressions (machinery fired correctly on both; see autopsies).
+
+### 11790 autopsy — the fidelity judge named the exact bug in English, and the agent shipped it anyway
+
+**The failure is the tightest demonstration yet of the mirrored-entry / self-consistent-wrong-oracle
+class.** The agent shipped `self.fields['username'].widget.attrs['maxlength'] = str(username_max_length)`;
+gold assigns the **int**. Hidden test asserts `self.assertEqual(...widget.attrs.get('maxlength'), 255)`
+→ `'255' != 255` → red. Same one-token face as the round-1 forensic — but this time we can watch
+every safeguard fire and miss, in order:
+
+1. **The seed prior was in context.** `frame_seed_planted seeds=["repro","localization"]` fired;
+   the typed-mirror prior is baked into this binary verbatim ("assign the SOURCE value itself —
+   never a stringified copy … 254, not '254' … **typed-mirror OVERRIDES idiom-mirror**").
+2. **The agent's repro encoded the misconception, self-consistently.** `repro_issue.py`'s own
+   docstring splits the value model: "(a) the bound field's `.max_length` (Python **int**); (b)
+   the widget's `attrs['maxlength']` entry (**string**, used to render HTML)". Its assertion (b) is
+   `assert widget_maxlength == str(expected_max_length)` — asserting the **stringified** mirror.
+   So its `str()` fix made its **own** repro green. Every execution gate (`turn_probe_green`,
+   `turn_regression_green`) was checking the fix against an oracle that shared the fix's
+   misconception — the repro is the fix's mirror image.
+3. **RF-4's required-literals tooth and T1 could not fire** — correctly. The value "255" is the
+   User model's `max_length`, **domain knowledge, never a literal in the issue text**. T1 extracted
+   0 expectations (`preamble binding line count: 0`), so `applyRequiredLiteralsGap` had an empty
+   list and was a no-op. There was no stated ground truth to bind the repro against.
+4. **The LLM fidelity judge DID catch it — and it didn't matter.** `repro_fidelity_gap` fired with
+   gap: *"assert the API-LEVEL value with == — rendered output hides type differences like **'255'
+   vs 255**"* — the exact bug, in plain English. The nudge was delivered; the agent edited the repro
+   (`pinned_probe_edited`). But it applied the typed-`==` check to (a) `bound_field.max_length`
+   (already int, already correct) and **left (b) still asserting `== str(expected_max_length)`**
+   (final shipped repro, line 72). Telling the agent "assert with `==`" can't fix a bug whose root
+   is the agent's *value model* (widget attr = string), not its choice of operator — it asserted
+   `== str(x)`, which is `==`, and moved on.
+
+**Judge-quality wart (logged):** the same `repro_fidelity_gap` carried a **hallucinated** first gap
+— *"assert that the script batches multiple independent tool calls into a single batch execution"* —
+which is the batch-execution meta-instruction leaking into a repro-fidelity verdict. Nonsense gaps
+dilute the real one; candidate for a judge-prompt scope tightening (gaps must be repro-scoped).
+
+**Verdict + levers.** Not a wave regression — the signal machinery worked exactly as built (seed
+present, fidelity judge accurate, deferral budget correctly *unspent* since no hard-tail signal
+fired). This is the **tier-immune mirrored-entry class**: when the expected value is domain-derived
+(no stated literal) and the agent authors both the fix and the repro under one misconception, no
+"does the fix pass the repro" gate can break the mirror. Ranked levers (per [[no-blanket-best-of-n]]):
+1. **Deterministic tooth (near-zero cost), the actionable one:** an assertion of the shape
+   `<attr-access>[...] == str(<x>)` on a *mirrored entry* is itself the anti-pattern the typed-mirror
+   prior forbids. RF-4 can mechanically flag a `== str(...)` comparison in a pinned repro and refuse
+   the pin ("you are asserting the stringified mirror; the prior says assert the typed source") —
+   this catches THIS repro regardless of the LLM judge, without needing the issue to state a literal.
+2. **Independent-oracle re-derivation:** a verifier that computes the widget-attr expected value from
+   the model-field schema (int) rather than from the agent's repro — but that is the "no in-arena
+   witness" problem restated, and expensive.
+3. **Best-of-N:** documented, not built — the convergence-variance backstop for the pure
+   value-model fork. Cost co-equal; the tooth in (1) is tried first.
+
+### 11848 autopsy — real boundary bug (NOT the line-gluing artifact), no in-arena witness
+
+Failing gold assertion: `datetime(1970,12,31,...) != datetime(2070,12,31,...)`. **This is a real
+fail, verified distinct from the documented subTest line-gluing artifact** (`test_parsing_year_less_than_70`)
+— it's `test_parsing_rfc850`'s boundary case, same failure *class* as round-1's 11848 (RFC threshold
+off), independent of the signal-bus wave. The agent's patch kept the old hardcoded split **and**
+bolted on a one-directional correction:
+```python
+year += 2000 if year < 70 else 1900      # "70" → 1970 (70 is not < 70)
+if year > current_year + 50: year -= 100  # only ever slides DOWN, never up
+```
+RFC 7231 wants a two-digit year interpreted into the `[current−50, current+50)` window. For "70"
+with current≈2025, gold gives **2070** (45 yrs future, ≤50). The agent maps 70→1970 then can only
+push further down — it can never slide **up** to 2070. The `utcnow()` idiom the seed prior warns
+about was copied correctly (test is UTC-based); the defect is the sliding *direction*, a first-draw
+logic error the conductor's repro didn't exercise at the boundary. RF-6 (`interpreter_mismatch`
+rewrote the `/tmp` probe to venv python) and the bounded probe-retry (`probe_gate_reject exit=2` →
+`turn_probe_green`) both fired correctly — the machinery worked; the fix was wrong at a boundary no
+in-arena test covered. Same **no-witness** family as 11790 (a wrong fix that passes the agent's own
+repro), different mechanism (boundary logic vs. type mirror). Lever: a repro seeded to exercise the
+stated RFC boundary cases (>50yr-future example from the issue text) — a T1-style extraction of the
+*worked example* in the ticket, not just literals.
+
+### 11815 win — the deferral consumer cured the exact round-E failure
+
+The instance that **failed round E** (0 slices, conductor-only, shipped the right mechanism with a
+`%s`-vs-`%r` quote face) **passed round F**, and the signal trace shows the causal chain the wave was
+built for. The finish gate exhausted (`[signal] unverified_finish severity=tail decision=defer
+rung=s3-exhausted`) → `[signal] deferral_armed decision=defer evidence.consumed=unverified_finish` →
+a `HARD-TAIL ESCALATION:` reasoner slice planted → the run escalated **73 conductor / 49 reasoner /
+12 oracle / 10 explorer** turns (round E's failing draw never left the conductor). Decomposition
+settled the right-layer slices ("Implement fix to use Enum.name instead of Enum.value"), and this
+time it landed the `%r` repr form → 46 tests OK on gold. **This is the D-vs-E variance
+("same binary armed 4 slices and passed / armed none and failed") converted into a deterministic
+trigger:** a denied finish now *forces* the escalation the risk router exists for, instead of leaving
+it to a stochastic arming draw. The hub-gate evidence-bearing 2nd-deny (RF-3) cycled 5× on
+`serializer.py` and fail-open-3rd every time — never wedged.
+
+### 12039 autopsy — self-consistent green over an incomplete repro; deferral correctly abstained
+
+Failing gold assertion: `'("headline" DESC)' not found in '…("headline"DESC)'` — the exact
+**missing-space-before-DESC** face that failed 12039 in round E. The agent shipped a real partial
+fix (`ddl_references.py`, 4+/6−) that covers the trailing-space/empty-suffix faces but not the
+`col_str` restructuring that inserts the space before `DESC` in the `("headline" DESC)` rendering
+(gold rewrites both `Columns` and `IndexColumns`). Round D's winning patch was the full two-class
+shape; this run drew the partial.
+
+**The signal trace is the important part — it explains why the deferral consumer (correctly) did
+NOT fire.** The run ended on `turn_probe_green` + `turn_regression_green` at 24 conductor turns.
+Sequence: the agent declared done twice without a pin → `[signal] unverified_finish` fired **twice**
+at the CONVERT rung (`rung=s3 attempt=1/2 severity=info decision=convert`), nudging it to pin →
+the agent complied, wrote a repro, pinned it, and the pin went **green** against its own repro →
+turn ended clean. It never reached the s3-**exhausted** (tail/defer) rung, so `deferral_armed` never
+fired and `deferralAvailable` stayed `true`. **This is correct behavior, and it exposes the class
+boundary precisely:** the deferral consumer arms on *finish-gate exhaustion* — the agent failing to
+produce a green pin. 12039 doesn't fail that way; it produces a green pin over a repro that doesn't
+exercise the failing face. There is no hard-tail signal for "you finished green but your repro is
+incomplete," because from inside the arena the finish IS green. Same structural trap as 11790: the
+repro is the fix's mirror. Lever is identical in spirit to the 11790 tooth — a repro forced to
+exercise the issue's *worked examples* (the ticket literally shows the `("headline" DESC)` target
+string), i.e. a T1 extraction of stated example strings, not just numeric literals.
+
+### Signal-bus live-fire notes (this sweep, so far)
+
+- **RF-6 interpreter discipline fired on real probes** (11790, 11848): `[signal] interpreter_mismatch`
+  rewrote a pinned `python <script>` → the arena venv python, including a `/var/folders/.../T/opencode/`
+  temp-dir repro path — the exact agent-run-probe case RF-6 was added for.
+- **Bounded probe retry recovered** (11848): `probe_gate_reject exit=2 retry=1` → `turn_probe_green`.
+- **The trace contract works:** `grep '\[signal\]' run-<n>.log` replays every gate decision;
+  `[signal] turn_summary counts.* deferralAvailable=<bool>` closes each turn. First round where an
+  autopsy is a log-grep, not a reconstruction.
+
+### Round-F closing verdict (2026-07-14)
+
+**7/10. The wave did exactly what it was scoped to do, and the sweep drew a clean read of what it
+does not.** The signal bus + deferral consumer target one failure mode — *right advisory signal
+fires, nothing consumes it for routing* — and 11815 (E❌→F✅) is the direct, traced proof: finish-gate
+exhaustion → `deferral_armed` → forced escalation (73/49/12/10 across four tiers) → the convergence
+round E's stochastic conductor-only draw never reached. That mechanism is now **KEEP** (below).
+
+All three reds (11790, 11848, 12039) are the **no-in-arena-witness class**: the agent's fix passes
+its own repro but is wrong/incomplete on a face the hidden test asserts and no arena test covers
+(type mirror / boundary direction / partial render-shape). The bus fired correctly on every one —
+and the traces prove the deferral *correctly abstains* on this class, because these turns finish
+**green** (over a self-authored oracle), so no hard-tail exhaustion signal is ever owed. Deferral is
+the answer to *stochastic non-convergence*, not to *confident-but-wrong convergence*.
+
+**The lever for the residual class is deterministic and near-zero-cost** (per [[no-blanket-best-of-n]]):
+push ground truth into the repro at pin time so the agent's own oracle stops being a mirror of its
+fix. Two concrete, RF-4/T1-shaped candidates surfaced this round:
+1. **`== str(<x>)`-on-mirrored-entry tooth** (11790) — mechanically refuse a pinned repro whose
+   assertion stringifies a mirrored attribute; the typed-mirror prior already forbids it in prose.
+2. **Worked-example extraction** (11848, 12039) — T1 currently extracts stated *literals*; extend it
+   to the ticket's stated *example strings/cases* (`("headline" DESC)`, the >50-yr-future RFC
+   example) and feed them as required repro coverage. Both 11848 and 12039 state their failing face
+   verbatim in the issue.
+best-of-N stays documented-not-built — the convergence backstop for the pure value-model fork that
+survives the teeth.
+
+**Phase-1 state:** D=10/10, E=8/10, F=7/10. The consecutive-clean-sweep gate is not met; the
+regression is variance concentrated in one tier-immune class, not mechanism rot. Next wave is the
+two deterministic repro-teeth above (RF-4/T1 extensions), then re-fire the difficult-5.
+
+**Suspect-list updates from round F:**
+
+| Mechanism | Verdict change |
+|---|---|
+| Hard-tail deferral consumer (signal bus, new 07-14) | **KEEP** — 11815 E❌→F✅ traced end to end (`unverified_finish` tail → `deferral_armed` → 4-tier escalation → converged); correctly abstained on the no-witness class (12039) |
+| Signal bus + `[signal]` trace contract (new 07-14) | **KEEP** — first round where every autopsy is a log-grep; zero false fires observed |
+| RF-6 interpreter discipline (new 07-14) | **KEEP** — rewrote pinned `python`→venv on 11790/11848/12039 incl. a `/tmp/opencode/` probe path; the agent-run-probe case it was added for |
+| RF-4 repro-fidelity teeth (new 07-14) | **SUSPECT→GUILTY-of-a-gap** — the LLM judge named 11790's bug verbatim ("'255' vs 255") and the agent still shipped it; deterministic `==str()` tooth is the fix, not a better prompt |
+| Repro-first seed / typed-mirror prior | **KEEP but insufficient alone** — present in-context on 11790, agent rationalized around it via an (int)/(str) value-model split; needs the pin-time tooth to enforce |
+| No-in-arena-witness class | **standing GAP** — 3/3 round-F reds; tier-immune; owned by the repro-teeth wave + best-of-N, not by routing |
