@@ -1,12 +1,18 @@
 # The econ harness — mechanism walkthrough + the 2026-07-13 variance forensics
 
-**What this is.** One report, two halves. Part I is a plain-language, code-grounded
-walkthrough of the harness as it exists at HEAD (`acb49dee5`) — every mechanism, its
-trigger condition (if/else), and its exception/fallback path, each with `file:line`
-anchors. Parts II–V are the forensic analysis of the 2026-07-13 benchmark runs: five
-runs of the same build, one all-green, four with failures at *different* failure points —
-the stochastic-variance signature. Every claim below is grounded in either the codebase
-or a run bundle; nothing is inferred from memory.
+**What this is.** One report, three parts. Part I is a plain-language, code-grounded
+walkthrough of the harness as it exists today — every mechanism, its trigger condition
+(if/else), and its exception/fallback path, each with `file:line` anchors. Parts II–V are
+the forensic analysis of the 2026-07-13 benchmark runs: five runs of the same build, one
+all-green, four with failures at *different* failure points — the stochastic-variance
+signature. Part VII is a second, independent forensic axis: the 2026-07-15 **turn-economy**
+analysis — not *did it solve*, but *what did it burn getting there*. Every claim below is
+grounded in either the codebase or a run bundle; nothing is inferred from memory.
+
+**Code state.** Part I describes HEAD `784d6849c` **plus the uncommitted turn-economy
+wave** (the seven mechanisms of Part VII.4, working tree only, pending the validation in
+VII.5). Wave mechanisms are marked **⧗ uncommitted** at each anchor so this map stays
+honest if the wave is reverted rather than committed.
 
 **Sources.** Three fleet failed-run bundles
 (`unerr-benchmarks/e2e/distributed/failed-runs/mini10ded-0713-{1859,2058}`,
@@ -146,13 +152,18 @@ are (re)written. The decision tree:
 ```
 todos unreadable                        → metered fallback, legacy path       (:2107-2113)
 no PENDING TYPED slice                  → not engaged (untyped batches never engage) (:2114)
+cascade-latch consumed?                 → held INLINE, once-only (⧗ :2240-2246)
 fresh turn + sessionID:                                                        (:2145-2207)
   flagged = ambiguous OR hard
-  if flagged → resolutionDecision (resolution-phase.ts:84-140):
+  if flagged → resolutionDecision (resolution-phase.ts:84-150):
       1b. ARMED turn (armLocalization):
             attempts==0 → resolve-first (plant localization pre-pass; NO slices)
             attempts≥1 → continue-inline (armed turns NEVER decompose;
                           grind valve is the only escalation)
+      2b. DIRECT-FIRST VALVE (⧗ resolution-phase.ts:139-150) — all four required:
+            attempts==0 && diagnosisLocationOrFixKnown && hardness!="hard"
+            && writerSliceCount<=2  → continue-inline (one direct-fix window
+            before decomposition; the issue already names the site or the fix)
       2.  valid candidate plan → decompose-now
       3.  needs user + interactive → ask-user
       4.  attempts ≥ MAX_RESOLVE_ATTEMPTS(2) → decompose-now (termination)
@@ -176,6 +187,29 @@ routes the verifier** (testable → sound rung; high coupling or risk>70 → jud
 Graph risk (fan-in/centrality, `bun-sqlite-graph.ts:590-605`) tightens *verification*,
 never buys a bigger author.
 
+**What a dispatched above-conductor slice receives and how long it may run** (⧗ both
+new; Part VII.2 is the evidence). A first-hop reasoner/oracle slice
+(`aboveConductorCheapHop` = `(tier=="reasoner"||tier=="oracle") && !escalated`,
+`prompt.ts:5255-5262`) is handed a **compiled brief** — goals as verbatim issue quotes,
+must-honor constraints, the pinned probe with its red tail + repro content, candidate fix
+sites, sibling-slice digests (`buildAboveConductorSliceBrief`,
+`slice-orchestrator.ts:2658-2699`) — **instead of** the full context block (repo primer +
+whole digest ledger + parent task). Escalated hops and executor slices keep the old path
+byte-identical. And `sliceStepBudget` (`slice-orchestrator.ts:372-375`) clamps those two
+tiers to `ABOVE_CONDUCTOR_STEP_CAP = 12` (`:348`) — the clamp is applied **after** the P8
+×1.5 design/hard/escalated lift, so **the cap always wins**. Together these encode one
+rule: *an above-conductor slice is an adviser, not a second agent* — it should not
+re-explore the repo from a cold context, and it should not tool-loop.
+
+**The cascade latch** (⧗ `cascadeLatchBySession`, `slice-orchestrator.ts:2176`) is the
+anti-retry-loop. It sets when an engaged cascade produces **zero accepted outcomes and at
+least one dead one** (`state=="blocked"`, or `state=="unverified" && verdict.accepted==false`
+— `:2426-2430`). On the next orchestration it is **deleted before it is read** (`:2242`,
+so it can never fire twice), returns `{engaged:false}`, and injects one untyped
+`[cascade-inline]` corrective todo naming the dead slice (`:2184-2189`). A cascade that
+died wholesale means the decomposition was wrong; re-running it is the one move guaranteed
+not to help.
+
 **The escalation ladder** (`slice-loop.ts:1092-1337`) exists only inside slice dispatch:
 squeeze (≤2 same-tier retries) → climb (at most ONE hop past the cheap tier) →
 re-verify every hop → double-pay ledger (`double-pay.ts:89-106`). Turn-level routing
@@ -190,12 +224,32 @@ hub-design judge.** This is load-bearing for Part IV.
 In order (`prompt.ts:2039-2899`): probe-from-red pinning (a red test-shaped command
 becomes the turn's binding contract; toothless `repro*` scripts refused, F15c
 `:406-413`; a fidelity judge checks the pin against the issue once — gap → nudge, never
-block) → S4 gate-block ledger (scans `[econ-gate] BLOCKED` errors) → S2 repro deadline
-(12 steps to settle a repro, then abstention/handoff; armed turns then plant the
-localization pre-pass) → drift nudges + F13d engine-pin (the engine itself runs
-`repro_issue.*` when reds stay unpinnable) → S9 pinned-repro deletion guard → S8
-converge-now (8 post-fix steps without a pin pre-arms the final finish denial) → stuck
-ladder → hub-design nudge → batch-momentum nudge.
+block) → **⧗ identical-run dedupe** → S4 gate-block ledger (scans `[econ-gate] BLOCKED`
+errors) → S2 repro deadline (12 steps to settle a repro, then abstention/handoff; armed
+turns then plant the localization pre-pass) → drift nudges + F13d engine-pin (the engine
+itself runs `repro_issue.*` when reds stay unpinnable) → S9 pinned-repro deletion guard →
+S8 converge-now (8 post-fix steps without a pin pre-arms the final finish denial) → **⧗
+post-green convergence** → stuck ladder → hub-design nudge → batch-momentum nudge.
+
+Two ⧗ additions, both aimed at re-running rather than re-thinking (Part VII.2):
+
+- **Identical-run dedupe** (`createRerunDedupeTracker`, `turn-supervisor.ts:367-404`;
+  wired root-only at `prompt.ts:2128`). The same command returning byte-identical
+  (normalized) output for the **3rd** time (`IDENTICAL_RUN_THRESHOLD = 3`, `:406`) with
+  **no edit landed in between** carries zero new information → `probe_rerun_dedupe`, once
+  per command. Any file edit clears every tracked run (`:378-381`) — after a real change,
+  re-running is evidence again, so the tracker never argues against verifying a fix.
+- **Post-green convergence** (`prompt.ts:2841-2859`). Pinned probe green **and** zero
+  other unresolved reds → one finish-now nudge (`converge_post_green`), suppressing the
+  stuck-ladder and batch-momentum nudges that would otherwise keep a *finished* turn
+  hunting. It converts, never blocks.
+
+**Pin release on an environment-blocked probe** (⧗ `prompt.ts:3456-3489`): when the
+pinned probe's own red repeats an environment-shaped signature ≥2× (`isEnvBlockedSignature`
+— an env marker, missing file, or missing module), the pin stops binding, emits
+`probe_env_blocked`, and passes through with a state-the-gap nudge. This is the M4 mirror
+of the F18c partition in I.5, and it exists because a probe the *arena* cannot pass is not
+a fact about the patch (11880 burned 42 turns on one — VII.2).
 
 ### I.4 Edit-time gate stack (inside edit/write, before the file mutates)
 
@@ -211,6 +265,20 @@ ladder → hub-design nudge → batch-momentum nudge.
    edit and it will be allowed"). Defining sites are allowed outright
    (hub_edit_gate_defining_site_allow). 2nd distinct-file bounce → design pre-pass →
    synchronous hub-design judge verdict (wave-7).
+   **⧗ Turn-level bounce memory** (`edit-governance.ts:367,374` — `hubEditTurnBounceCount`
+   / `hubEditTurnSettled`; ladder at `:768-800`). The gate's per-session memory made every
+   child session re-learn the same bounce from scratch, so one turn could bounce the same
+   file N× across N sub-sessions (11815 did it 4×). Turn-scoped counters inherit across
+   sessions (`inheritHubEditTurnBounceState`) and add two rungs **above** the existing
+   ones — 2nd evidence-less bounce this turn → deny `repeat:true`
+   (`hub_bounce_turn_repeat`); 3rd → dispatch the hub-design judge
+   (`dispatchHubDesignJudge` DI param on `evaluateHubEditGate`) → judge endorses or
+   degrades ⇒ **bounded fail-open allow loud** (`hub_gate_exhausted_allow`), judge names a
+   different site ⇒ one `final:true` bounce naming it (`hub_bounce_judge_redirect`), after
+   which the file is turn-settled. Call sites log all three in `tool/edit.ts:164,181,228`
+   and `tool/write.ts:129,146,188`. **The engagement guard is the inertness proof**: turn
+   rungs apply only when the session itself never bounced this file (`:762`) — every
+   pre-existing per-session path stays byte-identical.
 5. CONVENTION-DIVERGENCE gate (wave-11): an edit calling an API variant the file has
    never used (e.g. datetime.now() in a file using utcnow()) pauses once, names the
    variant and the file's existing sites — **"an identical retry will be accepted"**
@@ -233,6 +301,15 @@ being used as the exit door on real failures.
    → one bounded deny (:3345-3358) naming the conflict + loud pass-through
 3. F18 seen-red          → any watched red in the transcript not re-run green (incl.
    exit-0 laundered pipes) → nudge once → loud pass                        (:3056-3110, seen-red.ts:149-171)
+   partitioned TWICE before it binds: F18b `partitionSeenRedByInversion` (the 11815
+   oracle-inversion carve-out, V.2) and ⧗ F18c `partitionSeenRedByEnvBlock`
+   (seen-red.ts:281-306) — a red whose tail matches an env-blocked signature
+   (`isEnvBlockedSignature`, :253-257: env marker | missing file | missing module) AND
+   repeats ≥2× is sanctioned with `seen_red_env_blocked` + a state-the-gap nudge instead
+   of F18's confirm-GREEN demand. **A red first seen BEFORE any edit landed
+   (`sawEditBefore`) is sanctionable only on an explicit env-marker match, never on
+   timing** — the same discipline as the inversion partition: the arena's gaps are
+   written off, the patch's own reds never are.
 4. bug-shaped turns  [bugShaped = !verdictIsReadOnly(verdict) && (any diagnosis goal ||
    testEditGateArmed)]:  a READ-ONLY verdict (every goal qa/research/audit/run-only) is
    never bug-shaped, so this whole block stands down (P4b, 2026-07-15). Before that fix
@@ -262,6 +339,8 @@ finish gates. Consequence: a gate can *pressure* but never *force* — and it al
 | Per-result ceiling (edit/write/todo exempt) | 6,000 tok | `tools.ts:477-490` |
 | Per-tool output truncation | 2,000 lines / 50 KB | `tool/truncate.ts:15-16` |
 | Persona tool-call budgets | 30/25/45/45/15/60 | `slice-orchestrator.ts:293-300` (the "25-tool cap" = the runner persona; a folklore-free real constraint) |
+| ⧗ Above-conductor step cap (reasoner/oracle slices) | **12** | `slice-orchestrator.ts:348`, applied `:372-375` **after** the P8 ×1.5 lift — the cap wins |
+| ⧗ Identical-run dedupe threshold | 3 | `turn-supervisor.ts:406` (any edit resets) |
 | Slice attempts / climbs | 8 attempts, ≤1 climb, 2 same-tier retries | `slice-loop.ts:963-977, :1244` |
 | Repro/finish step counters | pin deadline 12 · converge 8 · pin-green 3 · probe-gate retries 3 · unverified-finish 3 | `prompt.ts:270-288, :1801, :1812` |
 | Shell timeouts | 120s default; regression gate 240s÷N; engine probe 120s | `slice-orchestrator.ts:343`, `prompt.ts:298-306` |
@@ -825,6 +904,268 @@ against the value's natural source) distinguishes `254` from `'254'`.
 
 **Status:** documented; implementation deferred to the post-sweep rebuild so the
 binary rebuilds once, then re-validated against 11790's class.
+
+---
+
+## Part VII — the turn-economy forensics (2026-07-15): what econ burns, and why
+
+Parts II–VI ask *did it solve*. This part asks *what did it burn getting there* — a
+separate axis with its own failure classes. It opens with a correction, because the
+investigation was provoked by a number that turned out to be false.
+
+### VII.1 The false premise (and why the work still paid)
+
+**The alarm:** on the mini-10, econ spent $2.47 against Opus's $3.12 — near cost parity,
+despite econ's tiers pricing ~8× cheaper per token and running an 88–93% cache-hit rate.
+If true, something in the harness was eating an order-of-magnitude price advantage.
+
+**It was not true.** That Opus figure came from
+`claude-off-mini10-verified-2026-07-03`, which **never stripped the future** (its runner
+resets with `git checkout` + `reset --hard` + `clean`; every git ref and the reflog
+survive, leaving the gold fix reachable via `git log --all`) and was **self-reported**,
+never real-graded. Against the honest strict sweep — Opus **$9.03 / 225 turns / 10-10**,
+real-graded, refs deleted and reflog expired — econ at ~$2.35–2.47 is **~3.8× cheaper**.
+The parity alarm was an artifact. Full retirement note, the 2.8× turn-inflation
+signature, and all cross-model numbers:
+[ECON_VS_CLAUDE_MODELS.md](./ECON_VS_CLAUDE_MODELS.md) (which owns those facts; they are
+not restated here).
+
+**The lesson worth keeping** is procedural, and it is the strict-cycle's own rule pointed
+at ourselves: *a reference run is a benchmark run.* Strip-the-future and real-grading are
+not econ-only hygiene — an unstripped, self-reported baseline is not a baseline, and it
+silently reframed a winning position as an emergency. Any future cross-agent comparison
+gets the same gate before it is quoted.
+
+**The work still paid**, because the internal waste it went looking for was real and is
+independently measurable on econ's own runs (VII.2) — it just wasn't costing us *parity*.
+Correct framing: this is **tail-trimming on a position we were already winning**, not a
+rescue. That distinction sets the risk appetite — see VII.5.
+
+### VII.2 Where econ's turns actually go
+
+Measured on econ's own 2026-07-15 mini-10 receipts; nothing here depends on any Claude
+comparison.
+
+1. **The above-conductor tail is 48% of spend.** $1.18 of $2.47, concentrated in the four
+   instances that dispatched reasoner/oracle slices (11815/11848/11880/11999) — which are
+   exactly the four costliest. The mechanism (I.2): a delegated slice inherited the **full
+   exploration burden** — fresh context, cold cache, 33–43 tool calls at near-frontier
+   input price. We were paying a premium tier to re-derive what the conductor already knew.
+2. **Verification redundancy.** 42–53 of 59–89 turns went to probe/regression loops;
+   roughly **half of 60–72 repro runs were byte-identical re-runs** with no edit between
+   them. 11880 spent **42 turns on a probe the arena cannot pass** ("GIS backend
+   required" — an environment gap, not a defect in the patch).
+3. **Blocked-cascade retries.** 11999 (100t/$0.61): an explorer slice timed out → all five
+   slices blocked → **three full-cascade retries** + two 16-turn reasoner delegations + a
+   21-turn oracle synthesis. The conductor had already named the fix site at step 1.
+4. **Gate-bounce loops.** 11815 bounced the hub gate **4× on the same file** — the gate's
+   memory was per-session, so every child session re-learned the same denial from scratch.
+
+**Caching was never the problem.** 88–93% hit rate, ~$0.06/M on reads, per-turn context
+~25–30k — comparable to Claude Code's own per-turn footprint. Cost is
+`turns × context-per-turn`, and context grows *with* turns, so the bill is quadratic in
+turn count. A 90% cache hit rate on 100 turns loses to no cache at all on 10. **Turn count
+was the whole story**, which is why every mechanism below targets turns, not tokens.
+
+### VII.3 The turn-economy wave (seven mechanisms) — ⧗ uncommitted
+
+Each is always-on, no flags, and **inert by signature** — built so that a run not
+exhibiting the pathology takes a byte-identical path, protecting the passing baseline.
+Anchors and trigger predicates are in Part I; this is the intent map.
+
+| # | Mechanism | Waste it targets | Part I |
+|---|---|---|---|
+| 1 | Brief-not-transcript dispatch | VII.2.1 — delegated slice re-explores from cold | I.2 |
+| 2 | `ABOVE_CONDUCTOR_STEP_CAP = 12` | VII.2.1 — premium tier tool-loops like a 2nd agent | I.2 / I.6 |
+| 3 | Cascade-failed inline latch | VII.2.3 — 3× re-decompose of a dead cascade | I.2 |
+| 4 | Direct-first valve | VII.2.1 — decomposing a task whose site is already named | I.2 |
+| 5 | Identical-run dedupe | VII.2.2 — byte-identical re-runs with no edit between | I.3 |
+| 6 | Env-blocked writeoff (F18c + pin release) | VII.2.2 — 42 turns on an unpassable probe | I.3 / I.5 |
+| 7 | Hub-gate turn bounce memory + judge | VII.2.4 — same file bounced 4× across child sessions | I.4 |
+
+The unifying rule, and the one the wave is really testing: **an above-conductor slice is
+an adviser, not a second agent** (1, 2); **a signal that carries no new information should
+not cost a turn** (5, 6); and **a mechanism that has already failed wholesale should not
+be re-run unchanged** (3, 4, 7).
+
+### VII.4 Live-fire validation — IN FLIGHT, results mixed
+
+Strict fresh-arena re-fire, binary built from the working tree; pathology set
+(11999/11880/11815) + inertness guards (11790/12050); baselines are the 2026-07-15
+receipts. **This section is provisional and must not be cited as a result until complete.**
+
+| Instance | Baseline | Wave | Above-conductor turns | Verdict |
+|---|---|---|---|---|
+| 11999 | 100t / $0.6149 / PASS | **29t / $0.1831 / PASS** | 55 → **6** | **3.4× cheaper** — the thesis working |
+| 11880 | 59t / $0.2364 / PASS | 135t / $0.7406 / PASS | 17 → **62** | +213% — *not* wave-caused (VII.4.1) |
+| 11815 | 89t / $0.5075 / **FAIL** | 104t / $0.5345 / **PASS** | 27 → 28 | FAIL→PASS at flat cost — pre-existing `1270cbccd` seams |
+| 11790 | 20t / $0.0531 / PASS | 36t / $0.1879 / PASS | 0 → 6 | +254% — escalated draw, inside its documented band |
+| 12050 | 19t / $0.0267 / PASS | 72t / $0.3079 / PASS | 0 → **37** | **+1053% — wave-caused (VII.4.3)** |
+| **total** | **287t / $1.4386 / 4-of-5** | **376t / $1.954 / 5-of-5** | 99 → 139 | **+31% turns, +36% cost, +1 solve** |
+
+**The wave as a block is a cost regression** — the opposite of its purpose — while being a
+correctness improvement (5/5 vs 4/5). Four of five instances escalated *more* than
+baseline. The per-mechanism verdicts below are what matter; the block verdict is that it
+does not ship as one.
+
+**11999 is the thesis working.** Above-conductor turns collapsed 55 → 6 ($0.13 reasoner)
+with no named signal firing — consistent, because the two mechanisms that own this shape
+(brief, step cap) are silent structural changes, and the cascade latch correctly never
+engaged on a run whose cascade never died.
+
+#### VII.4.1 The 11880 autopsy — the regression is *not* wave-caused, and the real findings are worse
+
+Three hypotheses were tested against both run logs; the two obvious ones are **wrong**,
+and killing them is what exposed the real defects.
+
+**Rejected — "the wave introduced an early-deferral boundary."** Both `s3-exhausted` and
+`deferral_armed` exist at HEAD (`prompt.ts:3810`, `:3126`) and the wave diff touches
+neither. This is pre-existing round-F deferral machinery (Part V item 1).
+
+**Rejected — "the latch/valve insert an inline window then decompose anyway."** The
+direct-first valve never fired (no `direct_first_inline` in either log). Both
+`cascade_inline_latch` firings and the single `converge_post_green` occur **after** the
+cascade was already running (log lines >1133, vs the deferral at line 707). **No wave
+mechanism touched the root conductor before the divergence point.**
+
+**What actually happened — a route fork, model-driven.** Both runs defer exactly once;
+they differ in *which signal* trips it and *when*:
+
+| | Baseline | Wave |
+|---|---|---|
+| Deferral trigger | `probe_gate_exhausted` (line 1461, late) | `unverified_finish` rung=`s3-exhausted` (line 707, **step 26**) |
+| Conductor steps inline first | 42 | 26 |
+| Above-conductor turns | 17 | **62** (6 judge rungs: reasoner→reasoner→reasoner→oracle→oracle→oracle) |
+| `unverified_finish` count | 2 (both `convert`) | 3 → exhausted |
+
+The wave run declared an unverified finish a third time; the baseline only ever did twice,
+so it never exhausted S3's bounded rejects. **That is root-conductor sampling variance in
+finish-declaration timing** — not a mechanism change. Given III.4's documented ~19× cost
+spread on a *fixed* binary (11790: $0.033–$0.632 over five runs), one draw cannot
+distinguish this from noise, and the burden of proof is on anyone claiming otherwise.
+
+**Real finding 1 — the deferral cascade is a cost cliff that bought nothing here.** Once
+tripped, the escalation ran six judge rungs, every one logging `rungReason="judge rung
+failed"`, climbing reasoner→oracle, ending in two `mixedOutcomes=true` syntheses: **62
+above-conductor turns, +$0.50**. And both runs shipped the **byte-identical one-line
+patch** (`result.error_messages = copy.deepcopy(self.error_messages, memo)` in
+`django/forms/fields.py`), both real-graded OK. The cascade re-derived a fix the conductor
+had already written. Round-F item 1 — "consume the hard-tail signal", called *the
+strongest-evidenced item on the board* — is here observed **paying ~10× inline retry for
+zero patch delta**. Worse, the escalation was chasing a verification that was
+*environmentally impossible*: its own gate evidence reads "no reproduction was ever pinned
+despite landed source edits", and every judge rung failed for want of a green pin the arena
+could not produce. This is a **fifth** entry for Part IV.3's anti-pattern list, and the
+first one found on the cost axis: **a deferral that cannot terminate, because it escalates
+toward evidence the environment cannot supply.** Note the irony against IV.3's third
+anti-pattern ("warnings without teeth, and without routing"): we gave the signal teeth and
+routing, and the tooth closed on an environment gap.
+
+**Real finding 2 — mechanism 6 has never fired on the instance it was built for, because
+its regex does not match its own motivating case.** `ENV_BLOCKED_MARKER_RE`
+(`seen-red.ts:250`) is `/backend required|ImproperlyConfigured|command not found/i`. The
+actual arena text is:
+
+```
+Aborting: A GIS database backend is required to run gis_tests.
+```
+
+`backend required` ≠ `backend **is** required` — **no match** (verified directly). The
+comment three lines above the regex names "The django-11880 shape" as its motivation, so
+the pattern was written from the *paraphrase* ("GIS backend required") rather than from the
+log line. The GIS red appears identically in both runs (baseline :1904, wave :4085) and was
+sanctioned in neither. **Mechanism 6 is therefore unvalidated, not merely unfired** — and
+the 42-turn unpassable-probe waste it was built to remove (VII.2.2) is still fully present.
+Fix is a one-token widening (`backend (is )?required`), but it must be re-validated, not
+assumed: widening a red-sanctioning predicate trades verification rigor for turns, which is
+the wrong direction to guess in.
+
+**Real finding 3 — the step cap appears to be working.** 31 reasoner + 31 oracle turns
+across 6 rungs ≈ 10 turns/slice, under the cap of 12. Volume of slices, not slice length,
+drove the cost. The cap contained a bad route; it cannot prevent one.
+
+#### VII.4.3 django-12050 — mechanism 6 (post-green convergence) is actively harmful
+
+The cleanest causal specimen in the wave, and it convicts one of our own mechanisms.
+12050's baseline is the tightest run in the set: 19 turns, $0.0267, **conductor-only**,
+and **zero** `probe_gate_reject` signals — it simply converged and finished. Under the
+wave it cost **$0.3079 over 72 turns with 37 above conductor (11.5×)**. The log order:
+
+```
+ 736  [signal] converge_post_green   ← our finish-now nudge (mechanism 6)
+ 748  [signal] probe_gate_reject ×3  ← 12 lines later: M4 re-runs the pin at finish → RED
+1136  [signal] probe_gate_exhausted  → decision=defer
+1137  [signal] deferral_armed        → the escalation cascade → 37 above-conductor turns
+1725  [signal] probe_gate_exhausted  (none-loud)
+```
+
+**The defect:** `converge_post_green` (`prompt.ts:2841`) nudges *finish now* when it
+observes the pinned probe green with no other unresolved reds. The **M4 finish gate then
+re-runs that same pin and finds it red** (I.5 step 2). The two mechanisms hold different
+notions of "verified", and every round trip between them burns one of M4's three bounded
+rejects. Exhaust them and the turn falls off the **deferral cost cliff** documented in
+VII.4.1 — which is exactly how a conductor-only 19-turn instance acquired 37
+above-conductor turns.
+
+The same chain reproduces on 11815 (`converge_post_green` :469 → `probe_gate_reject`
+:483, 14 lines later), where it cost one reject but the run recovered. It is **2-for-2 in
+the runs where the nudge fires before the finish**. On 11790 and 11880 the nudge fired
+*after* the escalation had already been chosen (:764 vs `stuck_escalate` :730; :1602 vs
+the deferral :707), so it is not implicated there.
+
+**The correlation across the wave is the summary of the whole exercise:**
+
+| `converge_post_green` | Runs | Cost outcome |
+|---|---|---|
+| fired | 11880, 11815, 11790, 12050 | **4 of 4 more expensive** |
+| never fired | 11999 | **1 of 1 dramatically cheaper (−70%)** |
+
+**Verdict: mechanism 6 does not ship.** A convergence nudge may only fire on a green the
+finish gate itself would accept — i.e. downstream of M4, not upstream of it. Nudging the
+model toward a finish that a gate is about to reject does not save turns; it *buys* the
+turns back at the escalation ladder's price. This is the wave's own contribution to the
+IV.3 anti-pattern list: **two mechanisms disagreeing about "done", with a bounded-retry
+counter as the currency.**
+
+#### VII.4.2 What this wave can and cannot establish
+
+**A 5-instance, n=1 wave cannot validate a cost change on this distribution.** 11880 is the
+proof: a 3.1× cost swing with *no wave mechanism implicated in the divergence*. Cost claims
+on this harness need the §6-style variance band (≥3 runs/instance), not a before/after pair
+— the same standard Part III already applies to correctness claims. The inertness guards
+(11790/12050) remain the only cells where a deviation would be unambiguous, since their
+floor is tight and well-characterized.
+
+Standing rule, given VII.1: this wave trims a tail on a **3.8× winning position**, so the
+burden of proof runs against it. A mechanism that cannot be shown to help does not ship on
+the argument that it might.
+
+**Per-mechanism verdicts on the evidence actually obtained:**
+
+| # | Mechanism | Evidence | Verdict |
+|---|---|---|---|
+| 1 | Brief-not-transcript | 11999: above-conductor 55 → 6. 11790: took an escalated draw at **6** above-conductor turns / $0.19 where every historical escalated 11790 ran **31–42** turns / $0.53–0.63 (III.4) | **Ship candidate** — two specimens, no counter-evidence |
+| 2 | `ABOVE_CONDUCTOR_STEP_CAP=12` | Same two specimens. 11880 confirms it binds per-slice (6 rungs × ~10 turns, all under cap) | **Ship candidate** — but see the gap below |
+| 3 | Cascade latch | Fired 2× on 11880, both *after* the route was set; no measurable effect | No evidence either way |
+| 4 | Direct-first valve | **Never fired** on any of the five | No evidence |
+| 5 | Identical-run dedupe | **Never fired** on any of the five | No evidence |
+| 6a | Post-green convergence | 12050 (+1053%) + 11815, 2-for-2 causal chain into `probe_gate_reject` | **DROP** (VII.4.3) |
+| 6b | Env-blocked writeoff | Regex never matched its own motivating case | **Broken** — fix + revalidate (VII.4.1) |
+| 7 | Hub-gate turn bounce memory | **Never fired** on any of the five | No evidence |
+
+**The gap mechanisms 1–2 do not close.** They bound *per-slice* cost, not *slice count*.
+11880's 62 above-conductor turns were six judge rungs of ~10 turns each — every slice
+obeying the 12-step cap. A per-turn ceiling on escalation **rungs** (or on cumulative
+above-conductor spend) is the mechanism the evidence actually asks for, and the wave does
+not contain it. That, plus VII.4.1's non-terminating deferral, is where the next wave
+should start — not with more inline-window mechanisms.
+
+**Meta-lesson, recorded because it cost a day.** Four of the seven mechanisms never fired
+on any instance where they could be judged — they were designed inert-by-signature against
+pathologies observed in *one* prior run each, and those pathologies did not recur. Building
+seven mechanisms against n=1 observations, then validating with n=1 runs, produced exactly
+one defensible result (11999) and one self-inflicted regression (12050). The pathology has
+to be shown to be *recurrent* before it is worth a mechanism.
 
 ---
 

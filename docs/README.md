@@ -100,6 +100,11 @@ seam table: [features/README.md](./features/README.md).
 - [SWE_BENCH_TRACKER.md](./testing/SWE_BENCH_TRACKER.md) — the working tracker for the SWE-mini-10
   django set: per-instance benchmark verdict + local triage status + root-cause, the laptop run
   recipe, and the real-grader-simulation rule that keeps local runs honest (local "N tests OK" ≠ pass).
+- [ECON_VS_CLAUDE_MODELS.md](./testing/ECON_VS_CLAUDE_MODELS.md) — the cross-model cost/resource
+  comparison on the SWE mini-10, all four arms real-graded under identical strict conditions:
+  econ (9 solid + 11815 flaky, ~$2.35) vs vanilla Claude Code driving Opus ($9.03, 10/10) /
+  Sonnet ($5.81, 9/10) / Haiku 4.5 ($3.82, 5/10) — tokens in/out, cache hits, cost, turns. Also
+  owns the retirement note for the contaminated 2026-07-03 Opus baseline.
 
 ### `strategy/` — the business case
 - [POSITIONING.md](./strategy/POSITIONING.md) — who econ is for, the wedge, and the

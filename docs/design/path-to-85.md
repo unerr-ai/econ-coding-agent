@@ -42,6 +42,17 @@ baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log).
    tail** (one extra constrained draw on the ~10–20% of instances where a deterministic
    failure signal fires — the double-pay ledger already accounts for exactly this
    shape).
+5. **The cost axis is not in trouble — we start from ~3.8× ahead, and that changes the
+   risk appetite here.** Real-graded mini-10: econ ~$2.35–2.47 @ 9-solid vs Opus $9.03 @
+   10/10 (Sonnet $5.81 @ 9/10 — see
+   [ECON_VS_CLAUDE_MODELS.md](../testing/ECON_VS_CLAUDE_MODELS.md)). A 2026-07-15
+   investigation into apparent *cost parity* with Opus turned out to be chasing a
+   contaminated baseline (an unstripped, self-reported 07-03 reference); the honest gap is
+   3.8×. Two consequences for this plan: (a) **score is the scarce axis, not cost** — pp
+   are worth more than pennies, so a Tier-1 mechanism that buys accuracy at ~$0 is
+   strictly better than a cost mechanism that risks it; and (b) any future *cost*
+   mechanism carries the burden of proof, because it is trimming a tail on a winning
+   position (the turn-economy wave in §3 Tier 0 is the live test of this rule).
 
 ---
 
@@ -107,6 +118,28 @@ rest, in cost order.
   by relevance to the issue cut SWE-Agent cost 23% *and* reduced false positives
   (arXiv:2510.18270). Our F11 neighbor machinery already selects; tightening selection
   to issue-relevance is a refinement, not new spend.
+- **The turn-economy wave (2026-07-15, ⧗ UNCOMMITTED — IN VALIDATION, mixed).** Seven
+  always-on, inert-by-signature mechanisms attacking *turns* rather than tokens: a compiled
+  brief + a 12-step cap for first-hop reasoner/oracle slices (an above-conductor slice is an
+  adviser, not a second agent), a cascade-failed inline latch, a direct-first valve,
+  identical-run dedupe, an env-blocked probe writeoff, and hub-gate turn-bounce memory.
+  Mechanism map: [HARNESS_AND_VARIANCE_REPORT.md](../testing/HARNESS_AND_VARIANCE_REPORT.md)
+  Part I (⧗ anchors) · rationale + live-fire: Part VII. **Live-fire verdict (5 instances,
+  2026-07-15): the wave as a block is a COST REGRESSION — $1.44 → $1.95 (+36%), 287 → 376
+  turns (+31%)** — while improving correctness 4/5 → 5/5. It does **not** ship as a block.
+  Per-mechanism: the compiled brief + 12-step cap are the survivors (two specimens —
+  11999's above-conductor turns 55 → 6 at −70% cost; 11790's escalated draw held to 6
+  above-conductor turns vs a historical 31–42); post-green convergence is **dropped** as
+  actively harmful (it nudges a finish the M4 gate then rejects, burning bounded retries
+  into the deferral cliff — 12050 +1053%); the env-blocked writeoff is **defective** (its
+  regex never matched its own motivating case); and the cascade latch, direct-first valve,
+  identical-run dedupe and hub turn-bounce memory **never fired on any of the five** — no
+  evidence either way. The premise that provoked the wave was itself false (§0.5). Two
+  lessons feed the rest of this plan: **(a) bound escalation *rungs*, not just steps** —
+  11880 burned 62 above-conductor turns as six judge rungs of ~10, every slice obeying the
+  cap; **(b) don't build mechanisms against n=1 pathologies** — four of seven targeted
+  single prior observations that never recurred.
+
 - **Shape-gate the fix machinery by the turn-read verdict (2026-07-15, IMPLEMENTED).**
   The harness armed on *every* turn, so a read-only turn (a question, an audit, a
   research lookup, a command-run) paid the full fix apparatus — decomposing a question
@@ -141,11 +174,28 @@ rest, in cost order.
 
 ### Tier 2 — tail-only spend (the deferral machinery)
 
+> **Live-fire caution (2026-07-15): "tail-only" is doing a lot of work in that heading.**
+> The first measured specimen of this machinery firing (django-11880, forensics report
+> VII.4.1) cost **62 above-conductor turns / +$0.50 — ~10× inline retry — and shipped the
+> byte-identical one-line patch the conductor had already written.** Six judge rungs
+> climbed reasoner→oracle, every one logging `judge rung failed`, because the escalation
+> was chasing a green pin the *arena environment* could not produce. Two design
+> consequences, both now prerequisites rather than refinements: (a) **a deferral must be
+> able to terminate** — escalating toward evidence the environment cannot supply is an
+> unbounded loop wearing a bounded-retry costume, and the env-blocked writeoff that should
+> have caught it was itself defective (VII.4.1 finding 2); (b) **the tail must be priced
+> before it is widened** — this item is still the right idea (8/8 reds ran 0-escalation),
+> but "tail-only spend" is a cost *shape*, not a cost *bound*, and one firing here cost
+> 2× a median instance's entire budget.
+
 - **Signal-gated second draw** (report item 1): a denied finish / unresolved repro /
   2nd hub bounce fires one constrained retry — enumerate-then-choose from named
   candidates (definition sites, sibling classes, API variants), usually one tier up.
   This is UCCI-shaped calibrated deferral with *deterministic* signals instead of
   logprobs — better calibrated than confidence, and free.
+  **Gating requirement added 2026-07-15:** the retry must carry a termination condition
+  that does not depend on producing evidence the environment has already refused, and its
+  cost must be measured per firing, not assumed from its trigger rate.
 - **Two-candidate selection, execution-free, on the tail only.** When deferral produces
   a second candidate, pick between the two with the judge tier reading both diffs
   against the issue (R4P-style patch reasoning: +6.6pp selecting from 16 at ~1s/patch;
@@ -279,6 +329,19 @@ doesn't have, and (after round F) actually consume them.
    "failures" contained a test that actually passed).
 5. **Multilingual probe** (SWE-bench Multilingual, 300 tasks) once the top-3 runner
    adapters exist — expectation: frontier-relative, not Python-parity.
+6. **Cost claims need the variance band too** (added 2026-07-15). A before/after pair is
+   not evidence on this distribution: per-instance cost spans ~19× on a *fixed* binary
+   (11790: $0.033–$0.632 over five runs), and the turn-economy wave produced a 3.1× cost
+   swing on 11880 with **no mechanism implicated in the divergence** — a pure route fork
+   driven by when the conductor happened to declare an unverified finish (forensics report
+   VII.4). Rule: a cost mechanism ships on ≥3 runs/instance across the affected class, or
+   it does not ship. The cheap-and-tight instances (11790/12050) are the sensitive cells —
+   their floor is narrow enough that a deviation means something.
+7. **Reference runs are benchmark runs** (added 2026-07-15). Any external baseline gets
+   strip-the-future + real-grading before it is quoted, or it is not a baseline. An
+   unstripped, self-reported Opus reference made econ look like it was at cost parity when
+   it was ~3.8× ahead, and that artifact set an engineering agenda for a day
+   ([ECON_VS_CLAUDE_MODELS.md](../testing/ECON_VS_CLAUDE_MODELS.md), "Retired").
 
 ---
 
