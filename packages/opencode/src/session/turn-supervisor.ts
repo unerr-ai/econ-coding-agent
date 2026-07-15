@@ -332,6 +332,78 @@ export function createBatchMomentumWatcher(): BatchMomentumWatcher {
 }
 
 // ---------------------------------------------------------------------------
+// Round-H — identical-run dedupe (probe_rerun_dedupe): the same shell command
+// producing byte-identical output for the 3rd+ time carries zero new
+// information (django-11815: ~72 repro re-runs, roughly half byte-identical).
+// ---------------------------------------------------------------------------
+
+/** A command must repeat this many times with an identical (normalized) output before it counts as a no-information rerun — the first two runs could be a legitimate confirm-then-reconfirm. */
+export const IDENTICAL_RUN_THRESHOLD = 3
+
+/** The dedupe tracker's evidence when it fires — logged verbatim on the `probe_rerun_dedupe` line. */
+export interface RerunDedupeSignal {
+  command: string
+  /** How many times this command has now produced this exact (normalized) output, back to back. */
+  occurrence: number
+}
+
+export interface RerunDedupeTracker {
+  /** Feed one completed step's raw parts; returns a signal the first time a command crosses `IDENTICAL_RUN_THRESHOLD` byte-identical (normalized) reruns since its counter last reset, else undefined. */
+  observe(parts: readonly unknown[]): RerunDedupeSignal | undefined
+}
+
+/**
+ * Build the once-per-command identical-run dedupe tracker: per command
+ * string, tallies consecutive runs whose `normalizeResult`-normalized output
+ * hashes the same. A DIFFERENT output resets that command's own counter (so
+ * a flaky test — same command, different result — never trips it). ANY
+ * completed edit landing in a step resets EVERY command's counter (an edit
+ * is forward progress; the next rerun of a command is new information again).
+ * Fires at most once per distinct command for the tracker's lifetime (one
+ * tracker per turn) — a converted signal, never a repeated one.
+ *
+ * @sem domain=routing role=orchestrator
+ */
+export function createRerunDedupeTracker(): RerunDedupeTracker {
+  const runs = new Map<string, { hash: string; count: number }>()
+  const nudged = new Set<string>()
+  return {
+    observe(parts) {
+      let sawEdit = false
+      for (const raw of parts) {
+        const part = raw as ToolPartLike
+        if (part?.type !== "tool" || !part.tool) continue
+        if (FILE_EDIT_TOOLS.has(part.tool) && (part.state?.status ?? "completed") === "completed") sawEdit = true
+      }
+      // An edit landing this step is forward progress — every command's
+      // rerun history resets, so a legitimate re-verify after a real change
+      // never misreads as a no-information repeat.
+      if (sawEdit) runs.clear()
+
+      let signal: RerunDedupeSignal | undefined
+      for (const raw of parts) {
+        const part = raw as ToolPartLike
+        if (part?.type !== "tool" || !part.tool || !COMMAND_TOOLS.has(part.tool)) continue
+        if ((part.state?.status ?? "completed") !== "completed") continue
+        const input = part.state?.input ?? {}
+        const command = typeof input["command"] === "string" ? (input["command"] as string).trim() : ""
+        if (!command) continue
+        const output = typeof part.state?.output === "string" ? part.state.output : ""
+        const hash = hashString(normalizeResult(output))
+        const prior = runs.get(command)
+        const entry = prior && prior.hash === hash ? { hash, count: prior.count + 1 } : { hash, count: 1 }
+        runs.set(command, entry)
+        if (entry.count >= IDENTICAL_RUN_THRESHOLD && !nudged.has(command) && !signal) {
+          nudged.add(command)
+          signal = { command, occurrence: entry.count }
+        }
+      }
+      return signal
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wave 10 — real test-execution detection (unverified-finish gate)
 // ---------------------------------------------------------------------------
 

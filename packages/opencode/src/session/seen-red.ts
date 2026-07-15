@@ -12,7 +12,7 @@
  * @sem domain=routing role=gate
  */
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
-import { looksLikeTestExecution } from "./turn-supervisor"
+import { looksLikeTestExecution, normalizeResult } from "./turn-supervisor"
 import { detectOracleInversion, type IssueExpectation } from "./issue-expectations"
 
 /** One bash execution from the turn's transcript, in chronological order. */
@@ -20,6 +20,14 @@ export interface SeenRedExecution {
   command: string
   exitCode: number | undefined
   output: string
+  /**
+   * True when a source (non-test, non-scratch-repro) edit had already landed
+   * BEFORE this execution ran. Optional — every existing extractor that
+   * never populates it reads as "unknown," which `partitionSeenRedByEnvBlock`
+   * treats as before-any-edit (conservative: a caller that hasn't wired edit
+   * provenance yet should not be silently excluded from that rung).
+   */
+  sawEditBefore?: boolean
 }
 
 /** An unresolved red execution surfaced to the model, with a short evidence tail. */
@@ -231,4 +239,68 @@ export function partitionSeenRedByInversion(
     }
   }
   return { binding, sanctioned }
+}
+
+// Conservative environment-gap markers beyond the MISSING_FILE_RE/
+// MODULE_MISSING_RE family already excluded upstream (isRedTestExecution
+// above never lets those reach `unresolved` at all — checked again here only
+// as defense in depth). The django-11880 shape: a GIS-backend-required
+// neighbor regression is an unconfigured test ENVIRONMENT, not an unfixed
+// producer, and neither existing regex names it.
+const ENV_BLOCKED_MARKER_RE = /backend required|ImproperlyConfigured|command not found/i
+
+/** Whether an unresolved red's evidence tail is environment-shaped: the MISSING_FILE_RE/MODULE_MISSING_RE family or the conservative marker set above. */
+export function isEnvBlockedSignature(outputTail: string): boolean {
+  return (
+    ENV_BLOCKED_MARKER_RE.test(outputTail) || MISSING_FILE_RE.test(outputTail) || MODULE_MISSING_RE.test(outputTail)
+  )
+}
+
+/** An unresolved red sanctioned as environment/baseline-blocked — never fixable by editing the issue's code. `repeats` is how many red executions in the turn shared its normalized signature (evidence it is a stable gap, not a one-off flake). */
+export interface SeenRedEnvBlock extends UnresolvedSeenRed {
+  repeats: number
+}
+
+/**
+ * Partition F18's still-binding unresolved reds (after `partitionSeenRedByInversion`)
+ * into `binding` (owe a green re-run, unchanged) and `envBlocked`: a red
+ * whose evidence tail is environment-shaped (`isEnvBlockedSignature`) OR
+ * whose FIRST occurrence in `executions` predates this turn's first landed
+ * source edit (`sawEditBefore` unset/false), AND has repeated with an
+ * identical normalized signature at least twice — the 2026-07-15 django-
+ * 11880 shape (a GIS-backend-required regression neighbor burned 42 of 59
+ * turns re-running a red that can never pass in this arena). Both conditions
+ * are conservative on purpose: a red whose ONLY evidence is "first observed
+ * after an edit" and carries no environment marker stays binding — it could
+ * be a regression the edit itself caused. Applies uniformly to suite and
+ * repro commands alike (unlike the inversion partition, an environment gap
+ * is equally real evidence regardless of provenance).
+ *
+ * @sem domain=routing role=gate
+ */
+export function partitionSeenRedByEnvBlock(
+  unresolved: readonly UnresolvedSeenRed[],
+  executions: readonly SeenRedExecution[],
+): { binding: UnresolvedSeenRed[]; envBlocked: SeenRedEnvBlock[] } {
+  const binding: UnresolvedSeenRed[] = []
+  const envBlocked: SeenRedEnvBlock[] = []
+  for (const red of unresolved) {
+    const envMarker = isEnvBlockedSignature(red.outputTail)
+    const firstExec = executions.find((e) => e.command === red.command)
+    const beforeEdit = firstExec ? firstExec.sawEditBefore !== true : true
+    if (!envMarker && !beforeEdit) {
+      binding.push(red)
+      continue
+    }
+    const signature = normalizeResult(red.outputTail)
+    const repeats = executions.filter(
+      (exec) => isRedTestExecution(exec) && normalizeResult(outputTail(exec.output)) === signature,
+    ).length
+    if (repeats >= 2) {
+      envBlocked.push({ ...red, repeats })
+    } else {
+      binding.push(red)
+    }
+  }
+  return { binding, envBlocked }
 }

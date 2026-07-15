@@ -8,8 +8,11 @@
  * gate's own green re-run, invisible to the transcript), and the
  * exact-command fallback when no test-target tokens are extractable.
  * Also covers isTrackedSuiteCommand (committed-suite provenance for the
- * inversion rung, repro scripts excluded) and partitionSeenRedByInversion
- * (binding vs sanctioned split, empty-literals no-op).
+ * inversion rung, repro scripts excluded), partitionSeenRedByInversion
+ * (binding vs sanctioned split, empty-literals no-op), isEnvBlockedSignature
+ * (the environment-marker regex family), and partitionSeenRedByEnvBlock
+ * (F18c — env/baseline-blocked writeoff: binding vs envBlocked split,
+ * provenance-gated on edit-ordering + repeat count).
  */
 
 import { describe, it, expect } from "bun:test"
@@ -17,6 +20,8 @@ import {
   findUnresolvedSeenRed,
   isTrackedSuiteCommand,
   partitionSeenRedByInversion,
+  isEnvBlockedSignature,
+  partitionSeenRedByEnvBlock,
   type SeenRedExecution,
   type UnresolvedSeenRed,
 } from "../../src/session/seen-red"
@@ -302,5 +307,146 @@ describe("partitionSeenRedByInversion", () => {
     const result = partitionSeenRedByInversion([plainA, inversionA, plainB, inversionB], FORM_CLASS_LITERALS)
     expect(result.binding).toEqual([plainA, plainB])
     expect(result.sanctioned.map((s) => s.command)).toEqual([inversionA.command, inversionB.command])
+  })
+})
+
+// --- 2026-07-15 django-11880 live-run fixtures (env/baseline-blocked partition) ---
+
+describe("isEnvBlockedSignature", () => {
+  it("matches the conservative marker set (backend required / ImproperlyConfigured / command not found)", () => {
+    expect(isEnvBlockedSignature("django.core.exceptions.ImproperlyConfigured: GIS backend required")).toBe(true)
+    expect(isEnvBlockedSignature("psycopg2 backend required for this test")).toBe(true)
+    expect(isEnvBlockedSignature("bash: gdal-config: command not found")).toBe(true)
+  })
+
+  it("matches the MISSING_FILE_RE/MODULE_MISSING_RE family too (defense in depth)", () => {
+    expect(isEnvBlockedSignature("ModuleNotFoundError: No module named 'psycopg2'")).toBe(true)
+  })
+
+  it("does NOT match a plain assertion failure", () => {
+    expect(isEnvBlockedSignature("AssertionError: 22 != 25 : 22 queries executed, 25 expected")).toBe(false)
+  })
+})
+
+describe("partitionSeenRedByEnvBlock", () => {
+  // Includes "Traceback" so it also satisfies TEST_FAILURE_SIGNATURE_RE — the
+  // repeat-count rung reuses isRedTestExecution, which requires a generic
+  // red-test-execution shape in addition to the env marker itself.
+  const GIS_TAIL =
+    "Traceback (most recent call last):\n  ...\ndjango.core.exceptions.ImproperlyConfigured: GIS backend requires a PostGIS or SpatiaLite build"
+  const PLAIN_TAIL = "AssertionError: 22 != 25 : 22 queries executed, 25 expected"
+  const NEIGHBOR_CMD = "python tests/runtests.py gis_tests.geoapp"
+  const OTHER_CMD = "pytest tests/test_bar.py::test_baz"
+
+  it("an env-marker red repeated 2x (both BEFORE any edit) is sanctioned envBlocked", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: NEIGHBOR_CMD, outputTail: GIS_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual([])
+    expect(result.envBlocked).toHaveLength(1)
+    expect(result.envBlocked[0]!.command).toBe(NEIGHBOR_CMD)
+    expect(result.envBlocked[0]!.repeats).toBe(2)
+  })
+
+  it("an env-marker red that repeats only ONCE (no confirming repeat) stays binding", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: NEIGHBOR_CMD, outputTail: GIS_TAIL }]
+    const executions: SeenRedExecution[] = [{ command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false }]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual(unresolved)
+    expect(result.envBlocked).toEqual([])
+  })
+
+  it("a NON-env-marker red whose first occurrence predates any edit, repeated 2x, is sanctioned via the timing path", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: OTHER_CMD, outputTail: PLAIN_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL, sawEditBefore: false },
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL, sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual([])
+    expect(result.envBlocked).toHaveLength(1)
+  })
+
+  it("a NON-env-marker red whose FIRST occurrence is AFTER an edit landed is NEVER sanctioned, even if it repeats 2x — the timing path requires before-edit provenance", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: OTHER_CMD, outputTail: PLAIN_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL, sawEditBefore: true },
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL, sawEditBefore: true },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual(unresolved)
+    expect(result.envBlocked).toEqual([])
+  })
+
+  it("an env-marker red is sanctioned even when it first appeared AFTER an edit — the marker independently proves the environment, not the code, is at fault", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: NEIGHBOR_CMD, outputTail: GIS_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: true },
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: true },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual([])
+    expect(result.envBlocked).toHaveLength(1)
+  })
+
+  it("differing signatures across runs are NEVER sanctioned: a normalization-surviving CONTENT difference keeps the red binding", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: NEIGHBOR_CMD, outputTail: GIS_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+      // a different failure message on the SAME command — not a stable repeat
+      { command: NEIGHBOR_CMD, exitCode: 1, output: "AssertionError: some unrelated other failure", sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.binding).toEqual(unresolved)
+    expect(result.envBlocked).toEqual([])
+  })
+
+  it("run-to-run noise (durations/timestamps/temp paths) does not defeat the repeat-signature match", () => {
+    const tailA = GIS_TAIL + " (0.031s)"
+    const tailB = GIS_TAIL + " (1.204s)"
+    const unresolved: UnresolvedSeenRed[] = [{ command: NEIGHBOR_CMD, outputTail: tailA }]
+    const executions: SeenRedExecution[] = [
+      { command: NEIGHBOR_CMD, exitCode: 1, output: tailA, sawEditBefore: false },
+      { command: NEIGHBOR_CMD, exitCode: 1, output: tailB, sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.envBlocked).toHaveLength(1)
+  })
+
+  it("the agent's own repro_issue.py red follows the SAME provenance rules — no special-casing by command shape", () => {
+    const reproCmd = "python repro_issue.py"
+    const unresolved: UnresolvedSeenRed[] = [{ command: reproCmd, outputTail: GIS_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: reproCmd, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+      { command: reproCmd, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.envBlocked).toHaveLength(1)
+  })
+
+  it("undefined sawEditBefore (a caller that hasn't wired edit provenance) reads as before-any-edit, not excluded", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: OTHER_CMD, outputTail: PLAIN_TAIL }]
+    const executions: SeenRedExecution[] = [
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL },
+      { command: OTHER_CMD, exitCode: 1, output: PLAIN_TAIL },
+    ]
+    const result = partitionSeenRedByEnvBlock(unresolved, executions)
+    expect(result.envBlocked).toHaveLength(1)
+  })
+
+  it("a mixed input array is partitioned correctly, preserving order within each bucket", () => {
+    const plainOnce: UnresolvedSeenRed = { command: "pytest tests/test_a.py -x", outputTail: PLAIN_TAIL }
+    const envBlocked: UnresolvedSeenRed = { command: NEIGHBOR_CMD, outputTail: GIS_TAIL }
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_a.py -x", exitCode: 1, output: PLAIN_TAIL, sawEditBefore: false },
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+      { command: NEIGHBOR_CMD, exitCode: 1, output: GIS_TAIL, sawEditBefore: false },
+    ]
+    const result = partitionSeenRedByEnvBlock([plainOnce, envBlocked], executions)
+    expect(result.binding).toEqual([plainOnce])
+    expect(result.envBlocked.map((e) => e.command)).toEqual([envBlocked.command])
   })
 })

@@ -63,6 +63,9 @@ import {
   type ModelFamily,
   type LogprobToken,
   type UncertaintySignal,
+  compileBrief,
+  type AttemptSummary,
+  type OracleBrief,
 } from "@opencode-ai/code-intelligence"
 
 // ---------------------------------------------------------------------------
@@ -326,6 +329,24 @@ export const PERSONA_STEP_BUDGET: Record<EconPersona, number> = {
  */
 export const FRAME_SLICE_STEP_BUDGET = 45
 
+/**
+ * Hard step cap for a slice session dispatched on the reasoner or oracle tier
+ * (an above-conductor seat) — independent of, and tighter than, the persona
+ * budget above. Forensics (mini10-11999): a reasoner/oracle child re-derives
+ * the conductor's own exploration from a cold cache (33-43 tool calls, fresh
+ * context) at 10x+ the cost of the conductor's own step. Capping the session
+ * forces the SAME loud best-so-far settle a persona budget exhaustion already
+ * produces (`budgetExhaustedMarker` + the watchdog's partial-output digest)
+ * instead of burning the full (possibly ×1.5-lifted) persona budget
+ * re-deriving what the compiled brief (CTX-2.1/2.2, `buildAboveConductorSliceBrief`)
+ * already handed it. Executor-tier persona budgets and the squeeze/climb
+ * escalation ladder (`runSlice` in slice-loop.ts) are untouched — this only
+ * narrows the step-count ceiling passed to the existing watchdog.
+ *
+ * @sem domain=routing role=config
+ */
+export const ABOVE_CONDUCTOR_STEP_CAP = 12
+
 /** P8 — the difficulty/escalation signals that lift a slice's step budget, all already present at the dispatch seam (req.sliceType, req.escalated, the arming store's hardness). */
 export interface SliceStepBudgetOpts {
   /** The slice's DAG node type — `design` is difficulty by construction (allocation's design-insight floor). */
@@ -334,6 +355,8 @@ export interface SliceStepBudgetOpts {
   readonly hard?: boolean
   /** True on an escalated rescue dispatch. */
   readonly escalated?: boolean
+  /** The tier this dispatch runs on. reasoner/oracle (above-conductor seats) are capped at `ABOVE_CONDUCTOR_STEP_CAP` regardless of persona or the P8 ×1.5 lift (item 2, mini10-11999 forensics). Absent — the pre-existing behavior — never caps. */
+  readonly tier?: EconTier
 }
 
 /**
@@ -342,10 +365,14 @@ export interface SliceStepBudgetOpts {
  * escalated rescue gets ×1.5: exhaustion is not graceful (the `[BUDGET
  * EXHAUSTED]` digest fails verification and the ladder double-pays a full
  * retry), so +50% steps up front on the hard tail is cheaper than a rescue.
+ * A reasoner/oracle dispatch (`opts.tier`) is then hard-capped at
+ * `ABOVE_CONDUCTOR_STEP_CAP`, overriding the persona base and the P8 lift
+ * alike — the cap always wins on an above-conductor seat.
  */
 export function sliceStepBudget(persona: EconPersona, sliceId?: string, opts?: SliceStepBudgetOpts): number {
   const base = sliceId === LOCALIZATION_SLICE_CONTENT ? FRAME_SLICE_STEP_BUDGET : PERSONA_STEP_BUDGET[persona]
-  return opts?.sliceType === "design" || opts?.hard || opts?.escalated ? Math.ceil(base * 1.5) : base
+  const lifted = opts?.sliceType === "design" || opts?.hard || opts?.escalated ? Math.ceil(base * 1.5) : base
+  return opts?.tier === "reasoner" || opts?.tier === "oracle" ? Math.min(lifted, ABOVE_CONDUCTOR_STEP_CAP) : lifted
 }
 
 /** Fail-loud marker prepended to a slice's output when its step budget is exhausted (OL-9.3a). */
@@ -2075,8 +2102,14 @@ export interface ConductorOrchestrationDeps {
   options?: ConductorLoopOptions
   /** U2 — the turn's triage goal count (§1.2), fed into `shouldOrchestrate`'s width check. Absent on a null-verdict (legacy) turn. */
   goalCount?: number
-  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). `degraded` (the null turn-read posture, `DEGRADED_ARMING`) holds the conductor inline — mid-turn todos never orchestrate, the grind valve's design prepass excepted. Absent on a null-verdict (legacy) turn. */
-  arming?: { hardness?: SliceHardness; ambiguity?: SliceAmbiguity; armLocalization?: boolean; degraded?: boolean }
+  /** §1.1b — the turn's arming-judge difficulty signals, threaded onto every slice `todosToLoopSlices` builds for this turn (two-axis allocator floor). `armLocalization` picks the resolve-first seed's shape (P12 residual case). `degraded` (the null turn-read posture, `DEGRADED_ARMING`) holds the conductor inline — mid-turn todos never orchestrate, the grind valve's design prepass excepted. `diagnosisLocationOrFixKnown` (item 4) is true when at least one diagnosis goal already carries `locationNamed`/`fixSpecified` evidence — the direct-first valve's precondition (resolutionDecision); absent (no caller populates it yet) keeps the valve permanently inert. Absent on a null-verdict (legacy) turn. */
+  arming?: {
+    hardness?: SliceHardness
+    ambiguity?: SliceAmbiguity
+    armLocalization?: boolean
+    degraded?: boolean
+    diagnosisLocationOrFixKnown?: boolean
+  }
   /** P4 §4b — this turn is a continuation (steering/iteration on the session's existing work): the resolution gate stands down entirely — a continuation never re-enters resolve-first; the fresh turn that started the task already resolved it. */
   continuation?: boolean
   /** P3/Q-D — the turn-read found a research-shaped goal: recon slices default to the web-enabled researcher persona and research slices verify by citation, never the test rung (threaded to `todosToLoopSlices`). */
@@ -2106,6 +2139,8 @@ export interface ConductorOrchestrationDeps {
     reseeded: boolean
     redecompAttempts: number
   }) => void
+  /** Item 3 — cascade-inline-latch telemetry sink: fires with `phase: "set"` when an engaged cascade settles with >=1 unverified/blocked slice and zero verified completions, and again with `phase: "consumed"` on the call that holds inline and injects the corrective todo. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the `cascade_inline_latch` log line). A no-op when absent. */
+  onCascadeInlineLatch?: (info: { sessionID: string; deadSlice: string; phase: "set" | "consumed" }) => void
 }
 
 /** What the hook reports back to the turn: whether it took over, and whether it fell back on error. */
@@ -2113,6 +2148,45 @@ export interface ConductorOrchestrationResult {
   engaged: boolean
   fellBack?: boolean
   result?: SliceLoopResult
+}
+
+// ---------------------------------------------------------------------------
+// Cascade-failed inline latch (item 3, mini10-11999 forensics): the conductor
+// re-engaged an already-failed cascade 3x via unverified-finish nudges, each
+// re-run re-paying the same doomed decomposition from a cold cache. When an
+// engaged cascade settles with >=1 unverified/blocked slice and ZERO verified
+// (accepted/escalated) completions, the latch below makes the NEXT call to
+// `runConductorOrchestration` for this session hold INLINE once and inject a
+// corrective, untyped todo naming the dead slice instead of re-dispatching —
+// the conductor does that slice's work inline itself, with its own warm
+// context. The latch is consumed (cleared) by that one hold so it can never
+// wedge a session inline forever. NOTE: fresh-turn bookkeeping (todo-store
+// resets, resolveAttempts resets) lives in prompt.ts's turn-open block, out
+// of this module's scope, so there is no turn-epoch signal available here —
+// "clears at next fresh turn" is approximated by "clears after exactly one
+// intervention", which is sufficient to break the specific 3x re-decompose
+// loop this closes (the loop only ever needed one interruption to stop
+// re-firing). Never touches a cascade that settles verified/complete.
+// ---------------------------------------------------------------------------
+
+interface CascadeInlineLatch {
+  readonly deadSlice: string
+}
+
+const cascadeLatchBySession = new Map<string, CascadeInlineLatch>()
+
+/** Test/reset seam — clears one session's cascade-inline latch, mirroring resolution-store's reset pattern. */
+export function clearCascadeInlineLatch(sessionID: string): void {
+  cascadeLatchBySession.delete(sessionID)
+}
+
+/** The untyped corrective todo the latch injects once — deliberately no `sliceType` (mirrors `REPRO_PREPASS_TODO`) so it never re-enters the typed-DAG orchestration path and instead runs INLINE on the conductor, in the same session that already has the warm context. */
+function cascadeInlineLatchCorrectiveTodo(deadSlice: string): InjectedSliceTodo {
+  return {
+    content: `[cascade-inline] The previous decomposition attempt did not verify — slice "${deadSlice}" timed out or was blocked and nothing else in that cascade settled verified. Do NOT re-decompose this again: you already have the warm context from that attempt. Finish "${deadSlice}"'s work yourself, inline, now.`,
+    status: "pending",
+    priority: "high",
+  }
 }
 
 /**
@@ -2155,6 +2229,22 @@ export async function runConductorOrchestration(
     return { engaged: false, fellBack: true }
   }
   if (!hasPendingTypedSlices(todos)) return { engaged: false }
+
+  // Item 3 — cascade-failed inline latch: consume once, hold this call
+  // INLINE, and inject the corrective todo instead of ever reaching the
+  // resolution gate or the dispatch path below. Takes precedence over every
+  // other branch (mirrors the L4.2 degraded-arming hold's unconditional
+  // stand-down) since re-decomposing a cascade we already know failed is
+  // exactly the loop this closes.
+  if (deps.sessionID !== undefined) {
+    const latch = cascadeLatchBySession.get(deps.sessionID)
+    if (latch !== undefined) {
+      cascadeLatchBySession.delete(deps.sessionID)
+      if (deps.appendTodos) await deps.appendTodos(cascadeInlineLatchCorrectiveTodo(latch.deadSlice))
+      deps.onCascadeInlineLatch?.({ sessionID: deps.sessionID, deadSlice: latch.deadSlice, phase: "consumed" })
+      return { engaged: false }
+    }
+  }
 
   // Serialize every status write so the live read-modify-write of the whole todo
   // list never races (a wave dispatches slices concurrently via Promise.all).
@@ -2222,6 +2312,14 @@ export async function runConductorOrchestration(
           // REAL FAIL vs inline 3/3 REAL PASS).
           armLocalization: deps.arming?.armLocalization === true,
           resolveAttempts,
+          // Item 4 — direct-first valve inputs. `diagnosisLocationOrFixKnown`
+          // is undefined unless a caller populates deps.arming with it (no
+          // live caller does yet), so the valve stays permanently inert
+          // until that wiring lands; writerSliceCount is always computable
+          // here from the live todos (which carry sliceType, unlike the
+          // stripped-down candidatePlan above).
+          diagnosisLocationOrFixKnown: deps.arming?.diagnosisLocationOrFixKnown,
+          writerSliceCount: todos.filter((t) => t.sliceType === "mechanical" || t.sliceType === "design").length,
         }).mode
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
@@ -2310,6 +2408,28 @@ export async function runConductorOrchestration(
       if (idx !== undefined) await settle(idx, outcome.state === "blocked" ? "cancelled" : "completed")
     }
     await chain
+
+    // Item 3 — arm the cascade-failed inline latch when this engaged run
+    // settled with at least one genuinely timed-out/failed/blocked slice and
+    // NO accepted verdict anywhere. `state === "unverified"` alone is NOT
+    // the right signal here: an untestable-but-accepted critical slice
+    // (verdict.accepted true, verdict.unverified true, OL-9.5d) ALSO settles
+    // as "unverified" — that is real, accepted work with nothing to check,
+    // not a dead slice, and must never latch. Only a state whose OWN verdict
+    // was rejected (the ladder exhausted on a genuine reject or a wall-clock
+    // timeout) or a P6a "blocked" (never dispatched) counts as dead. A
+    // cascade with even one accepted verdict is real progress, not the
+    // doomed-cascade shape the forensics named, so it is left untouched.
+    if (deps.sessionID !== undefined && result.engaged) {
+      const hasAccepted = result.outcomes.some((o) => o.verdict.accepted === true)
+      const deadOutcome = result.outcomes.find(
+        (o) => o.state === "blocked" || (o.state === "unverified" && o.verdict.accepted === false),
+      )
+      if (!hasAccepted && deadOutcome !== undefined) {
+        cascadeLatchBySession.set(deps.sessionID, { deadSlice: deadOutcome.id })
+        deps.onCascadeInlineLatch?.({ sessionID: deps.sessionID, deadSlice: deadOutcome.id, phase: "set" })
+      }
+    }
 
     // #55 mid-flight re-decomposition (§4.2): once a run has settled, evaluate
     // the re-decomposition triggers against its outcomes. A slice that settled
@@ -2490,4 +2610,90 @@ export function renderSliceDigestLedger(
   }
   if (blocks.length === 0) return ""
   return ["## Established by earlier slices (trust these findings; do not re-derive them)", ...blocks].join("\n\n")
+}
+
+// ---------------------------------------------------------------------------
+// Above-conductor slice brief (CTX-2.1/2.2, item 1) — a compiled brief for a
+// slice's FIRST (non-escalated) dispatch on the reasoner or oracle tier,
+// standing in for the repo-primer + digest-ledger + parent-task context every
+// executor slice gets. An escalated hop already carries a compiled brief as
+// its dispatch prompt (`buildEscalationBrief` in code-intelligence's
+// slice-loop.ts) so this is only ever the cheap-hop counterpart to that path.
+// Pure — no I/O; the caller reads the turn stores and the pinned repro file
+// off disk and passes the results in.
+// ---------------------------------------------------------------------------
+
+/** Inputs to `buildAboveConductorSliceBrief`, all pre-derived by the caller (the dispatch closure) from the turn's stored evidence — this function performs no I/O and no session/store lookups of its own. */
+export interface AboveConductorSliceBriefInput {
+  /** The slice's own task text — SliceDispatchRequest.prompt on the cheap hop. */
+  readonly prompt: string
+  /** This turn's stored triage verdict (`getTurnVerdict`), if any — supplies the issue goals' verbatim quotes and the turn's constraints. */
+  readonly turnVerdict?: TriageVerdict
+  /** This turn's pinned reproduction (`getPinnedProbe`), if any. */
+  readonly pinnedProbe?: TurnProbePin
+  /** The pinned repro script's current on-disk content (`readPinnedReproFile`), when the caller could resolve and read it. */
+  readonly reproContent?: string
+  /** M2 file evidence for this turn (`getTurnFiles`) — named candidate fix-site paths. */
+  readonly turnFiles: readonly string[]
+  /** Sibling slices already completed this run (the same digest ledger `renderSliceDigestLedger` consumes) — folded in as prior attempts, never as a raw transcript. */
+  readonly siblingDigests: readonly SliceDigestEntry[]
+  /** Token budget forwarded to `compileBrief`; defaults to compileBrief's own default. */
+  readonly tokenBudget?: number
+}
+
+/** Default expected-output-shape text when no diagnosis goal's `deliverable` matches this slice's own prompt. Mirrors `buildEscalationBrief`'s own default. */
+const ABOVE_CONDUCTOR_DEFAULT_OUTPUT_SHAPE = "The corrected result for this slice, ready for the verifier."
+
+/**
+ * Compile the brief a reasoner/oracle-tier slice's cheap (first) dispatch
+ * receives instead of the generic repo-primer/digest-ledger/parent-task
+ * context: the issue goals' verbatim quotes and deliverables, the turn's
+ * constraint lines (e.g. no-test-edit), the pinned repro's command + current
+ * content + last red/green tail, this turn's named candidate fix sites, and
+ * completed sibling slices as prior attempts/decisions — never a raw
+ * transcript (the same contract `compileBrief`'s own tests already enforce).
+ *
+ * @sem domain=intelligence role=utilities
+ */
+export function buildAboveConductorSliceBrief(input: AboveConductorSliceBriefInput): OracleBrief {
+  const goals = input.turnVerdict?.goals ?? []
+  const constraints = input.turnVerdict?.constraints ?? []
+  const slices: string[] = []
+
+  if (goals.length > 0) {
+    slices.push(
+      `## Issue goals (verbatim)\n${goals.map((g) => `- "${g.quote}" → ${g.deliverable}`).join("\n")}`,
+    )
+  }
+  if (constraints.length > 0) {
+    slices.push(
+      `## Turn constraints (must honor)\n${constraints.map((c) => `- (${c.kind}) "${c.quote}"`).join("\n")}`,
+    )
+  }
+  if (input.pinnedProbe) {
+    const tail = input.pinnedProbe.redEvidence
+      ? `\nLast run — exit ${input.pinnedProbe.redEvidence.exitCode}:\n${input.pinnedProbe.redEvidence.outputTail}`
+      : ""
+    const content = input.reproContent ? `\nCurrent content:\n${input.reproContent}` : ""
+    slices.push(`## Pinned repro\nCommand: ${input.pinnedProbe.probe.command}${tail}${content}`)
+  }
+  if (input.turnFiles.length > 0) {
+    slices.push(`## Candidate fix sites named this turn\n${input.turnFiles.join("\n")}`)
+  }
+
+  const attempts: AttemptSummary[] = input.siblingDigests.map((d) => ({
+    task: `sibling slice "${d.id}"`,
+    status: "success",
+  }))
+
+  const matchedGoal = goals.find((g) => g.quote.length > 0 && input.prompt.includes(g.quote))
+
+  return compileBrief({
+    problem: goals.length > 0 ? goals.map((g) => g.quote).join("\n") : input.prompt,
+    question: input.prompt,
+    outputShape: matchedGoal?.deliverable ?? ABOVE_CONDUCTOR_DEFAULT_OUTPUT_SHAPE,
+    slices,
+    attempts,
+    ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+  })
 }

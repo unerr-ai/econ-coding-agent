@@ -347,6 +347,78 @@ const hubEditDefiningResolvedSet = new Set<string>()
 /** Wave 9 — session IDs whose retry of a bounced edit landed on a path outside the resolved defining-file allowlist: the denial message named the graph's candidates and the model re-issued the same edit against a different, non-candidate file anyway (round-A3 django-11964: bounced query_utils.py, denial named enums.py, conductor re-issued query_utils.py). Read through `hubEditRetriedAgainstCandidates`. Cleared on disarm. */
 const hubEditRetryAgainstCandidatesSet = new Set<string>()
 
+/**
+ * Wave 12 — cross-session (per-turn) bounce counter: how many bounce
+ * "rungs" file F has accumulated ACROSS THE WHOLE TURN, not just this
+ * session — 0 unset, 1 after the turn's first-ever bounce (wherever it
+ * happened), 2 after a later session's cheap repeat bounce. Seeded into a
+ * child session at arming time from its parent's own count
+ * (`inheritHubEditTurnBounceState`), so a hard-tail escalation spawning a
+ * fresh session mid-turn doesn't reset a hub file's bounce history to zero
+ * — the 2026-07-15 django-11815 forensics: 2 sessions each independently
+ * ran the full first-bounce/second-bounce cycle on the SAME file
+ * (serializer.py), 4 bounce events total for one file in one turn, and the
+ * escalation session's pair never reached the hub-design judge at all
+ * (prompt.ts's wave-7 trigger only fires for a root session). Independent
+ * of `hubEditBounced`/`hubEditSecondBounced`, which continue to govern
+ * same-session repeats exactly as before. Same lifecycle as those two —
+ * not cleared on disarm.
+ */
+const hubEditTurnBounceCount = new Map<string, Map<string, number>>()
+
+/**
+ * Wave 12 — per-session set of files whose turn-wide bounce budget is
+ * exhausted: the hub-design judge has already given its final word on this
+ * file this turn (an exhausted-allow or the one final redirect bounce) —
+ * never re-litigated again by this session. Same lifecycle as
+ * `hubEditTurnBounceCount` — not cleared on disarm.
+ */
+const hubEditTurnSettled = new Map<string, Set<string>>()
+
+/**
+ * Wave 12 — bumps file F's turn-wide bounce count for `sessionID` by one
+ * and returns the new count. Internal bookkeeping only, called both by the
+ * classic first-bounce path (bumps 0→1) and by the cross-session repeat
+ * rung below (bumps 1→2) — never observable in a return value, so it never
+ * changes what either of those paths returns.
+ */
+function bumpHubEditTurnBounceCount(sessionID: string, filePath: string): number {
+  if (!hubEditTurnBounceCount.has(sessionID)) hubEditTurnBounceCount.set(sessionID, new Map())
+  const perFile = hubEditTurnBounceCount.get(sessionID)!
+  const next = (perFile.get(filePath) ?? 0) + 1
+  perFile.set(filePath, next)
+  return next
+}
+
+/**
+ * Wave 12 — the session's per-file turn-wide bounce counts, snapshotted for
+ * cross-session inheritance (read by prompt.ts's child-inherit arming call
+ * alongside the existing defining-files inherit). Empty for a session with
+ * no turn-wide bounce history recorded.
+ */
+export function hubEditTurnBounceSnapshot(sessionID: string): ReadonlyMap<string, number> {
+  return new Map(hubEditTurnBounceCount.get(sessionID) ?? [])
+}
+
+/**
+ * Wave 12 — seeds a child session's per-file turn-wide bounce memory (and
+ * judge-settled set) from its parent's, at the same child-inherit point
+ * `setHubEditGate`'s `definingFiles` argument already uses — so a hard-tail
+ * escalation slice spawned mid-turn continues a hub file's bounce history
+ * instead of resetting it to zero. A parent with no turn-wide history is a
+ * no-op (the child starts fresh, exactly like today).
+ */
+export function inheritHubEditTurnBounceState(childSessionID: string, parentSessionID: string): void {
+  const parentCounts = hubEditTurnBounceCount.get(parentSessionID)
+  if (parentCounts && parentCounts.size > 0) {
+    hubEditTurnBounceCount.set(childSessionID, new Map(parentCounts))
+  }
+  const parentSettled = hubEditTurnSettled.get(parentSessionID)
+  if (parentSettled && parentSettled.size > 0) {
+    hubEditTurnSettled.set(childSessionID, new Set(parentSettled))
+  }
+}
+
 /** The session's bounced file set as an array (insertion order) — empty for an unknown or never-bounced session. Read by prompt.ts's hub-shopping trigger to detect a second DISTINCT bounced file in one turn (the tell that the model is moving the same fix to another hub instead of reconsidering where it belongs). */
 export function hubEditBouncedFiles(sessionID: string): string[] {
   return Array.from(hubEditBounced.get(sessionID) ?? [])
@@ -441,6 +513,40 @@ export function hubEditSecondDenialMessage(relPath: string, definingSites: reado
 /** Narrow graph surface the hub-edit gate needs — BunSqliteGraph satisfies it structurally; tests pass a synthetic fake (including one whose fileFanIn never resolves, to exercise the budget race). */
 export interface HubFanInGraph {
   fileFanIn(filePath: string): number | Promise<number>
+}
+
+/**
+ * Wave 12 — the narrow shape `evaluateHubEditGate` needs from the
+ * hub-design judge's verdict (structurally compatible with
+ * `session/hub-design-judge.ts`'s `HubDesignVerdict` — this module never
+ * imports it, to keep the tool→session import direction one-way).
+ */
+export interface HubEditJudgeVerdict {
+  readonly file: string
+  readonly entity: string
+  readonly change: string
+}
+
+/**
+ * Wave 12 — the cheap, cached deny for a file's SECOND evidence-less bounce
+ * THIS TURN, reached in a session that has never itself denied this file
+ * (a later session continuing a turn a prior session already bounced this
+ * file in). One line, never a re-litigation of the root-most-layer case —
+ * that argument was already made once this turn.
+ */
+export function hubEditRepeatBounceMessage(relPath: string): string {
+  return `${relPath} was already bounced once this turn as shared infrastructure — re-issuing the same edit without new evidence will not change that. If ${relPath} itself defines the behavior, state that evidence; otherwise fix the root-most layer instead.`
+}
+
+/**
+ * Wave 12 — the final word after the hub-design judge settles a file's
+ * THIRD evidence-less bounce this turn with a redirect verdict: names the
+ * judge's chosen file/entity and change, and states this is the turn's
+ * last bounce on `relPath` — bounded, never a wedge (a further retry
+ * allows).
+ */
+export function hubEditJudgeRedirectMessage(relPath: string, verdict: HubEditJudgeVerdict): string {
+  return `The hub-design judge reviewed ${relPath} against this turn's issue and named the root-most fix site as ${verdict.file} (${verdict.entity}): ${verdict.change}. This is the final word on ${relPath} this turn — edit ${verdict.file} instead.`
 }
 
 /**
@@ -558,6 +664,22 @@ export async function bandFilterDefiningSites(
  * lifecycle). An EMPTY allowlist still allows on retry exactly as before
  * round F — there is no graph evidence to hold the model to. Logging-free by
  * design — edit.ts/write.ts log at the call site, inside their own Effect.
+ * Wave 12 — all of the above governs a SINGLE session's own repeats and is
+ * unchanged; layered in front of it (after the defining-site allowlist
+ * check, before the per-session `bounced` check) is per-file PER-TURN
+ * memory: when this session has never itself bounced `filePath` but an
+ * earlier session THIS TURN already has (inherited via
+ * `inheritHubEditTurnBounceState`, seeded by prompt.ts's child-inherit
+ * arming call), a fresh first-bounce cycle is skipped — the turn's 2nd
+ * evidence-less attempt gets a cheap cached repeat deny (`repeat: true`,
+ * `hubEditRepeatBounceMessage`) instead of re-litigating, and the turn's
+ * 3rd evidence-less attempt auto-dispatches the injected
+ * `dispatchHubDesignJudge` (the wave-7 machinery, routed here rather than
+ * called fresh) to settle root-most vs not: an endorsing or
+ * degraded/unavailable verdict allows loud (`exhausted: true`, the call
+ * site logs `hub_gate_exhausted_allow`); a redirecting verdict is one final
+ * bounce (`final: true`) naming it, after which the file is turn-settled
+ * and every further attempt allows (bounded fail-open, never a wedge).
  *
  * @sem domain=intelligence role=analysis
  */
@@ -566,9 +688,21 @@ export async function evaluateHubEditGate(opts: {
   filePath: string
   graph?: HubFanInGraph
   resolveDefiningSites?: (issueText: string) => Promise<Array<{ file: string; kind?: string }> | null>
+  dispatchHubDesignJudge?: (opts: {
+    sessionID: string
+    filePath: string
+  }) => Promise<HubEditJudgeVerdict | undefined>
 }): Promise<
-  | { action: "allow"; retried?: boolean; definingSite?: boolean }
-  | { action: "deny"; message: string; importers?: number; second?: boolean; definingSites?: string[] }
+  | { action: "allow"; retried?: boolean; definingSite?: boolean; exhausted?: boolean }
+  | {
+      action: "deny"
+      message: string
+      importers?: number
+      second?: boolean
+      definingSites?: string[]
+      repeat?: boolean
+      final?: boolean
+    }
 > {
   if (!hubEditGateArmed(opts.sessionID)) return { action: "allow" }
   if (isTestFilePath(opts.filePath)) return { action: "allow" }
@@ -618,6 +752,54 @@ export async function evaluateHubEditGate(opts: {
     }
   }
 
+  // Wave 12 — per-file per-turn bounce memory. Only relevant when THIS
+  // session has never itself bounced filePath (a same-session repeat keeps
+  // using the unchanged per-session state machine below) AND the turn
+  // already carries bounce history for it (inherited from an ancestor
+  // session — see inheritHubEditTurnBounceState). A turn-count of 0 means
+  // this is genuinely the turn's first-ever look at filePath, so control
+  // falls through to the existing first-bounce path unchanged.
+  if (!hubEditBounced.get(opts.sessionID)?.has(opts.filePath)) {
+    if (hubEditTurnSettled.get(opts.sessionID)?.has(opts.filePath)) {
+      // The judge already gave this file its final word this turn — never
+      // re-litigate; bounded fail-open.
+      return { action: "allow", exhausted: true }
+    }
+    const turnCount = hubEditTurnBounceCount.get(opts.sessionID)?.get(opts.filePath) ?? 0
+    if (turnCount === 1) {
+      // 2nd evidence-less attempt at filePath this turn — a cheap cached
+      // repeat, not a fresh re-litigation. Deliberately does NOT touch this
+      // session's own `hubEditBounced` set — that would reroute a further
+      // look at this file into the OLD per-session evidence-hatch instead
+      // of this turn-level progression, so the 3rd evidence-less attempt
+      // (below) would never be reached.
+      bumpHubEditTurnBounceCount(opts.sessionID, opts.filePath)
+      return { action: "deny", repeat: true, message: hubEditRepeatBounceMessage(opts.filePath) }
+    }
+    if (turnCount >= 2) {
+      // 3rd evidence-less attempt at filePath this turn — settle it with
+      // the hub-design judge instead of bouncing forever. No injected
+      // judge (the common case today — no live wiring at the edit/write
+      // call sites yet) degrades exactly like a thrown/empty judge call.
+      let verdict: HubEditJudgeVerdict | undefined
+      try {
+        verdict = opts.dispatchHubDesignJudge
+          ? await opts.dispatchHubDesignJudge({ sessionID: opts.sessionID, filePath: opts.filePath })
+          : undefined
+      } catch {
+        verdict = undefined
+      }
+      if (!hubEditTurnSettled.has(opts.sessionID)) hubEditTurnSettled.set(opts.sessionID, new Set())
+      hubEditTurnSettled.get(opts.sessionID)!.add(opts.filePath)
+      if (!verdict || verdict.file === "" || pathsRefer(opts.filePath, verdict.file)) {
+        // Degraded/unavailable, or the judge itself endorses filePath as
+        // root-most — allow loud (the call site logs hub_gate_exhausted_allow).
+        return { action: "allow", exhausted: true }
+      }
+      return { action: "deny", final: true, message: hubEditJudgeRedirectMessage(opts.filePath, verdict) }
+    }
+  }
+
   const bounced = hubEditBounced.get(opts.sessionID)
   if (bounced?.has(opts.filePath)) {
     // Wave 9: the loop above already ruled out a match against the resolved
@@ -639,6 +821,12 @@ export async function evaluateHubEditGate(opts: {
       }
       if (!hubEditSecondBounced.has(opts.sessionID)) hubEditSecondBounced.set(opts.sessionID, new Set())
       hubEditSecondBounced.get(opts.sessionID)!.add(opts.filePath)
+      // Wave 12 — keeps the turn-wide counter in step with this
+      // session-local second bounce, so a child inheriting this session's
+      // state later sees turnCount 2 (routes straight to the judge rung)
+      // rather than 1 (one more cached-repeat rung it already had).
+      // Bookkeeping only — never changes what this branch returns.
+      bumpHubEditTurnBounceCount(opts.sessionID, opts.filePath)
       const resolvedDefiningSites = hubEditDefiningFiles(opts.sessionID)
       return {
         action: "deny",
@@ -663,6 +851,11 @@ export async function evaluateHubEditGate(opts: {
 
     if (!hubEditBounced.has(opts.sessionID)) hubEditBounced.set(opts.sessionID, new Set())
     hubEditBounced.get(opts.sessionID)!.add(opts.filePath)
+    // Wave 12 — records the turn's first bounce on filePath so a later
+    // session inheriting this session's state (a hard-tail escalation
+    // slice) sees turnCount 1 instead of starting from zero. Bookkeeping
+    // only — never changes what this branch returns.
+    bumpHubEditTurnBounceCount(opts.sessionID, opts.filePath)
     return {
       action: "deny",
       message: hubEditDenialMessage(opts.filePath, importers, hubEditDefiningFiles(opts.sessionID)),

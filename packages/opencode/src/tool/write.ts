@@ -116,6 +116,41 @@ export const WriteTool = Tool.define(
             })
             throw new Error(hubGateResult.message)
           }
+          // Wave 12 — the turn's 2nd evidence-less bounce on this file,
+          // reached in a session that never itself denied it (an earlier
+          // session this turn already did): a cheap cached repeat, not a
+          // fresh re-litigation.
+          if (hubGateResult.action === "deny" && hubGateResult.repeat) {
+            yield* Effect.logWarning("hub_edit_gate_bounced_turn_repeat", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filepath),
+            })
+            yield* publishSignalFx({
+              name: "hub_bounce_turn_repeat",
+              sessionID: ctx.sessionID,
+              severity: "tail",
+              decision: "convert",
+              evidence: { file: path.relative(instance.worktree, filepath) },
+            })
+            throw new Error(hubGateResult.message)
+          }
+          // Wave 12 — the turn's 3rd evidence-less bounce settled by the
+          // hub-design judge with a redirect verdict: the one final bounce
+          // on this file this turn (bounded — a further retry allows).
+          if (hubGateResult.action === "deny" && hubGateResult.final) {
+            yield* Effect.logWarning("hub_edit_gate_bounced_final", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filepath),
+            })
+            yield* publishSignalFx({
+              name: "hub_bounce_judge_redirect",
+              sessionID: ctx.sessionID,
+              severity: "tail",
+              decision: "convert",
+              evidence: { file: path.relative(instance.worktree, filepath) },
+            })
+            throw new Error(hubGateResult.message)
+          }
           if (hubGateResult.action === "deny") {
             yield* Effect.logWarning("hub_edit_gate_bounced", {
               "session.id": ctx.sessionID,
@@ -144,6 +179,22 @@ export const WriteTool = Tool.define(
             yield* Effect.logInfo("hub_edit_gate_defining_site_allow", {
               "session.id": ctx.sessionID,
               file: path.relative(instance.worktree, filepath),
+            })
+          }
+          // Wave 12 — the turn's 3rd evidence-less bounce on this file
+          // settled by the hub-design judge (endorsed F, or the judge was
+          // degraded/unavailable): allow LOUD instead of bouncing forever.
+          if (hubGateResult.action === "allow" && hubGateResult.exhausted) {
+            yield* Effect.logWarning("hub_gate_exhausted_allow", {
+              "session.id": ctx.sessionID,
+              file: path.relative(instance.worktree, filepath),
+            })
+            yield* publishSignalFx({
+              name: "hub_gate_exhausted_allow",
+              sessionID: ctx.sessionID,
+              severity: "tail",
+              decision: "convert",
+              evidence: { file: path.relative(instance.worktree, filepath) },
             })
           }
 

@@ -19,6 +19,9 @@ export type EconSignalName =
   | "oracle_inversion" // pinned red's EXPECTED contradicts issue-stated output — hard tail
   | "seen_red_unresolved" // F18 at finish (2nd arrival = tail)
   | "seen_red_oracle_inverted" // F18b: unresolved red is inversion-shaped — sanctioned, keep-general-fix nudge
+  | "seen_red_env_blocked" // F18c: unresolved red is environment/baseline-shaped — sanctioned, state-the-gap nudge
+  | "probe_env_blocked" // F18c/M4: pinned probe's own red repeats an environment-shaped signature — pin release, hard tail
+  | "probe_rerun_dedupe" // Round-H: same command produced identical output for the 3rd+ time — no new information
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
   | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail
@@ -28,6 +31,9 @@ export type EconSignalName =
   | "fidelity_finish_reject" // RF-8 finish-time type-fidelity re-check: 1st hit converts (bounded deny), 2nd hit = the convert failed — hard tail
   | "hub_bounce" // hub gate 1st bounce
   | "hub_bounce_repeat" // evidence-bearing 2nd deny — hard tail
+  | "hub_bounce_turn_repeat" // Wave 12: cross-session 2nd evidence-less bounce this turn — cached repeat, hard tail
+  | "hub_bounce_judge_redirect" // Wave 12: cross-session 3rd evidence-less bounce — judge named a different site, final bounce, hard tail
+  | "hub_gate_exhausted_allow" // Wave 12: cross-session 3rd evidence-less bounce — judge endorsed/degraded, bounded fail-open allow, hard tail
   | "convention_divergence" // wave-11 first pause
   | "convention_divergence_repeat" // evidenced family conflict on identical retry — hard tail
   | "interpreter_mismatch" // agent probe ran a non-project interpreter

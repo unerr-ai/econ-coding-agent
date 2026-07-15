@@ -167,6 +167,83 @@ describe("resolutionDecision — branch 2: valid candidatePlan short-circuit", (
 })
 
 // ---------------------------------------------------------------------------
+// Branch 2b — direct-first valve (item 4 / mini10-11999 forensics): a narrow
+// conjunction inside the valid-plan short-circuit that trades decompose-now
+// for one cheap continue-inline swing. Every disqualifier is tested alone so
+// the valve's signature stays exact — any one of them must fall back to the
+// byte-identical decompose-now (or resolve-first/continue-inline via an
+// earlier branch) the pre-valve code always returned.
+// ---------------------------------------------------------------------------
+
+describe("resolutionDecision — direct-first valve (narrow: fires only on its exact signature)", () => {
+  const valveInput = (overrides: Partial<ResolutionInput> = {}): ResolutionInput =>
+    baseInput({
+      ambiguity: "ambiguous",
+      candidatePlan: VALID_PLAN,
+      diagnosisLocationOrFixKnown: true,
+      writerSliceCount: 2,
+      ...overrides,
+    })
+
+  it("fires on the exact narrow signature: continue-inline, direct_first_inline signal", () => {
+    const result = resolutionDecision(valveInput())
+    expect(result.mode).toBe("continue-inline")
+    expect(result.reason).toContain("direct_first_inline")
+  })
+
+  it("fires at the writerSliceCount boundary (<=2, tested at exactly 1)", () => {
+    const result = resolutionDecision(valveInput({ writerSliceCount: 1 }))
+    expect(result.mode).toBe("continue-inline")
+  })
+
+  it("disqualifier: resolveAttempts !== 0 falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ resolveAttempts: 1 }))
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach fixed, plan valid")
+  })
+
+  it("disqualifier: diagnosisLocationOrFixKnown absent falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ diagnosisLocationOrFixKnown: undefined }))
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("disqualifier: diagnosisLocationOrFixKnown false falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ diagnosisLocationOrFixKnown: false }))
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("disqualifier: aggregate hardness \"hard\" falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ hardness: "hard" }))
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("disqualifier: writerSliceCount above the cap (3) falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ writerSliceCount: 3 }))
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("disqualifier: writerSliceCount absent falls back to decompose-now", () => {
+    const result = resolutionDecision(valveInput({ writerSliceCount: undefined }))
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("disqualifier: an armed turn takes branch 1b instead — continue-inline for the armed reason, never direct_first_inline", () => {
+    const result = resolutionDecision(
+      valveInput({ armLocalization: true, resolveAttempts: 1 }),
+    )
+    expect(result.mode).toBe("continue-inline")
+    expect(result.reason).not.toContain("direct_first_inline")
+    expect(result.reason).toBe("armed turn localized — continue inline, grind valve is the only escalation")
+  })
+
+  it("existing branch-2 behavior is byte-identical when the valve's new fields are simply absent (no diagnosisLocationOrFixKnown/writerSliceCount)", () => {
+    const result = resolutionDecision(baseInput({ ambiguity: "ambiguous", candidatePlan: VALID_PLAN }))
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("approach fixed, plan valid")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Branch 2b — structural-only short-circuit (requireNodeFields: false)
 // ---------------------------------------------------------------------------
 

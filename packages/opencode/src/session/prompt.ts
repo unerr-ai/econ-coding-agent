@@ -40,14 +40,17 @@ import {
   hubEditDefiningResolved,
   hubEditRetriedAgainstCandidates,
   memoizeHubEditDefiningSites,
+  inheritHubEditTurnBounceState,
 } from "../tool/edit-governance"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import {
   observeStep,
   createGrindValve,
   createBatchMomentumWatcher,
+  createRerunDedupeTracker,
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
+  normalizeResult,
 } from "./turn-supervisor"
 import {
   stuckNudgeText,
@@ -67,9 +70,18 @@ import {
   unverifiedFinishGateNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
+  identicalRunDedupeNudgeText,
+  seenRedEnvBlockedNudgeText,
+  probeEnvBlockedNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
-import { findUnresolvedSeenRed, partitionSeenRedByInversion, type SeenRedExecution } from "./seen-red"
+import {
+  findUnresolvedSeenRed,
+  partitionSeenRedByInversion,
+  partitionSeenRedByEnvBlock,
+  isEnvBlockedSignature,
+  type SeenRedExecution,
+} from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
 import {
   runReproFidelityJudge,
@@ -143,6 +155,7 @@ import {
   resolveDottedPyModules,
   personaForSlice,
   sliceStepBudget,
+  buildAboveConductorSliceBrief,
   countToolCalls,
   budgetExhaustedMarker,
   buildRepoPrimer,
@@ -360,13 +373,24 @@ function stepRanPinnedProbeGreen(parts: readonly unknown[], scriptFilename: stri
 // collecting every completed command instead of checking one.
 function extractTurnBashExecutions(parts: readonly unknown[]): SeenRedExecution[] {
   const executions: SeenRedExecution[] = []
+  // F18c — tracks, in the same linear pass, whether a source (non-test,
+  // non-scratch-repro) edit has already landed BEFORE the execution being
+  // collected — the provenance partitionSeenRedByEnvBlock needs to tell a
+  // red that predates any edit (an environment gap) from one that only
+  // appeared after the model started changing code.
+  let sawSourceEdit = false
   for (const raw of parts) {
     const part = raw as {
       type?: string
       tool?: string
       state?: { status?: string; input?: Record<string, unknown>; metadata?: Record<string, unknown>; output?: string }
     }
-    if (part?.type !== "tool" || !part.tool || !PIN_PROBE_COMMAND_TOOLS.has(part.tool)) continue
+    if (part?.type !== "tool" || !part.tool) continue
+    if (!sawSourceEdit && GATE_BLOCK_TOOLS.has(part.tool) && part.state?.status === "completed") {
+      const filePath = (part.state?.input?.["filePath"] ?? part.state?.input?.["path"]) as string | undefined
+      if (filePath && !isTestFilePath(filePath) && !isReproScratchPath(filePath)) sawSourceEdit = true
+    }
+    if (!PIN_PROBE_COMMAND_TOOLS.has(part.tool)) continue
     if (part.state?.status !== "completed") continue
     const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
     if (!command) continue
@@ -375,6 +399,7 @@ function extractTurnBashExecutions(parts: readonly unknown[]): SeenRedExecution[
       command,
       exitCode: typeof exit === "number" ? exit : undefined,
       output: part.state?.output ?? "",
+      sawEditBefore: sawSourceEdit,
     })
   }
   return executions
@@ -1846,6 +1871,14 @@ export const layer = Layer.effect(
         // is on record, and later finish arrivals pass through loud instead
         // of re-entering the reject ladder.
         let oracleInversionNoted = false
+        // F18c/M4 — env-blocked pin release state, mirroring oracleInversionNoted
+        // exactly: once the pinned probe's own red repeats an environment-shaped
+        // signature, the pin stops binding as green-required for the rest of the
+        // turn. lastEnvBlockedGateSignature/envBlockedGateRepeats track the
+        // pin's own normalized red streak across bounded M4 rejections.
+        let envBlockedPinNoted = false
+        let lastEnvBlockedGateSignature: string | undefined
+        let envBlockedGateRepeats = 0
         // S3 — the done-time fallback bar's own bounded retry: up to
         // MAX_UNVERIFIED_FINISH_ATTEMPTS reject-with-nudge cycles for a
         // bug-shaped turn finishing with no verified reproduction/source
@@ -1874,6 +1907,11 @@ export const layer = Layer.effect(
         // the confirm-GREEN demand and owes a stated verdict instead; later
         // finish arrivals pass through without re-noting.
         let turnSeenRedInversionNoted = false
+        // F18c — the seen-red env/baseline-blocked note fires at most once,
+        // same discipline as turnSeenRedInversionNoted: a sanctioned
+        // (environment-shaped) red is exempted from the confirm-GREEN
+        // demand and owes a stated environment gap instead.
+        let turnSeenRedEnvBlockedNoted = false
         let turnPinnedProbeRanGreen = false
         // F14a — the interpreter discovered for this turn's regression-gate
         // neighbor commands, cached so discovery (it shells out) runs at
@@ -2076,6 +2114,10 @@ export const layer = Layer.effect(
         // L1.2c — root-session-only, same round-trip economy as the valve
         // above: child slices already run the slice-loop FSM.
         const batchWatcher = session.parentID ? undefined : createBatchMomentumWatcher()
+        // Round-H — probe_rerun_dedupe: the SAME per-step stream, root-only,
+        // once-per-command signal (django-11815: ~72 repro re-runs, roughly
+        // half byte-identical).
+        const rerunDedupe = session.parentID ? undefined : createRerunDedupeTracker()
         let escalatedModelRef: { providerID: string; modelID: string } | undefined
         let stuckEscalations = 0
         const MAX_STUCK_ESCALATIONS = 2
@@ -2114,6 +2156,46 @@ export const layer = Layer.effect(
             const stepObs = observeStep(lastAssistantMsg?.parts ?? [], {
               isTestSlice: !testEditGateArmed(sessionID),
             })
+            // Round-H — probe_rerun_dedupe: the SAME command producing
+            // byte-identical (normalized) output for the 3rd+ time with no
+            // edit landed in between carries zero new information (django-
+            // 11815: ~72 repro re-runs, roughly half byte-identical). Fires
+            // once per distinct command; an edit resets every counter, a
+            // different output resets that command's own counter (never
+            // trips on a flaky test).
+            const dedupeSignal = rerunDedupe?.observe(lastAssistantMsg?.parts ?? [])
+            if (dedupeSignal) {
+              yield* publishSignalFx({
+                name: "probe_rerun_dedupe",
+                sessionID,
+                severity: "info",
+                decision: "convert",
+                evidence: { command: dedupeSignal.command, occurrence: dedupeSignal.occurrence },
+              })
+              yield* Effect.logInfo("probe_rerun_dedupe", {
+                "session.id": sessionID,
+                command: dedupeSignal.command,
+                occurrence: dedupeSignal.occurrence,
+              })
+              const dedupeNudge: SessionV1.User = {
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              }
+              yield* sessions.updateMessage(dedupeNudge)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: dedupeNudge.id,
+                sessionID,
+                type: "text",
+                text: identicalRunDedupeNudgeText(dedupeSignal.command, dedupeSignal.occurrence),
+                synthetic: true,
+              } satisfies SessionV1.TextPart)
+              continue
+            }
             // probe-from-red: pin while the test is still red — re-running it at
             // turn end (deriveTurnProbe's runner) confirms redness and picks the
             // most-specific case; a fake-green test edit is caught separately by
@@ -3275,7 +3357,72 @@ export const layer = Layer.effect(
                   } satisfies SessionV1.TextPart)
                   continue
                 }
-                if (oracleInversionNoted) {
+                // F18c/M4 — env-blocked pin release, checked BEFORE the
+                // reject ladder, same precedence as the oracle-inversion
+                // escape just above: a pin whose red repeats an
+                // environment-shaped signature (isEnvBlockedSignature — the
+                // MISSING_FILE_RE/MODULE_MISSING_RE family, or a
+                // conservative "backend required"/"ImproperlyConfigured"/
+                // "command not found" marker) at least twice in a row must
+                // not keep binding as green-required — the 2026-07-15
+                // django-11880 shape, where a GIS-backend-required
+                // regression neighbor burned 42 of 59 turns on a red that
+                // can never pass in this arena. Never re-checked once
+                // noted; the pin then stops binding for the rest of the
+                // turn, same discipline as oracleInversionNoted.
+                if (!envBlockedPinNoted && !inversion.inverted) {
+                  const gateSignature = gate.outputTail ? normalizeResult(gate.outputTail) : undefined
+                  if (gateSignature && gateSignature === lastEnvBlockedGateSignature) {
+                    envBlockedGateRepeats++
+                  } else {
+                    lastEnvBlockedGateSignature = gateSignature
+                    envBlockedGateRepeats = gateSignature ? 1 : 0
+                  }
+                  if (gate.outputTail && isEnvBlockedSignature(gate.outputTail) && envBlockedGateRepeats >= 2) {
+                    envBlockedPinNoted = true
+                    yield* publishSignalFx({
+                      name: "probe_env_blocked",
+                      sessionID,
+                      severity: "tail",
+                      decision: "convert",
+                      evidence: { probe: turnPinnedProbe.probe.command, repeats: envBlockedGateRepeats },
+                    })
+                    yield* Effect.logWarning("turn_probe_env_blocked", {
+                      "session.id": sessionID,
+                      probe: turnPinnedProbe.probe.command,
+                      repeats: envBlockedGateRepeats,
+                      redTail: gate.outputTail,
+                    })
+                    const envBlockedPinNote: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(envBlockedPinNote)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: envBlockedPinNote.id,
+                      sessionID,
+                      type: "text",
+                      text: probeEnvBlockedNudgeText(turnPinnedProbe.probe.command, gate.outputTail),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                }
+                if (envBlockedPinNoted) {
+                  // The pin no longer binds — loud pass-through with the
+                  // env-blocked verdict on record, never the retry ladder.
+                  yield* Effect.logWarning("turn_probe_unresolved", {
+                    "session.id": sessionID,
+                    probe: turnPinnedProbe.probe.command,
+                    retries: probeGateRetries,
+                    envBlocked: true,
+                  })
+                } else if (oracleInversionNoted) {
                   // The pin no longer binds — loud pass-through with the
                   // inversion verdict on record, never the retry ladder.
                   yield* Effect.logWarning("turn_probe_unresolved", {
@@ -3599,7 +3746,59 @@ export const layer = Layer.effect(
                   } satisfies SessionV1.TextPart)
                   continue
                 }
-                if (unresolvedSeenRed.length > 0) {
+                // F18c — env/baseline-blocked partition, checked AFTER the
+                // inversion partition and BEFORE the confirm-GREEN demand:
+                // a still-binding red whose failure signature is
+                // environment-shaped or predates this turn's first source
+                // edit, AND has repeated with an identical signature at
+                // least twice, can never be fixed by editing the issue's
+                // code — the 2026-07-15 django-11880 shape (a GIS-backend-
+                // required regression neighbor burned 42 of 59 turns
+                // re-running a red that can never pass in this arena).
+                // Sanctioned once — the model states the environment gap
+                // instead of re-running it forever, same reject-once-
+                // then-loud discipline as every sibling gate.
+                const { binding: bindingSeenRed, envBlocked: envBlockedSeenRed } = partitionSeenRedByEnvBlock(
+                  unresolvedSeenRed,
+                  seenRedExecutions,
+                )
+                if (envBlockedSeenRed.length > 0 && !turnSeenRedEnvBlockedNoted) {
+                  turnSeenRedEnvBlockedNoted = true
+                  yield* publishSignalFx({
+                    name: "seen_red_env_blocked",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: {
+                      blocked: envBlockedSeenRed.length,
+                      command: envBlockedSeenRed[0]?.command ?? null,
+                      repeats: envBlockedSeenRed[0]?.repeats ?? null,
+                    },
+                  })
+                  yield* Effect.logWarning("turn_seen_red_env_blocked", {
+                    "session.id": sessionID,
+                    blocked: envBlockedSeenRed,
+                  })
+                  const envBlockedSeenRedNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(envBlockedSeenRedNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: envBlockedSeenRedNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: seenRedEnvBlockedNudgeText(envBlockedSeenRed),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
+                if (bindingSeenRed.length > 0) {
                   if (!turnSeenRedNudged) {
                     turnSeenRedNudged = true
                     yield* publishSignalFx({
@@ -3607,11 +3806,11 @@ export const layer = Layer.effect(
                       sessionID,
                       severity: "info",
                       decision: "convert",
-                      evidence: { unresolved: unresolvedSeenRed.length },
+                      evidence: { unresolved: bindingSeenRed.length },
                     })
                     yield* Effect.logWarning("turn_seen_red_nudge", {
                       "session.id": sessionID,
-                      unresolved: unresolvedSeenRed,
+                      unresolved: bindingSeenRed,
                     })
                     const seenRedNudge: SessionV1.User = {
                       id: MessageID.ascending(),
@@ -3627,7 +3826,7 @@ export const layer = Layer.effect(
                       messageID: seenRedNudge.id,
                       sessionID,
                       type: "text",
-                      text: seenRedUnresolvedNudgeText(unresolvedSeenRed),
+                      text: seenRedUnresolvedNudgeText(bindingSeenRed),
                       synthetic: true,
                     } satisfies SessionV1.TextPart)
                     continue
@@ -3640,14 +3839,14 @@ export const layer = Layer.effect(
                     sessionID,
                     severity: "tail",
                     decision: deferralAvailable(sessionID) ? "defer" : "none-loud",
-                    evidence: { unresolved: unresolvedSeenRed.length },
+                    evidence: { unresolved: bindingSeenRed.length },
                   })
                   if (deferralAvailable(sessionID)) {
                     yield* armDeferral({
                       signal: "seen_red_unresolved",
                       gateEvidence:
                         `This turn landed source edits while these test/repro runs it SAW fail red were never re-run green:\n` +
-                        unresolvedSeenRed.join("\n"),
+                        bindingSeenRed.join("\n"),
                       probeCommand: turnPinnedProbe?.probe.command,
                       candidates: [...landedSourceEditFiles, ...getTurnFiles(sessionID)],
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
@@ -3657,7 +3856,7 @@ export const layer = Layer.effect(
                   }
                   yield* Effect.logWarning("turn_seen_red_unverified", {
                     "session.id": sessionID,
-                    unresolved: unresolvedSeenRed,
+                    unresolved: bindingSeenRed,
                   })
                 }
               }
@@ -4081,6 +4280,14 @@ export const layer = Layer.effect(
                 const parentIssueText = hubEditIssueText(session.parentID)
                 if (parentIssueText !== undefined) setHubEditIssueText(sessionID, parentIssueText)
               }
+              // Wave 12 — carry the parent's per-file turn-wide bounce
+              // history into the child too (same "inherit, don't reset"
+              // treatment as the defining-file allowlist above), so a
+              // hard-tail escalation slice spawned mid-turn continues a hub
+              // file's bounce count instead of running the first/second
+              // bounce cycle again from zero (round-07-15 django-11815
+              // forensics: 2 sessions × 2 bounces = 4 events on one file).
+              inheritHubEditTurnBounceState(sessionID, session.parentID)
             } else {
               const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
               // Hub-edit bounce gate: root sessions arm unconditionally every
@@ -4959,6 +5166,40 @@ export const layer = Layer.effect(
                         ports: delegationPorts,
                       })
                     }
+                    // CTX-2.1/2.2 (item 1) — a reasoner/oracle slice's FIRST
+                    // (non-escalated) dispatch gets a compiled brief — issue-goal
+                    // quotes, turn constraints, pinned repro + red tail + content,
+                    // candidate fix sites, sibling digests — instead of the
+                    // transcript-shaped repo-primer/ledger/parent-task block: the
+                    // expensive tier buys judgment, not re-exploration, and the
+                    // brief is the only thing that crosses the cold-cache model
+                    // boundary (mini10-11999: two 16-turn reasoner children re-did
+                    // the conductor's recon from a cold start). Escalated hops
+                    // already carry buildEscalationBrief; executor slices keep the
+                    // primer path byte-identical.
+                    const aboveConductorCheapHop = (req.tier === "reasoner" || req.tier === "oracle") && !req.escalated
+                    const contextBlock = (() => {
+                      if (!aboveConductorCheapHop)
+                        return [
+                          repoPrimer,
+                          renderSliceDigestLedger(completedSliceDigests),
+                          parentTask ? `## Parent task (context only — do ONLY your slice)\n${parentTask}` : "",
+                          `## Your slice\n${req.prompt}`,
+                        ]
+                      const pin = getPinnedProbe(sessionID)
+                      const pinScript = pin ? extractScriptPath(pin.probe.command) : undefined
+                      return [
+                        buildAboveConductorSliceBrief({
+                          prompt: req.prompt,
+                          turnVerdict: getTurnVerdict(sessionID),
+                          pinnedProbe: pin,
+                          reproContent:
+                            pinScript === undefined ? undefined : readPinnedReproFile(ctx.directory, pinScript),
+                          turnFiles: getTurnFiles(sessionID),
+                          siblingDigests: completedSliceDigests,
+                        }).text,
+                      ]
+                    })()
                     const framed = [
                       "You are a headless slice executor: you run ONE slice of a decomposed parent task, unattended.",
                       "Never ask the user questions — no one can answer a child session. If a detail seems ambiguous, take the most reasonable interpretation from the parent task below and proceed to a concrete result.",
@@ -4973,10 +5214,7 @@ export const layer = Layer.effect(
                       // brief demands incremental delivery, mirroring the frame
                       // slices' budget-discipline line.
                       "Budget discipline: your tool-call budget is HARD — a watchdog ends the session at the cap and keeps only the text you have already written. Write your deliverable INCREMENTALLY as evidence lands (partial findings first, refine as you go); reserve your final steps to complete it. A partial deliverable written beats a perfect one unwritten.",
-                      repoPrimer,
-                      renderSliceDigestLedger(completedSliceDigests),
-                      parentTask ? `## Parent task (context only — do ONLY your slice)\n${parentTask}` : "",
-                      `## Your slice\n${req.prompt}`,
+                      ...contextBlock,
                     ]
                       .filter(Boolean)
                       .join("\n\n")
@@ -5007,6 +5245,12 @@ export const layer = Layer.effect(
                       sliceType: req.sliceType,
                       hard: getArmingDecision(sessionID)?.hardness === "hard",
                       escalated: req.escalated,
+                      // Item 2 — a reasoner/oracle seat is hard-capped at
+                      // ABOVE_CONDUCTOR_STEP_CAP inside sliceStepBudget: the
+                      // expensive tiers advise from the brief, they don't
+                      // tool-loop (mini10 forensics: 33-43 tool calls per
+                      // above-conductor child at near-frontier prices).
+                      tier: req.tier,
                     })
                     const watchdog: Effect.Effect<void> = Effect.gen(function* () {
                       while (true) {
@@ -5187,7 +5431,21 @@ export const layer = Layer.effect(
                   // out of reach here — the store is the bridge) threaded onto
                   // every slice todosToLoopSlices builds, so a hard/ambiguous
                   // slice floors its generator tier at the reasoner.
-                  arming: getArmingDecision(sessionID),
+                  // Item 4 — the direct-first valve's precondition rides along:
+                  // true when a diagnosis goal already names the location or the
+                  // fix (the same turn-read evidence the arming table reads).
+                  // Only augments a PRESENT arming decision — a null (degraded)
+                  // turn keeps arming undefined so the degraded hold is untouched.
+                  arming: (() => {
+                    const stored = getArmingDecision(sessionID)
+                    if (!stored) return stored
+                    const known = (getTurnVerdict(sessionID)?.goals ?? []).some(
+                      (g) =>
+                        g.shape.startsWith("diagnosis") &&
+                        (g.evidence?.locationNamed === true || g.evidence?.fixSpecified === true),
+                    )
+                    return { ...stored, diagnosisLocationOrFixKnown: known }
+                  })(),
                   // P4 — a continuation turn stands the resolution gate down.
                   continuation: turnContinuation,
                   // P3/Q-D — research turns route slices to the researcher
@@ -5235,6 +5493,19 @@ export const layer = Layer.effect(
                         mode: info.mode,
                         candidatePlanValid: info.candidatePlanValid,
                         resolveAttempts: info.resolveAttempts,
+                      }),
+                    )
+                  },
+                  // Item 3 — cascade-failed inline latch telemetry: `set` when an
+                  // engaged cascade settles dead (>=1 blocked/rejected slice, zero
+                  // accepted), `consumed` when the next orchestration call holds
+                  // inline and injects the corrective todo instead of re-dispatching.
+                  onCascadeInlineLatch: (info) => {
+                    bridge.fork(
+                      Effect.logInfo("cascade_inline_latch", {
+                        "session.id": sessionID,
+                        phase: info.phase,
+                        deadSlice: info.deadSlice,
                       }),
                     )
                   },

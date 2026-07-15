@@ -51,6 +51,10 @@ export interface ResolutionInput {
   armLocalization?: boolean
   /** How many resolution passes already ran on this task — the recursion/termination guard. */
   resolveAttempts: number
+  /** Direct-first valve precondition: true when at least one diagnosis goal already carries `locationNamed` or `fixSpecified` evidence (the conductor already knows where the fix goes). Absent/false — the valve never fires. */
+  diagnosisLocationOrFixKnown?: boolean
+  /** Direct-first valve width gate: the candidate plan's writer (editing) slice count. Absent, or above the valve's cap, disqualifies it — the valve only ever narrows an existing `decompose-now`, never widens it. */
+  writerSliceCount?: number
 }
 
 /**
@@ -77,7 +81,11 @@ export const MAX_RESOLVE_ATTEMPTS = 2
  * The prior-uncertainty resolution-phase decision table (task #53): for a
  * flagged (ambiguous/hard) task, decide whether to decompose now, resolve the
  * approach first, ask the user, or continue inline — in strict precedence order
- * so exactly one branch ever fires. Pure: no I/O.
+ * so exactly one branch ever fires. A narrow direct-first valve nests inside
+ * the valid-plan branch: when the location/fix is already known, the turn is
+ * unarmed, this is the first pass, hardness isn't "hard", and the plan is
+ * narrow, it returns continue-inline instead of decompose-now for one cheap
+ * verified swing. Pure: no I/O.
  *
  * @sem domain=routing role=controller
  */
@@ -116,6 +124,30 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
     input.candidatePlan !== undefined &&
     validatePlan(input.candidatePlan, input.budget, { requireNodeFields: input.requireNodeFields ?? true }).ok
   ) {
+    // 2b. Direct-first valve (narrow, item 4 / mini10-11999 forensics): the
+    //     conductor already knows where the fix goes (a diagnosis goal named
+    //     the location or a fix), this is the FIRST resolution pass on an
+    //     unarmed turn, the aggregate hardness isn't "hard", and the plan is
+    //     narrow (<=2 writer slices) — take one cheap verified direct-fix
+    //     swing inline before paying for decomposition. A failed/incomplete
+    //     swing falls through to the rules above unchanged on the next
+    //     resolution pass (resolveAttempts >= 1 disqualifies this branch).
+    // armLocalization is already guaranteed not-true here (branch 1b above
+    // returns early whenever it is true), so this branch's precondition list
+    // omits it — TS narrows the type, so an explicit re-check would be a
+    // comparison with no overlap, not a real disqualifier.
+    if (
+      input.resolveAttempts === 0 &&
+      input.diagnosisLocationOrFixKnown === true &&
+      input.hardness !== "hard" &&
+      input.writerSliceCount !== undefined &&
+      input.writerSliceCount <= 2
+    ) {
+      return {
+        mode: "continue-inline",
+        reason: "direct_first_inline — location/fix already known, narrow plan, one direct-fix window before decomposition",
+      }
+    }
     return { mode: "decompose-now", reason: "approach fixed, plan valid" }
   }
 

@@ -6,6 +6,8 @@ import {
   GRIND_VALVE_STEPS,
   GRIND_VALVE_STALL_WINDOW,
   createBatchMomentumWatcher,
+  createRerunDedupeTracker,
+  IDENTICAL_RUN_THRESHOLD,
   SLOW_COMMAND_MS,
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
@@ -19,6 +21,7 @@ import {
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
   unverifiedFinishGateNudgeText,
+  identicalRunDedupeNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
@@ -164,6 +167,81 @@ describe("normalizeResult", () => {
     const a = normalizeResult("boom at 0xdeadbeef in /tmp/pytest-abc/x 2026-07-08T10:00:00Z")
     const b = normalizeResult("boom at 0xfeed1234 in /tmp/pytest-xyz/y 2026-07-08T11:22:33Z")
     expect(a).toBe(b)
+  })
+})
+
+// -- createRerunDedupeTracker (Round-H probe_rerun_dedupe) ------------------
+
+describe("createRerunDedupeTracker", () => {
+  it("fires on the 3rd identical (normalized) rerun, not the 1st or 2nd", () => {
+    const tracker = createRerunDedupeTracker()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    const signal = tracker.observe([bash(CMD, RED)])
+    expect(signal).toEqual({ command: CMD, occurrence: IDENTICAL_RUN_THRESHOLD })
+  })
+
+  it("an edit landing between runs resets the counter — the streak must restart from zero, not continue", () => {
+    const tracker = createRerunDedupeTracker()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    // an edit lands right before what would have been the 3rd identical run
+    expect(tracker.observe([edit("django/db/models/deletion.py")])).toBeUndefined()
+    // only 2 post-edit reruns so far — without the reset this would be the
+    // 4th identical run overall and would already have fired on the 3rd
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    // the 3rd POST-EDIT rerun does fire — the streak restarted, it did not carry over
+    expect(tracker.observe([bash(CMD, RED)])?.occurrence).toBe(3)
+  })
+
+  it("a different (normalized) output resets that command's own counter — a flaky test never fires", () => {
+    const tracker = createRerunDedupeTracker()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    // 3rd run comes back GREEN instead — resets, does not fire
+    expect(tracker.observe([bash(CMD, GREEN)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, GREEN)])).toBeUndefined()
+    // only the 2nd identical GREEN in a row — must not fire yet
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+  })
+
+  it("run-to-run noise (durations/timestamps/temp paths) does not defeat the identical-output match", () => {
+    const tracker = createRerunDedupeTracker()
+    expect(tracker.observe([bash(CMD, "FAIL: 22 != 25\nRan 1 test in 0.031s")])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, "FAIL: 22 != 25\nRan 1 test in 1.204s")])).toBeUndefined()
+    const signal = tracker.observe([bash(CMD, "FAIL: 22 != 25\nRan 1 test in 9.876s")])
+    expect(signal?.occurrence).toBe(3)
+  })
+
+  it("fires at most once per distinct command — a 4th, 5th, ... identical rerun of the SAME command never re-fires", () => {
+    const tracker = createRerunDedupeTracker()
+    tracker.observe([bash(CMD, RED)])
+    tracker.observe([bash(CMD, RED)])
+    expect(tracker.observe([bash(CMD, RED)])).toBeDefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+    expect(tracker.observe([bash(CMD, RED)])).toBeUndefined()
+  })
+
+  it("a DIFFERENT command gets its own independent counter", () => {
+    const tracker = createRerunDedupeTracker()
+    const OTHER_CMD = "python tests/runtests.py auth_tests"
+    tracker.observe([bash(CMD, RED)])
+    tracker.observe([bash(CMD, RED)])
+    // two runs of a different command in between must not contribute to CMD's tally
+    tracker.observe([bash(OTHER_CMD, RED)])
+    tracker.observe([bash(OTHER_CMD, RED)])
+    const signal = tracker.observe([bash(CMD, RED)])
+    expect(signal).toEqual({ command: CMD, occurrence: 3 })
+  })
+})
+
+describe("identicalRunDedupeNudgeText", () => {
+  it("names the command and the occurrence count, and asks for a change before re-running", () => {
+    const text = identicalRunDedupeNudgeText(CMD, 3)
+    expect(text).toContain(CMD)
+    expect(text).toContain("3")
+    expect(text.toLowerCase()).toContain("no new information")
   })
 })
 

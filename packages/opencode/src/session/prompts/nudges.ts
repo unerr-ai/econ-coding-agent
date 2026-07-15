@@ -313,3 +313,41 @@ export function conventionDivergenceSecondDenyNudgeText(
       : `this file's own comments/docstring mention "${evidence.token}" near \`${receiver}\`'s existing use`
   return `Second verification pause: \`${receiver}.${method}(...)\` belongs to a family of mutually-ambiguous variants, and ${evidenceText} — evidence the two are not interchangeable here. Re-read this file's existing usage and confirm \`${method}\` is really the right variant before retrying. An identical retry after this second pause will be accepted.`
 }
+
+/**
+ * Round-H — identical-run dedupe nudge: turn-supervisor.ts's `createRerunDedupeTracker`
+ * injects this once per distinct command, the first time it produces
+ * byte-identical (normalized) output for the `occurrence`-th time in a row
+ * with no edit landed in between. The django-11815 shape: ~72 repro
+ * re-runs, roughly half byte-identical, adding zero information between
+ * them.
+ */
+export function identicalRunDedupeNudgeText(command: string, occurrence: number): string {
+  return `Identical run ${occurrence} of \`${command}\` produced identical output — no new information. Change the code or your approach before re-running it: either land an edit that could change the result, or investigate the failure a different way.`
+}
+
+/**
+ * F18c — seen-red env/baseline-blocked nudge: prompt.ts's finish-time block
+ * injects this once instead of the confirm-GREEN demand, when
+ * `partitionSeenRedByEnvBlock` (seen-red.ts) finds a red whose evidence is
+ * environment-shaped (a missing backend/service, `ImproperlyConfigured`, a
+ * missing binary) or predates this turn's first edit, repeated at least
+ * twice. The 2026-07-15 django-11880 shape: a GIS-backend-required
+ * regression neighbor burned 42 of 59 turns re-running a red that can never
+ * pass in this arena.
+ */
+export function seenRedEnvBlockedNudgeText(blocked: readonly { command: string; outputTail: string }[]): string {
+  const single = blocked.length === 1
+  const list = blocked.map((b) => `\`${b.command}\`:\n${b.outputTail}`).join("\n\n")
+  return `${single ? "This failure is" : "These failures are"} ENVIRONMENT-BLOCKED — do not keep re-running ${single ? "it" : "them"}:\n${list}\nThis predates or is unrelated to your change and cannot be fixed by editing the issue's code — it is a broken/unconfigured test environment (a missing backend, service, or binary). Stop re-running ${single ? "it" : "them"}, and state the environment gap plainly in your final answer instead of chasing it further.`
+}
+
+/**
+ * F18c/M4 — env-blocked pin release nudge: prompt.ts's M4 finish gate
+ * injects this once, mirroring the oracle-inversion escape, when the pinned
+ * probe's own red repeats an environment-shaped signature — the pin then
+ * stops binding as green-required for the rest of the turn.
+ */
+export function probeEnvBlockedNudgeText(probeCommand: string, outputTail: string): string {
+  return `The pinned reproduction (\`${probeCommand}\`) keeps failing with the SAME environment-shaped signature:\n${outputTail}\nThis is a broken/unconfigured test environment (a missing backend, service, or binary), not something your code change can fix — the pin no longer binds as green-required. Stop re-running it, and state the environment gap plainly in your final answer.`
+}

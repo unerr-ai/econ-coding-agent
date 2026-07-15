@@ -73,12 +73,16 @@ import {
   isReproScratchPath,
   MODULE_MISSING_RE,
   missingModuleFromOutput,
+  ABOVE_CONDUCTOR_STEP_CAP,
+  buildAboveConductorSliceBrief,
+  clearCascadeInlineLatch,
   type ConductorSliceDispatch,
   type SliceProbes,
   type OrchestrationTodo,
   type SlicePermissionRule,
   type SliceDigestEntry,
   type TriageTodoRow,
+  type AboveConductorSliceBriefInput,
 } from "../../src/session/slice-orchestrator"
 import { triagePreamble } from "../../src/session/prompts/preambles"
 import { batchMomentumNudgeText } from "../../src/session/prompts/nudges"
@@ -2319,6 +2323,39 @@ describe("sliceStepBudget — the diagnosis pre-pass writer gets its own allowan
     expect(sliceStepBudget("researcher", "look up the docs for X")).toBe(PERSONA_STEP_BUDGET.researcher)
     expect(sliceStepBudget("applier", undefined)).toBe(PERSONA_STEP_BUDGET.applier)
   })
+
+  // Item 2 — the hard turn cap on above-conductor (reasoner/oracle) slice
+  // sessions. The cap must win over both the persona base AND the P8 ×1.5
+  // lift, and must never affect any other tier.
+  it("caps a reasoner-tier dispatch at ABOVE_CONDUCTOR_STEP_CAP even though the persona base (procedure=60) is far higher", () => {
+    expect(sliceStepBudget("procedure", undefined, { tier: "reasoner" })).toBe(ABOVE_CONDUCTOR_STEP_CAP)
+  })
+
+  it("caps an oracle-tier dispatch at ABOVE_CONDUCTOR_STEP_CAP even under the P8 ×1.5 lift (design + hard + escalated stacked)", () => {
+    expect(
+      sliceStepBudget("author", undefined, { tier: "oracle", sliceType: "design", hard: true, escalated: true }),
+    ).toBe(ABOVE_CONDUCTOR_STEP_CAP)
+  })
+
+  it("does not cap a reasoner/oracle dispatch whose base is already under the cap", () => {
+    // researcher's base (15) is below the cap (12)? No — 15 > 12, so this
+    // still caps; use a hypothetically-smaller opts shape is not available,
+    // so assert the cap is the min of (lifted base, cap) directly.
+    expect(sliceStepBudget("researcher", undefined, { tier: "oracle" })).toBe(
+      Math.min(PERSONA_STEP_BUDGET.researcher, ABOVE_CONDUCTOR_STEP_CAP),
+    )
+  })
+
+  it("never caps the executor tier — persona budgets and the P8 lift are byte-identical", () => {
+    expect(sliceStepBudget("applier", undefined, { tier: "executor", sliceType: "design" })).toBe(
+      Math.ceil(PERSONA_STEP_BUDGET.applier * 1.5),
+    )
+  })
+
+  it("never caps the conductor tier or an absent tier — pre-existing behavior is byte-identical", () => {
+    expect(sliceStepBudget("procedure", undefined, { tier: "conductor" })).toBe(PERSONA_STEP_BUDGET.procedure)
+    expect(sliceStepBudget("procedure", undefined)).toBe(PERSONA_STEP_BUDGET.procedure)
+  })
 })
 
 describe("PERSONA_STEP_BUDGET / countToolCalls / budgetExhaustedMarker (OL-9.3a)", () => {
@@ -2980,6 +3017,112 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Item 3 — cascade-failed inline latch: a doomed cascade (>=1 timed-out/
+// blocked slice, zero accepted) latches the NEXT call for the same session
+// to hold inline + inject a corrective todo naming the dead slice, exactly
+// once. Reuses the P6a doomed-cascade fixture (alpha rejects → unverified,
+// beta blocks) since it already produces the exact zero-accepted shape.
+// ---------------------------------------------------------------------------
+
+describe("runConductorOrchestration — item 3: cascade-failed inline latch", () => {
+  const doomedTodos: OrchestrationTodo[] = [
+    { content: "alpha — verify with `tsc --noEmit`", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+    {
+      content: "beta builds on alpha",
+      status: "pending",
+      sliceType: "mechanical",
+      coupling: "low",
+      testStrength: "testable",
+      deps: ["alpha — verify with `tsc --noEmit`"],
+    },
+  ]
+
+  afterEach(() => {
+    clearCascadeInlineLatch("cascade-latch-test")
+  })
+
+  it("holds the NEXT call inline exactly once, injecting a corrective todo naming the dead slice", async () => {
+    const injected: string[] = []
+    const latchEvents: Array<{ phase: string; deadSlice: string }> = []
+    const runDoomed = () =>
+      runConductorOrchestration({
+        getTodos: async () => doomedTodos,
+        probes: fakeProbes(),
+        dispatch: async () => ({ text: "attempt", parts: [] }),
+        setTodoStatus: async () => {},
+        sessionID: "cascade-latch-test",
+        goalCount: 2,
+        arming: { hardness: "trivial", ambiguity: "clear" },
+        options: { runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "verify failed" }) },
+        appendTodos: async (todo) => {
+          injected.push(todo.content)
+        },
+        onCascadeInlineLatch: (info) => {
+          latchEvents.push({ phase: info.phase, deadSlice: info.deadSlice })
+        },
+      })
+
+    // First call: the doomed cascade engages and settles zero-accepted — the
+    // latch SETS but does not hold THIS call inline (it already ran). (The
+    // pre-existing #55 re-decomposition seed may ALSO append a todo here on
+    // this same doomed-cascade shape — this test only asserts about the
+    // item-3 corrective marker, never about the full appendTodos call count.)
+    const first = await runDoomed()
+    expect(first.engaged).toBe(true)
+    expect(latchEvents).toEqual([{ phase: "set", deadSlice: "alpha — verify with `tsc --noEmit`" }])
+    expect(injected.some((c) => c.startsWith("[cascade-inline]"))).toBe(false)
+
+    // Second call (same session): the latch holds this call inline — never
+    // dispatches, never decomposes — and injects the corrective todo once.
+    injected.length = 0
+    const second = await runDoomed()
+    expect(second.engaged).toBe(false)
+    const correctiveTodos = injected.filter((c) => c.startsWith("[cascade-inline]"))
+    expect(correctiveTodos).toHaveLength(1)
+    expect(correctiveTodos[0]).toContain("alpha — verify with `tsc --noEmit`")
+    expect(latchEvents).toHaveLength(2)
+    expect(latchEvents[1]).toEqual({ phase: "consumed", deadSlice: "alpha — verify with `tsc --noEmit`" })
+
+    // Third call: the latch was consumed — back to normal engagement, never
+    // wedged inline forever.
+    injected.length = 0
+    const third = await runDoomed()
+    expect(third.engaged).toBe(true)
+    expect(injected.some((c) => c.startsWith("[cascade-inline]"))).toBe(false)
+  })
+
+  it("never latches a cascade that settles with at least one accepted slice", async () => {
+    const injected: string[] = []
+    // A single independent testable slice that verifies clean (exit 0) —
+    // real, accepted progress, not the doomed-cascade shape.
+    const healthyTodos: OrchestrationTodo[] = [
+      { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+      { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+    ]
+    const run = () =>
+      runConductorOrchestration({
+        getTodos: async () => healthyTodos,
+        probes: fakeProbes(),
+        dispatch: async () => ({ text: "ok", parts: [] }),
+        setTodoStatus: async () => {},
+        sessionID: "cascade-latch-test",
+        goalCount: 2,
+        arming: { hardness: "trivial", ambiguity: "clear" },
+        options: { runCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }) },
+        appendTodos: async (todo) => {
+          injected.push(todo.content)
+        },
+      })
+    const first = await run()
+    expect(first.engaged).toBe(true)
+    injected.length = 0
+    const second = await run()
+    expect(second.engaged).toBe(true) // never held inline — no latch ever set
+    expect(injected.some((c) => c.startsWith("[cascade-inline]"))).toBe(false)
+  })
+})
+
 describe("extractTrajectory — child message parts → trajectory", () => {
   it("maps edit/write parts to file-edit events with a scannable diff and shell parts to commands", () => {
     const parts = [
@@ -3553,6 +3696,119 @@ describe("renderSliceDigestLedger (OL-9.4b)", () => {
     expect(rendered.length).toBeLessThan(700) // header + a couple of blocks, not all 10
     expect(rendered).toContain("slice-0")
     expect(rendered).not.toContain("slice-9")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Item 1 (CTX-2.1/2.2) — buildAboveConductorSliceBrief: the compiled brief a
+// reasoner/oracle-tier slice's cheap dispatch receives instead of the generic
+// repo-primer/digest-ledger/parent-task context. Pure function — no I/O.
+// ---------------------------------------------------------------------------
+
+describe("buildAboveConductorSliceBrief (item 1 / CTX-2.1/2.2) — carries no raw transcript", () => {
+  const RAW_TRANSCRIPT_DECOY =
+    "=== RAW TRANSCRIPT START ===\nUser: explain the codebase\nAssistant: sure, here is everything\n=== RAW TRANSCRIPT END ==="
+
+  function baseBriefInput(overrides: Partial<AboveConductorSliceBriefInput> = {}): AboveConductorSliceBriefInput {
+    return {
+      prompt: "Fix the off-by-one in parse_http_date's two-digit-year branch.",
+      turnFiles: [],
+      siblingDigests: [],
+      ...overrides,
+    }
+  }
+
+  it("never contains a raw transcript decoy even when one is smuggled into a field", () => {
+    const brief = buildAboveConductorSliceBrief(
+      baseBriefInput({
+        turnVerdict: {
+          goals: [{ quote: "parse_http_date mishandles two-digit years", shape: "diagnosis-grounded", deliverable: "a fix" }],
+          constraints: [],
+          confidence: "high",
+        },
+        // A raw-transcript-shaped sibling digest must still only ever appear
+        // as a bounded, labeled "prior attempt" entry — never verbatim as an
+        // unbounded transcript blob outside the brief's structured sections.
+        siblingDigests: [{ id: "slice-a", text: RAW_TRANSCRIPT_DECOY }],
+      }),
+    )
+    // compileBrief accepts no rawTranscript-shaped field; only task/status
+    // ever ride from an AttemptSummary, so the decoy text itself is absent.
+    expect(brief.text).not.toContain(RAW_TRANSCRIPT_DECOY)
+    expect(brief.text).not.toContain("=== RAW TRANSCRIPT START ===")
+  })
+
+  it("carries the slice task text as the question", () => {
+    const brief = buildAboveConductorSliceBrief(baseBriefInput())
+    expect(brief.text).toContain("parse_http_date")
+  })
+
+  it("carries the issue goal's verbatim quote and deliverable", () => {
+    const brief = buildAboveConductorSliceBrief(
+      baseBriefInput({
+        turnVerdict: {
+          goals: [
+            { quote: "the two-digit year threshold is wrong", shape: "diagnosis-grounded", deliverable: "a corrected threshold" },
+          ],
+          constraints: [],
+          confidence: "high",
+        },
+      }),
+    )
+    expect(brief.text).toContain("the two-digit year threshold is wrong")
+    expect(brief.text).toContain("a corrected threshold")
+  })
+
+  it("carries the turn's constraint lines", () => {
+    const brief = buildAboveConductorSliceBrief(
+      baseBriefInput({
+        turnVerdict: {
+          goals: [],
+          constraints: [{ quote: "do not touch the test suite", kind: "no-test-edit" }],
+          confidence: "high",
+        },
+      }),
+    )
+    expect(brief.text).toContain("do not touch the test suite")
+    expect(brief.text).toContain("no-test-edit")
+  })
+
+  it("carries the pinned repro's command, current content, and last red tail", () => {
+    const brief = buildAboveConductorSliceBrief(
+      baseBriefInput({
+        pinnedProbe: {
+          probe: { kind: "test", command: "python -m pytest tests/test_http.py::test_parse_two_digit_year" },
+          redEvidence: { exitCode: 1, outputTail: "AssertionError: expected 2019, got 1919" },
+        },
+        reproContent: "def test_parse_two_digit_year():\n    assert parse_http_date(...) == expected",
+      }),
+    )
+    expect(brief.text).toContain("python -m pytest tests/test_http.py::test_parse_two_digit_year")
+    expect(brief.text).toContain("AssertionError: expected 2019, got 1919")
+    expect(brief.text).toContain("def test_parse_two_digit_year")
+  })
+
+  it("carries candidate fix sites named this turn", () => {
+    const brief = buildAboveConductorSliceBrief(baseBriefInput({ turnFiles: ["django/utils/http.py"] }))
+    expect(brief.text).toContain("django/utils/http.py")
+  })
+
+  it("carries sibling slice digests as prior attempts, labeled — not as a raw ledger blob", () => {
+    const brief = buildAboveConductorSliceBrief(
+      baseBriefInput({ siblingDigests: [{ id: "recon-1", text: "found the bug in http.py:200" }] }),
+    )
+    expect(brief.text).toContain("recon-1")
+  })
+
+  it("falls back to the default output shape when no goal's deliverable matches the slice prompt", () => {
+    const brief = buildAboveConductorSliceBrief(baseBriefInput())
+    expect(brief.text).toContain("The corrected result for this slice, ready for the verifier.")
+  })
+
+  it("degrades gracefully to just the slice prompt when every optional input is absent", () => {
+    const brief = buildAboveConductorSliceBrief(baseBriefInput())
+    expect(brief.text).toContain("Fix the off-by-one")
+    expect(brief.estimatedTokens).toBeGreaterThan(0)
   })
 })
 

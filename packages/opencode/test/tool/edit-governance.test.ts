@@ -385,7 +385,11 @@ import {
   bandFilterDefiningSites,
   hubEditRetriedAgainstCandidates,
   memoizeHubEditDefiningSites,
+  inheritHubEditTurnBounceState,
+  hubEditRepeatBounceMessage,
+  hubEditJudgeRedirectMessage,
   type HubFanInGraph,
+  type HubEditJudgeVerdict,
 } from "../../src/tool/edit-governance"
 
 describe("Wave 5 — hub-edit gate store", () => {
@@ -983,6 +987,230 @@ describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate f
 
     setHubEditGate("ses_hub_retry_d", false)
     expect(hubEditRetriedAgainstCandidates("ses_hub_retry_d")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Wave 12 — per-file per-turn bounce memory. Round-07-15 django-11815
+// forensics: a hard-tail escalation spawns a fresh session mid-turn, and the
+// hub-edit gate's per-session bounce state reset to zero for it — the SAME
+// hub file (serializer.py) ran the full first-bounce/second-bounce cycle
+// TWICE (once per session), 4 bounce events for one file in one turn. Fix:
+// inheritHubEditTurnBounceState carries a file's turn-wide bounce count into
+// a child session, so a session that never itself denied the file but whose
+// turn already has history for it gets a cheap cached repeat (rung 2) then
+// an auto-dispatched hub-design judge verdict (rung 3) instead of resetting
+// to a fresh first bounce.
+// ---------------------------------------------------------------------------
+
+describe("Wave 12 — per-file per-turn bounce memory", () => {
+  const overThresholdGraph: HubFanInGraph = { fileFanIn: () => 5 }
+
+  it("first bounce is unchanged when the turn has no prior history for the file", async () => {
+    setHubEditGate("ses_turn_first", true)
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_turn_first",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(result.action).toBe("deny")
+    if (result.action === "deny") {
+      expect(result.repeat).toBeUndefined()
+      expect(result.final).toBeUndefined()
+      expect(result.message).toBe(hubEditDenialMessage("hub.py", 5))
+    }
+  })
+
+  it("distinct-file 2nd bounce path is unchanged: two different hub files in one session each bounce once, independently", async () => {
+    setHubEditGate("ses_turn_distinct", true)
+    const a = await evaluateHubEditGate({
+      sessionID: "ses_turn_distinct",
+      filePath: "hub_a.py",
+      graph: overThresholdGraph,
+    })
+    const b = await evaluateHubEditGate({
+      sessionID: "ses_turn_distinct",
+      filePath: "hub_b.py",
+      graph: overThresholdGraph,
+    })
+    expect(a.action).toBe("deny")
+    expect(b.action).toBe("deny")
+    if (a.action === "deny") expect(a.repeat).toBeUndefined()
+    if (b.action === "deny") expect(b.repeat).toBeUndefined()
+    expect(hubEditBouncedFiles("ses_turn_distinct")).toEqual(["hub_a.py", "hub_b.py"])
+  })
+
+  it("evidence-bearing re-issue hatch still passes: an empty-allowlist identical retry allows exactly as before", async () => {
+    setHubEditGate("ses_turn_hatch", true)
+    const first = await evaluateHubEditGate({
+      sessionID: "ses_turn_hatch",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(first.action).toBe("deny")
+    const retry = await evaluateHubEditGate({
+      sessionID: "ses_turn_hatch",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(retry).toEqual({ action: "allow", retried: true })
+  })
+
+  it("a child session inheriting a turn-count of 1 gets a cached repeat on its first look, not a fresh first bounce", async () => {
+    setHubEditGate("ses_turn_parent_a", true)
+    const parentBounce = await evaluateHubEditGate({
+      sessionID: "ses_turn_parent_a",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(parentBounce.action).toBe("deny")
+
+    setHubEditGate("ses_turn_child_a", hubEditGateArmed("ses_turn_parent_a"))
+    inheritHubEditTurnBounceState("ses_turn_child_a", "ses_turn_parent_a")
+
+    const childFirst = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_a",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(childFirst).toEqual({
+      action: "deny",
+      repeat: true,
+      message: hubEditRepeatBounceMessage("hub.py"),
+    })
+  })
+
+  it("the turn's 3rd evidence-less attempt dispatches the hub-design judge", async () => {
+    setHubEditGate("ses_turn_parent_b", true)
+    await evaluateHubEditGate({ sessionID: "ses_turn_parent_b", filePath: "hub.py", graph: overThresholdGraph })
+    setHubEditGate("ses_turn_child_b", hubEditGateArmed("ses_turn_parent_b"))
+    inheritHubEditTurnBounceState("ses_turn_child_b", "ses_turn_parent_b")
+
+    let dispatched = 0
+    const dispatchHubDesignJudge = async () => {
+      dispatched++
+      return undefined
+    }
+
+    // Child's 1st look (turn's 2nd bounce) = cached repeat, no dispatch yet.
+    const repeat = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_b",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge,
+    })
+    expect(repeat.action).toBe("deny")
+    if (repeat.action === "deny") expect(repeat.repeat).toBe(true)
+    expect(dispatched).toBe(0)
+
+    // Child's 2nd look (turn's 3rd evidence-less attempt) = judge dispatch.
+    await evaluateHubEditGate({
+      sessionID: "ses_turn_child_b",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge,
+    })
+    expect(dispatched).toBe(1)
+  })
+
+  it("a judge verdict endorsing the bounced file allows loud (exhausted)", async () => {
+    setHubEditGate("ses_turn_parent_c", true)
+    await evaluateHubEditGate({ sessionID: "ses_turn_parent_c", filePath: "hub.py", graph: overThresholdGraph })
+    setHubEditGate("ses_turn_child_c", hubEditGateArmed("ses_turn_parent_c"))
+    inheritHubEditTurnBounceState("ses_turn_child_c", "ses_turn_parent_c")
+
+    const endorse = async (): Promise<HubEditJudgeVerdict> => ({
+      file: "hub.py",
+      entity: "Hub",
+      change: "no-op",
+    })
+
+    await evaluateHubEditGate({
+      sessionID: "ses_turn_child_c",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge: endorse,
+    })
+    const settled = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_c",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge: endorse,
+    })
+    expect(settled).toEqual({ action: "allow", exhausted: true })
+  })
+
+  it("a degraded/unavailable judge (no callback injected) allows loud (exhausted)", async () => {
+    setHubEditGate("ses_turn_parent_d", true)
+    await evaluateHubEditGate({ sessionID: "ses_turn_parent_d", filePath: "hub.py", graph: overThresholdGraph })
+    setHubEditGate("ses_turn_child_d", hubEditGateArmed("ses_turn_parent_d"))
+    inheritHubEditTurnBounceState("ses_turn_child_d", "ses_turn_parent_d")
+
+    await evaluateHubEditGate({ sessionID: "ses_turn_child_d", filePath: "hub.py", graph: overThresholdGraph })
+    const settled = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_d",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(settled).toEqual({ action: "allow", exhausted: true })
+  })
+
+  it("a judge verdict naming a different file is one final bounce carrying that verdict, then a further retry allows", async () => {
+    setHubEditGate("ses_turn_parent_e", true)
+    await evaluateHubEditGate({ sessionID: "ses_turn_parent_e", filePath: "hub.py", graph: overThresholdGraph })
+    setHubEditGate("ses_turn_child_e", hubEditGateArmed("ses_turn_parent_e"))
+    inheritHubEditTurnBounceState("ses_turn_child_e", "ses_turn_parent_e")
+
+    const redirect = async (): Promise<HubEditJudgeVerdict> => ({
+      file: "root_most.py",
+      entity: "Root",
+      change: "fix here instead",
+    })
+
+    await evaluateHubEditGate({
+      sessionID: "ses_turn_child_e",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge: redirect,
+    })
+    const final = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_e",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge: redirect,
+    })
+    expect(final).toEqual({
+      action: "deny",
+      final: true,
+      message: hubEditJudgeRedirectMessage("hub.py", {
+        file: "root_most.py",
+        entity: "Root",
+        change: "fix here instead",
+      }),
+    })
+
+    // Bounded — a further attempt never re-dispatches the judge, and allows.
+    const afterFinal = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_e",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+      dispatchHubDesignJudge: redirect,
+    })
+    expect(afterFinal).toEqual({ action: "allow", exhausted: true })
+  })
+
+  it("a parent session with no turn-wide history is a no-op inherit — the child starts fresh", async () => {
+    setHubEditGate("ses_turn_parent_f", true)
+    setHubEditGate("ses_turn_child_f", true)
+    inheritHubEditTurnBounceState("ses_turn_child_f", "ses_turn_parent_f")
+
+    const result = await evaluateHubEditGate({
+      sessionID: "ses_turn_child_f",
+      filePath: "hub.py",
+      graph: overThresholdGraph,
+    })
+    expect(result.action).toBe("deny")
+    if (result.action === "deny") expect(result.repeat).toBeUndefined()
   })
 })
 
