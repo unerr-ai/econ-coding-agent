@@ -319,12 +319,26 @@ describe("isEnvBlockedSignature", () => {
     expect(isEnvBlockedSignature("bash: gdal-config: command not found")).toBe(true)
   })
 
+  it("matches the real 2026-07-15 django arena text — 'backend' and 'required' share a clause but are not adjacent", () => {
+    expect(isEnvBlockedSignature("Aborting: A GIS database backend is required to run gis_tests.")).toBe(true)
+  })
+
   it("matches the MISSING_FILE_RE/MODULE_MISSING_RE family too (defense in depth)", () => {
     expect(isEnvBlockedSignature("ModuleNotFoundError: No module named 'psycopg2'")).toBe(true)
   })
 
   it("does NOT match a plain assertion failure", () => {
     expect(isEnvBlockedSignature("AssertionError: 22 != 25 : 22 queries executed, 25 expected")).toBe(false)
+  })
+
+  it("does NOT match a plain unittest failure summary", () => {
+    expect(isEnvBlockedSignature("FAILED (failures=15)")).toBe(false)
+  })
+
+  it("does NOT match 'backend' and 'required' when they belong to different sentences (gap must not cross a period)", () => {
+    expect(
+      isEnvBlockedSignature("The backend processed the request. Authentication is required for this endpoint."),
+    ).toBe(false)
   })
 })
 

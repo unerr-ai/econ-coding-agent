@@ -244,10 +244,13 @@ export function partitionSeenRedByInversion(
 // Conservative environment-gap markers beyond the MISSING_FILE_RE/
 // MODULE_MISSING_RE family already excluded upstream (isRedTestExecution
 // above never lets those reach `unresolved` at all — checked again here only
-// as defense in depth). The django-11880 shape: a GIS-backend-required
-// neighbor regression is an unconfigured test ENVIRONMENT, not an unfixed
-// producer, and neither existing regex names it.
-const ENV_BLOCKED_MARKER_RE = /backend required|ImproperlyConfigured|command not found/i
+// as defense in depth). The django-11880 shape: the real arena text reads
+// "A GIS database backend is required to run gis_tests." — `backend` and
+// `required` share a clause but are not adjacent, so the gap between them
+// is bounded (never `.*`) to stay a conservative red-sanctioning marker
+// rather than a generic environment-gap catch-all that could write off a
+// real failure.
+const ENV_BLOCKED_MARKER_RE = /backend\b[^.\n]{0,24}?\brequired|ImproperlyConfigured|command not found/i
 
 /** Whether an unresolved red's evidence tail is environment-shaped: the MISSING_FILE_RE/MODULE_MISSING_RE family or the conservative marker set above. */
 export function isEnvBlockedSignature(outputTail: string): boolean {
