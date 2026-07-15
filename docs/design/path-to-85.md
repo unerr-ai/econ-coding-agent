@@ -54,7 +54,8 @@ baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log).
    mechanism carries the burden of proof, because it is trimming a tail on a winning
    position (the turn-economy wave in §3 Tier 0 was the first test of this rule —
    verdict: the block regressed, two mechanisms survived; the escalation gate in §3
-   Tier 0 is the second, larger test).
+   Tier 0 was the second, larger test — verdict: PASSED, shipped `247cf53b3`; report
+   Part VIII.6).
 
 ---
 
@@ -142,7 +143,7 @@ rest, in cost order.
   cap; **(b) don't build mechanisms against n=1 pathologies** — four of seven targeted
   single prior observations that never recurred.
 
-- **Deterministic, conductor-biased escalation gate (2026-07-15, ⧗ IN VALIDATION).**
+- **Deterministic, conductor-biased escalation gate (2026-07-15, VALIDATED 2026-07-16, shipped `247cf53b3`).**
   Band forensics (report Part VIII) found the orchestration-benefit gate was effectively
   a coin flip: same binary, same instance, identical triage verdict produced
   `slices=5`/146t/$0.6639 one round and conductor-only/25t/$0.0670 the next (9.9×, both
@@ -155,14 +156,18 @@ rest, in cost order.
   or probe-derived coupling/risk; reverses run-21. Framing for this plan: this is the
   largest single cost lever found so far — bigger than everything in the turn-economy
   wave combined — because escalated and conductor-only routes differ 4–10× for
-  identical outcomes on this class. **Risk:** it is also the first Tier-0 item that
-  could plausibly cost score (if escalation was load-bearing on
-  11815/11848/11880/11885, conductor-bias shows up as new failures), so unlike the
-  other Tier-0 items it ships under the full §6.6 burden: 3-round mini-10 with
-  per-decision gate logging, deterministic per-instance routes, and correctness ≥ the
-  current 9/10-consistent level. It enforces the companion rule from §5: the escalation
-  decision is now a CONVERT-shaped consumer of deterministic signals (probe
-  coupling/risk, triage width) instead of an advisory read of the model's self-report.
+  identical outcomes on this class. **Risk (resolved):** it was the first Tier-0 item
+  that could plausibly cost score (if escalation was load-bearing on
+  11815/11848/11880/11885, conductor-bias shows up as new failures), so it shipped under
+  the full §6.6 burden. **Verdict (two mini-10 rounds + failed-pair rerun, report Part
+  VIII.6): aggregate cost band 1.55× → 1.02× at ~35% below the old gate's expensive
+  draw; three fails (11964 ×2, 11885 ×1) all in route-immune variance classes, none
+  gate-attributable, and both instances passed a same-binary rerun** — 11880 even passed
+  a *declined* draw at $0.0565, its cheapest ever. Residual: the `goal-width` trigger is
+  the one remaining LLM-fed escalation channel (11951's 8.3× swing). It enforces the
+  companion rule from §5: the escalation decision is now a CONVERT-shaped consumer of
+  deterministic signals (probe coupling/risk, triage width) instead of an advisory read
+  of the model's self-report.
 
 - **Shape-gate the fix machinery by the turn-read verdict (2026-07-15, IMPLEMENTED).**
   The harness armed on *every* turn, so a read-only turn (a question, an audit, a

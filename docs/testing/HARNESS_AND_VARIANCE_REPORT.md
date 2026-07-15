@@ -14,9 +14,10 @@ or a run bundle; nothing is inferred from memory.
 
 **Code state.** Part I describes HEAD `784d6849c` **plus the turn-economy wave's six
 surviving mechanisms**, committed as `5dc9a21a1` (docs `95ba1a982` — see Part VII.4.2's
-per-mechanism verdicts for which six). The escalation-gate rewrite (Part VIII.5) is the
-thing now **⧗ uncommitted**; it is marked at its anchor so this map stays honest if it is
-reverted rather than shipped.
+per-mechanism verdicts for which six). The escalation-gate rewrite (Part VIII.5) is
+**committed `247cf53b3` and VALIDATED** (two mini-10 rounds + a failed-pair rerun,
+2026-07-15/16 — verdict in VIII.6). The seen-red env-block marker fix is `19c9659b0`
+(activates a never-fired mechanism; validation rides the next benchmark run).
 
 **Sources.** Three fleet failed-run bundles
 (`unerr-benchmarks/e2e/distributed/failed-runs/mini10ded-0713-{1859,2058}`,
@@ -1267,7 +1268,7 @@ anti-pattern: advisory-only signal).
 **Classification.** This is the documented tier-immune spec-gap class (11964 recurrence):
 **3.6× spend bought a WORSE answer.**
 
-### VIII.5 The fix under validation — deterministic, conductor-biased gate (⧗ uncommitted)
+### VIII.5 The fix — deterministic, conductor-biased gate (committed `247cf53b3`, VALIDATED)
 
 **New contract.** New `shouldOrchestrate` contract (`slice-orchestrator.ts`): opens ONLY
 on (1) a harness-seeded escape-hatch slice, (2) ≥6 slices, (3) goalCount≥2
@@ -1289,10 +1290,46 @@ test — `fakeProbes()` defaulting coupling to "high" — hid the grind-valve br
 recorded here as method lessons. `deferralPrepassTodo()` is deliberately EXCLUDED from
 the escape set — the deferral cascade is the measured cost cliff of VII.4 / VIII.4.
 
-**Ship rule** (`path-to-85.md` §6.6, §0.5): 3-round mini-10 with per-decision gate
+**Ship rule** (`path-to-85.md` §6.6, §0.5): mini-10 band with per-decision gate
 logging, ships only if route becomes deterministic per instance AND correctness holds
 ≥9/10 (the current consistent level; escalation may be load-bearing on
-11815/11848/11880/11885 — that is precisely what the run measures).
+11815/11848/11880/11885 — that is precisely what the run measures). Amended mid-run by
+user decision: two full rounds + a rerun of only the failed pair, instead of three rounds.
+
+### VIII.6 Validation verdict (2026-07-15/16, pinned binary `0.0.0-main-202607151736`) — SHIP
+
+**Cost determinism achieved.** r1 = 9/10 · $2.4695 · 509t; r2 = 8/10 · $2.5286 · 584t.
+The ten-instance aggregate band collapsed **1.55× → 1.02×**, landing ~35% below the old
+gate's expensive draw ($3.8519). Per-instance: 11999 $0.61 → $0.027–0.04 (cascade never
+seeds); 11880-r2 *declined* (coupling=low) and passed at $0.0565 — cheapest ever, proving
+even its historical escalations unnecessary; 12050 declined DAGs of 1/3/3/5 slices both
+rounds. The one residual LLM-fed trigger is **goal-width**: 11951-r1 engaged on a
+triage read of 2 goals (8.3× cost swing vs its declined draw) — the next tightening
+candidate, not a ship-blocker.
+
+**Correctness: no gate-attributable failure.** Three fails across the two rounds
+(11964 ×2, 11885 ×1), all in documented route-immune variance classes, and **both
+instances passed a same-binary rerun**:
+- **11885** (rerun PASS, $0.3638/105t): the gate made **zero decisions** on it in all
+  three draws (no typed DAG is ever written — conductor-only on every binary), so its r2
+  fail cannot be the gate's. The fail/pass flip is draw-level approach choice —
+  naive combine-all (r2, red 2/45) vs conditional per-model combine (r1 + rerun, green).
+  The rerun showed none of r2's failure signature (`deferral_armed` ×2 /
+  `probe_gate_exhausted` ×4 / `regression_unresolved` all absent) and one
+  `turn_regression_green` — a regression observed and driven back to green.
+- **11964** (rerun PASS, $0.0973/35t): the diagnosis-preference class confirmed from the
+  passing side. This draw's first diagnosis landed on `django/db/models/enums.py` — the
+  root-most layer the hub-gate maintainer-prior had named 5×/round in both failing
+  rounds — so the prior never needed to fire (0 fires), the `model_enums` suite ran 6×
+  before finish, and the gate declined 5× (`trigger=none`, sliceCount 1–2). Fails happen
+  exactly when the first diagnosis anchors on the symptom layer (`query_utils.py`) and the
+  **evidence-free re-issue hatch** lets the agent override the prior — now three-for-three
+  evidence for closing that hatch (VIII.4).
+
+**Signals remain advisory-only at the ship boundary** (§5 anti-pattern, second
+confirmation): the 11964 rerun *passed* while `unverified_finish` fired 7× and
+`deferral_armed` 2×, all unconsumed — same as they fired unconsumed on 11885-r2's
+shipped-red. Consuming them at finish is the companion follow-up to the hatch.
 
 ---
 
