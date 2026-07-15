@@ -154,6 +154,14 @@ export interface LoopSlice {
   wiring?: string
   /** Expected output shape, surfaced in the escalation brief. */
   outputShape?: string
+  /**
+   * OL-9.5c — set ONLY when the source `OrchestrationTodo` was one of the
+   * harness's own injected prepass seeds (diagnosis/re-plan/plan/grind-valve),
+   * never by the conductor. `shouldOrchestrate` admits this as a structural
+   * benefit-gate trigger on its own — the harness planting its own escape
+   * hatch is legitimate evidence, unlike a conductor-authored sliceType/need.
+   */
+  harnessSeeded?: boolean
 }
 
 /** A single model dispatch the loop asks the host to run (cheap hop or escalation hop). */

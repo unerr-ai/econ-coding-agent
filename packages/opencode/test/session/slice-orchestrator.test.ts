@@ -16,6 +16,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import {
   ECON_PERSONAS,
   allocateSlice,
+  ALLOCATION_RISK_TIEBREAK,
   redecompositionCheck,
   PERPLEXITY_HIGH_THRESHOLD,
   type VerifyCommand,
@@ -36,6 +37,7 @@ import {
   todosToLoopSlices,
   hasPendingTypedSlices,
   shouldOrchestrate,
+  explainOrchestrationGate,
   autoTypeTodos,
   reconcileSettledSlices,
   LOCALIZATION_PREPASS_TODO,
@@ -523,12 +525,31 @@ describe("shouldOrchestrate — the OL-9.5c benefit gate", () => {
     expect(shouldOrchestrate(slices)).toBe(false)
   })
 
-  it("a wave of >=2 independent slices qualifies", () => {
+  // The fourth admissible signal (the harness's OWN escape hatch, distinct
+  // from a conductor-authored sliceType/need): a lone harness-seeded slice
+  // qualifies regardless of coupling/risk/goalCount/width. This is what keeps
+  // the grind-valve/re-plan/plan prepass seeds working now that the old
+  // tier-keyed inference (design → reasoner → gate opens) is gone.
+  it("a lone slice with harnessSeeded:true qualifies, even with zero coupling/risk/width", () => {
+    const slices = [{ id: "the grind valve's design seed", prompt: "", harnessSeeded: true as const }]
+    expect(shouldOrchestrate(slices)).toBe(true)
+  })
+
+  it("harnessSeeded:false/absent on a lone slice does not qualify on its own", () => {
+    const slices = [{ id: "just a slice", prompt: "", harnessSeeded: false as const }]
+    expect(shouldOrchestrate(slices)).toBe(false)
+  })
+
+  // Reverses run-21/pre-OL-9.5c: a bare wave of width >=2 used to qualify on
+  // its own (planWaves-derived width was an admissible signal). The wave
+  // trigger is gone — width alone is not benefit evidence; only >=6 slices,
+  // goalCount >=2, or a probe-derived critical slice (coupling/risk) qualify.
+  it("run-21 reversal: a bare wave of >=2 independent slices no longer qualifies on width alone", () => {
     const slices = [
       { id: "a", prompt: "" },
       { id: "b", prompt: "" },
     ]
-    expect(shouldOrchestrate(slices)).toBe(true)
+    expect(shouldOrchestrate(slices)).toBe(false)
   })
 
   it("a batch of >=6 slices qualifies on scale alone, even serialized into width-1 waves", () => {
@@ -549,9 +570,14 @@ describe("shouldOrchestrate — the OL-9.5c benefit gate", () => {
     expect(shouldOrchestrate(slices)).toBe(false)
   })
 
-  it("run-21: a lone judgment slice with need reasoner/oracle qualifies by itself", () => {
-    expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "reasoner" }])).toBe(true)
-    expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "oracle" }])).toBe(true)
+  // Reverses run-21: a lone slice's self-reported `need` used to qualify it by
+  // itself via the ALLOCATED tier (allocateSlice reads sliceType/need, both
+  // written by the conductor into its own todo). The gate no longer keys on
+  // allocation at all — a self-reported need is not benefit evidence the
+  // conductor did not author, so a lone slice can no longer escalate on it.
+  it("run-21 reversal: a lone slice's self-reported need (reasoner/oracle) cannot escalate on its own", () => {
+    expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "reasoner" }])).toBe(false)
+    expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "oracle" }])).toBe(false)
     // an executor-need width-1 chain still gains nothing — stays declined
     expect(shouldOrchestrate([{ id: "run suite", prompt: "", need: "executor" }])).toBe(false)
   })
@@ -573,6 +599,56 @@ describe("shouldOrchestrate — the OL-9.5c benefit gate", () => {
     expect(shouldOrchestrate(slices, 0)).toBe(false)
     expect(shouldOrchestrate(slices, 1)).toBe(false)
     expect(shouldOrchestrate(slices, undefined)).toBe(false)
+  })
+
+  // The new admissible signal: a CRITICAL slice — probe-derived coupling or
+  // risk (blast radius / fan-in), the one escalation input the lead model
+  // cannot talk itself into (unlike sliceType/need, which it authors).
+  it("a lone slice with coupling: \"high\" qualifies", () => {
+    const slices = [{ id: "touch the shared module", prompt: "", coupling: "high" as const }]
+    expect(shouldOrchestrate(slices)).toBe(true)
+  })
+
+  it("a lone slice with risk above ALLOCATION_RISK_TIEBREAK qualifies", () => {
+    const slices = [{ id: "touch the risky module", prompt: "", risk: ALLOCATION_RISK_TIEBREAK + 1 }]
+    expect(shouldOrchestrate(slices)).toBe(true)
+  })
+
+  // Mirrors allocation.test.ts's "risk at the threshold does not break the
+  // borderline (strictly greater)" — risk must exceed the tiebreak, not meet it.
+  it("a lone slice with risk exactly at ALLOCATION_RISK_TIEBREAK does not qualify (strictly greater)", () => {
+    const slices = [{ id: "touch the borderline module", prompt: "", risk: ALLOCATION_RISK_TIEBREAK }]
+    expect(shouldOrchestrate(slices)).toBe(false)
+  })
+})
+
+describe("explainOrchestrationGate — trigger attribution", () => {
+  // First match wins: harness-seed is checked before coupling-risk, so a
+  // harness-seeded slice reports its own trigger even when it would ALSO
+  // qualify on coupling — the caller must see the escape hatch, not the
+  // probe signal, as the reason the gate opened.
+  it("a harness-seeded slice reports harness-seed even when coupling is also high", () => {
+    const slices = [{ id: "grind valve seed", prompt: "", harnessSeeded: true as const, coupling: "high" as const }]
+    expect(explainOrchestrationGate(slices)).toEqual({ engage: true, trigger: "harness-seed" })
+  })
+
+  it("a declined case reports none", () => {
+    const slices = [
+      { id: "recon it", prompt: "" },
+      { id: "fix it", prompt: "", deps: ["recon it"] },
+    ]
+    expect(explainOrchestrationGate(slices)).toEqual({ engage: false, trigger: "none" })
+  })
+
+  it("attributes breadth, goal-width, and coupling-risk to their own trigger", () => {
+    const sixSlices = Array.from({ length: 6 }, (_, i) => ({ id: `step ${i}`, prompt: "" }))
+    expect(explainOrchestrationGate(sixSlices)).toEqual({ engage: true, trigger: "breadth" })
+
+    const widthSlices = [{ id: "solo step", prompt: "" }]
+    expect(explainOrchestrationGate(widthSlices, 2)).toEqual({ engage: true, trigger: "goal-width" })
+
+    const couplingSlices = [{ id: "touch the shared module", prompt: "", coupling: "high" as const }]
+    expect(explainOrchestrationGate(couplingSlices)).toEqual({ engage: true, trigger: "coupling-risk" })
   })
 })
 
@@ -1394,22 +1470,30 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(Permission.evaluate("bash", "python -m pytest -k failing", effective).action).toBe("allow")
   })
 
-  it("the writer seed is DIFFICULTY-allocated: trivial → executor (gate declines), judge-rated hard → reasoner (gate opens)", async () => {
+  // Reverses run-21/OL-9.5c: this test used to assert the difficulty floor's
+  // ALLOCATED tier (executor vs reasoner) drove shouldOrchestrate directly —
+  // exactly the self-reported-need coupling the new gate deliberately severed
+  // (allocateSlice reads hardness/need, both conductor/arming-judge authored,
+  // not probe evidence). Allocation itself is UNCHANGED (still floors hard
+  // work to the reasoner); only the gate's read on it is gone — a lone slice
+  // with the same (low) probe-derived coupling now stays declined regardless
+  // of tier.
+  it("the writer seed is still DIFFICULTY-allocated (trivial → executor, hard → reasoner), but its ALLOCATED tier no longer drives shouldOrchestrate", async () => {
     // No pin: a trivial, already-located bug converts to a testable mechanical
-    // slice that allocates to the CHEAP executor — the lone seed no longer
-    // force-opens the benefit gate (the django-12039 over-route).
-    const trivial = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes())
+    // slice that allocates to the CHEAP executor.
+    const trivial = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes("low"))
     expect(trivial).toHaveLength(1)
     expect(trivial[0]).toMatchObject({ id: LOCALIZATION_SLICE_CONTENT, sliceType: "mechanical", testStrength: "testable" })
     expect(trivial[0]!.need).toBeUndefined()
     expect(allocateSlice(trivial[0]!).tier).toBe("executor")
     expect(shouldOrchestrate(trivial)).toBe(false)
 
-    // When the arming judge rates the bug genuinely hard, the difficulty floor
-    // lifts the SAME seed to the reasoner and the gate opens on the allocated tier.
-    const hard = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes(), { hardness: "hard" })
+    // The difficulty floor still lifts the SAME seed's ALLOCATED tier to the
+    // reasoner when the arming judge rates the bug genuinely hard — but with
+    // the same low probe-derived coupling, the gate stays declined regardless.
+    const hard = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes("low"), { hardness: "hard" })
     expect(allocateSlice(hard[0]!).tier).toBe("reasoner")
-    expect(shouldOrchestrate(hard)).toBe(true)
+    expect(shouldOrchestrate(hard)).toBe(false)
   })
 
   it("P12 — the plan seed mirrors the re-plan seed's decider shape (design/reasoner/researcher) with a forward-looking, edit-free brief", () => {
@@ -1431,6 +1515,46 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
   it("P12 — all three engine seeds are pairwise distinct (the dedup-by-content rule)", () => {
     const contents = [LOCALIZATION_SLICE_CONTENT, REDECOMPOSITION_SLICE_CONTENT, PLAN_SLICE_CONTENT]
     expect(new Set(contents).size).toBe(3)
+  })
+
+  // The round trip the earlier fakeProbes()-masked test skipped: harnessSeeded
+  // is DERIVED at slice-build time from content (HARNESS_SEED_CONTENTS in
+  // slice-orchestrator.ts) — it has no field on OrchestrationTodo/
+  // SessionTodo.Info, so nothing to persist and nothing to lose. Each todo
+  // here carries ONLY the fields that actually survive SessionTodo.Info
+  // persistence (content/status/priority/sliceType/need/persona — explicitly
+  // NO harnessSeeded field, because none exists to set) for all three harness
+  // prepass seeds; the derivation must still fire, and with fakeProbes("low")
+  // (the REAL probeSliceCoupling default on a file-less prompt) the gate must
+  // still clear on zero probe-derived coupling/risk.
+  it("harnessSeeded round-trips through a todo carrying ONLY store-persisted fields, for all three harness prepass seeds", async () => {
+    // Deliberately un-annotated: `priority` is a SessionTodo.Info-persisted
+    // field the driver's own OrchestrationTodo type doesn't declare (it
+    // never reads it). Widening here (not a literal in the call below)
+    // keeps that extra field legal without touching OrchestrationTodo.
+    const storePersistedSeed = (content: string) => ({
+      content,
+      status: "pending",
+      priority: "high",
+      sliceType: "design",
+      need: "reasoner",
+      persona: "researcher",
+    })
+    for (const content of [REDECOMPOSITION_SLICE_CONTENT, PLAN_SLICE_CONTENT, GRIND_DESIGN_SLICE_CONTENT]) {
+      const slices = await todosToLoopSlices([storePersistedSeed(content)], fakeProbes("low"))
+      expect(slices).toHaveLength(1)
+      expect(slices[0]!.harnessSeeded).toBe(true)
+      expect(shouldOrchestrate(slices)).toBe(true)
+    }
+  })
+
+  it("a normal conductor-authored todo (arbitrary content) derives harnessSeeded === false", async () => {
+    const slices = await todosToLoopSlices(
+      [{ content: "apply the fix to foo.ts", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" }],
+      fakeProbes("low"),
+    )
+    expect(slices[0]!.harnessSeeded).toBe(false)
+    expect(shouldOrchestrate(slices)).toBe(false)
   })
 })
 
@@ -2468,8 +2592,10 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     let dispatched = 0
     const res = await runConductorOrchestration({
       getTodos: async () => [
-        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
-        { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        // coupling:"high" clears the OL-9.5c benefit gate (a probe-derived
+        // critical slice) — width/wave-shape alone no longer does.
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
+        { content: "b", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
       ],
       probes: fakeProbes(),
       dispatch: async () => {
@@ -2532,7 +2658,15 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
         { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
         GRIND_DESIGN_PREPASS_TODO,
       ],
-      probes: fakeProbes(),
+      // "low" — the REAL probeSliceCoupling default when it resolves zero
+      // graph entities (a file-less design prompt, the common case for this
+      // seed). fakeProbes()'s own default ("high") would mask the OL-9.5c
+      // regression this test exists to catch: without todosToLoopSlices
+      // deriving `harnessSeeded` from GRIND_DESIGN_PREPASS_TODO's content
+      // (HARNESS_SEED_CONTENTS), a low-coupling lone design slice no longer
+      // clears the benefit gate on its own (the old tier-keyed inference is
+      // gone) — the escape hatch must clear it structurally.
+      probes: fakeProbes("low"),
       dispatch: async (req) => {
         dispatchedIds.push(req.sliceId)
         return { text: "design done", parts: [] }
@@ -2556,8 +2690,10 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     let stoodDown = false
     const res = await runConductorOrchestration({
       getTodos: async () => [
-        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
-        { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        // coupling:"high" clears the OL-9.5c benefit gate (probe-derived
+        // critical slice) — width/wave-shape alone no longer does.
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
+        { content: "b", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
       ],
       probes: fakeProbes(),
       dispatch: async () => {
@@ -2579,7 +2715,8 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
   it("dispatch throw → caught at the boundary, metered, falls back (turn survives)", async () => {
     let metered = 0
     const res = await runConductorOrchestration({
-      // Two independent slices so the OL-9.5c benefit gate passes (one wave of 2) and dispatch is reached.
+      // No explicit coupling — the probe (fakeProbes' default "high") fills it
+      // in, clearing the OL-9.5c benefit gate so dispatch is reached.
       getTodos: async () => [
         { content: "a", status: "pending", sliceType: "mechanical" },
         { content: "b", status: "pending", sliceType: "mechanical" },
@@ -2624,8 +2761,9 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     const statusCalls: { index: number; status: string }[] = []
     const res = await runConductorOrchestration({
       getTodos: async () => [
-        { content: "a", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
-        { content: "b", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+        // coupling:"high" clears the OL-9.5c benefit gate so dispatch is reached.
+        { content: "a", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
+        { content: "b", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
       ],
       probes: fakeProbes(),
       dispatch: async (req) => {
@@ -2678,12 +2816,12 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
   let sid = 0
   const nextSessionID = () => `resolution-gate-test-${++sid}`
 
-  // Two independent typed slices — a real parallel wave, so the OL-9.5c
-  // benefit gate passes and dispatch actually reaches the loop whenever the
-  // resolution gate takes the decompose-now path.
+  // coupling:"high" clears the OL-9.5c benefit gate (a probe-derived critical
+  // slice), so dispatch actually reaches the loop whenever the resolution
+  // gate takes the decompose-now path.
   const dispatchableTodos: OrchestrationTodo[] = [
-    { content: "alpha", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
-    { content: "beta", status: "pending", sliceType: "mechanical", coupling: "low", testStrength: "testable" },
+    { content: "alpha", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
+    { content: "beta", status: "pending", sliceType: "mechanical", coupling: "high", testStrength: "testable" },
   ]
 
   // A structurally-invalid candidate plan for validatePlan's structural-only

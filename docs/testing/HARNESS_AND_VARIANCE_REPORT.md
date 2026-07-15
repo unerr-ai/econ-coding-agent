@@ -1,18 +1,22 @@
 # The econ harness — mechanism walkthrough + the 2026-07-13 variance forensics
 
-**What this is.** One report, three parts. Part I is a plain-language, code-grounded
-walkthrough of the harness as it exists today — every mechanism, its trigger condition
-(if/else), and its exception/fallback path, each with `file:line` anchors. Parts II–V are
-the forensic analysis of the 2026-07-13 benchmark runs: five runs of the same build, one
-all-green, four with failures at *different* failure points — the stochastic-variance
-signature. Part VII is a second, independent forensic axis: the 2026-07-15 **turn-economy**
-analysis — not *did it solve*, but *what did it burn getting there*. Every claim below is
-grounded in either the codebase or a run bundle; nothing is inferred from memory.
+**What this is.** One report, three forensic layers on one code map. Part I is a
+plain-language, code-grounded walkthrough of the harness as it exists today — every
+mechanism, its trigger condition (if/else), and its exception/fallback path, each with
+`file:line` anchors. Parts II–V are the forensic analysis of the 2026-07-13 benchmark
+runs: five runs of the same build, one all-green, four with failures at *different*
+failure points — the stochastic-variance signature. Part VII is a second forensic axis:
+the 2026-07-15 **turn-economy** analysis — not *did it solve*, but *what did it burn
+getting there*. Part VIII is the third, and the deepest cut of the three: the escalation
+**decision itself** is the cost distribution — the same binary flips between a $0.07 and
+a $0.66 route on identical input. Every claim below is grounded in either the codebase
+or a run bundle; nothing is inferred from memory.
 
-**Code state.** Part I describes HEAD `784d6849c` **plus the uncommitted turn-economy
-wave** (the seven mechanisms of Part VII.4, working tree only, pending the validation in
-VII.5). Wave mechanisms are marked **⧗ uncommitted** at each anchor so this map stays
-honest if the wave is reverted rather than committed.
+**Code state.** Part I describes HEAD `784d6849c` **plus the turn-economy wave's six
+surviving mechanisms**, committed as `5dc9a21a1` (docs `95ba1a982` — see Part VII.4.2's
+per-mechanism verdicts for which six). The escalation-gate rewrite (Part VIII.5) is the
+thing now **⧗ uncommitted**; it is marked at its anchor so this map stays honest if it is
+reverted rather than shipped.
 
 **Sources.** Three fleet failed-run bundles
 (`unerr-benchmarks/e2e/distributed/failed-runs/mini10ded-0713-{1859,2058}`,
@@ -1166,6 +1170,129 @@ pathologies observed in *one* prior run each, and those pathologies did not recu
 seven mechanisms against n=1 observations, then validating with n=1 runs, produced exactly
 one defensible result (11999) and one self-inflicted regression (12050). The pathology has
 to be shown to be *recurrent* before it is worth a mechanism.
+
+---
+
+## Part VIII — the escalation decision IS the cost distribution (2026-07-15 band forensics)
+
+Part VII measured what the wave's mechanisms burn; this part measures the decision
+upstream of all of them — *whether to orchestrate at all* — and finds it is not a function
+of the input. Every cost number quoted so far in this report (Part III's spreads, Part
+VII's mini-10 figures) is a draw from that decision's distribution, not a measurement of
+a fixed quantity. The forensics below are a 2-round band re-fire (`main-202607151500`) plus
+one full-suite comparison and two single-instance autopsies, all tonight, 2026-07-15.
+
+### VIII.1 The discovery — the gate is nondeterministic on identical input
+
+Band rounds r1/r2, SAME pinned binary (`main-202607151500`), same instance django-11790,
+74 minutes apart, IDENTICAL triage verdict (`hardness=moderate ambiguity=clear`,
+goalCount=1):
+
+| Round | Gate | Turns | Cost | Above-conductor |
+|---|---|---|---|---|
+| r1 | `orchestration_engaged slices=5` | 146 | $0.6639 | 60 |
+| r2 | never engaged | 25 | $0.0670 | 0 (conductor-only) |
+
+Both PASS with the same correct patch (`widget.attrs['maxlength']` as int). **9.9× cost
+for zero outcome change.**
+
+**The nondeterminism source.** `shouldOrchestrate` (slice-orchestrator.ts) is itself
+pure — the coin-flip is the conductor LLM's todo-writing verbosity feeding it (5 todos one
+run, fewer the next).
+
+### VIII.2 The aggregate does NOT wash out
+
+Full-suite comparison, ~same binary class: pre-wave mini10 $2.4715 / 514t / 9-10 vs band
+r1 $3.8519 / 756t / 9-10 — the ten-instance AGGREGATE swings **1.55×** between draws
+because the escalation decision correlates across the suite (one verbose todo-write run
+tends to escalate several instances, not one).
+
+**Consequence.** A single mini-10 run is not a cost measurement even in aggregate; the
+published $2.35–2.47 figure is a draw, not a mean.
+
+Per-instance detail, baseline → band r1:
+
+| Instance | Baseline | Band r1 | Note |
+|---|---|---|---|
+| 11790 | $0.0531 / 20t | $0.6639 / 146t | the band-source instance (VIII.1) |
+| 11815 | $0.5075 / 89t **FAIL** | $0.3748 / 67t **PASS** | |
+| 11848 | $0.3383 / 44t | $0.4792 / 47t | |
+| 11880 | $0.2364 / 59t | $0.4845 / 81t | |
+| 11885 | $0.2936 / 70t | $0.5369 / 98t | |
+| 11951 | $0.0560 / 24t | $0.1082 / 42t | conductor-only BOTH runs, ZERO wave mechanisms fired — variance alone produced 1.93× |
+| 11964 | $0.1715 / 41t **PASS** | $0.6253 / 157t **FAIL** | autopsy in VIII.4 |
+| 11999 | $0.6149 / 100t | $0.2966 / 61t | the brief+cap win, 0.48× |
+| 12039 | $0.1735 / 48t | $0.2368 / 36t | |
+| 12050 | $0.0457 / 21t | — | not itemized separately; folded into the 756t / $3.8519 total above |
+
+### VIII.3 Where the wall-clock goes (trace-measured, not inferred)
+
+From the band-r1 logs' millisecond timestamps. 11951 is single-session (no concurrency)
+so attribution is exact:
+
+| Component | Time | Share |
+|---|---|---|
+| Inference | 168.3s | 70% (median call 4.54s, p90 7.95s, max 15.0s) |
+| Tool exec | 22.1s | 9% (median 0.45s, max 2.2s — the slowest bash in the whole instance) |
+| Startup/gaps | remainder | 21% |
+
+LLM latency is HEALTHY; test runs are negligible; wall-clock ≈ steps × ~5.6s, so **step
+count is the only latency lever**.
+
+**Escalation multiplies both.** 11790 escalated ran 12 concurrent sessions, 134 steps,
+1431s vs 11951's 1 session / 43 steps / 241s; reasoner tier median 6.79s/call vs conductor
+4.29s (+58%); conductor parents sit in blocked-on-children windows up to 949s.
+
+**Instrumentation gap found.** `evaluated permission` events carry NO `session.id` (0 of
+315 in 11790's log), so under concurrency tool-time cannot be attributed to a session —
+single-session runs are the only exactly-decomposable traces until that one field is
+added.
+
+### VIII.4 The 11964 autopsy — the failure is NOT the wave, and more compute made it worse
+
+Band r1 11964: 157t / $0.6253 FAILED (15/17 model_enums tests) vs baseline 41t / $0.1715
+PASS. Zero wave signals fired.
+
+**The wrong layer.** The agent fixed the wrong layer: gold site is `Choices.__str__`
+(`django/db/models/enums.py:61`, never touched); instead it added
+`DeferredAttribute.__set__` (`query_utils.py`) — promoting a non-data descriptor to a
+data descriptor, which inverts attribute-lookup precedence against instance `__dict__`
+for every deferred field in the ORM. It also hand-wrote the hidden test into
+`tests/model_enums/tests.py` (reverted by the grader).
+
+**Declared-done-on-red.** It ran the suite it broke 7×, emitted `unverified_finish` ×5 +
+`deferral_armed`, and shipped anyway — the signal fired and nothing consumed it (the §5
+anti-pattern: advisory-only signal).
+
+**Classification.** This is the documented tier-immune spec-gap class (11964 recurrence):
+**3.6× spend bought a WORSE answer.**
+
+### VIII.5 The fix under validation — deterministic, conductor-biased gate (⧗ uncommitted)
+
+**New contract.** New `shouldOrchestrate` contract (`slice-orchestrator.ts`): opens ONLY
+on (1) a harness-seeded escape-hatch slice, (2) ≥6 slices, (3) goalCount≥2
+(triage-derived), (4) probe-derived `coupling === "high"` or `risk > ALLOCATION_RISK_TIEBREAK`.
+
+**Removed.** The allocated-tier trigger — allocation reads `sliceType`/`need`
+(conductor-authored) and defaults absent test-strength to `untestable`, flooring unbacked
+mechanical slices to reasoner, so the old gate escalated on a missing probe signal plus
+the model's self-report (contradicting `allocation.ts`'s own "conservative default is not
+a cost hit" comment); and the bare wave≥2 trigger. This knowingly REVERSES run-21.
+
+**Escape hatches.** The grind-valve/replan/plan escape hatches survive via
+`harnessSeeded`, DERIVED at slice-build time by matching the harness's own seed content
+constants (`HARNESS_SEED_CONTENTS`) — deliberately never a persisted field, because
+`SessionTodo.Info` is the todowrite input contract and a persisted flag would let the
+conductor set it itself. Two silent production traps caught during implementation: the
+store schema would have dropped the field while every test stayed green, and the masking
+test — `fakeProbes()` defaulting coupling to "high" — hid the grind-valve break; both are
+recorded here as method lessons. `deferralPrepassTodo()` is deliberately EXCLUDED from
+the escape set — the deferral cascade is the measured cost cliff of VII.4 / VIII.4.
+
+**Ship rule** (`path-to-85.md` §6.6, §0.5): 3-round mini-10 with per-decision gate
+logging, ships only if route becomes deterministic per instance AND correctness holds
+≥9/10 (the current consistent level; escalation may be load-bearing on
+11815/11848/11880/11885 — that is precisely what the run measures).
 
 ---
 

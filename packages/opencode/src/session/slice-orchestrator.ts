@@ -30,9 +30,7 @@ import {
   runSliceLoop,
   tierModelRef,
   ECON_PERSONAS,
-  allocateSlice,
-  TIER_RANK,
-  planWaves,
+  ALLOCATION_RISK_TIEBREAK,
   validatePlan,
   resolutionDecision,
   redecompositionCheck,
@@ -1281,7 +1279,15 @@ export const REPRO_PREPASS_TODO: InjectedSliceTodo = {
   priority: "high",
 }
 
-/** #55 — the re-plan seed (§4.2 `new-items`): a `design` slice, so allocateSlice floors it to the reasoner (design-insight) and a lone re-plan seed still clears the shouldOrchestrate benefit gate (which keys on the ALLOCATED tier) on the hook re-fire. */
+/**
+ * #55 — the re-plan seed (§4.2 `new-items`): a `design` slice, so
+ * allocateSlice floors it to the reasoner (design-insight). Its CONTENT is
+ * listed in `HARNESS_SEED_CONTENTS` below, which `todosToLoopSlices` matches
+ * to derive `harnessSeeded` — that, not the allocated tier (OL-9.5c severed
+ * that inference), is what clears the shouldOrchestrate benefit gate for a
+ * lone re-plan seed on the hook re-fire: this is the harness planting its own
+ * escape hatch, not the conductor pricing its own work.
+ */
 export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
   content: REDECOMPOSITION_SLICE_CONTENT,
   status: "pending",
@@ -1291,7 +1297,15 @@ export const REDECOMPOSITION_PREPASS_TODO: InjectedSliceTodo = {
   persona: "researcher",
 }
 
-/** P12 — the plan seed a non-diagnosis `needsPlan` goal plants at turn open: same edit-free `design` shape as the re-plan seed (reasoner-floored by allocation, clears the benefit gate alone), but a forward-looking decomposition brief for fresh build work instead of the diagnosis writer's bug-hunt. */
+/**
+ * P12 — the plan seed a non-diagnosis `needsPlan` goal plants at turn open:
+ * same edit-free `design` shape as the re-plan seed, a forward-looking
+ * decomposition brief for fresh build work instead of the diagnosis writer's
+ * bug-hunt. Its CONTENT is listed in `HARNESS_SEED_CONTENTS` below, which
+ * `todosToLoopSlices` matches to derive `harnessSeeded` and clear the benefit
+ * gate alone (OL-9.5c: the ALLOCATED tier no longer does) — the harness
+ * planted this seed, not the conductor.
+ */
 export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
   content: PLAN_SLICE_CONTENT,
   status: "pending",
@@ -1301,7 +1315,19 @@ export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
   persona: "researcher",
 }
 
-/** L4.2 — the design seed the GRIND VALVE plants MID-TURN (prompt.ts SM4 block) when an inline conductor turn crosses its soft step budget with no green verify in the stall window (django-11885's 179-step, $0.8447 grind). Same edit-free `design`/reasoner shape as the two seeds above: the OL-7.3b slice hook dispatches it through the EXISTING delegation machinery (a lone design seed clears the shouldOrchestrate benefit gate) and the fold-back relay hands its design back to the conductor — the one inline→orchestrated mid-turn transition. */
+/**
+ * L4.2 — the design seed the GRIND VALVE plants MID-TURN (prompt.ts SM4
+ * block) when an inline conductor turn crosses its soft step budget with no
+ * green verify in the stall window (django-11885's 179-step, $0.8447 grind).
+ * Same edit-free `design`/reasoner shape as the two seeds above: the OL-7.3b
+ * slice hook dispatches it through the EXISTING delegation machinery — its
+ * CONTENT is listed in `HARNESS_SEED_CONTENTS` below, which `todosToLoopSlices`
+ * matches to derive `harnessSeeded` and clear the shouldOrchestrate benefit
+ * gate (OL-9.5c: the old tier-keyed inference is gone, so this is now
+ * explicit, not a side effect of the design floor) — and the fold-back relay
+ * hands its design back to the conductor — the one inline→orchestrated
+ * mid-turn transition.
+ */
 export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
   content: GRIND_DESIGN_SLICE_CONTENT,
   status: "pending",
@@ -1312,12 +1338,38 @@ export const GRIND_DESIGN_PREPASS_TODO: InjectedSliceTodo = {
 }
 
 /**
+ * OL-9.5c benefit-gate derivation key: exactly the content of the harness's
+ * own injected prepass seeds above — matched by VALUE, never persisted as a
+ * field, because `harnessSeeded` must never exist on `OrchestrationTodo` or
+ * `SessionTodo.Info` (the `todowrite` tool's model-facing input schema). A
+ * field there would hand the conductor a self-escalation switch it could set
+ * on any todo it writes — exactly the self-reported-benefit hole OL-9.5c
+ * closed. Deriving from content instead means the ONLY way to clear the gate
+ * this way is to emit one of these exact strings byte-for-byte — a far
+ * smaller hole than a `sliceType`/`need` field the model sets by design, but
+ * not strictly zero (a model that happened to emit one of these blocks
+ * verbatim would still clear it). `deferralPrepassTodo`'s content is
+ * DELIBERATELY excluded — see its definition for why.
+ */
+const HARNESS_SEED_CONTENTS: ReadonlySet<string> = new Set([
+  REDECOMPOSITION_SLICE_CONTENT,
+  PLAN_SLICE_CONTENT,
+  GRIND_DESIGN_SLICE_CONTENT,
+])
+
+/**
  * Round F — the hard-tail deferral seed the finish path plants when a finish
  * gate exhausts its bounded rejects (feature 08 §3): same edit-free
  * design/reasoner shape as the grind seed above so the OL-7.3b slice hook
  * dispatches it through the existing delegation machinery, but its content is
  * a compiled enumerate-then-choose evidence brief (buildDeferralSliceContent),
  * never a static prompt — dedupe/filters key on DEFERRAL_SLICE_PREFIX.
+ * DELIBERATELY excluded from `HARNESS_SEED_CONTENTS`: the deferral cascade
+ * has a measured cost cliff (11964 shipped a 15/17-failing patch after
+ * `deferral_armed`; 11880 burned 62 above-conductor turns post-deferral for
+ * zero outcome change), so this seed must earn orchestration the normal way
+ * (real width, or probe-derived coupling/risk) rather than buying it
+ * automatically the way the other three prepass seeds do.
  *
  * @sem domain=routing role=deferral-seed
  */
@@ -1966,41 +2018,90 @@ export async function todosToLoopSlices(
         ...(verifyCommands.length > 0 ? { verifyCommands } : {}),
         ...(probeCommand ? { probeCommand } : {}),
         ...(TEST_AUTHORING_RE.test(t.content) ? { isTestSlice: true } : {}),
+        // Derived, never read off `t` — `harnessSeeded` has no field on
+        // OrchestrationTodo/SessionTodo.Info (see HARNESS_SEED_CONTENTS' doc).
+        harnessSeeded: HARNESS_SEED_CONTENTS.has(t.content),
       }
     }),
   )
 }
 
 /**
- * The benefit gate (OL-9.5c): decomposition only earns its overhead when
- * splitting demonstrably helps — real parallelism exists (some wave
- * `planWaves` schedules has >=2 slices that can run concurrently), the
- * batch is large enough that no single context could hold it (>=6 slices),
- * or a slice ALLOCATES to a tier above the executor (run-21: a lone judgment
- * slice whose `allocateSlice` tier is reasoner/oracle IS the benefit — a
- * fresh-context higher-tier verdict the lead model cannot produce inline — so
- * it must not be declined for being a width-1 DAG). Keying on the ALLOCATED
- * tier, not a raw `need` hint, is load-bearing: the allocator can clamp a
- * `need` request away (a testable mechanical slice hinting `need:"reasoner"`
- * still allocates to the executor), so a raw-`need` gate would open on a slice
- * the router then runs cheap. A linear all-cheap chain — every wave width 1,
- * nothing allocating above the executor — gains nothing from being split: each
- * child still pays its own context re-derivation and the waves still serialize,
- * so it is strictly worse than handling the same work inline (run-8 evidence:
- * 868 LLM calls for one trivial, purely-linear issue). Applied once per engagement, right
- * after `todosToLoopSlices`, before any dispatch. `goalCount` (U2, from the
- * turn's triage verdict) is a second, independent width signal: >=2 tracked
- * goals is real width even when each goal's own DAG is a linear chain — the
- * goals themselves run as parallel instances (§4.5), so the benefit is at
- * the goal level, not the per-goal wave level.
+ * The benefit gate (OL-9.5c): decomposition is DECLINED unless it is earned by
+ * evidence the conductor did not author. Engaging costs 4-10x — a dispatched
+ * slice pays fresh context re-derivation at a pricier tier, and an unverified
+ * settle drags in the deferral cascade — so the default is inline.
+ *
+ * Four admissible signals:
+ *   - `harnessSeeded` — DERIVED at slice-build time (`todosToLoopSlices`,
+ *     `HARNESS_SEED_CONTENTS`) by matching the slice's content against the
+ *     harness's own injected prepass seeds (diagnosis/re-plan/plan/grind-
+ *     valve), never read off a persisted field: `harnessSeeded` deliberately
+ *     has no place on `OrchestrationTodo` or `SessionTodo.Info` (the
+ *     `todowrite` tool's model-facing input schema), because a field there
+ *     would hand the conductor a self-escalation switch it could set on any
+ *     todo it writes — exactly the self-reported-benefit hole this gate
+ *     closes. The harness planting its own escape hatch IS legitimate
+ *     evidence; checked first since it is exactly that — an escape hatch.
+ *     Residual limitation, plainly: a model that emitted one of the three
+ *     seed content blocks byte-for-byte would also clear the gate this way —
+ *     far smaller than a `sliceType`/`need` field the model sets by design,
+ *     but not strictly zero.
+ *   - `>=6 slices` — breadth no single context holds.
+ *   - `goalCount >= 2` — real width from the turn's TRIAGE verdict (U2, §4.5):
+ *     >=2 tracked goals run as parallel instances even when each goal's own DAG
+ *     is a linear chain, so the benefit is at the goal level.
+ *   - a CRITICAL slice — high coupling, or risk above `ALLOCATION_RISK_TIEBREAK`.
+ *     Both are PROBE-derived (blast radius / fan-in), which is the one escalation
+ *     input the lead model cannot talk itself into.
+ *
+ * What this gate deliberately does NOT key on (reversing run-21, 2026-07-15
+ * live-fire): the ALLOCATED tier. Allocation reads `sliceType` and `need` — both
+ * written by the conductor into its own todo — and its test-strength default is
+ * `untestable` whenever the probe observed nothing. On a real repo that default
+ * is the common case, and an unbacked mechanical slice then floors to `reasoner`
+ * (allocation.ts), so a tier-keyed gate escalates on a MISSING probe signal plus
+ * the model's self-report. Measured: 11848/11880/11885 each dispatched ONE
+ * trivial-judged slice and burned 26-47 above-conductor turns at $0.48-0.54,
+ * while 11790 solved the same bug conductor-only for $0.067 that it spent $0.6639
+ * on when the gate opened. Letting the model price its own work is not a benefit
+ * signal. A width-1 chain of cheap work gains nothing from being split (run-8:
+ * 868 LLM calls for one trivial linear issue) — that reasoning always held; it
+ * was the tier escape hatch that made it moot. The harness's own prepass seeds
+ * previously cleared the gate as a SIDE EFFECT of that tier inference (their
+ * `sliceType:"design"` floors to reasoner); losing the inference would have
+ * silently broken the grind valve's one escape hatch for a stalled degraded
+ * turn, so `harnessSeeded` makes that escape hatch explicit instead.
+ *
+ * Applied once per engagement, right after `todosToLoopSlices`, before dispatch.
  *
  * @sem domain=routing role=router
  */
 export function shouldOrchestrate(slices: readonly LoopSlice[], goalCount?: number): boolean {
-  if (slices.length >= 6) return true
-  if (slices.some((s) => TIER_RANK[allocateSlice(s).tier] >= TIER_RANK.reasoner)) return true
-  if ((goalCount ?? 0) >= 2) return true
-  return planWaves(slices).some((wave) => wave.length >= 2)
+  return explainOrchestrationGate(slices, goalCount).engage
+}
+
+/** Which of the gate's four admissible signals opened it; `"none"` on a decline. */
+export type OrchestrationGateTrigger = "harness-seed" | "breadth" | "goal-width" | "coupling-risk" | "none"
+
+/**
+ * The reasoned form of `shouldOrchestrate`: the same four checks, in the same
+ * order (harness-seed, breadth, goal-width, coupling-risk), but returns WHICH
+ * one opened the gate instead of collapsing to a boolean — so a caller can log
+ * WHY a benefit-gate decision landed the way it did, not just the verdict.
+ *
+ * @sem domain=routing role=router
+ */
+export function explainOrchestrationGate(
+  slices: readonly LoopSlice[],
+  goalCount?: number,
+): { engage: boolean; trigger: OrchestrationGateTrigger } {
+  if (slices.some((s) => s.harnessSeeded)) return { engage: true, trigger: "harness-seed" }
+  if (slices.length >= 6) return { engage: true, trigger: "breadth" }
+  if ((goalCount ?? 0) >= 2) return { engage: true, trigger: "goal-width" }
+  if (slices.some((s) => s.coupling === "high" || (s.risk ?? 0) > ALLOCATION_RISK_TIEBREAK))
+    return { engage: true, trigger: "coupling-risk" }
+  return { engage: false, trigger: "none" }
 }
 
 /**
@@ -2131,6 +2232,16 @@ export interface ConductorOrchestrationDeps {
   }) => void
   /** L4.2 — degraded stand-down telemetry sink: fires when a degraded (null turn-read) turn holds its conductor-authored mid-turn todos INLINE instead of orchestrating them. `grindEscapeHatch` is true when the grind valve's design prepass is present and still orchestrates. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
   onDegradedStandDown?: (info: { conductorTodos: number; grindEscapeHatch: boolean }) => void
+  /** OL-9.5c — benefit-gate decision telemetry: fires exactly once per gate evaluation (right after `todosToLoopSlices`, before dispatch) with the verdict and which of `explainOrchestrationGate`'s four admissible signals opened it (`"none"` on a decline). Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
+  onGateDecision?: (info: {
+    verdict: "engaged" | "declined"
+    sliceCount: number
+    goalCount?: number
+    trigger: OrchestrationGateTrigger
+    maxCoupling: "high" | "low"
+    maxRisk: number
+    harnessSeeded: boolean
+  }) => void
   /** #55 — mid-flight re-decomposition telemetry sink: fires after every settled run with the §4.2 triggers `redecompositionCheck` returned and the signals behind them, whether or not any trigger was acted on. Same callback-to-caller pattern as `onResolutionGate`. */
   onRedecomposition?: (info: {
     triggers: RedecompositionTrigger[]
@@ -2381,7 +2492,17 @@ export async function runConductorOrchestration(
       researchShaped: deps.researchShaped,
       fallbackFiles: deps.turnFiles,
     })
-    if (!shouldOrchestrate(slices, deps.goalCount)) return { engaged: false }
+    const gate = explainOrchestrationGate(slices, deps.goalCount)
+    deps.onGateDecision?.({
+      verdict: gate.engage ? "engaged" : "declined",
+      sliceCount: slices.length,
+      goalCount: deps.goalCount,
+      trigger: gate.trigger,
+      maxCoupling: slices.some((s) => s.coupling === "high") ? "high" : "low",
+      maxRisk: Math.max(0, ...slices.map((s) => s.risk ?? 0)),
+      harnessSeeded: slices.some((s) => s.harnessSeeded),
+    })
+    if (!gate.engage) return { engaged: false }
     const todoIndexOf = (sliceId: string): number | undefined => {
       const k = slices.findIndex((s) => s.id === sliceId)
       return k >= 0 ? typedIndices[k] : undefined

@@ -52,7 +52,9 @@ baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log).
    are worth more than pennies, so a Tier-1 mechanism that buys accuracy at ~$0 is
    strictly better than a cost mechanism that risks it; and (b) any future *cost*
    mechanism carries the burden of proof, because it is trimming a tail on a winning
-   position (the turn-economy wave in §3 Tier 0 is the live test of this rule).
+   position (the turn-economy wave in §3 Tier 0 was the first test of this rule —
+   verdict: the block regressed, two mechanisms survived; the escalation gate in §3
+   Tier 0 is the second, larger test).
 
 ---
 
@@ -139,6 +141,28 @@ rest, in cost order.
   11880 burned 62 above-conductor turns as six judge rungs of ~10, every slice obeying the
   cap; **(b) don't build mechanisms against n=1 pathologies** — four of seven targeted
   single prior observations that never recurred.
+
+- **Deterministic, conductor-biased escalation gate (2026-07-15, ⧗ IN VALIDATION).**
+  Band forensics (report Part VIII) found the orchestration-benefit gate was effectively
+  a coin flip: same binary, same instance, identical triage verdict produced
+  `slices=5`/146t/$0.6639 one round and conductor-only/25t/$0.0670 the next (9.9×, both
+  PASS, same patch) — because the old gate keyed on the *allocated* tier, which derives
+  from conductor-authored `sliceType`/`need` plus a probe default that floors unbacked
+  mechanical slices to reasoner. The suite-level consequence: the ten-instance aggregate
+  swings 1.55× between draws — single runs are not measurements even in aggregate.
+  **The rewrite:** the gate opens only on harness-seeded escape hatches (derived from
+  seed content, never a model-writable field), ≥6-slice breadth, triage goal-width ≥2,
+  or probe-derived coupling/risk; reverses run-21. Framing for this plan: this is the
+  largest single cost lever found so far — bigger than everything in the turn-economy
+  wave combined — because escalated and conductor-only routes differ 4–10× for
+  identical outcomes on this class. **Risk:** it is also the first Tier-0 item that
+  could plausibly cost score (if escalation was load-bearing on
+  11815/11848/11880/11885, conductor-bias shows up as new failures), so unlike the
+  other Tier-0 items it ships under the full §6.6 burden: 3-round mini-10 with
+  per-decision gate logging, deterministic per-instance routes, and correctness ≥ the
+  current 9/10-consistent level. It enforces the companion rule from §5: the escalation
+  decision is now a CONVERT-shaped consumer of deterministic signals (probe
+  coupling/risk, triage width) instead of an advisory read of the model's self-report.
 
 - **Shape-gate the fix machinery by the turn-read verdict (2026-07-15, IMPLEMENTED).**
   The harness armed on *every* turn, so a read-only turn (a question, an audit, a
@@ -334,7 +358,14 @@ doesn't have, and (after round F) actually consume them.
    (11790: $0.033–$0.632 over five runs), and the turn-economy wave produced a 3.1× cost
    swing on 11880 with **no mechanism implicated in the divergence** — a pure route fork
    driven by when the conductor happened to declare an unverified finish (forensics report
-   VII.4). Rule: a cost mechanism ships on ≥3 runs/instance across the affected class, or
+   VII.4). That per-instance spread was already known; 2026-07-15 added a second
+   layer — the **ten-instance aggregate** itself swings 1.55× between draws ($2.4715
+   vs $3.8519, same binary class) because escalation correlates across the suite (the
+   coin-flip gate in §3 Tier 0), so headline *suite* costs are draws too, not fixed
+   numbers. The published $2.35–2.47 figure needs a ≥3-run band before it is quoted
+   competitively — the Opus $9.03 reference (§0.5) is likewise n=1.
+
+   Rule: a cost mechanism ships on ≥3 runs/instance across the affected class, or
    it does not ship. The cheap-and-tight instances (11790/12050) are the sensitive cells —
    their floor is narrow enough that a deviation means something.
 7. **Reference runs are benchmark runs** (added 2026-07-15). Any external baseline gets
@@ -342,6 +373,11 @@ doesn't have, and (after round F) actually consume them.
    unstripped, self-reported Opus reference made econ look like it was at cost parity when
    it was ~3.8× ahead, and that artifact set an engineering agenda for a day
    ([ECON_VS_CLAUDE_MODELS.md](../testing/ECON_VS_CLAUDE_MODELS.md), "Retired").
+8. **Route determinism is a measurable property** (added 2026-07-15). The escalation
+   gate's primary readout is per-instance route stability across 3 rounds (same
+   instance → same gate decision), logged per decision (verdict + trigger + inputs) —
+   a cost mechanism whose effect depends on a coin flip cannot be attributed at n=1.
+   Cross-ref forensics report Part VIII.
 
 ---
 

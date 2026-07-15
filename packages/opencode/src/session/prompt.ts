@@ -5521,6 +5521,27 @@ export const layer = Layer.effect(
                       }),
                     )
                   },
+                  // OL-9.5c — the benefit gate's own decision, logged on BOTH
+                  // outcomes: neither `orchestration_engaged` below (final loop
+                  // outcome, no reason) nor a silent decline told us WHY the gate
+                  // opened or stayed shut (2026-07-15 forensics: coupling/risk
+                  // never appeared in a run log). Named gate_engaged/gate_declined —
+                  // NOT orchestration_engaged, which stays the post-hoc loop outcome;
+                  // two same-named events with different fields is a forensics trap.
+                  onGateDecision: (info) => {
+                    bridge.fork(
+                      Effect.logInfo(info.verdict === "engaged" ? "gate_engaged" : "gate_declined", {
+                        "session.id": sessionID,
+                        verdict: info.verdict,
+                        sliceCount: info.sliceCount,
+                        goalCount: info.goalCount ?? -1,
+                        trigger: info.trigger,
+                        maxCoupling: info.maxCoupling,
+                        maxRisk: info.maxRisk,
+                        harnessSeeded: info.harnessSeeded,
+                      }),
+                    )
+                  },
                   options: loopOptions,
                 }),
               )
