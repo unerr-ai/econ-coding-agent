@@ -7,10 +7,20 @@
  * test-shaped, clearing via the `clearedByProbe` passthrough (the M4
  * gate's own green re-run, invisible to the transcript), and the
  * exact-command fallback when no test-target tokens are extractable.
+ * Also covers isTrackedSuiteCommand (committed-suite provenance for the
+ * inversion rung, repro scripts excluded) and partitionSeenRedByInversion
+ * (binding vs sanctioned split, empty-literals no-op).
  */
 
 import { describe, it, expect } from "bun:test"
-import { findUnresolvedSeenRed, type SeenRedExecution } from "../../src/session/seen-red"
+import {
+  findUnresolvedSeenRed,
+  isTrackedSuiteCommand,
+  partitionSeenRedByInversion,
+  type SeenRedExecution,
+  type UnresolvedSeenRed,
+} from "../../src/session/seen-red"
+import type { IssueExpectation } from "../../src/session/issue-expectations"
 
 describe("findUnresolvedSeenRed", () => {
   it("(a) clears a red test run when a later execution shares its test-target token", () => {
@@ -208,5 +218,89 @@ describe("findUnresolvedSeenRed", () => {
       },
     ]
     expect(findUnresolvedSeenRed(executions)).toEqual([])
+  })
+})
+
+describe("isTrackedSuiteCommand", () => {
+  it("a tracked-suite runtests invocation (piped tail) is tracked-suite-shaped", () => {
+    expect(
+      isTrackedSuiteCommand(".venv/bin/python tests/runtests.py migrations.test_writer --verbosity=2 2>&1 | tail -40"),
+    ).toBe(true)
+  })
+
+  it("the agent's own scratch repro never qualifies, even though a test-shaped runner token is present", () => {
+    expect(isTrackedSuiteCommand("python repro_issue.py")).toBe(false)
+  })
+
+  it("a pytest tests/ path invocation is tracked-suite-shaped", () => {
+    expect(isTrackedSuiteCommand("pytest tests/test_writer.py -x")).toBe(true)
+  })
+
+  it("a bare non-test command is never tracked-suite-shaped", () => {
+    expect(isTrackedSuiteCommand("ls -la")).toBe(false)
+  })
+})
+
+// --- 2026-07-15 django-11815 live-run fixtures (oracle-inversion partition) ---
+
+describe("partitionSeenRedByInversion", () => {
+  const TRACKED_SUITE_COMMAND =
+    ".venv/bin/python tests/runtests.py migrations.test_writer --verbosity=2 2>&1 | tail -40"
+  const REPRO_COMMAND = "python repro_issue.py"
+  const INVERSION_TAIL =
+    "AssertionError: Tuples differ: (\"mig[13 chars]writer.TextEnum['A']\", {'import migrations.test_writer'}) != (\"mig[13 chars]writer.TextEnum('a-value')\", {'import migrations.test_writer'})"
+  const PLAIN_FAILURE_TAIL = "AssertionError: False is not true"
+  // Form-class rung fixture (adapted from issue-expectations.test.ts's
+  // promotedLiterals): a single expected-kind literal in enum subscript
+  // form, no "actual"-kind counterpart — rung 1 is structurally blind here.
+  const FORM_CLASS_LITERALS: IssueExpectation[] = [
+    { value: "TextEnum['A']", kind: "expected", source: "It should be: TextEnum['A']" },
+  ]
+
+  it("empty literals: every red stays binding, sanctioned empty — byte-identical to pre-partition behavior", () => {
+    const unresolved: UnresolvedSeenRed[] = [
+      { command: TRACKED_SUITE_COMMAND, outputTail: INVERSION_TAIL },
+      { command: REPRO_COMMAND, outputTail: PLAIN_FAILURE_TAIL },
+    ]
+    const result = partitionSeenRedByInversion(unresolved, [])
+    expect(result.binding).toEqual(unresolved)
+    expect(result.sanctioned).toEqual([])
+  })
+
+  it("a tracked-suite command + an inversion-shaped tail + firing literals lands in sanctioned with desired/buggy literals populated", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: TRACKED_SUITE_COMMAND, outputTail: INVERSION_TAIL }]
+    const result = partitionSeenRedByInversion(unresolved, FORM_CLASS_LITERALS)
+    expect(result.binding).toEqual([])
+    expect(result.sanctioned).toHaveLength(1)
+    expect(result.sanctioned[0]!.command).toBe(TRACKED_SUITE_COMMAND)
+    expect(result.sanctioned[0]!.desiredLiteral).toBe("TextEnum['A']")
+    expect(result.sanctioned[0]!.buggyLiteral).toContain("TextEnum('a-value')")
+  })
+
+  it("the same inverting tail from the agent's own repro command is never sanctioned — a repro's red is honest", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: REPRO_COMMAND, outputTail: INVERSION_TAIL }]
+    const result = partitionSeenRedByInversion(unresolved, FORM_CLASS_LITERALS)
+    expect(result.binding).toEqual(unresolved)
+    expect(result.sanctioned).toEqual([])
+  })
+
+  it("a tracked-suite command with a plain non-inversion failure stays binding", () => {
+    const unresolved: UnresolvedSeenRed[] = [{ command: TRACKED_SUITE_COMMAND, outputTail: PLAIN_FAILURE_TAIL }]
+    const result = partitionSeenRedByInversion(unresolved, FORM_CLASS_LITERALS)
+    expect(result.binding).toEqual(unresolved)
+    expect(result.sanctioned).toEqual([])
+  })
+
+  it("a mixed input array is partitioned correctly, preserving order within each bucket", () => {
+    const plainA: UnresolvedSeenRed = { command: "pytest tests/test_a.py -x", outputTail: PLAIN_FAILURE_TAIL }
+    const inversionA: UnresolvedSeenRed = { command: TRACKED_SUITE_COMMAND, outputTail: INVERSION_TAIL }
+    const plainB: UnresolvedSeenRed = { command: "pytest tests/test_b.py -x", outputTail: PLAIN_FAILURE_TAIL }
+    const inversionB: UnresolvedSeenRed = {
+      command: ".venv/bin/python tests/runtests.py migrations.test_writer2 2>&1 | tail -40",
+      outputTail: INVERSION_TAIL,
+    }
+    const result = partitionSeenRedByInversion([plainA, inversionA, plainB, inversionB], FORM_CLASS_LITERALS)
+    expect(result.binding).toEqual([plainA, plainB])
+    expect(result.sanctioned.map((s) => s.command)).toEqual([inversionA.command, inversionB.command])
   })
 })

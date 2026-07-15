@@ -21,6 +21,22 @@ const REFACTOR_PLAYBOOK = [
   "Type refactor slices `mechanical` (the suite is the safety net); if the work adds behavior, that is a separate build goal — never smuggle it into the refactor.",
 ].join("\n")
 
+// 11815 (oracle inversion, T2 read-first trajectory) — the senior-oracle rule
+// for diagnosis-shaped turns. The carve-out already exists in
+// LOCALIZATION_SLICE_CONTENT, but that seed rides only ARMED turns; a turn
+// where triage read the fix as handed (armLocalization=false) reaches the
+// stale committed test with no oracle-priority rule in context and pre-complies
+// with its buggy assertion (narrowing the fix with type/condition guards to
+// keep it green). This line rides EVERY diagnosis turn, before any test is
+// read. Inert when no contradiction exists; when the model leaves a red
+// claiming staleness wrongly, the F18 seen-red gate still binds (the
+// deterministic detectOracleInversion partition is the arbiter, not the
+// model's claim).
+const DIAGNOSIS_PLAYBOOK = [
+  "DIAGNOSIS PLAYBOOK: the ISSUE TEXT is the spec. Identify the actual CAUSE of the reported behavior and fix it at that layer, generally — never just the narrowest edit that silences the reported symptom.",
+  "If a committed test's expectation contradicts the issue's stated desired output, the ISSUE wins: that assertion encodes the bug being fixed (the grader supplies a corrected oracle). Keep the fix general — do not add type or condition guards whose only purpose is keeping such an assertion green — leave that test red, and state the conflict plainly in your final answer.",
+].join("\n")
+
 // P4b — the read-only playbook, appended when EVERY goal is read-only
 // (qa/research/audit/run-only — no diagnosis/build/refactor goal). It steers the
 // conductor to answer-and-stop: the observed over-work was a pure question
@@ -74,6 +90,7 @@ export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): 
   }
   lines.push("Track each goal against its own todo; verify each independently — never conflate or drop one for another.")
   if (verdictIsReadOnly(verdict)) lines.push(READ_ONLY_PLAYBOOK)
+  if (verdict.goals.some((goal) => goal.shape.startsWith("diagnosis"))) lines.push(DIAGNOSIS_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "research")) lines.push(RESEARCH_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "refactor")) lines.push(REFACTOR_PLAYBOOK)
   if (arming.ambiguity === "ambiguous" || arming.hardness === "hard") {

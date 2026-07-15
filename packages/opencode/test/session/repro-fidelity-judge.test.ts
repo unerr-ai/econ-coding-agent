@@ -217,6 +217,11 @@ describe("REPRO_FIDELITY_SYSTEM_PROMPT", () => {
     expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("never invent an expectation the issue text does not state")
     expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("omit that gap entirely rather than assert one")
   })
+
+  test("checks exactly four things, including INPUT-CLASS BREADTH", () => {
+    expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("exactly four")
+    expect(REPRO_FIDELITY_SYSTEM_PROMPT).toContain("INPUT-CLASS BREADTH")
+  })
 })
 
 describe("hasAssertionTeeth", () => {

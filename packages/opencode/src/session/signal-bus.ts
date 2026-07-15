@@ -18,6 +18,7 @@ export type EconSignalName =
   | "probe_gate_exhausted" // M4 retries exhausted — hard tail
   | "oracle_inversion" // pinned red's EXPECTED contradicts issue-stated output — hard tail
   | "seen_red_unresolved" // F18 at finish (2nd arrival = tail)
+  | "seen_red_oracle_inverted" // F18b: unresolved red is inversion-shaped — sanctioned, keep-general-fix nudge
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
   | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail

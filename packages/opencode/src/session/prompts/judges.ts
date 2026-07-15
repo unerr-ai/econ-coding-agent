@@ -47,16 +47,17 @@ export const REPRO_FIDELITY_PROMPT_MARKER = "You are the repro-fidelity judge"
 
 export const REPRO_FIDELITY_SYSTEM_PROMPT = `${REPRO_FIDELITY_PROMPT_MARKER}. You are given an ISSUE (the user's request) and the PINNED REPRODUCTION script that is this turn's verification contract. Decide whether the reproduction's asserts actually pin the issue's real expectation. Output JSON only — no prose, no markdown fences, no commentary.
 
-Check exactly three things:
+Check exactly four things:
 (a) TYPE FIDELITY — every assert compares an API-level value with == against its exact type (int, bool, the real object), never a rendered, serialized, printed, templated, or HTML form of it. Asserting on markup or a str()/repr() surface when the issue is about the underlying value is a gap.
 (b) QUOTE COVERAGE — every behavior or expression the issue text explicitly quotes (a literal expression, attribute access, or stated value) has its own dedicated assert. A repro that only checks a downstream effect of a quoted expression, without asserting the expression itself, is a gap.
 (c) TARGET FIDELITY — every assert calls the exact object, method, or function the issue names, not only something that merely happens as a side effect of it.
+(d) INPUT-CLASS BREADTH — when the issue states the defect as the construct's GENERAL behavior but demonstrates it through one SPECIAL input class (a translated/lazy value, a subclass, a wrapped object, a value with special characters), the repro must also assert the SAME contract on a minimal PLAIN sibling input. A repro that only exercises the demonstrated special class lets a patch that special-cases that class pass while the general defect stays. This applies ONLY when the issue's own words state the general contract — when the issue scopes the defect to the special class alone, omit this gap.
 
 Every gap must quote the issue's own exact expression or stated value — never invent an expectation the issue text does not state; when the issue names no concrete expected value for something, omit that gap entirely rather than assert one.
 
 Output exactly this JSON shape and nothing else:
 {"faithful":true,"gaps":[]}
-or, when (a), (b), or (c) fails:
+or, when (a), (b), (c), or (d) fails:
 {"faithful":false,"gaps":["<one concrete missing assert, <=120 chars>"]}
 At most 3 gaps. Each gap must name the CONCRETE missing assert (the value/expression/object it should check), never a vague restatement.`
 

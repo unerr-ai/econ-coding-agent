@@ -159,8 +159,8 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
     "+ (\"migrations.test_writer.TextEnum('a-value')\", 1)",
   ].join("\n")
 
-  test("promotedPin:true, no literal-rung actual pair — subscript-vs-call same identifier fires as inversion", () => {
-    const verdict = detectOracleInversion(redTail, promotedLiterals, { promotedPin: true })
+  test("fromTrackedSuite:true, no literal-rung actual pair — subscript-vs-call same identifier fires as inversion", () => {
+    const verdict = detectOracleInversion(redTail, promotedLiterals, { fromTrackedSuite: true })
     expect(verdict.inverted).toBe(true)
     expect(verdict.desiredLiteral).toBe("TextEnum['A']")
     expect(verdict.buggyLiteral).toContain("TextEnum('a-value')")
@@ -170,25 +170,25 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
     expect(detectOracleInversion(redTail, promotedLiterals).inverted).toBe(false)
   })
 
-  test("promotedPin:false — never fires (an agent's own repro legitimately expects the desired form pre-fix)", () => {
-    expect(detectOracleInversion(redTail, promotedLiterals, { promotedPin: false }).inverted).toBe(false)
+  test("fromTrackedSuite:false — never fires (an agent's own repro legitimately expects the desired form pre-fix)", () => {
+    expect(detectOracleInversion(redTail, promotedLiterals, { fromTrackedSuite: false }).inverted).toBe(false)
   })
 
   test("no subscript-form literal among expected literals — rung never applies", () => {
     const literals: IssueExpectation[] = [
       { value: "the migration should use the enum name, not its value", kind: "expected", source: "..." },
     ]
-    expect(detectOracleInversion(redTail, literals, { promotedPin: true }).inverted).toBe(false)
+    expect(detectOracleInversion(redTail, literals, { fromTrackedSuite: true }).inverted).toBe(false)
   })
 
   test("subscript and call forms on DIFFERENT identifiers — no match", () => {
     const differentIdentTail = "AssertionError: (\"TextEnum['A']\", 1) != (\"OtherEnum('v')\", 1)"
-    expect(detectOracleInversion(differentIdentTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+    expect(detectOracleInversion(differentIdentTail, promotedLiterals, { fromTrackedSuite: true }).inverted).toBe(false)
   })
 
   test("only one of the two forms present in the region — no match", () => {
     const onlySubscriptTail = "AssertionError: expected \"TextEnum['A']\" but got something else"
-    expect(detectOracleInversion(onlySubscriptTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+    expect(detectOracleInversion(onlySubscriptTail, promotedLiterals, { fromTrackedSuite: true }).inverted).toBe(false)
   })
 
   test("mirror ordering: call form BEFORE subscript form — code still PRODUCES the value form, test expects the desired form; never inversion", () => {
@@ -202,7 +202,7 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
       "\"migrations.test_writer.TextEnum('a-value')\"",
       "\"TextEnum['A']\"",
     ].join("\n")
-    expect(detectOracleInversion(mirrorTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+    expect(detectOracleInversion(mirrorTail, promotedLiterals, { fromTrackedSuite: true }).inverted).toBe(false)
   })
 
   test("no comparison-failure line (plain traceback/ImportError) — no match", () => {
@@ -211,10 +211,10 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
       '  File "migrations/writer.py", line 12, in <module>',
       "ImportError: cannot import name 'TextEnum' from 'migrations.test_writer'",
     ].join("\n")
-    expect(detectOracleInversion(crashTail, promotedLiterals, { promotedPin: true }).inverted).toBe(false)
+    expect(detectOracleInversion(crashTail, promotedLiterals, { fromTrackedSuite: true }).inverted).toBe(false)
   })
 
-  test("ordering: literal rung wins first — identical result with and without promotedPin:true", () => {
+  test("ordering: literal rung wins first — identical result with and without fromTrackedSuite:true", () => {
     const literalRungLiterals: IssueExpectation[] = [
       { value: "TextEnum['A']", kind: "expected", source: "serialization should be `TextEnum['A']`" },
       { value: "TextEnum('a-value')", kind: "actual", source: "currently got `TextEnum('a-value')`" },
@@ -224,7 +224,7 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
     ].join("\n")
 
     const withoutOpts = detectOracleInversion(literalRungRedTail, literalRungLiterals)
-    const withPromotedPin = detectOracleInversion(literalRungRedTail, literalRungLiterals, { promotedPin: true })
+    const withPromotedPin = detectOracleInversion(literalRungRedTail, literalRungLiterals, { fromTrackedSuite: true })
     expect(withoutOpts).toEqual(withPromotedPin)
     expect(withoutOpts.inverted).toBe(true)
   })

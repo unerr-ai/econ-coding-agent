@@ -229,6 +229,40 @@ export function seenRedUnresolvedNudgeText(unresolved: readonly { command: strin
 }
 
 /**
+ * F18b — seen-red oracle-inversion nudge: prompt.ts's finish-time block
+ * injects this once instead of the confirm-GREEN demand above, when
+ * `partitionSeenRedByInversion` (seen-red.ts) finds a red from a COMMITTED
+ * visible test whose failure shows the code PRODUCING the issue's stated
+ * desired value while the assertion still expects the value the issue calls
+ * wrong. The 2026-07-15 11815 shape: the agent applied the general
+ * gold-equivalent fix, the stale committed suite went red on it, and the
+ * confirm-GREEN nudge forced a retreat to a narrowed conditional patch.
+ * This nudge sanctions that red explicitly — keep the general fix, never
+ * narrow it, state the conflict — the same senior-oracle rule the
+ * no-test-edit denial and the localization seed's EXCEPTION already name.
+ */
+export function seenRedInversionNudgeText(
+  sanctioned: readonly { command: string; desiredLiteral?: string; buggyLiteral?: string }[],
+): string {
+  const single = sanctioned.length === 1
+  const list = sanctioned
+    .map((s) => {
+      const evidence =
+        s.desiredLiteral && s.buggyLiteral
+          ? ` — your code now produces \`${s.desiredLiteral}\` (the issue's stated desired form) while the committed test still expects \`${s.buggyLiteral}\` (the value the issue calls wrong)`
+          : ""
+      return `\`${s.command}\`${evidence}`
+    })
+    .join("\n")
+  return (
+    `${single ? "This red is" : "These reds are"} SANCTIONED — do NOT make ${single ? "it" : "them"} green:\n${list}\n` +
+    `The committed test's expectation contradicts the issue's stated desired output, so the ISSUE is the spec and that assertion is stale (the grader supplies a corrected oracle). ` +
+    `Keep your fix GENERAL: do not narrow it with type or condition guards, and do not rework it, just to satisfy the contradicting assertion. ` +
+    `Leave ${single ? "that test" : "those tests"} red, and state the conflict plainly in your final answer with the evidence above.`
+  )
+}
+
+/**
  * Wave 10 — unverified-finish-gate nudge: prompt.ts's finish-time block
  * injects this once, when a FIX-SHAPED root turn lands a non-test source
  * edit with ZERO real test executions anywhere in its own transcript (the

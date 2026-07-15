@@ -50,3 +50,17 @@ describe("triagePreamble — read-only playbook", () => {
     expect(text).not.toContain("READ-ONLY TURN")
   })
 })
+
+describe("triagePreamble — diagnosis playbook", () => {
+  test("a diagnosis-shaped verdict carries the DIAGNOSIS PLAYBOOK line", () => {
+    for (const shape of ["diagnosis-grounded", "diagnosis-vague"] as const) {
+      const text = preambleOf(verdictOf([{ quote: "fix the bug", shape, deliverable: "fixed" }]))
+      expect(text, `shape ${shape} must carry the diagnosis playbook`).toContain("DIAGNOSIS PLAYBOOK")
+    }
+  })
+
+  test("a build-only verdict does NOT carry the DIAGNOSIS PLAYBOOK line", () => {
+    const text = preambleOf(verdictOf([{ quote: "add a retry to the boot path", shape: "build", deliverable: "shipped" }]))
+    expect(text).not.toContain("DIAGNOSIS PLAYBOOK")
+  })
+})

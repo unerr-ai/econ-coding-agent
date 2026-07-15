@@ -62,13 +62,14 @@ import {
   reproFidelityNudgeText,
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
+  seenRedInversionNudgeText,
   unverifiedFinishNudgeText,
   unverifiedFinishGateNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
-import { findUnresolvedSeenRed, type SeenRedExecution } from "./seen-red"
+import { findUnresolvedSeenRed, partitionSeenRedByInversion, type SeenRedExecution } from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
 import {
   runReproFidelityJudge,
@@ -1868,6 +1869,11 @@ export const layer = Layer.effect(
         // directly, invisible to the transcript this gate scans, so without
         // this flag a genuinely-cleared pin would read as still unresolved.
         let turnSeenRedNudged = false
+        // F18b — the seen-red oracle-inversion note fires at most once: a
+        // sanctioned (inversion-shaped) committed-suite red is exempted from
+        // the confirm-GREEN demand and owes a stated verdict instead; later
+        // finish arrivals pass through without re-noting.
+        let turnSeenRedInversionNoted = false
         let turnPinnedProbeRanGreen = false
         // F14a — the interpreter discovered for this turn's regression-gate
         // neighbor commands, cached so discovery (it shells out) runs at
@@ -3198,11 +3204,12 @@ export const layer = Layer.effect(
                   ? { inverted: false as const }
                   : detectOracleInversion(gate.outputTail, getIssueExpectations(sessionID), {
                       // Round-G: the form rung (name-form vs value-form on the
-                      // same enum) is sound only against a promoted pin — a
-                      // previously-green tracked test; on the agent's own
-                      // repro the desired form legitimately sits on the
-                      // expectation side of an honest red.
-                      promotedPin: turnPinnedProbe.promoted === true,
+                      // same enum) is sound only against tracked-suite
+                      // provenance — here an F16-promoted pin, a previously-
+                      // green tracked test; on the agent's own repro the
+                      // desired form legitimately sits on the expectation
+                      // side of an honest red.
+                      fromTrackedSuite: turnPinnedProbe.promoted === true,
                     })
                 if (inversion.inverted) {
                   oracleInversionNoted = true
@@ -3535,10 +3542,63 @@ export const layer = Layer.effect(
               // arrival.
               if (landedSourceEdits) {
                 const seenRedExecutions = extractTurnBashExecutions(turnAssistantParts)
-                const unresolvedSeenRed = findUnresolvedSeenRed(
+                const allUnresolvedSeenRed = findUnresolvedSeenRed(
                   seenRedExecutions,
                   turnPinnedProbeRanGreen ? turnPinnedProbe?.probe.command : undefined,
                 )
+                // F18b — oracle-inversion partition, checked BEFORE the
+                // confirm-GREEN demand: the 2026-07-15 11815 runs applied the
+                // general gold-equivalent fix, watched the stale committed
+                // suite go red on it (its assertions encode the bug; gold's
+                // test_patch rewrites them), and THIS nudge's "confirm GREEN
+                // before finishing" forced the retreat to a narrowed
+                // Promise-conditional patch. The RF-2 escape at the M4 gate
+                // never saw it: the agent's own issue-faithful pin stayed
+                // green under the narrow patch, so the inversion surfaced
+                // only here, as a seen-red. A sanctioned red is exempt from
+                // the green demand and owes a stated verdict instead —
+                // reject-once-then-loud, same discipline as every sibling.
+                const { binding: unresolvedSeenRed, sanctioned: invertedSeenRed } = partitionSeenRedByInversion(
+                  allUnresolvedSeenRed,
+                  getIssueExpectations(sessionID),
+                )
+                if (invertedSeenRed.length > 0 && !turnSeenRedInversionNoted) {
+                  turnSeenRedInversionNoted = true
+                  yield* publishSignalFx({
+                    name: "seen_red_oracle_inverted",
+                    sessionID,
+                    severity: "tail",
+                    decision: "convert",
+                    evidence: {
+                      sanctioned: invertedSeenRed.length,
+                      command: invertedSeenRed[0]?.command ?? null,
+                      desired: invertedSeenRed[0]?.desiredLiteral ?? null,
+                      buggy: invertedSeenRed[0]?.buggyLiteral ?? null,
+                    },
+                  })
+                  yield* Effect.logWarning("turn_seen_red_inversion", {
+                    "session.id": sessionID,
+                    sanctioned: invertedSeenRed,
+                  })
+                  const inversionNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(inversionNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: inversionNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: seenRedInversionNudgeText(invertedSeenRed),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                }
                 if (unresolvedSeenRed.length > 0) {
                   if (!turnSeenRedNudged) {
                     turnSeenRedNudged = true

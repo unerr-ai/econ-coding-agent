@@ -124,9 +124,9 @@ describe("LLMRequestPrep.prepare — reasoning-effort guard (E0)", () => {
     expect(result.params.options.reasoningEffort).toBeUndefined()
   })
 
-  test("a small housekeeping call with a pinned effort is muted to 'none'", async () => {
+  test("a small housekeeping call with a pinned effort is muted to 'low'", async () => {
     const result = await prepare("test-reasoning-guard-small-high", "high", true)
-    expect(result.params.options.reasoningEffort).toBe("none")
+    expect(result.params.options.reasoningEffort).toBe("low")
   })
 
   test("a small housekeeping call with no pinned effort stays untouched", async () => {

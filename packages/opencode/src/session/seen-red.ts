@@ -13,6 +13,7 @@
  */
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 import { looksLikeTestExecution } from "./turn-supervisor"
+import { detectOracleInversion, type IssueExpectation } from "./issue-expectations"
 
 /** One bash execution from the turn's transcript, in chronological order. */
 export interface SeenRedExecution {
@@ -168,4 +169,66 @@ export function findUnresolvedSeenRed(
     unresolved.push({ command: exec.command, outputTail: outputTail(exec.output) })
   }
   return unresolved.slice(-3)
+}
+
+/** An unresolved red whose failure is oracle-inversion-shaped: a COMMITTED visible test still expects the value the issue calls wrong while the code now produces the issue's stated desired form. Sanctioned — exempt from the confirm-GREEN demand; the finish owes a stated verdict instead. */
+export interface SeenRedInversion extends UnresolvedSeenRed {
+  desiredLiteral?: string
+  buggyLiteral?: string
+}
+
+/**
+ * Committed-suite provenance for the inversion form rung: the command's
+ * extracted test targets reference the committed tests tree (a `tests/` path,
+ * a dotted module label, or a bare module label trailing the runner) and
+ * nothing about the command is repro-shaped. The agent's own scratch repro
+ * (`repro_issue.py` at the repo root) must never qualify — its expectation
+ * side legitimately carries the issue's desired form ahead of an unfixed
+ * producer, which is an honest red, not an inversion.
+ *
+ * @sem domain=routing role=gate
+ */
+export function isTrackedSuiteCommand(command: string): boolean {
+  if (/repro/i.test(command)) return false
+  const targets = extractTestTargetTokens(command)
+  return targets.some(
+    (t) => /(?:^|\/)tests?\//.test(t) || DOTTED_LABEL_RE.test(t) || BARE_LABEL_RE.test(t),
+  )
+}
+
+/**
+ * Partition F18's unresolved reds into `binding` (owe a green re-run — the
+ * unchanged confirm-GREEN demand) and `sanctioned` (oracle-inversion-shaped:
+ * a committed visible test whose red tail shows the code PRODUCING the
+ * issue's stated desired value while the assertion still expects the value
+ * the issue calls wrong — the 2026-07-15 11815 shape, where the agent
+ * applied the general gold-equivalent fix, watched the stale committed suite
+ * go red on it, and the confirm-GREEN nudge forced the retreat to a
+ * narrowed Promise-conditional patch). A sanctioned red must NOT be re-run
+ * green; the caller nudges keep-the-general-fix + state-the-conflict
+ * instead. Empty `literals` (no issue expectations extracted) sanctions
+ * nothing — every red stays binding, byte-identical to the pre-partition
+ * behavior.
+ *
+ * @sem domain=routing role=gate
+ */
+export function partitionSeenRedByInversion(
+  unresolved: readonly UnresolvedSeenRed[],
+  literals: readonly IssueExpectation[],
+): { binding: UnresolvedSeenRed[]; sanctioned: SeenRedInversion[] } {
+  const binding: UnresolvedSeenRed[] = []
+  const sanctioned: SeenRedInversion[] = []
+  for (const red of unresolved) {
+    if (literals.length === 0 || !isTrackedSuiteCommand(red.command)) {
+      binding.push(red)
+      continue
+    }
+    const verdict = detectOracleInversion(red.outputTail, literals, { fromTrackedSuite: true })
+    if (verdict.inverted) {
+      sanctioned.push({ ...red, desiredLiteral: verdict.desiredLiteral, buggyLiteral: verdict.buggyLiteral })
+    } else {
+      binding.push(red)
+    }
+  }
+  return { binding, sanctioned }
 }

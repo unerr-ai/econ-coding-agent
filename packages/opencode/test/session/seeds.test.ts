@@ -36,6 +36,11 @@ describe("seeds.ts — §11 seed priors", () => {
       "Prefer %r/repr-shaped formatting expectations exactly as the issue states them — never normalize quote style in expected strings.",
     )
   })
+
+  it("REPRO_SLICE_CONTENT carries the (11) witness-breadth point (plain-sibling assert)", () => {
+    expect(REPRO_SLICE_CONTENT).toContain("(11)")
+    expect(REPRO_SLICE_CONTENT).toContain("PLAIN sibling")
+  })
 })
 
 describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)", () => {

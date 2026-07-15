@@ -315,16 +315,18 @@ const SUBSCRIPT_FORM_RE = /\b([A-Za-z_][A-Za-z0-9_]*)\[(['"])[^'"\]]+\2\]/
  * so desired-before-buggy means the fix already produces what the issue
  * asked for and the visible test encodes the bug.
  *
- * Rung 2 (form-class, gated on `opts.promotedPin === true`, tried only when
- * rung 1 found nothing): covers the django-11815 shape where the issue
+ * Rung 2 (form-class, gated on `opts.fromTrackedSuite === true`, tried only
+ * when rung 1 found nothing): covers the django-11815 shape where the issue
  * extractor stores a single expected-kind literal in enum subscript form
  * (`X['NAME']`) with no "actual"-kind counterpart, so rung 1 is structurally
- * blind. A promoted pin is a previously-green tracked visible test, so when
+ * blind. The gate is PROVENANCE: the red must come from a COMMITTED tracked
+ * visible test — an F16-promoted pin (a previously-green tracked neighbor)
+ * or an F18 seen-red whose command targets the committed suite — so when
  * the region shows the SAME trailing identifier in both subscript form and
  * call form (`X('value')`), the fix already produces the issue-desired form
- * while the pinned test still expects the value form. Never runs on
- * non-promoted pins, where an agent's own repro legitimately expects the
- * desired form ahead of an unfixed producer.
+ * while the committed test still expects the value form. Never runs on the
+ * agent's own scratch repro, which legitimately expects the desired form
+ * ahead of an unfixed producer.
  *
  * Any ambiguity on either rung (missing side, no comparison shape, tie, no
  * qualifying identifier) returns inverted:false — the gate then behaves
@@ -335,7 +337,7 @@ const SUBSCRIPT_FORM_RE = /\b([A-Za-z_][A-Za-z0-9_]*)\[(['"])[^'"\]]+\2\]/
 export function detectOracleInversion(
   redOutputTail: string | undefined,
   literals: readonly IssueExpectation[],
-  opts?: { promotedPin?: boolean },
+  opts?: { fromTrackedSuite?: boolean },
 ): OracleInversionVerdict {
   if (!redOutputTail) return { inverted: false }
   const desired = literals.filter((l) => l.kind === "expected")
@@ -363,13 +365,14 @@ export function detectOracleInversion(
     }
   }
 
-  if (opts?.promotedPin !== true) return { inverted: false }
+  if (opts?.fromTrackedSuite !== true) return { inverted: false }
 
-  // Form-class rung (django-11815): a promoted pin was green before this
-  // turn, so if the region shows the SAME identifier in both the issue's
-  // subscript form and a value-call form, the assertion — not the fix — is
-  // stale. Gated to promoted pins only; an agent's own fresh repro expecting
-  // the desired form ahead of an unfixed producer is normal, not inversion.
+  // Form-class rung (django-11815): a tracked committed test carried these
+  // expectations before this turn, so if the region shows the SAME identifier
+  // in both the issue's subscript form and a value-call form, the assertion —
+  // not the fix — is stale. Gated to tracked-suite provenance only; an
+  // agent's own fresh repro expecting the desired form ahead of an unfixed
+  // producer is normal, not inversion.
   const hasSubscriptDesired = desired.some((l) => SUBSCRIPT_FORM_RE.test(l.value))
   if (!hasSubscriptDesired) return { inverted: false }
 
