@@ -13,6 +13,7 @@ import type { AnchoredNote } from "./memory.js"
 import { readFile, readdir } from "node:fs/promises"
 import { resolve, join, relative } from "node:path"
 import { detectLanguage, extractEntities } from "./ast-extractor.js"
+import { estimateTokens } from "./trim.js"
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -535,8 +536,9 @@ export function makeSearchCodeTool(graph: CodeIntelligence, repoRoot: string): G
 
 /**
  * Build the `file_outline` tool definition. Returns a structural outline:
- * entities (name, kind, line range), imports, and exports. Uses graph-backed
- * entities when available; falls back to AST extraction during background indexing.
+ * entities (name, kind, line range, plus summary/domain/role when @sem-annotated),
+ * imports, and exports — trimmed to fit token_budget. Uses graph-backed entities
+ * when available; falls back to AST extraction during background indexing.
  *
  * @sem domain=intelligence role=tools
  */
@@ -565,9 +567,10 @@ export function makeFileOutlineTool(graph: CodeIntelligence, repoRoot: string): 
       required: ["file_path"],
     },
     execute: async (input) => {
-      const inp = input as { file_path?: unknown; limit?: unknown }
+      const inp = input as { file_path?: unknown; limit?: unknown; token_budget?: unknown }
       const filePath = String(inp.file_path ?? "")
       const maxEntities = Math.min(inp.limit ? Number(inp.limit) : 30, 100)
+      const tokenBudget = inp.token_budget ? Number(inp.token_budget) : 400
 
       const abs = filePath.startsWith("/") ? filePath : resolve(repoRoot, filePath)
       const rel = filePath.startsWith("/") ? relative(repoRoot, filePath) : filePath
@@ -578,15 +581,32 @@ export function makeFileOutlineTool(graph: CodeIntelligence, repoRoot: string): 
       const fileLines = content.split("\n")
       const total_lines = fileLines.length
 
+      type EntityRow = {
+        name: string
+        kind: string
+        lines: [number, number]
+        summary?: string
+        domain?: string
+        role?: string
+      }
+
       // Prefer graph entities (enriched with risk/callers); fall back to AST
       const graphEntities = await graph.getEntitiesInFile(abs)
 
-      let entityRows: Array<{ name: string; kind: string; lines: [number, number] }>
+      let entityRows: EntityRow[]
       if (graphEntities.length > 0) {
         entityRows = graphEntities
           .sort((a, b) => a.lineStart - b.lineStart || a.name.localeCompare(b.name))
           .slice(0, maxEntities)
-          .map((e) => ({ name: e.name, kind: e.kind, lines: [e.lineStart, e.lineEnd] as [number, number] }))
+          .map((e) => {
+            const row: EntityRow = { name: e.name, kind: e.kind, lines: [e.lineStart, e.lineEnd] }
+            // @sem fields are only ever a non-empty string or undefined (rowToEntity) —
+            // omit the key entirely rather than emitting summary/domain/role: undefined.
+            if (e.summary) row.summary = e.summary
+            if (e.domain) row.domain = e.domain
+            if (e.role) row.role = e.role
+            return row
+          })
       } else {
         const lang = detectLanguage(rel) ?? "unknown"
         if (lang !== "unknown") {
@@ -609,17 +629,29 @@ export function makeFileOutlineTool(graph: CodeIntelligence, repoRoot: string): 
         else if (/^export\s/.test(t)) exports.push(t.slice(0, 160))
       }
 
-      return JSON.stringify(
-        {
+      // Honor token_budget: trim entities (keep earliest-by-line, drop from the
+      // tail) until the serialized result fits, surfacing how many were dropped.
+      const assemble = (rows: EntityRow[]): string => {
+        const out: Record<string, unknown> = {
           file_path: rel,
           total_lines,
-          entities: entityRows,
+          entities: rows,
           imports: imports.slice(0, 40),
           exports: exports.slice(0, 40),
-        },
-        null,
-        2,
-      )
+        }
+        const omitted = entityRows.length - rows.length
+        if (omitted > 0) out.omitted = omitted
+        return JSON.stringify(out, null, 2)
+      }
+
+      let rows = entityRows
+      let json = assemble(rows)
+      while (rows.length > 0 && estimateTokens(json) > tokenBudget) {
+        rows = rows.slice(0, -1)
+        json = assemble(rows)
+      }
+
+      return json
     },
   }
 }

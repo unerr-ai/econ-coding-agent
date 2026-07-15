@@ -166,6 +166,7 @@ import {
   runTurnRead,
   triageTelemetry,
   isContinuationShortCircuit,
+  nonFixQaShortCircuit,
   type TriageComplete,
   type TriageVerdict,
 } from "./turn-triage"
@@ -4042,23 +4043,38 @@ export const layer = Layer.effect(
                 if (hasPriorTurns && isContinuationShortCircuit(userText)) {
                   continuationSource = "short-circuit"
                 } else {
-                  verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
-                  if (!verdict) {
-                    // P5 — the cross-tier re-ask: the same reasoner re-run the
-                    // low-confidence path uses, now also covering a null merged
-                    // verdict (extraction flake / timeout / transient error).
-                    verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "reasoner", userPrompt: userText })
-                  } else if (verdict.confidence === "low") {
-                    const reasonerVerdict = yield* turnReadDispatch({
-                      sessionID,
-                      lastUser,
-                      tier: "reasoner",
-                      userPrompt: userText,
-                    })
-                    if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length)
-                      verdict = reasonerVerdict
+                  // P4b — the deterministic non-fix Q&A short-circuit: a short,
+                  // single-line, interrogative/locate prompt carrying ZERO
+                  // fix/mutation/diagnosis intent is a pure question. Synthesize
+                  // a qa verdict so decideArming stands BOTH doors down (no
+                  // repro/localization pre-pass, no over-work finish gate on a
+                  // turn that only answers), and skip the LLM turn-read. It can
+                  // never fire on a fix task — any fix/action/failure token
+                  // forces the model path — so a real ticket is never gated
+                  // into a symptom-only finish (the 11964 false-green shape).
+                  const qaVerdict = nonFixQaShortCircuit(userText)
+                  if (qaVerdict) {
+                    verdict = qaVerdict
+                    yield* Effect.logInfo("turn_read_short_circuit", { "session.id": sessionID, kind: "qa" })
+                  } else {
+                    verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "conductor", userPrompt: userText })
+                    if (!verdict) {
+                      // P5 — the cross-tier re-ask: the same reasoner re-run the
+                      // low-confidence path uses, now also covering a null merged
+                      // verdict (extraction flake / timeout / transient error).
+                      verdict = yield* turnReadDispatch({ sessionID, lastUser, tier: "reasoner", userPrompt: userText })
+                    } else if (verdict.confidence === "low") {
+                      const reasonerVerdict = yield* turnReadDispatch({
+                        sessionID,
+                        lastUser,
+                        tier: "reasoner",
+                        userPrompt: userText,
+                      })
+                      if (reasonerVerdict && reasonerVerdict.goals.length >= verdict.goals.length)
+                        verdict = reasonerVerdict
+                    }
+                    if (hasPriorTurns && verdict?.turnRole === "continuation") continuationSource = "turn-read"
                   }
-                  if (hasPriorTurns && verdict?.turnRole === "continuation") continuationSource = "turn-read"
                 }
 
                 if (continuationSource) {

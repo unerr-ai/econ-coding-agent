@@ -4,7 +4,9 @@
  * Fetches a URL (or list of URLs), extracts DOM text to markdown via a pure
  * regex pipeline, splits the result into passages, and returns the top-ranked
  * passages scored against the caller's prompt — reducing raw page size by
- * ~70–90% for typical documentation pages.
+ * ~70–90% for typical documentation pages. Detects bot-challenge pages and,
+ * when a browser-render dependency is available and enabled, retries via a
+ * headless render before extraction; otherwise degrades to the static page.
  *
  * Supports cache_ref pagination so large result sets can be paged at ~0
  * recompute cost. First paginated call returns meta.cache_ref + total + more;
@@ -19,6 +21,8 @@ import { htmlToMarkdown } from "../../../code-intelligence/src/webfetch/extract"
 import { splitMarkdownIntoPassages, type Passage } from "../../../code-intelligence/src/webfetch/passage-split"
 import { rankPassagesByPrompt } from "../../../code-intelligence/src/webfetch/bm25"
 import { contentHash, buildCacheKey, getCached, setCached } from "../../../code-intelligence/src/webfetch/cache"
+import { detectChallenge } from "../../../code-intelligence/src/webfetch/anti-bot"
+import { renderWithBrowser, shouldAttemptBrowserRender } from "../../../code-intelligence/src/webfetch/browser-render"
 import { hashInputs, put, getSlice, withMeta, recordToolCall } from "./_shared"
 
 // ---------------------------------------------------------------------------
@@ -69,7 +73,9 @@ export const Parameters = Schema.Struct({
 
 /**
  * `webfetch` tool: fetch a URL and return BM25-ranked markdown passages
- * instead of the raw page, achieving a 70–90% size reduction.
+ * instead of the raw page, achieving a 70–90% size reduction. Retries via an
+ * optional headless-browser render (gated by ECON_WEBFETCH_BROWSER) when a
+ * bot-challenge is detected or extraction is near-empty.
  * Supports cache_ref pagination — large result sets page at near-zero cost.
  *
  * @sem domain=intelligence role=tools
@@ -156,8 +162,37 @@ export const WebFetchTool = Tool.define(
           }
         }
 
-        // ── Extract → split → rank ───────────────────────────────────────────
-        const extracted = await htmlToMarkdown(html, url)
+        // ── Resilience: bot-challenge detection, attempted BEFORE the
+        // (unchanged) extraction pipeline commits to the raw page. Non-fatal:
+        // falls back to the static html on any failure or when no browser
+        // lib is installed. ──────────────────────────────────────────────────
+        let renderedHtml = html
+        let renderedUrl = url
+        const challenge = detectChallenge(html, response.status)
+        if (shouldAttemptBrowserRender({ challengeDetected: !!challenge, markdownLength: Infinity })) {
+          const rendered = await renderWithBrowser(url)
+          if (rendered?.html) {
+            renderedHtml = rendered.html
+            renderedUrl = rendered.finalUrl
+          }
+        }
+
+        // ── Extract → split → rank (unchanged pipeline) ──────────────────────
+        let extracted = await htmlToMarkdown(renderedHtml, renderedUrl)
+
+        // ── Resilience: near-empty extraction → one browser-render retry,
+        // still before passage-split/BM25 see the result. ────────────────────
+        if (
+          !challenge &&
+          shouldAttemptBrowserRender({ challengeDetected: false, markdownLength: extracted.markdown.length })
+        ) {
+          const rendered = await renderWithBrowser(url)
+          if (rendered?.html) {
+            const reExtracted = await htmlToMarkdown(rendered.html, rendered.finalUrl)
+            if (reExtracted.markdown.length > extracted.markdown.length) extracted = reExtracted
+          }
+        }
+
         const pageTitle = extracted.title || url
         const allPassages = splitMarkdownIntoPassages(extracted.markdown)
 

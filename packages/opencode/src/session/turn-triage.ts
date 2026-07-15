@@ -294,6 +294,303 @@ export function isContinuationShortCircuit(userPrompt: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// P4b — the pre-LLM non-fix Q&A short-circuit (the over-work guard)
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound (exclusive) on a prompt the Q&A short-circuit will consider. A
+ * longer message almost always carries task/spec detail (a ticket, a repro, a
+ * multi-part request), so it must reach the turn-read where its real goals arm.
+ */
+export const QA_SHORT_CIRCUIT_MAX_CHARS = 180
+
+// Interrogative leads that, WITH a "?", mark a pure question. "why" is
+// deliberately excluded — "why is X …" is diagnosis-flavoured and must reach
+// the turn-read so a genuine diagnosis can arm the repro/localization pre-pass.
+const QA_INTERROGATIVE_LEADS: ReadonlySet<string> = new Set([
+  "where",
+  "what",
+  "whats",
+  "which",
+  "who",
+  "whose",
+  "when",
+  "how",
+  "does",
+  "do",
+  "did",
+  "is",
+  "are",
+  "was",
+  "were",
+])
+
+// Locate/explain imperative leads — a "?" is not required (these ask for
+// information, never a code change): "list all callers of X", "explain how
+// retries work".
+const QA_LOCATE_LEADS: ReadonlySet<string> = new Set([
+  "explain",
+  "describe",
+  "summarize",
+  "summarise",
+  "list",
+  "show",
+  "find",
+  "locate",
+  "tell",
+  "walk",
+  "outline",
+  "trace",
+])
+
+// Politeness/framing prefixes stripped before the lead word is read.
+const QA_LEAD_PREFIXES: readonly string[] = [
+  "please",
+  "hey",
+  "hi",
+  "so",
+  "just",
+  "quick question",
+  "question",
+  "can you",
+  "could you",
+  "would you",
+  "help me",
+]
+
+// Any of these anywhere in the prompt forces the LLM turn-read: fix intent,
+// mutation verbs, and diagnosis/failure framing. Over-inclusion is SAFE (a
+// legitimate question carrying one of these words merely pays the turn-read);
+// a MISS here is the dangerous direction (a real fix gated into a qa finish,
+// the 11964 false-green shape), so the list is deliberately broad.
+// Word-boundary, case-insensitive.
+const QA_FIX_INTENT_RE = new RegExp(
+  "\\b(?:" +
+    [
+      // fix / failure / diagnosis framing
+      "fix",
+      "fixes",
+      "fixed",
+      "fixing",
+      "fixme",
+      "bug",
+      "bugs",
+      "buggy",
+      "broken",
+      "break",
+      "breaks",
+      "breaking",
+      "crash",
+      "crashes",
+      "crashing",
+      "crashed",
+      "error",
+      "errors",
+      "errored",
+      "fail",
+      "fails",
+      "failed",
+      "failing",
+      "failure",
+      "failures",
+      "exception",
+      "exceptions",
+      "traceback",
+      "tracebacks",
+      "stacktrace",
+      "wrong",
+      "incorrect",
+      "invalid",
+      "unexpected",
+      "regress",
+      "regression",
+      "regressions",
+      "repro",
+      "reproduce",
+      "reproduces",
+      "reproducing",
+      "reproduction",
+      "patch",
+      "patches",
+      "debug",
+      "diagnose",
+      "diagnosis",
+      "panic",
+      "segfault",
+      "deadlock",
+      "hang",
+      "hangs",
+      "freeze",
+      "leak",
+      "leaks",
+      "race",
+      "issue",
+      "issues",
+      "problem",
+      "problems",
+      "fault",
+      "faults",
+      "why",
+      // mutation / action verbs
+      "implement",
+      "implements",
+      "implementation",
+      "implementing",
+      "add",
+      "adds",
+      "added",
+      "adding",
+      "remove",
+      "removes",
+      "removed",
+      "removing",
+      "delete",
+      "deletes",
+      "deleted",
+      "deleting",
+      "create",
+      "creates",
+      "created",
+      "creating",
+      "edit",
+      "edits",
+      "edited",
+      "editing",
+      "modify",
+      "modifies",
+      "modified",
+      "modifying",
+      "change",
+      "changes",
+      "changed",
+      "changing",
+      "update",
+      "updates",
+      "updated",
+      "updating",
+      "refactor",
+      "refactors",
+      "refactored",
+      "refactoring",
+      "rename",
+      "renames",
+      "renamed",
+      "renaming",
+      "rewrite",
+      "rewrites",
+      "rewrote",
+      "rewriting",
+      "replace",
+      "replaces",
+      "replaced",
+      "replacing",
+      "build",
+      "builds",
+      "built",
+      "building",
+      "make",
+      "makes",
+      "made",
+      "making",
+      "write",
+      "writes",
+      "wrote",
+      "writing",
+      "install",
+      "installs",
+      "configure",
+      "configures",
+      "deploy",
+      "deploys",
+      "migrate",
+      "migrates",
+      "migration",
+      "port",
+      "ports",
+      "convert",
+      "converts",
+      "upgrade",
+      "upgrades",
+      "optimize",
+      "optimise",
+      "improve",
+      "improves",
+      "enhance",
+      "enhances",
+      "correct",
+      "corrects",
+      "resolve",
+      "resolves",
+      "solve",
+      "solves",
+      "address",
+      "addresses",
+      "should",
+      "must",
+      "expected",
+      "expect",
+      "expects",
+      "todo",
+    ].join("|") +
+    ")\\b",
+  "i",
+)
+
+/**
+ * P4b — should this prompt skip the turn-read entirely as a pure, non-fix
+ * question? Returns a synthetic single-`qa`-goal `TriageVerdict` (so
+ * `decideArming` stands the repro AND localization doors down — no over-work
+ * finish gate on a turn that only answers a question) ONLY for a short,
+ * single-line, interrogative-or-locate prompt carrying ZERO fix, mutation, or
+ * diagnosis intent. Everything else returns `null` and pays the turn-read.
+ *
+ * The asymmetry is deliberate and load-bearing: a false NEGATIVE here merely
+ * pays one LLM call; a false POSITIVE would gate a real fix task into a
+ * question — skipping repro/localization and risking a symptom-only finish
+ * (the 11964 false-green shape). So the gate is biased hard toward NOT firing:
+ * any fix/action/failure token, or any multi-line or over-length prompt,
+ * forces the model path.
+ *
+ * @sem domain=routing role=router
+ */
+export function nonFixQaShortCircuit(userPrompt: string): TriageVerdict | null {
+  const prompt = userPrompt.trim()
+  if (prompt.length === 0 || prompt.length > QA_SHORT_CIRCUIT_MAX_CHARS) return null
+  // A ticket/spec spans multiple lines; a pure question is one line.
+  if (/[\r\n]/.test(prompt)) return null
+  // Any fix / mutation / diagnosis token forces the model path.
+  if (QA_FIX_INTENT_RE.test(prompt)) return null
+
+  // Read the lead word past any stacked politeness/framing prefixes.
+  let head = prompt.toLowerCase()
+  let stripped = true
+  while (stripped) {
+    stripped = false
+    for (const prefix of QA_LEAD_PREFIXES) {
+      if (head === prefix) return null
+      if (head.startsWith(prefix + " ")) {
+        head = head.slice(prefix.length).trimStart()
+        stripped = true
+        break
+      }
+    }
+  }
+  const lead = head.match(/^[a-z]+/)?.[0] ?? ""
+  if (!lead) return null
+
+  const isInterrogative = QA_INTERROGATIVE_LEADS.has(lead) && prompt.includes("?")
+  const isLocate = QA_LOCATE_LEADS.has(lead)
+  if (!isInterrogative && !isLocate) return null
+
+  return {
+    goals: [{ quote: prompt, shape: "qa", deliverable: "answer the user's question" }],
+    constraints: [],
+    confidence: "high",
+    turnRole: "fresh",
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The call itself — one blocking, forced-JSON request on the conductor tier
 // ---------------------------------------------------------------------------
 

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { join } from "node:path"
 import { BunSqliteGraph } from "../src/bun-sqlite-graph.js"
 import { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool } from "../src/tools.js"
+import { estimateTokens } from "../src/trim.js"
 
 const FIXTURE_DIR = join(import.meta.dir, "fixture")
 
@@ -177,6 +178,105 @@ describe("Graph tools — execute() interface smoke test", () => {
     const tool = makeFileOutlineTool(graph, FIXTURE_DIR)
     const result = await tool.execute({ file_path: "nonexistent_xyz.ts" })
     expect(result).toContain("not found")
+  })
+
+  it("file_outline surfaces summary/domain/role for an @sem-annotated entity", async () => {
+    const tool = makeFileOutlineTool(graph, FIXTURE_DIR)
+    const raw = await tool.execute({ file_path: "sem.ts" })
+    const outline = JSON.parse(raw)
+
+    const risk = outline.entities.find((e: { name: string }) => e.name === "computeRisk")
+    expect(risk).toBeDefined()
+    expect(risk.domain).toBe("risk")
+    expect(risk.role).toBe("analysis")
+    expect(risk.summary).toBe(
+      "Computes a risk score for an entity based on its import fan-in count. Used to gate expensive escalation decisions.",
+    )
+  })
+
+  it("file_outline omits summary/domain/role for an entity with no doc comment", async () => {
+    // Calculator.add (b.ts) has no per-method doc comment above it (the class-level
+    // comment sits above `class Calculator`, not the method) — no @sem, no summary.
+    const tool = makeFileOutlineTool(graph, FIXTURE_DIR)
+    const raw = await tool.execute({ file_path: "b.ts" })
+    const outline = JSON.parse(raw)
+
+    const add = outline.entities.find((e: { name: string }) => e.name === "Calculator.add")
+    expect(add).toBeDefined()
+    expect(add).not.toHaveProperty("summary")
+    expect(add).not.toHaveProperty("domain")
+    expect(add).not.toHaveProperty("role")
+    expect(Object.keys(add).sort()).toEqual(["kind", "lines", "name"])
+  })
+
+  it("file_outline entities stay lean {name,kind,lines} for the AST fallback (no graph entities)", async () => {
+    // A file outside the indexed fixture dir has zero graph entities, forcing
+    // the AST-extraction fallback branch — which never carries @sem fields.
+    const scratchGraph = new BunSqliteGraph(":memory:", FIXTURE_DIR)
+    const tool = makeFileOutlineTool(scratchGraph, FIXTURE_DIR)
+    const raw = await tool.execute({ file_path: "sem.ts" })
+    const outline = JSON.parse(raw)
+
+    expect(Array.isArray(outline.entities)).toBe(true)
+    expect(outline.entities.length).toBeGreaterThan(0)
+    for (const e of outline.entities) {
+      expect(Object.keys(e).sort()).toEqual(["kind", "lines", "name"])
+    }
+    scratchGraph.close()
+  })
+
+  it("file_outline honors token_budget by trimming entities (keeps earliest-by-line) and reports omitted count", async () => {
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const dir = await mkdtemp(join(tmpdir(), "ci-outline-budget-"))
+    try {
+      const body = Array.from(
+        { length: 10 },
+        (_, i) => `export function fn${i}(): number {\n  return ${i}\n}\n`,
+      ).join("\n")
+      await writeFile(join(dir, "many.ts"), body)
+
+      const scratchGraph = new BunSqliteGraph(":memory:", dir)
+      await scratchGraph.index(dir)
+      const tool = makeFileOutlineTool(scratchGraph, dir)
+
+      const fullRaw = await tool.execute({ file_path: "many.ts", token_budget: 100_000 })
+      const full = JSON.parse(fullRaw)
+      expect(full.entities.length).toBe(10)
+      expect(full).not.toHaveProperty("omitted")
+
+      // Find a budget strictly between the full response and the maximally-
+      // trimmed (all-entities-dropped) response, so the trim is partial —
+      // asserted via the tool's own estimator rather than a guessed ratio.
+      const emptyRaw = await tool.execute({ file_path: "many.ts", token_budget: 1 })
+      const fullTokens = estimateTokens(fullRaw)
+      const emptyTokens = estimateTokens(emptyRaw)
+      expect(fullTokens).toBeGreaterThan(emptyTokens)
+      const budget = Math.floor((fullTokens + emptyTokens) / 2)
+
+      const trimmed = JSON.parse(await tool.execute({ file_path: "many.ts", token_budget: budget }))
+      expect(trimmed.entities.length).toBeGreaterThan(0)
+      expect(trimmed.entities.length).toBeLessThan(10)
+      expect(trimmed.omitted).toBe(10 - trimmed.entities.length)
+
+      // Kept entities are the earliest-by-line prefix of the full list.
+      const keptNames = trimmed.entities.map((e: { name: string }) => e.name)
+      const expectedPrefix = full.entities
+        .slice(0, trimmed.entities.length)
+        .map((e: { name: string }) => e.name)
+      expect(keptNames).toEqual(expectedPrefix)
+
+      scratchGraph.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("file_outline default token_budget (400) does not trim a small outline", async () => {
+    const tool = makeFileOutlineTool(graph, FIXTURE_DIR)
+    const raw = await tool.execute({ file_path: "a.ts" })
+    const outline = JSON.parse(raw)
+    expect(outline).not.toHaveProperty("omitted")
   })
 
   // -------------------------------------------------------------------------

@@ -641,7 +641,7 @@ export const ShellTool = Tool.define(
       // shouldMergeStderr (inside compressShellOutput) decides whether to dedup-merge
       // stderr into stdout before classify (tsc/cargo/pytest/eslint/…).
       // trunc.write saves the full combined (stdout+stderr) output for user reference.
-      const compressed = compressShellOutput(input.command, raw, stderrFull || undefined, code ?? undefined)
+      const compressed = compressShellOutput(input.command, raw, stderrFull || undefined, code ?? undefined, input.cwd)
       const combined = stderrFull ? raw + "\n" + stderrFull : raw
       // The truncation safety net (truncated flag + full-output file save) keys off the RAW output
       // size, not the compressed view: large output must always be preserved to a file and flagged

@@ -13,9 +13,12 @@ import {
   runTurnRead,
   triageTelemetry,
   isContinuationShortCircuit,
+  nonFixQaShortCircuit,
+  QA_SHORT_CIRCUIT_MAX_CHARS,
   TRIAGE_MAX_GOALS,
   type TriageComplete,
 } from "../../src/session/turn-triage"
+import { decideArming } from "../../src/session/arming-judge"
 
 describe("parseTurnReadResponse", () => {
   test("a single goal parses with its shape and deliverable intact", () => {
@@ -699,5 +702,110 @@ describe("isContinuationShortCircuit — the pre-LLM ack/anaphora net", () => {
     ]) {
       expect(isContinuationShortCircuit(prompt)).toBe(false)
     }
+  })
+})
+
+describe("nonFixQaShortCircuit — the pre-LLM non-fix Q&A over-work guard", () => {
+  test("pure navigation/comprehension questions fire a qa verdict", () => {
+    for (const prompt of [
+      "where is resolve_redirects defined?",
+      "which files import the proxy bridge?",
+      "what does the retry handler return?",
+      "how does the session store work?",
+      "who calls dispatch on the router?",
+      "explain how retries are sequenced",
+      "list all the callers of decideArming",
+      "show the shape of the turn-read verdict",
+      "find the entry point for the conductor loop",
+      "describe the tier routing flow",
+      "outline the arming decision table",
+      "trace the path from a user prompt to a slice",
+      "please explain how the governance gate arms", // politeness prefix stripped
+      "can you tell me where the idle timeout lives?", // stacked prefix + interrogative body
+      "so what happens when a verdict is null?",
+    ]) {
+      const verdict = nonFixQaShortCircuit(prompt)
+      expect(verdict, `"${prompt}" should short-circuit to qa`).not.toBeNull()
+      expect(verdict!.goals).toHaveLength(1)
+      expect(verdict!.goals[0]!.shape).toBe("qa")
+      expect(verdict!.constraints).toHaveLength(0)
+      expect(verdict!.confidence).toBe("high")
+      expect(verdict!.turnRole).toBe("fresh")
+    }
+  })
+
+  test("the returned goal's quote is the verbatim trimmed prompt", () => {
+    const verdict = nonFixQaShortCircuit("  where is the router?  ")
+    expect(verdict!.goals[0]!.quote).toBe("where is the router?")
+  })
+
+  // The load-bearing safety property: a fired qa verdict must NEVER carry a
+  // fix task. Every one of these MUST reach the LLM turn-read (null) — a false
+  // positive here would strip repro/localization from a real fix (11964).
+  test("anything carrying fix / mutation / diagnosis intent NEVER fires", () => {
+    for (const prompt of [
+      // explicit fix framing
+      "where is the bug in resolve_redirects?",
+      "what is causing the crash in the parser?",
+      "which test is failing and why?",
+      "how do I fix the memory leak?",
+      "why is the output empty?", // diagnosis-flavoured "why"
+      "why does login fail?",
+      "what's wrong with the retry logic?",
+      "the parser returns None on empty input", // declarative bug report — no interrogative lead
+      "resolve_redirects drops the fragment on a 303", // declarative symptom
+      "expected a 200 but got a 500 — what happened?",
+      "the tests should pass but they don't",
+      // mutation / action verbs
+      "add validation to the login form",
+      "implement retry with backoff in the client",
+      "refactor the router into smaller functions",
+      "rename decideArming to armTurn everywhere",
+      "make the parser handle empty input",
+      "update the config to allow websearch",
+      "change the timeout to 30 seconds",
+      "remove the deprecated shim",
+      "create a new handler for the webhook",
+      "build a savings receipt for the status line",
+      "write a test for the arming judge",
+      "can you fix the failing import?", // politeness prefix but fix intent
+      "please add a --json flag to status", // politeness prefix but action intent
+      "how should I resolve this merge conflict?", // "should"/"resolve"
+      "optimize the graph query for large repos", // "optimize"
+      "port the shell compressor from unerr", // "port"
+    ]) {
+      expect(nonFixQaShortCircuit(prompt), `"${prompt}" must reach the turn-read`).toBeNull()
+    }
+  })
+
+  test("shape guards: multi-line, over-length, and non-question leads never fire", () => {
+    // Multi-line (a ticket/spec) never fires even with an interrogative lead.
+    expect(nonFixQaShortCircuit("where is the router?\nalso what does it return?")).toBeNull()
+    // Over-length (carries detail) never fires.
+    const long = "what " + "x".repeat(QA_SHORT_CIRCUIT_MAX_CHARS) + "?"
+    expect(long.length).toBeGreaterThan(QA_SHORT_CIRCUIT_MAX_CHARS)
+    expect(nonFixQaShortCircuit(long)).toBeNull()
+    // Interrogative lead WITHOUT a "?" does not fire (locate leads are the only
+    // "?"-free path, and these are not locate leads).
+    expect(nonFixQaShortCircuit("where the router lives")).toBeNull()
+    expect(nonFixQaShortCircuit("what the handler does")).toBeNull()
+    // A statement with no interrogative or locate lead never fires.
+    expect(nonFixQaShortCircuit("the router dispatches to tiers.")).toBeNull()
+    // Empty / whitespace-only.
+    expect(nonFixQaShortCircuit("")).toBeNull()
+    expect(nonFixQaShortCircuit("   ")).toBeNull()
+    // A bare politeness prefix with no body never fires.
+    expect(nonFixQaShortCircuit("please")).toBeNull()
+    expect(nonFixQaShortCircuit("can you")).toBeNull()
+  })
+
+  test("a fired verdict makes decideArming stand BOTH doors down (no repro/localization pre-pass)", () => {
+    const verdict = nonFixQaShortCircuit("where is the retry handler defined?")
+    expect(verdict).not.toBeNull()
+    const arming = decideArming(verdict)
+    expect(arming.armLocalization).toBe(false)
+    expect(arming.armReproduction).toBe(false)
+    expect(arming.hardness).toBe("trivial")
+    expect(arming.ambiguity).toBe("clear")
   })
 })

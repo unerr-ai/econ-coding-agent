@@ -1,13 +1,20 @@
 /**
  * Shell output compression pipeline.
- * Wires: ANSI-strip → stderr-merge → git-status fast-path → classify → strategy dispatch → omni fallback.
+ * Wires: ANSI-strip → redact → git-status fast-path → cloud-CLI parser → user-filter DSL →
+ * classify → strategy dispatch → omni fallback.
  *
  * Port of unerr-cli src/proxy/shell-compressor.ts — telemetry wired to _shared meter,
  * graph-boost gated on unerrd daemon presence (no-op when absent).
  *
  * Strategies now live (Sprint 1B):
  *   git_status, tabular, test_results, log_text, diff, structured, key_value,
- *   error_diagnostic, yaml, tree_paths, progress_streaming.
+ *   error_diagnostic, yaml, tree_paths, progress_streaming, cloud (aws/gcp/azure/kubectl).
+ *
+ * PRE-CLASSIFY TRANSFORMS: redact strips credential shapes (API keys, bearer tokens,
+ * passwords, AWS keys, connection strings) right after ANSI-strip, before anything else
+ * sees the text. The user filter DSL reads repo-local `.econ/filters.toml` + global
+ * `~/.config/econ/filters.toml` (first-matching-filter-wins) right before classify;
+ * missing config files are a no-op.
  *
  * STDERR-MERGE: when shell.ts supplies separate stderr (shouldMergeStderr commands —
  * tsc/cargo/pytest/eslint/go/gradle/mvn/webpack/vite/esbuild/terraform/…), stderr is
@@ -22,12 +29,15 @@ import type { ToolMeta } from "../_shared"
 import { recordToolCall, withMeta } from "../_shared"
 import type { OutputCategory } from "./classifier"
 import { classifyShellOutput } from "./classifier"
+import { compressCloud } from "./strategies/cloud"
+import { applyUserFilter } from "./strategies/filter-dsl"
 import { compressGitStatus } from "./strategies/git-status"
 import { compressKeyValue } from "./strategies/key-value"
 import { compressLogText } from "./strategies/log-text"
 import { compressMultiRegion } from "./strategies/multi-region"
 import { compressOmni } from "./strategies/omni"
 import { compressProgress } from "./strategies/progress"
+import { redactOutput } from "./strategies/redact"
 import { compressStructured } from "./strategies/structured"
 import { compressTabular } from "./strategies/tabular"
 import { compressTestResults } from "./strategies/test-results"
@@ -193,12 +203,15 @@ async function applyDiffWithGraphBoost(stripped: string, command: string): Promi
  * @param stderr   - captured stderr, if available separately; merged when
  *                   shouldMergeStderr(command) returns true
  * @param exitCode - process exit code; passed to test_results for safe short-circuit
+ * @param cwd      - working directory for the user filter DSL config lookup
+ *                   (`.econ/filters.toml`); defaults to process.cwd()
  */
 export function compressShellOutput(
   command: string,
   stdout: string,
   stderr?: string,
   exitCode?: number,
+  cwd?: string,
 ): ShellCompressResult {
   // Merge stderr into stdout when appropriate (compile/test commands)
   const raw =
@@ -219,7 +232,9 @@ export function compressShellOutput(
     return { text: raw, meta }
   }
 
-  const stripped = stripAnsiCodes(raw)
+  // Redact credential shapes (API keys, bearer tokens, passwords, AWS keys, connection
+  // strings) before anything downstream sees the text.
+  const stripped = redactOutput(stripAnsiCodes(raw))
 
   // Dedicated git status fast-path (bypasses classifier; ~70-85% savings)
   if (/^\s*git\s+status\b/.test(command)) {
@@ -241,6 +256,47 @@ export function compressShellOutput(
       }
       return { text: gitOut, meta }
     }
+  }
+
+  // Cloud-CLI parser fast-path (AWS/GCP/Azure/kubectl/docker-inspect) — tried before
+  // generic classification for cloud commands.
+  const cloudOut = compressCloud(stripped, command)
+  if (cloudOut) {
+    const meta = withMeta(raw, cloudOut)
+    recordToolCall({ tool: "shell", ...meta })
+    if (meta.ratio < QUALITY_TRACK_RATIO) {
+      shellQualityMonitor().recordCompression({
+        command,
+        category: "structured",
+        confidence: 1,
+        rawTokens: meta.raw_tokens,
+        returnedTokens: meta.returned_tokens,
+        ratio: meta.ratio,
+        timestamp: Date.now(),
+      })
+    }
+    return { text: cloudOut, meta }
+  }
+
+  // User filter DSL — repo-local .econ/filters.toml + global ~/.config/econ/filters.toml,
+  // first-matching-filter-wins, applied before classify. No-op when no filter matches or
+  // neither config file exists.
+  const userFiltered = applyUserFilter(command, stripped, cwd ?? process.cwd())
+  if (userFiltered) {
+    const meta = withMeta(raw, userFiltered.text)
+    recordToolCall({ tool: "shell", ...meta })
+    if (meta.ratio < QUALITY_TRACK_RATIO) {
+      shellQualityMonitor().recordCompression({
+        command,
+        category: "log_text",
+        confidence: 1,
+        rawTokens: meta.raw_tokens,
+        returnedTokens: meta.returned_tokens,
+        ratio: meta.ratio,
+        timestamp: Date.now(),
+      })
+    }
+    return { text: userFiltered.text, meta }
   }
 
   const classification = classifyShellOutput(command, stripped)
@@ -319,6 +375,7 @@ export async function compressShellOutputAsync(
   stdout: string,
   stderr?: string,
   exitCode?: number,
+  cwd?: string,
 ): Promise<ShellCompressResult> {
   const raw =
     stderr && shouldMergeStderr(command)
@@ -333,7 +390,7 @@ export async function compressShellOutputAsync(
     return { text: raw, meta }
   }
 
-  const stripped = stripAnsiCodes(raw)
+  const stripped = redactOutput(stripAnsiCodes(raw))
 
   if (/^\s*git\s+status\b/.test(command)) {
     const gitOut = compressGitStatus(stripped)
@@ -342,6 +399,20 @@ export async function compressShellOutputAsync(
       recordToolCall({ tool: "shell", ...meta })
       return { text: gitOut, meta }
     }
+  }
+
+  const cloudOut = compressCloud(stripped, command)
+  if (cloudOut) {
+    const meta = withMeta(raw, cloudOut)
+    recordToolCall({ tool: "shell", ...meta })
+    return { text: cloudOut, meta }
+  }
+
+  const userFiltered = applyUserFilter(command, stripped, cwd ?? process.cwd())
+  if (userFiltered) {
+    const meta = withMeta(raw, userFiltered.text)
+    recordToolCall({ tool: "shell", ...meta })
+    return { text: userFiltered.text, meta }
   }
 
   const classification = classifyShellOutput(command, stripped)
@@ -355,5 +426,5 @@ export async function compressShellOutputAsync(
   }
 
   // Standard path
-  return compressShellOutput(command, stdout, stderr, exitCode)
+  return compressShellOutput(command, stdout, stderr, exitCode, cwd)
 }
