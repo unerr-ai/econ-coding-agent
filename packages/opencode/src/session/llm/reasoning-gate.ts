@@ -5,15 +5,20 @@
  * deleted, because omitting the param means UNBOUNDED server-side thinking
  * (one 2,453s step on django-11964, e0-mini10-r1). A small housekeeping
  * one-shot is muted instead: thinking starves/slows its JSON output, so any
- * pinned effort collapses to "none". Requests already shipping a bounded
- * effort pass through untouched.
+ * pinned effort collapses to the minimal VALID level "low". It is NOT muted to
+ * "none": the small_model (gpt-oss-120b) rejects reasoningEffort "none" on
+ * Fireworks with a 400 ("Invalid reasoning effort: none") — "none" is not one
+ * of its trained levels, so the housekeeping call (title/summary) errored out.
+ * "low" is the floor of thinking every reasoning model accepts, so it mutes
+ * without breaking the call; an incoming stale "none" is rewritten too (it
+ * would 400 the same). Requests already at "low" pass through untouched.
  *
  * @sem domain=routing role=gate
  */
 export function guardReasoningEffort(options: Record<string, any>, small: boolean): "muted" | "bounded" | undefined {
   if (small) {
-    if (options.reasoningEffort === undefined || options.reasoningEffort === "none") return undefined
-    options.reasoningEffort = "none"
+    if (options.reasoningEffort === undefined || options.reasoningEffort === "low") return undefined
+    options.reasoningEffort = "low"
     return "muted"
   }
   // "none" is the deepseek-flash-era conductor mute; no live config pins it

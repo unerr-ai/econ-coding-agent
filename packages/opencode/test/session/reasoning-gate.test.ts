@@ -31,16 +31,25 @@ describe("reasoning-gate", () => {
     expect(options.reasoningEffort).toBeUndefined()
   })
 
-  test("a small call with a pinned effort mutes to 'none'", () => {
+  // "low", NOT "none": the small_model (gpt-oss-120b) 400s on
+  // reasoningEffort "none" ("Invalid reasoning effort: none"); "low" is the
+  // minimal level it accepts, so the title/summary call mutes without erroring.
+  test("a small call with a pinned effort mutes to the minimal valid 'low'", () => {
     const options: Record<string, any> = { reasoningEffort: "high" }
     expect(guardReasoningEffort(options, true)).toBe("muted")
-    expect(options.reasoningEffort).toBe("none")
+    expect(options.reasoningEffort).toBe("low")
   })
 
-  test("a small call already muted or unset stays untouched", () => {
-    const muted: Record<string, any> = { reasoningEffort: "none" }
+  test("a small call pinned to the invalid 'none' is rewritten to 'low' (it would 400 otherwise)", () => {
+    const stale: Record<string, any> = { reasoningEffort: "none" }
+    expect(guardReasoningEffort(stale, true)).toBe("muted")
+    expect(stale.reasoningEffort).toBe("low")
+  })
+
+  test("a small call already at 'low' or unset stays untouched", () => {
+    const muted: Record<string, any> = { reasoningEffort: "low" }
     expect(guardReasoningEffort(muted, true)).toBeUndefined()
-    expect(muted.reasoningEffort).toBe("none")
+    expect(muted.reasoningEffort).toBe("low")
     const unset: Record<string, any> = {}
     expect(guardReasoningEffort(unset, true)).toBeUndefined()
     expect(unset.reasoningEffort).toBeUndefined()

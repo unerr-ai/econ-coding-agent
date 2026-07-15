@@ -138,9 +138,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // ships the mute marker — a stale config-pinned "none" is rewritten to the
   // bounded "high", never deleted, since omitting the param means unbounded
   // server-side thinking (one 41-minute step in e0-mini10-r1). Small
-  // (housekeeping) one-shots are muted instead: un-muted thinking starves or
-  // slows their JSON output. (The turn-read call never rides this path at
-  // all: it dispatches via generateText — prompt.ts turnReadDispatch.)
+  // (housekeeping) one-shots are muted to the minimal valid "low" instead:
+  // un-muted thinking starves or slows their JSON output, but "none" 400s the
+  // small_model (gpt-oss-120b: "Invalid reasoning effort: none"). (The
+  // turn-read call never rides this path at all: it dispatches via
+  // generateText — prompt.ts turnReadDispatch.)
   const reasoningGate = guardReasoningEffort(options, input.small === true)
   if (reasoningGate) yield* Effect.logInfo("reasoning effort guarded", { sessionID: input.sessionID, action: reasoningGate })
 
