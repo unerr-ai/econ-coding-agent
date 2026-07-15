@@ -359,6 +359,30 @@ anti-correlated with resolution on any instance whose gold rewrites visible test
 a maximally stubborn agent could eat 3 rejects and finish loud-red with the gold fix —
 but the nudge text actively instructs the retreat, and a compliant conductor complies.
 
+**CLOSED 2026-07-15 (commit `1270cbccd`, live-validated 2/2 across both trajectories).**
+The fix is the three-seam pack in Part V item 2. Both 11815 failure trajectories now
+convert to a general fix, each caught by the seam built for it, on a strict fresh-arena
+re-fire (binary built from `1270cbccd`):
+- **r1** ($0.39 / 67t) — the T2 read-first shape: repro-seed point (11) + repro-fidelity
+  rubric (d) INPUT-CLASS BREADTH made the pinned repro assert a plain sibling enum, so the
+  narrowing conditional patch left the pin **red** → M4 gate reject → the pre-existing
+  `oracle_inversion` detector (RF-2) fired 5× and converted. Shipped `serializer.py` 3/3,
+  real-graded **OK on all 46 tests** (incl. the hidden non-translated-enum F2P a Promise
+  conditional fails).
+- **r2** ($0.48 / 66t) — the T1 write-first shape: the general fix reddened the committed
+  suite as a **seen-red**, and the new F18 partition (`partitionSeenRedByInversion`)
+  detected the inversion (`seen_red_oracle_inverted` + 2× `SANCTIONED`
+  + `turn_seen_red_inversion`), sanctioned it, and the keep-general-fix nudge held the fix
+  general. Shipped `serializer.py` 5/3, real-graded **OK on all 46 tests**.
+
+The T2 counter (DIAGNOSIS_PLAYBOOK, an additive diagnosis-turn preamble stating the
+issue-is-spec / cause-not-symptom rule + the oracle-priority carve-out) rides every
+diagnosis turn so the rule is in context before any stale test is read — it no longer
+reaches armed turns only via the localization seed. All seams are always-on converts; none
+blocks. Empty issue-literals sanctions nothing, so non-inversion instances see
+byte-identical old F18 behavior (verified inert on 11790/11848/12039 — 0 oracle-inversion
+telemetry).
+
 ### III.2 django-11848 (parse_http_date two-digit year) — failed 2058 + x10-2107
 
 **The known "boundary off-by-one" face is a misdiagnosis.** Both patches have
@@ -584,9 +608,11 @@ held under direct pressure twice; arming/triage classified consistently.
 
 The three anti-patterns:
 
-1. **Oracle inversion** (11815): the pin-from-visible-red + pin-green pressure +
-   no-test-edit deny circuit *rejects the gold fix* whenever gold rewrites visible
-   tests. The harness's strongest enforcement loop points backwards on this class.
+1. **Oracle inversion** (11815) — *converted 2026-07-15, see V.2*: the pin-from-visible-red
+   + pin-green pressure + no-test-edit deny circuit *rejected the gold fix* whenever gold
+   rewrites visible tests. The harness's strongest enforcement loop pointed backwards on this
+   class; the three-seam pack (`1270cbccd`) now sanctions the inversion red and keeps the fix
+   general (live-validated 2/2, both trajectories).
 2. **Polite hatches on hard gates** (11848, 11964-A): a gate that names the exact bug
    and then accepts an identical retry is an advisory with extra steps. The strict-cycle
    record already proved advisory text never steers the cheap conductor (4
@@ -651,12 +677,36 @@ cycle: improve the orchestration, don't amputate it).
    Evidence: 8/8 reds at 0 escalations; 11815 D-vs-E (slices pass, no-slices fail).
    *This was round-F candidate #1 before these bundles; it is now the strongest-
    evidenced item on the board.*
-2. **Fix the oracle-inversion trap (11815 class).** When the pinned red's *expected*
-   value contradicts the issue's stated desired output (both runs had this string
-   evidence in the redTail), the pin must not bind as green-required — allowed
-   resolutions: loud-red finish with a stated visible-test-encodes-bug verdict, or
-   escalation (item 1), never "make the buggy assertion pass." The *tests-are-spec*
-   seed needs the same carve-out sentence.
+2. **Fix the oracle-inversion trap (11815 class) — three-seam pack (2026-07-15, IMPLEMENTED + live-validated 2/2).**
+   When the pinned red's *expected* value contradicts the issue's stated desired output, the
+   pin must not bind as green-required — the allowed resolution is keep-the-general-fix +
+   state-the-conflict, never "make the buggy assertion pass." Shipped as commit `1270cbccd`,
+   three always-on convert seams (none blocks), each covering one leg of the trap:
+   - **Part 1 — F18 seen-red partition (the T1 write-first leg).** `partitionSeenRedByInversion`
+     (seen-red.ts) routes each unresolved finish-time red through `detectOracleInversion`: a
+     committed-suite red whose tail shows the code producing the issue's desired form while the
+     assertion still expects the buggy form is *sanctioned* — it gets a `seen_red_oracle_inverted`
+     convert signal + a keep-general-fix nudge instead of F18's confirm-GREEN demand.
+     `isTrackedSuiteCommand` excludes the agent's own `repro_issue.py` (an honest red).
+     **Empty issue-literals sanctions nothing → byte-identical old F18 behavior** (the greens
+     are structurally protected). Rung-2 form-class detection gates on `fromTrackedSuite`
+     provenance.
+   - **Part 2 — DIAGNOSIS_PLAYBOOK (the T2 read-first leg).** An additive preamble on every
+     diagnosis-shaped turn (issue-is-spec / cause-not-symptom + the oracle-priority carve-out),
+     so the rule is in context before a stale test is read — previously the carve-out reached
+     armed turns only via the localization seed. The *tests-are-spec* seed itself keeps its
+     existing EXCEPTION sentence.
+   - **Part 3 — witness breadth.** Repro-seed point (11) + repro-fidelity rubric (d)
+     INPUT-CLASS BREADTH: an issue narrating a general defect through one special input class
+     must also assert a plain sibling, so a conditional patch leaves the pin red and the
+     existing M4 `oracle_inversion` escape (RF-2) converts it.
+
+   **Live-validated 2026-07-15** (strict fresh-arena re-fire, binary `1270cbccd`): 11815 **2/2**,
+   r1 via Part 3 → M4 `oracle_inversion`, r2 via Part 1's new F18 partition — both shipped a
+   general `serializer.py` fix, real-graded OK on all 46 tests incl. the hidden F2P (see III.1).
+   Green guards 11790 ✅ / 12039 ✅ held with 0 oracle-inversion telemetry (seams inert on
+   non-inversion instances); 11848's one fail was its documented `.now()/utcnow()` convention
+   variance (III.2), oracle-inversion seams provably inert.
 3. **Close the hatches with evidence requirements, P5 degrade reach + mechanical extraction (2026-07-14, IMPLEMENTED).** Convention gate: for time/tz (and similar semantic families), an identical retry is accepted only with cited in-file evidence (existing `utcnow` sites, docstring domain) — otherwise require the variant switch. Hub gate: re-issue must name why the bounced file is the defining site (quote the definition), not merely repeat the edit. (11848 ×2, 11964-A.) **New in round F:** P5 turn-read-degrade branch (null LLM verdict) no longer stands down mechanical extractors — literals + thresholds still extracted from raw issue text, preamble lines still planted (verbatim quotes are facts not guesses). `extractScriptPath` (repro-drift.ts) replaces basename extraction, honoring absolute /var/folders/… paths round-F 11848 encountered. Thresholds stored via `setIssueThresholds`/`getIssueThresholds` (turn-read-store.ts), quotes threaded as statedRules. New ISSUE-STATED RULES (binding) preamble: assert BOTH sides of each stated boundary. All three are converts, never blocks.
 4. **Give the repro-fidelity judge teeth on assert shape — RF-4 deterministic tooth (2026-07-14, IMPLEMENTED).** Enforce the seed's own point (2): typed API-level asserts, refuse print-only and rendered-output probes (11790, 12039). New `detectStringifiedMirrorAssert` fires when an assert's expected side stringifies the value under test (`== str(x)`), chained 4th in the verdict chain (after assertion-teeth, rendered-assert, required-literals). Does NOT fire on subject-stringify, membership asserts, non-assert lines. Turns 12039's printed red into a binding red. Also: `RunReproFidelityJudgeInput.statedRules?: readonly string[]` renders a "Stated boundary rules" rubric (byte-identical prompt when absent). Both are converts (gap/nudge), never blocks. **RF-8 finish-time re-check (2026-07-14, IMPLEMENTED):** RF-4's one-shot pin-time judgment alone could not convert 11790's fork because the agent rewrote the pinned repro between judgment and finish, from typed asserts into if/append form, dodging every assert-anchored detector. RF-8 adds a bounded content re-check at M4 green finish (lines 3345–3358 prompt.ts): read the on-disk repro current state, run `detectTypeUnfaithfulRepro` composite (numeric-string-conflict + stringified-mirror, the high-precision subset), and on hit, deny once with nudge naming the conflict line + demanding typed equality. High-precision audit (5 of 7 round-F runs logged fidelity gaps, none were numeric-string/mirror) ensures zero false-fire on rendered-tooth or LLM-judge gaps. **Live-validated 2026-07-14** (5-attempt strict fresh-arena re-fire hunt, binary `388cf3255`): 5/5 REAL PASS, RF-8 finish-re-check fired + converted on attempt 5 (honest attribution: via the pre-existing numeric-string-conflict half of the composite, not the same-day one-hop `str()`-alias extension in `388cf3255` — see [STRICT_CYCLE.md](./STRICT_CYCLE.md)).
 5. **Seed precedence + the two cheap priors.** One sentence: *typed-mirror overrides

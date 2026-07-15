@@ -76,7 +76,7 @@ those buy, paying only on signal.
 | Report item | Failure class it converts | Cost shape |
 |---|---|---|
 | 1. Hard-tail signals → deterministic escalation/decomposition | 8/8 reds ran 0-escalation; denied finishes discarded | tail-only spend |
-| 2. Oracle-inversion escape | 11815 ×2 (gold fix squeezed out by pin + no-test-edit) | ~$0 |
+| 2. Oracle-inversion escape **(IMPLEMENTED + live-validated 2/2, `1270cbccd`)** | 11815 ×2 (gold fix squeezed out by pin + no-test-edit) — both trajectories now convert to a general fix (report III.1 / V.2) | ~$0 |
 | 3. Close gate hatches (evidence-bearing retry) | 11848 ×2, 11964-A (identical-retry / re-issue walk-throughs) | ~$0 |
 | 4. Repro-fidelity teeth (typed asserts enforced) | 11790, 12039 (rendered/print witnesses) | ~$0 |
 | 5. Seed precedence + %r + sibling-enumeration priors | 11790 clause conflict, 11815-E, 12039 | ~$0 |
