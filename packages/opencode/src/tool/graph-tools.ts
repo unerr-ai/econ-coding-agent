@@ -191,6 +191,58 @@ export async function ensureGraphReady(startDir: string = process.cwd()): Promis
 }
 
 /**
+ * One-shot graph index for the `opencode init` command: (re)build the on-disk
+ * graph db for `startDir`'s canonical root and hand back where it landed plus
+ * the counts. Runs the SAME persistence path the lazy runtime uses (graphDbPath
+ * + schema evict/stamp), so a later agent turn warm-starts off this db instead
+ * of cold-indexing. Unlike getOrCreateEntry it awaits the index and returns its
+ * result rather than swallowing it. `force` wipes the db first so the rebuild
+ * ignores the content-hash cache. `stats` is the whole-graph total; `reindexed`
+ * is how many files were re-extracted this run (0 when the cache was fresh).
+ *
+ * @sem domain=intelligence role=indexing
+ */
+export async function prepareGraphIndex(
+  startDir: string = process.cwd(),
+  opts: { force?: boolean } = {},
+): Promise<{
+  root: string
+  dbPath: string
+  stats: { files: number; entities: number; edges: number }
+  reindexed: number
+}> {
+  const root = canonicalRepoRoot(startDir)
+  const dbPath = graphDbPath(root)
+  if (opts.force) {
+    _graphs.delete(root)
+    try {
+      if (existsSync(dbPath)) unlinkSync(dbPath)
+    } catch {
+      /* best-effort — a stale-schema evict below will rebuild anyway */
+    }
+  }
+
+  let entry = _graphs.get(root)
+  if (!entry) {
+    mkdirSync(path.dirname(dbPath), { recursive: true })
+    evictStaleSchema(dbPath)
+    const graph = new BunSqliteGraph(dbPath, root)
+    stampSchemaVersion(dbPath)
+    const indexReady = graph.index(root)
+    entry = { graph, indexReady: indexReady.catch(() => {}) }
+    _graphs.set(root, entry)
+    const delta = await indexReady
+    return { root, dbPath, stats: graph.stats(), reindexed: delta.files }
+  }
+
+  // Root already has a live graph in this process — let any in-flight initial
+  // index settle, then refresh (hash-skip makes the second pass cheap).
+  await entry.indexReady
+  const delta = await entry.graph.index(root)
+  return { root, dbPath, stats: entry.graph.stats(), reindexed: delta.files }
+}
+
+/**
  * Graph-tool execute paths bound their wait on the initial index to this long
  * before degrading to a "still indexing" response — longer than the turn-open
  * risk probe's budget (RISK_PROBE_INDEX_BUDGET_MS) since a tool call the model

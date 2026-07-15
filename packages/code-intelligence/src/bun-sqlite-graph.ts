@@ -437,6 +437,20 @@ export class BunSqliteGraph implements CodeIntelligence {
     return { files: filesIndexed, entities: entitiesTotal, edges: edgesTotal }
   }
 
+  /**
+   * Whole-graph row totals read straight off the tables. Distinct from index()'s
+   * return value, whose `files` counts only what was re-extracted this run (0 on a
+   * fully warm repo) — this is the true persisted total the `opencode init` receipt
+   * reports so a warm re-index still shows the real graph size, not a 0.
+   *
+   * @sem domain=intelligence role=indexing
+   */
+  stats(): { files: number; entities: number; edges: number } {
+    const count = (table: string) =>
+      (this.db.prepare(`SELECT COUNT(*) as n FROM ${table}`).get() as { n: number } | null)?.n ?? 0
+    return { files: count("files"), entities: count("entities"), edges: count("edges") }
+  }
+
   // -------------------------------------------------------------------------
   // Graph queries
   // -------------------------------------------------------------------------
