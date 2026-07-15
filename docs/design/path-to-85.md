@@ -107,6 +107,26 @@ rest, in cost order.
   by relevance to the issue cut SWE-Agent cost 23% *and* reduced false positives
   (arXiv:2510.18270). Our F11 neighbor machinery already selects; tightening selection
   to issue-relevance is a refinement, not new spend.
+- **Shape-gate the fix machinery by the turn-read verdict (2026-07-15, IMPLEMENTED).**
+  The harness armed on *every* turn, so a read-only turn (a question, an audit, a
+  research lookup, a command-run) paid the full fix apparatus — decomposing a question
+  into tiered reasoner/oracle slices, authoring a repro, editing a test — before
+  answering. Now a high-confidence all-read-only verdict (`verdictIsReadOnly`,
+  arming-judge.ts) stands the fix machinery down on three seams: `degraded:true` arming
+  (answer inline, no decomposition, no repro pre-pass), `bugShaped=false` (the S3/wave-10
+  finish gates stop nudging an empty-finish question to "author a repro" — their
+  `testEditGateArmed` disjunct had made a plain Q&A bug-shaped), and a `READ_ONLY_PLAYBOOK`
+  preamble that steers answer-and-stop. The deterministic `nonFixQaShortCircuit`
+  (turn-triage.ts) skips the LLM turn-read entirely for a plain question — cheaper still.
+  This is strictly cost-negative on read-only turns and *provably inert* on fix work: a
+  compound turn carrying even one diagnosis/build/refactor goal is not read-only, so the
+  full harness stays armed (the fix reproduction still arms — unit-verified, and a live
+  compound probe planted repro + localization seeds). Live result: the same
+  "where is resolve_redirects" Q&A went 31 turns / $0.17 → 3 conductor steps / $0.0056. It leverages the turn-read
+  classifier and goal-split we already run: the initial LLM call decides *what kind of
+  task this is*, and the harness arms to match instead of assuming every turn is a fix.
+  This is the rare harness knob that is cheaper with no accuracy cost — the mirror image
+  of the observation-masking item above.
 
 ### Tier 1 — ≈$0 marginal (prompt/gate/code changes)
 

@@ -561,8 +561,11 @@ export function nonFixQaShortCircuit(userPrompt: string): TriageVerdict | null {
   // Any fix / mutation / diagnosis token forces the model path.
   if (QA_FIX_INTENT_RE.test(prompt)) return null
 
-  // Read the lead word past any stacked politeness/framing prefixes.
-  let head = prompt.toLowerCase()
+  // Read the lead word past any stacked politeness/framing prefixes. The CLI
+  // `run` command wraps the prompt in surrounding quotes when it builds the
+  // user-message part, so strip a leading quote/backtick/whitespace wrapper
+  // first — otherwise the lead word is the quote char and the gate never fires.
+  let head = prompt.toLowerCase().replace(/^["'`\s]+/, "")
   let stripped = true
   while (stripped) {
     stripped = false
@@ -575,7 +578,7 @@ export function nonFixQaShortCircuit(userPrompt: string): TriageVerdict | null {
       }
     }
   }
-  const lead = head.match(/^[a-z]+/)?.[0] ?? ""
+  const lead = head.match(/^[^a-z]*([a-z]+)/)?.[1] ?? ""
   if (!lead) return null
 
   const isInterrogative = QA_INTERROGATIVE_LEADS.has(lead) && prompt.includes("?")

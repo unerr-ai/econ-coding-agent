@@ -734,6 +734,22 @@ describe("nonFixQaShortCircuit — the pre-LLM non-fix Q&A over-work guard", () 
     }
   })
 
+  test("tolerates the CLI's surrounding-quote wrapper on the prompt", () => {
+    // The `run` command wraps the prompt in double-quotes when building the
+    // user-message part (observed live: userText = "\"where is X?\""). The gate
+    // must still fire — and still refuse a quoted fix task.
+    for (const prompt of [
+      '"where is resolve_redirects defined and what does it do?"',
+      "'which files import the proxy bridge?'",
+      "`explain how retries are sequenced`",
+    ]) {
+      expect(nonFixQaShortCircuit(prompt), `quoted "${prompt}" should still fire`).not.toBeNull()
+    }
+    for (const prompt of ['"fix the failing redirect test"', "'add retry backoff to the client'"]) {
+      expect(nonFixQaShortCircuit(prompt), `quoted fix "${prompt}" must NOT fire`).toBeNull()
+    }
+  })
+
   test("the returned goal's quote is the verbatim trimmed prompt", () => {
     const verdict = nonFixQaShortCircuit("  where is the router?  ")
     expect(verdict!.goals[0]!.quote).toBe("where is the router?")

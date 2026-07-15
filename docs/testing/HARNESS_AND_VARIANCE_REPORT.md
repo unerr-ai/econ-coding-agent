@@ -82,11 +82,25 @@ turnRole == continuation → inherit everything from the previous turn: verdict,
 ```
 if no verdict            → DEGRADED_ARMING (:94-102): everything stands down, hardness
                            floor "trivial", degraded:true → conductor held INLINE all turn
+read-only turn           → degraded:true too (applied at the prompt.ts arming site, not
+  (verdictIsReadOnly)      inside decideArming): EVERY goal qa/research/audit/run-only AND
+                           confidence=="high" → answer inline, no decomposition, no repro
+                           pre-pass. A COMPOUND turn with even one diagnosis/build/refactor
+                           goal is NOT read-only → full harness. Gated on high confidence so
+                           a shaky read pays the harness rather than no-op a misread ticket.
 per diagnosis goal:  arm |= !fixSpecified && (!locationNamed || hardness=="hard")   (:149)
 armReproduction = any diagnosis goal exists (repro-first even for located bugs)    (:165)
 hardness = anyNeedsPlan ? "hard" : max(goal hardness)                              (:167)
 ambiguity = anyGoalAmbiguous || confidence=="low" ? "ambiguous" : "clear"          (:168)
 ```
+
+The read-only stand-down is the turn-shape lever that arms the fix machinery
+*as-needed* rather than on every turn (the deterministic `nonFixQaShortCircuit`,
+`turn-triage.ts`, is its cheap fast-path — it synthesizes exactly such a
+high-confidence `qa` verdict and skips the LLM turn-read entirely). Its preamble
+counterpart is the `READ_ONLY_PLAYBOOK` line (`prompts/preambles.ts`), emitted on
+the same `verdictIsReadOnly` condition, steering the conductor to answer-and-stop
+instead of authoring a repro or running the suite inline.
 
 **3. Seeds** (`buildTriageTodoSkeleton`, `slice-orchestrator.ts:1442-1472`; contents in
 `prompts/seeds.ts`) are planted only when the todo list is empty. Per diagnosis goal:
@@ -219,7 +233,13 @@ being used as the exit door on real failures.
    → one bounded deny (:3345-3358) naming the conflict + loud pass-through
 3. F18 seen-red          → any watched red in the transcript not re-run green (incl.
    exit-0 laundered pipes) → nudge once → loud pass                        (:3056-3110, seen-red.ts:149-171)
-4. bug-shaped turns:
+4. bug-shaped turns  [bugShaped = !verdictIsReadOnly(verdict) && (any diagnosis goal ||
+   testEditGateArmed)]:  a READ-ONLY verdict (every goal qa/research/audit/run-only) is
+   never bug-shaped, so this whole block stands down (P4b, 2026-07-15). Before that fix
+   the `testEditGateArmed` disjunct made a pure Q&A bug-shaped — the no-test-edit gate
+   arms on any turn that doesn't authorize test work, a question included — so S3 nudged
+   an empty-finish question to "author a repro" ×3 and the conductor churned 31 inline
+   steps / 17 reasoner escalations inventing verification for a fix never in scope.
    wave-10 ran-no-real-test deny (once per session, ever)                  (:3111-3167)
    S3 unverified-finish: no pin, or pin+zero source edits → nudge ≤3 → loud (:3176-3243)
 5. F11/F16 regression gate: ≤3 neighbor suites (exact-twin → proximity → F17 module
@@ -580,6 +600,27 @@ The three anti-patterns:
    consumed as routing evidence. This is the calibrated-deferral gap: the harness
    already *produces* the deferral signal and throws it away.
 
+**A fourth anti-pattern, off the fix-turn axis — over-work on read-only turns
+(2026-07-15, FIXED).** The eight reds are all fix tasks; a separate finding came from
+the capability probes: the fix machinery armed *globally*, so a pure question ("where is
+`resolve_redirects` and what does it do?") decomposed its own mid-turn todos into tiered
+reasoner/oracle slices, authored an unrelated repro script, and edited a test file
+before answering. Root cause: a `qa` verdict stood the repro/localization doors down
+(via `decideArming`) but left `degraded` unset, so the orchestration hook still
+decomposed. A live probe surfaced a second, subtler leak: the S3 finish gate is guarded
+by `bugShaped`, whose `testEditGateArmed` disjunct (the no-test-edit gate arms on any
+turn not authorizing test work — a question included) made the Q&A bug-shaped, so after
+answering it was nudged ×3 to "author a repro" and churned 31 inline steps / 17 reasoner
+escalations. Fix, three coordinated parts (I.1 §2, I.5): (1) a high-confidence
+all-read-only verdict arms `degraded:true`, holding the conductor inline (no
+decomposition); (2) `bugShaped` short-circuits to false on a read-only verdict, so no
+finish gate fires; (3) the `READ_ONLY_PLAYBOOK` preamble steers the conductor to
+answer-and-stop. Post-fix the same Q&A ran **3 conductor steps at $0.0056** (from 31
+turns / $0.17 — ~30× cheaper), answered correctly, touched no file; a compound "explain
+X and fix Y" probe kept the full harness (repro + localization seeds, orchestration
+engaged). This is the "arm as-needed, not on every turn" correction the round-F review
+called for, on a different axis than the deferral gap.
+
 ### IV.4 Mapping to the countermeasure literature
 
 | Observed class | Countermeasure (evidence) | Fit |
@@ -641,6 +682,23 @@ cycle: improve the orchestration, don't amputate it).
 10. **Best-of-N stays the general answer for pure hypothesis-commitment forks**
     (11964 layer draw, 12039 half-diagnosis discard) — E1-gated as agreed; items 1–4
     are the deterministic subset that doesn't wait for it.
+11. **Shape-gate the fix machinery by the turn-read verdict — read-only turns stand
+    down (2026-07-15, IMPLEMENTED + live-validated).** The harness armed globally; a
+    read-only turn (every goal qa/research/audit/run-only, high confidence) now stands
+    down on three seams: (a) `degraded:true` arming holds the conductor inline instead
+    of decomposing a question into fix slices; (b) `bugShaped` short-circuits to false
+    on a read-only verdict, so the S3/wave-10 finish gates never nudge an empty-finish
+    question to "author a repro" (the `testEditGateArmed` disjunct had made a plain Q&A
+    bug-shaped); (c) the `READ_ONLY_PLAYBOOK` preamble steers answer-and-stop.
+    `verdictIsReadOnly` (arming-judge.ts) is the shared lever; the deterministic
+    `nonFixQaShortCircuit` (turn-triage.ts) is its zero-LLM fast-path. A compound turn
+    with any diagnosis/build/refactor goal is NOT read-only → full harness (verified: a
+    compound probe planted repro + localization seeds and engaged orchestration).
+    Live-validated: the same "where is resolve_redirects" Q&A went 31 turns / 17 reasoner
+    / $0.17 → **3 conductor steps / $0.0056**, correct answer, zero files touched. It
+    leaves every fix-turn gate that guards on landed edits untouched (F18 seen-red,
+    F11/F16 regression fire only on real source edits, which a stood-down read-only turn
+    never lands), so the 8-red analysis above is unaffected.
 
 ---
 

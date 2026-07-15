@@ -5,7 +5,7 @@
 // gate is armed (prompt.ts guards the injection on testEditGateArmed, not on
 // triage having run).
 import type { TriageVerdict } from "../turn-triage"
-import type { ArmingDecision } from "../arming-judge"
+import { verdictIsReadOnly, type ArmingDecision } from "../arming-judge"
 
 // P3 — per-shape playbooks (≤4 lines each), appended when the verdict carries
 // the shape. Policy statements only; no special decomposition path — the
@@ -19,6 +19,17 @@ const RESEARCH_PLAYBOOK = [
 const REFACTOR_PLAYBOOK = [
   "REFACTOR PLAYBOOK: behavior must NOT change — done when the existing suite is green and no public signature breaks (the edit-time governance gate flags callers at risk).",
   "Type refactor slices `mechanical` (the suite is the safety net); if the work adds behavior, that is a separate build goal — never smuggle it into the refactor.",
+].join("\n")
+
+// P4b — the read-only playbook, appended when EVERY goal is read-only
+// (qa/research/audit/run-only — no diagnosis/build/refactor goal). It steers the
+// conductor to answer-and-stop: the observed over-work was a pure question
+// spawning a repro script + tiered verify slices. Positively framed (leads with
+// the deliverable, not a "don't") per the negative-constraint caution in the
+// variance report — a bare prohibition primes the very token it forbids.
+const READ_ONLY_PLAYBOOK = [
+  "READ-ONLY TURN: every goal here asks you to answer, locate, explain, review, or run something — not to change code. The turn is DONE the moment the question is answered or the findings are reported.",
+  "Investigate with the graph/read tools and reply directly. Authoring a repro script, editing source or tests, and running the full suite are OUT OF SCOPE unless the user explicitly asks — and a question needs no fix to confirm, so do not open todos to 'verify' an answer.",
 ].join("\n")
 
 /**
@@ -62,6 +73,7 @@ export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): 
     lines.push(`CONSTRAINT (${constraint.kind}): "${constraint.quote}"`)
   }
   lines.push("Track each goal against its own todo; verify each independently — never conflate or drop one for another.")
+  if (verdictIsReadOnly(verdict)) lines.push(READ_ONLY_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "research")) lines.push(RESEARCH_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "refactor")) lines.push(REFACTOR_PLAYBOOK)
   if (arming.ambiguity === "ambiguous" || arming.hardness === "hard") {

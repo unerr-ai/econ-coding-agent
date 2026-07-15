@@ -9,7 +9,7 @@
 
 import { describe, test, expect } from "bun:test"
 import { allocateSlice, resolutionDecision } from "@opencode-ai/code-intelligence"
-import { decideArming, DEGRADED_ARMING } from "../../src/session/arming-judge"
+import { decideArming, verdictIsReadOnly, DEGRADED_ARMING } from "../../src/session/arming-judge"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 
 function verdictOf(goals: TriageGoal[], confidence: "high" | "low" = "high"): TriageVerdict {
@@ -315,5 +315,43 @@ describe("decideArming — armReproduction (S2 repro-first gate)", () => {
       ]),
     )
     expect(decision.armReproduction).toBe(true)
+  })
+})
+
+describe("verdictIsReadOnly — the turn-shape lever the harness gates on", () => {
+  test("every read-only shape (qa/research/audit/run-only) is read-only", () => {
+    for (const shape of ["qa", "research", "audit", "run-only"] as const) {
+      expect(verdictIsReadOnly(verdictOf([{ quote: "where is X", shape, deliverable: "answer" }]))).toBe(true)
+    }
+  })
+
+  test("a turn of ALL read-only goals is read-only (a multi-question turn still stands the fix machinery down)", () => {
+    const verdict = verdictOf([
+      { quote: "where is resolve_redirects", shape: "qa", deliverable: "answer" },
+      { quote: "list the retry call sites", shape: "audit", deliverable: "list" },
+    ])
+    expect(verdictIsReadOnly(verdict)).toBe(true)
+  })
+
+  test("every editing shape (diagnosis-*/build/refactor) is NOT read-only — the fix harness stays armed", () => {
+    for (const shape of ["diagnosis-vague", "diagnosis-grounded", "build", "refactor"] as const) {
+      expect(verdictIsReadOnly(verdictOf([{ quote: "do the thing", shape, deliverable: "done" }]))).toBe(false)
+    }
+  })
+
+  test("a COMPOUND turn with even one fix goal is NOT read-only — 'explain X and fix Y' keeps the full harness", () => {
+    const compound = verdictOf([
+      { quote: "explain how redirect handling works", shape: "qa", deliverable: "answer" },
+      { quote: "fix the failing redirect test", shape: "diagnosis-grounded", deliverable: "test green" },
+    ])
+    expect(verdictIsReadOnly(compound)).toBe(false)
+    // …and its diagnosis goal still arms reproduction — the fix work fires.
+    expect(decideArming(compound).armReproduction).toBe(true)
+  })
+
+  test("an absent or empty verdict is NOT read-only — the null-verdict DEGRADED_ARMING path owns that posture", () => {
+    expect(verdictIsReadOnly(null)).toBe(false)
+    expect(verdictIsReadOnly(undefined)).toBe(false)
+    expect(verdictIsReadOnly(verdictOf([]))).toBe(false)
   })
 })

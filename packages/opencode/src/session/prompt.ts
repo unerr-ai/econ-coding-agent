@@ -170,7 +170,7 @@ import {
   type TriageComplete,
   type TriageVerdict,
 } from "./turn-triage"
-import { decideArming, type ArmingVerdict } from "./arming-judge"
+import { decideArming, verdictIsReadOnly, type ArmingVerdict } from "./arming-judge"
 import { setArmingDecision, getArmingDecision } from "./arming-store"
 import {
   setTurnVerdict,
@@ -3497,9 +3497,21 @@ export const layer = Layer.effect(
             // patch — nothing pinnable was ever authored/run).
             if (!session.parentID) {
               const storedVerdict = getTurnVerdict(sessionID)
+              // P4b — a READ-ONLY turn (every goal qa/research/audit/run-only)
+              // is never bug-shaped, so none of the fix-finish gates below fire
+              // on it. Without this a pure question tripped bugShaped via the
+              // `testEditGateArmed` disjunct (the no-test-edit gate arms on any
+              // turn that doesn't authorize test work — a question included),
+              // so the S3 "author a repro" nudge fired 3× and the conductor
+              // churned inventing verification for a fix that was never in
+              // scope. The disjunct still guards fix turns that evade the
+              // diagnosis shape (11885's enhancement wording) — those are NOT
+              // read-only, so their protection is untouched; a null verdict
+              // (P5 degrade) is not read-only either and stays protected.
               const bugShaped =
-                (storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
-                testEditGateArmed(sessionID)
+                !verdictIsReadOnly(storedVerdict) &&
+                ((storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
+                  testEditGateArmed(sessionID))
               // F11 — the shared trajectory scan is hoisted ABOVE the M4 gate
               // (round F): one scan per finish arrival, reused by M4's
               // interpreter discovery and every gate here — the "never a
@@ -4146,6 +4158,30 @@ export const layer = Layer.effect(
                 // (autoTypeTodos) and the per-slice difficulty floor never
                 // read a stale decision from an earlier turn.
                 arming = decideArming(verdict)
+                // P4b — a READ-ONLY turn (every extracted goal is qa/research/
+                // audit/run-only — none of them a diagnosis/build/refactor goal
+                // that edits code) arms DEGRADED: the stand-down doors are
+                // already false via decideArming, and `degraded:true` is what
+                // the orchestration hook reads to hold the conductor's mid-turn
+                // todos INLINE (slice-orchestrator.ts §L4.2), so a pure question
+                // answers-and-stops instead of decomposing into tiered
+                // reasoner/oracle slices that invent unrelated work. A COMPOUND
+                // turn carrying even ONE fix goal is not read-only, so its full
+                // harness stays armed and the fix work still fires. Gated on
+                // HIGH confidence — a shaky classification pays the full
+                // harness rather than risk standing a misread fix ticket down
+                // into a no-op (the false-green guard). The deterministic
+                // nonFixQaShortCircuit above yields exactly such a
+                // high-confidence qa verdict, so it flows through this same
+                // general lever with no special case: turn shape, not a regex,
+                // is what arms the harness as-needed.
+                if (verdict && verdict.confidence === "high" && verdictIsReadOnly(verdict) && !arming.degraded) {
+                  arming = {
+                    ...arming,
+                    degraded: true,
+                    evidence: "read-only turn (qa/research/audit/run-only) — answer inline, no decomposition or repro pre-pass",
+                  }
+                }
                 setArmingDecision(sessionID, arming)
                 yield* Effect.logInfo("arming_decided", {
                   "session.id": sessionID,

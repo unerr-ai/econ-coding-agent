@@ -64,6 +64,27 @@ function isDiagnosisGoal(goal: TriageGoal): boolean {
   return goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
 }
 
+/** The read-only goal shapes — a goal that answers, investigates, reviews, or runs a
+ * command, never one that edits code (the diagnosis/build/refactor shapes are the editors). */
+const READ_ONLY_SHAPES: ReadonlySet<TriageGoal["shape"]> = new Set(["qa", "research", "audit", "run-only"])
+
+/**
+ * Whether this turn is PURELY read-only — every extracted goal is a question,
+ * investigation, review, or command-run, none of them a code-editing goal. Such a
+ * turn arms DEGRADED (answers inline, never decomposes a question into tiered fix
+ * slices, no repro pre-pass); a COMPOUND turn carrying even one editing goal
+ * (any diagnosis/build/refactor goal) keeps the full harness so the fix work still fires.
+ * Absent/empty goals are NOT read-only — the null-verdict path owns that posture
+ * via DEGRADED_ARMING. This is the turn-shape lever the harness gates on so the
+ * fix machinery is armed as-needed, not on every turn.
+ *
+ * @sem domain=routing role=router
+ */
+export function verdictIsReadOnly(verdict?: TriageVerdict | null): boolean {
+  if (!verdict || verdict.goals.length === 0) return false
+  return verdict.goals.every((goal) => READ_ONLY_SHAPES.has(goal.shape))
+}
+
 /**
  * The ONE posture a degraded/absent turn-read resolves to (P5) — the single
  * source of truth for "no verdict", so no consumer synthesizes its own guess.
