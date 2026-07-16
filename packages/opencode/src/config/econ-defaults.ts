@@ -18,11 +18,12 @@ const PERSONA_DESCRIPTION: Record<EconPersona, string> = {
 
 /**
  * Permission deltas for each persona, layered on top of econ's global `permission` defaults
- * below (which already sets read/list/glob/grep/lsp to allow and edit/bash/webfetch/websearch
- * to ask). All six personas are equally capable now — no persona-specific override is listed
- * here; `task` and `question` are denied for every persona (OL-9.3d, injected by the wiring
- * below) and the childSlicePermission overlay (slice-orchestrator.ts) grants edit/bash/web at
- * dispatch and re-denies the danger bash patterns for every seat alike.
+ * below (which already sets read/list/glob/grep/lsp/edit/bash/webfetch/websearch to allow).
+ * All six personas are equally capable now — no persona-specific override is listed here;
+ * `task` and `question` are denied for every persona (OL-9.3d, injected by the wiring below)
+ * and the childSlicePermission overlay (slice-orchestrator.ts) grants edit/bash at dispatch
+ * and re-denies the danger bash patterns for every seat alike — web is NOT touched by that
+ * overlay, so it follows this config floor (or a stricter user/arena override) instead.
  *
  * @sem domain=configuration role=config
  */

@@ -427,6 +427,67 @@ tests, 0 fail (27ms):
 
 ---
 
+## Web search default enablement — S2.3a
+
+**Status:** shipped 2026-07-16, tests green.
+
+Exa-backed web search (`websearch` tool) is now default-on for every econ tier and
+persona as a cost-efficient lookup capability. The goal: one targeted search early
+when a task hinges on external knowledge — a single good search resolves ~54% of
+lookup-shaped tasks without further recon turns (user-supplied motivating stat).
+The model can explicitly request more results (defaults: 5 results, 8000-char context
+limit) or webfetch additional pages.
+
+**Control surfaces:**
+
+- **Runtime flag:** `enableExa` (packages/opencode/src/effect/runtime-flags.ts:31–40)
+  defaults `TRUE`; single kill switch `OPENCODE_DISABLE_WEBSEARCH=1`.
+- **Tool registration:** `webSearchEnabled` simplified in
+  `packages/opencode/src/tool/registry.ts:62–64` — advertised on every provider path
+  including our litellm gateway.
+- **Prompt doctrine:** `WEB_LOOKUP_DOCTRINE` fragment (packages/opencode/src/session/prompts/fragments.ts:35–51)
+  composes into `BASE` (prompts/base.ts:17) → inherited by all 4 tiers + 6 personas.
+  Explorer persona delta (personas.ts:27). Read-only playbook lookup clause
+  (preambles.ts:48). Doctrine: ONE targeted search EARLY when task hinges on external
+  knowledge; search → webfetch the authoritative source; never search what the repo
+  answers; denied search = proceed on local evidence.
+- **Cost-lean defaults:** `numResults: 5` (max 20), `contextMaxCharacters: 8000` (max 50000).
+- **Deterministic provider:** explicit `OPENCODE_WEBSEARCH_PROVIDER` override >
+  parallel-only-if-sole-enabled > Exa always. The old `checksum(sessionID)%2`
+  per-session coin flip was deleted (per §6.8 route-determinism rule).
+
+**Files touched:**
+
+| File | Change |
+|---|---|
+| `packages/opencode/src/effect/runtime-flags.ts:31–40` | `enableExa` defaults TRUE, kill switch OPENCODE_DISABLE_WEBSEARCH |
+| `packages/opencode/src/tool/registry.ts:62–64` | `webSearchEnabled` simplified |
+| `packages/opencode/src/tool/websearch.ts` | `selectWebSearchProvider`, deterministic routing |
+| `packages/core/src/tool/websearch.ts` | `defaultConfigLayer` (dormant, zero callers) |
+| `packages/opencode/src/session/prompts/fragments.ts:35–51` | `WEB_LOOKUP_DOCTRINE` |
+| `packages/opencode/src/session/prompts/base.ts:17` | doctrine composes into BASE |
+| `packages/opencode/src/session/prompts/personas.ts:27` | explorer delta |
+| `packages/opencode/src/session/prompts/preambles.ts:48` | READ_ONLY_PLAYBOOK lookup clause |
+| `packages/opencode/test/config/econ-defaults.test.ts:198–231` | seat coverage drift tests (websearch/webfetch allow floor) |
+| `packages/opencode/src/session/slice-orchestrator.ts` | deny-precedence fix: no automatic allow overlay |
+| `packages/opencode/src/config/econ-defaults.ts` | permission floor (agent.permission first, session overlay last) |
+
+**Deny-precedence fix:** `childSlicePermission` (slice-orchestrator.ts) no longer
+appends `websearch`/`webfetch` allow rules — the config-layer floor
+(config/econ-defaults.ts permission block) grants web per-seat. An explicit user or
+arena `opencode.json` deny now wins by merge order (agent.permission merged first,
+session overlay last; evaluation is `findLast` — last matching rule wins, and the
+overlay no longer carries a web rule to shadow the deny). Previously the overlay silently overrode
+an explicit deny for every slice child — a strict-benchmark integrity hole now closed.
+Benchmark arenas additionally set `OPENCODE_DISABLE_WEBSEARCH=1` + per-seat config
+denies (host-side scripts, outside this repo).
+
+**Tests:** `packages/opencode/test/config/econ-defaults.test.ts:198–231` drift tests
+verify no seat drops the `websearch`/`webfetch` tools (derived from ECON_PERSONAS).
+All green.
+
+---
+
 ## Window pruning — S2.4
 
 **Module:** `packages/code-intelligence/src/prune.ts`.

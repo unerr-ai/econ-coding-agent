@@ -32,6 +32,21 @@ export const EVICTION_RULE =
 export const VERIFY_ONCE =
   "RULE: verify once, at the finish line. Do not re-run a test suite that already passed unless a file has changed since that run — a second green proves nothing new and wastes a step. One green run of the full relevant suite IS the finish line, not N runs of it."
 
+// OL-9.5 web-lookup doctrine — one static block composed into BASE (base.ts) so every econ tier AND
+// persona inherits the same when-to-search rule (web search is now default-on across all econ seats).
+// Motivating datum: ~54% of lookup-shaped tasks resolve on ONE well-targeted search — the failure mode
+// this guards is a model guessing at external facts (unknown API/version behavior, dependency errors,
+// post-cutoff changes) or burning repo-recon turns on a question the repo itself cannot answer. Static
+// (OL-9.2a): no session/env interpolation, so it stays in the cached prefix; kept to a header + 4 lines
+// to protect the prefix budget. Denied-tool clause included so a no-web environment degrades cleanly.
+export const WEB_LOOKUP_DOCTRINE = [
+  "# Reaching for the web",
+  "- When the task hinges on external knowledge you don't hold — an unfamiliar API or library's behavior, a dependency or version error, anything plausibly changed after your training cutoff — do ONE targeted `websearch` EARLY, before guessing and before spending repo-recon turns; most lookup-shaped blockers clear on a single good search.",
+  "- Search to find the source, then `webfetch` the authoritative one (official docs, changelog, or issue) — every fact you carry from the web names the page you fetched it from.",
+  "- NEVER search for what the repo itself answers — code structure, local behavior, and call sites are what the read/search/graph tools are for.",
+  "- If `websearch` is denied or unavailable in this environment, treat that as a signal to proceed on local evidence: note the gap and move on — never retry the denied call.",
+].join("\n")
+
 // Generate the authoritative tool-usage section from the live advertised tool set (Sprint 5b §10.1).
 // This is the single source of truth: the prompt can never name a tool the model isn't given, which
 // closes the prompt↔tool drift class (the grep/glob coupling) permanently. The full per-tool schema

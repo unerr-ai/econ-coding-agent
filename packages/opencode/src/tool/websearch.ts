@@ -20,7 +20,6 @@ import { HttpClient } from "effect/unstable/http"
 import * as Tool from "./tool"
 import * as McpWebSearch from "./mcp-websearch"
 import DESCRIPTION from "./websearch.txt"
-import { checksum } from "@opencode-ai/core/util/encode"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { rankPassagesByPrompt } from "../../../code-intelligence/src/webfetch/bm25"
@@ -34,7 +33,7 @@ import { hashInputs, put, getSlice, withMeta, recordToolCall } from "./_shared"
 export const Parameters = Schema.Struct({
   query: Schema.String.annotate({ description: "Websearch query" }),
   numResults: Schema.optional(Schema.Number).annotate({
-    description: "Number of search results to return (default: 8)",
+    description: "Number of search results to return (default: 5)",
   }),
   livecrawl: Schema.optional(Schema.Literals(["fallback", "preferred"])).annotate({
     description:
@@ -44,7 +43,7 @@ export const Parameters = Schema.Struct({
     description: "Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search",
   }),
   contextMaxCharacters: Schema.optional(Schema.Number).annotate({
-    description: "Maximum characters for context string (passed to provider; BM25 pruning is applied on top)",
+    description: "Maximum characters for context string (default: 8000; passed to provider; BM25 pruning is applied on top)",
   }),
   depth: Schema.optional(Schema.Number).annotate({
     description:
@@ -76,9 +75,10 @@ export type WebSearchProvider = Schema.Schema.Type<typeof WebSearchProviderSchem
 export function selectWebSearchProvider(sessionID: string, flags = { exa: false, parallel: false }): WebSearchProvider {
   const override = process.env.OPENCODE_WEBSEARCH_PROVIDER
   if (override === "exa" || override === "parallel") return override
-  if (flags.parallel) return "parallel"
-  if (flags.exa) return "exa"
-  return Number.parseInt(checksum(sessionID) ?? "0", 36) % 2 === 0 ? "exa" : "parallel"
+  // Deterministic: parallel only wins when it's the sole enabled provider; exa is
+  // the default otherwise (no per-session coin flip — route determinism matters).
+  if (flags.parallel && !flags.exa) return "parallel"
+  return "exa"
 }
 
 export function webSearchProviderLabel(provider: unknown) {
@@ -133,9 +133,9 @@ function callProvider(
     {
       query: params.query,
       type: params.type || "auto",
-      numResults: params.numResults || 8,
+      numResults: params.numResults || 5,
       livecrawl: params.livecrawl || "fallback",
-      contextMaxCharacters: params.contextMaxCharacters,
+      contextMaxCharacters: params.contextMaxCharacters ?? 8000,
     },
     "25 seconds",
   )
@@ -342,7 +342,7 @@ export const WebSearchTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const { query, depth = 0, token_budget = 2000, cache_ref, offset = 0, limit } = params
-          const numResults = params.numResults ?? 8
+          const numResults = params.numResults ?? 5
 
           // ── cache_ref pagination path ───────────────────────────────────────
           if (cache_ref) {

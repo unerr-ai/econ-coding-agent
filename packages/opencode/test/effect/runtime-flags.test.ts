@@ -64,6 +64,31 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  it.effect("enableExa defaults to true and enableParallel to false with no env set", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+
+      expect(flags.enableExa).toBe(true)
+      expect(flags.enableParallel).toBe(false)
+    }),
+  )
+
+  it.effect("OPENCODE_DISABLE_WEBSEARCH=1 de-advertises the websearch tool (both providers resolve false)", () =>
+    Effect.gen(function* () {
+      const flags = yield* readFlags.pipe(
+        Effect.provide(
+          fromConfig({
+            OPENCODE_DISABLE_WEBSEARCH: "true",
+            OPENCODE_ENABLE_PARALLEL: "true",
+          }),
+        ),
+      )
+
+      expect(flags.enableExa).toBe(false)
+      expect(flags.enableParallel).toBe(false)
+    }),
+  )
+
   it.effect("defaultLayer parses OPENCODE_EXPERIMENTAL_LSP_TY", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(
@@ -112,7 +137,7 @@ describe("RuntimeFlags", () => {
       expect(flags.disableLspDownload).toBe(false)
       expect(flags.disableClaudeCodePrompt).toBe(false)
       expect(flags.disableClaudeCodeSkills).toBe(false)
-      expect(flags.enableExa).toBe(false)
+      expect(flags.enableExa).toBe(true)
       expect(flags.experimentalIconDiscovery).toBe(false)
       expect(flags.experimentalOxfmt).toBe(false)
       expect(flags.outputTokenMax).toBeUndefined()
@@ -338,7 +363,7 @@ describe("RuntimeFlags", () => {
       expect(flags.disableLspDownload).toBe(false)
       expect(flags.disableClaudeCodePrompt).toBe(false)
       expect(flags.disableClaudeCodeSkills).toBe(false)
-      expect(flags.enableExa).toBe(false)
+      expect(flags.enableExa).toBe(true)
       expect(flags.experimentalIconDiscovery).toBe(false)
       expect(flags.experimentalOxfmt).toBe(false)
       expect(flags.outputTokenMax).toBeUndefined()

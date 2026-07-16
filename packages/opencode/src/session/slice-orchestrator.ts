@@ -125,9 +125,9 @@ export interface SlicePermissionRule {
  * agent/config rules and evaluation is last-match-wins, so this overlay
  * coerces every askable surface the slices actually hit to a decisive action:
  * bash and edit ARE the slice's work (allow); the danger set is re-pinned to
- * deny AFTER the broad bash allow; blocking/interactive surfaces (question)
- * and the network are denied so loop-on-deny bounces the model to an
- * alternative instead of dead-ending; task is denied unconditionally — a
+ * deny AFTER the broad bash allow; the blocking/interactive surface (question)
+ * is denied so loop-on-deny bounces the model to an alternative instead of
+ * dead-ending; task is denied unconditionally — a
  * slice can never re-orchestrate by spawning a subagent of its own, no matter
  * what the agent/config ruleset says, because delegation is the conductor's
  * job alone. The read-only lane (recon/verify) lands last of all and beats
@@ -152,15 +152,26 @@ export function childSlicePermission(
   deciderSeat = false,
   delegatingSeat = false,
 ): SlicePermissionRule[] {
-  // Every seat gets the four core tools — bash, edit, webfetch, websearch — as
-  // ALLOW (2026-07-15). A slice that can gather evidence and act does its job;
-  // denying shell to judgment seats starved django-11848's escalated reasoner of
-  // the sibling test's `utcnow` seam and it guessed the wrong callable. Seat and
-  // persona no longer scope these four — the only limits are the floors below:
-  // the danger set, the interactive `question` surface, `task` re-orchestration,
-  // and `delegate` reserved for the conductor. (readOnly/persona/deciderSeat stay
-  // on the signature for callers + future per-seat policy; they no longer gate
-  // the core tools.)
+  // Every seat gets bash + edit as ALLOW (2026-07-16). A slice that can gather
+  // evidence and act does its job; denying shell to judgment seats starved
+  // django-11848's escalated reasoner of the sibling test's `utcnow` seam and
+  // it guessed the wrong callable. Seat and persona no longer scope these two
+  // — the only limits are the floors below: the danger set, the interactive
+  // `question` surface, `task` re-orchestration, and `delegate` reserved for
+  // the conductor.
+  //
+  // Web (webfetch/websearch) is deliberately NOT forced here. The econ config
+  // floor (config/econ-defaults.ts permission block) already sets webfetch and
+  // websearch to "allow" for every seat at the agent/config layer, and
+  // Permission.merge puts agent/config rules FIRST — so a slice child keeps
+  // web by default with no overlay entry needed. Adding an allow here used to
+  // sit LAST in the merged (agent + session) ruleset, and evaluation picks the
+  // last match (findLast — llm.ts), so it silently overrode an explicit
+  // user/arena `websearch`/`webfetch: "deny"` for every dispatched slice
+  // child, defeating strict-benchmark no-web configs regardless of user
+  // intent. Web access now follows config, not a dispatch-time overlay.
+  // (readOnly/persona/deciderSeat stay on the signature for callers + future
+  // per-seat policy; they no longer gate the core tools.)
   void readOnly
   void persona
   void deciderSeat
@@ -171,8 +182,6 @@ export function childSlicePermission(
     { permission: "question", pattern: "*", action: "deny" },
     { permission: "task", pattern: "*", action: "deny" },
     { permission: "delegate", pattern: "*", action: delegatingSeat ? "allow" : "deny" },
-    { permission: "webfetch", pattern: "*", action: "allow" },
-    { permission: "websearch", pattern: "*", action: "allow" },
     { permission: "skill", pattern: "*", action: "deny" },
     { permission: "doom_loop", pattern: "*", action: "deny" },
     { permission: "bash", pattern: "sudo *", action: "deny" },

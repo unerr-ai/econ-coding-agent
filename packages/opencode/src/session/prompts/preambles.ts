@@ -45,7 +45,7 @@ const DIAGNOSIS_PLAYBOOK = [
 // variance report — a bare prohibition primes the very token it forbids.
 const READ_ONLY_PLAYBOOK = [
   "READ-ONLY TURN: every goal here asks you to answer, locate, explain, review, or run something — not to change code. The turn is DONE the moment the question is answered or the findings are reported.",
-  "Investigate with the graph/read tools and reply directly. Authoring a repro script, editing source or tests, and running the full suite are OUT OF SCOPE unless the user explicitly asks — and a question needs no fix to confirm, so do not open todos to 'verify' an answer.",
+  "Investigate with the graph/read tools and reply directly; when the answer lies OUTSIDE the repo — an API's behavior, a version, a post-cutoff fact — one `websearch` (then `webfetch` the source) is the path, not more repo digging. Authoring a repro script, editing source or tests, and running the full suite are OUT OF SCOPE unless the user explicitly asks — and a question needs no fix to confirm, so do not open todos to 'verify' an answer.",
 ].join("\n")
 
 /**

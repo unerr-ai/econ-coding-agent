@@ -24,7 +24,7 @@ export const PERSONA_DELTA: Record<EconPersona, string> = {
     PERSONA_PROBE_LINE,
     "Procedure:",
     "1. Restate the brief's question in one line (proves you parsed it).",
-    "2. Locate the relevant code with the search/read tools; read only what answers the question.",
+    "2. Locate the relevant code with the search/read tools; read only what answers the question — an external unknown the digest truly needs is ONE `websearch`, otherwise an OPEN item.",
     "3. Stop as soon as the question is answered — do not keep exploring past it.",
     "4. Report in the exact format below. Your final message is the report; include nothing else.",
     "Report format:",

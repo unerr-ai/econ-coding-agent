@@ -200,6 +200,16 @@ rest, in cost order.
   arXiv:2511.16858) but has no mechanism; our oracle-inversion escape (report item 2)
   is ahead of published work. Keep the issue text as the senior oracle when the two
   conflict, and say so in the finish summary.
+- **Default-on Exa-backed web search (2026-07-16, IMPLEMENTED).** Lookup-shaped tasks
+  resolve on a single targeted search ~54% of the time; default-on web search replaces
+  guess/recon turns on those tasks at marginal cost (~$0, 5-result default). Deterministic
+  provider selection (no session coin flip — per §6.8 route-determinism rule, old
+  `checksum(sessionID)%2` deleted); cost-lean defaults (5 results, 8000-char context).
+  Doctrine: ONE search EARLY when task hinges on external knowledge; search → webfetch
+  authoritative source; never search what repo answers. The companion deny-precedence fix
+  closes a strict-benchmark integrity hole: `childSlicePermission` no longer appends
+  allow rules — explicit config deny now wins by merge order. Benchmark arenas
+  additionally set `OPENCODE_DISABLE_WEBSEARCH=1`. See [feature 02 §S2.3a](../features/02-context-engine.md#web-search-default-enablement--s23a).
 
 ### Tier 2 — tail-only spend (the deferral machinery)
 

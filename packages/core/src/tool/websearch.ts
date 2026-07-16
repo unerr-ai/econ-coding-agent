@@ -10,7 +10,6 @@ import { PermissionV2 } from "../permission"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { collectBoundedResponseBody } from "./http-body"
-import { checksum } from "../util/encode"
 
 export const name = "websearch"
 export const NO_RESULTS = "No search results found. Please try a different query."
@@ -37,7 +36,7 @@ The current year is ${new Date().getFullYear()}. Use this year when searching fo
 export const Input = Schema.Struct({
   query: Schema.String.annotate({ description: "Websearch query" }),
   numResults: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_NUM_RESULTS))).annotate({
-    description: `Number of search results to return (default: 8, maximum: ${MAX_NUM_RESULTS})`,
+    description: `Number of search results to return (default: 5, maximum: ${MAX_NUM_RESULTS})`,
   }),
   livecrawl: Schema.optional(Schema.Literals(["fallback", "preferred"])).annotate({
     description:
@@ -48,7 +47,7 @@ export const Input = Schema.Struct({
   }),
   contextMaxCharacters: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_CONTEXT_CHARACTERS))).annotate(
     {
-      description: `Maximum characters for context string optimized for models (default: 10000, maximum: ${MAX_CONTEXT_CHARACTERS})`,
+      description: `Maximum characters for context string optimized for models (default: 8000, maximum: ${MAX_CONTEXT_CHARACTERS})`,
     },
   ),
 })
@@ -66,19 +65,26 @@ export interface Config {
 
 export class ConfigService extends Context.Service<ConfigService, Config>()("@opencode/v2/WebSearchConfig") {}
 
-/** Isolates the retained product environment contract from the generic tool implementation. */
-export const defaultConfigLayer = Layer.sync(ConfigService, () =>
-  ConfigService.of({
+/**
+ * Isolates the retained product environment contract from the generic tool
+ * implementation. Exa-backed web search ships default-on across every provider
+ * path; the legacy OPENCODE_ENABLE_EXA/OPENCODE_EXPERIMENTAL_EXA opt-in flags are
+ * kept parseable but redundant. OPENCODE_DISABLE_WEBSEARCH is the single kill
+ * switch — truthy suppresses both providers.
+ */
+export const defaultConfigLayer = Layer.sync(ConfigService, () => {
+  const disabled = truthy("OPENCODE_DISABLE_WEBSEARCH")
+  return ConfigService.of({
     provider:
       process.env.OPENCODE_WEBSEARCH_PROVIDER === "exa" || process.env.OPENCODE_WEBSEARCH_PROVIDER === "parallel"
         ? process.env.OPENCODE_WEBSEARCH_PROVIDER
         : undefined,
-    enableExa: truthy("OPENCODE_EXPERIMENTAL") || truthy("OPENCODE_ENABLE_EXA") || truthy("OPENCODE_EXPERIMENTAL_EXA"),
-    enableParallel: truthy("OPENCODE_ENABLE_PARALLEL") || truthy("OPENCODE_EXPERIMENTAL_PARALLEL"),
+    enableExa: !disabled,
+    enableParallel: !disabled && (truthy("OPENCODE_ENABLE_PARALLEL") || truthy("OPENCODE_EXPERIMENTAL_PARALLEL")),
     exaApiKey: process.env.EXA_API_KEY,
     parallelApiKey: process.env.PARALLEL_API_KEY,
-  }),
-)
+  })
+})
 
 export function selectProvider(
   sessionID: string,
@@ -86,9 +92,10 @@ export function selectProvider(
   override?: Provider,
 ): Provider {
   if (override) return override
-  if (flags.enableParallel) return "parallel"
-  if (flags.enableExa) return "exa"
-  return Number.parseInt(checksum(sessionID) ?? "0", 36) % 2 === 0 ? "exa" : "parallel"
+  // Deterministic: parallel only wins when it's the sole enabled provider; exa is
+  // the default otherwise (no per-session coin flip — route determinism matters).
+  if (flags.enableParallel && !flags.enableExa) return "parallel"
+  return "exa"
 }
 
 const McpResult = Schema.Struct({
@@ -216,9 +223,9 @@ export const layer = Layer.effectDiscard(
                   ? yield* callMcp(http, exaUrl(config.exaApiKey), "web_search_exa", ExaArgs, {
                       query: input.query,
                       type: input.type || "auto",
-                      numResults: input.numResults || 8,
+                      numResults: input.numResults || 5,
                       livecrawl: input.livecrawl || "fallback",
-                      contextMaxCharacters: input.contextMaxCharacters,
+                      contextMaxCharacters: input.contextMaxCharacters ?? 8000,
                     })
                   : yield* callMcp(
                       http,

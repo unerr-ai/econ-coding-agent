@@ -10,7 +10,8 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 const SESSION_ID = "ses_0196aabbccddeeff001122334455"
 
 describe("websearch provider", () => {
-  test("selects a stable provider per session", () => {
+  test("defaults to Exa deterministically (no per-session coin flip)", () => {
+    expect(selectWebSearchProvider(SESSION_ID)).toBe("exa")
     expect(selectWebSearchProvider(SESSION_ID)).toBe(selectWebSearchProvider(SESSION_ID))
   })
 
@@ -41,23 +42,25 @@ describe("websearch provider", () => {
     }
   })
 
-  test("routes to Parallel when the Parallel flag is enabled", () => {
+  test("routes to Parallel only when Parallel is enabled and Exa is not", () => {
     const original = process.env.OPENCODE_WEBSEARCH_PROVIDER
 
     try {
       delete process.env.OPENCODE_WEBSEARCH_PROVIDER
       expect(selectWebSearchProvider(SESSION_ID, { exa: false, parallel: true })).toBe("parallel")
+      expect(selectWebSearchProvider(SESSION_ID, { exa: true, parallel: true })).toBe("exa")
     } finally {
       if (original === undefined) delete process.env.OPENCODE_WEBSEARCH_PROVIDER
       else process.env.OPENCODE_WEBSEARCH_PROVIDER = original
     }
   })
 
-  test("is only enabled for opencode or explicit websearch provider flags", () => {
-    expect(webSearchEnabled(ProviderV2.ID.opencode, { exa: false, parallel: false })).toBe(true)
-    expect(webSearchEnabled(ProviderV2.ID.openai, { exa: false, parallel: false })).toBe(false)
+  test("is enabled by default (Exa) regardless of provider ID, and de-advertised when the kill switch resolves both flags false", () => {
+    expect(webSearchEnabled(ProviderV2.ID.opencode, { exa: true, parallel: false })).toBe(true)
     expect(webSearchEnabled(ProviderV2.ID.openai, { exa: true, parallel: false })).toBe(true)
     expect(webSearchEnabled(ProviderV2.ID.openai, { exa: false, parallel: true })).toBe(true)
+    // OPENCODE_DISABLE_WEBSEARCH resolves enableExa/enableParallel to false upstream in RuntimeFlags.
+    expect(webSearchEnabled(ProviderV2.ID.openai, { exa: false, parallel: false })).toBe(false)
   })
 
   test("uses branded labels", () => {

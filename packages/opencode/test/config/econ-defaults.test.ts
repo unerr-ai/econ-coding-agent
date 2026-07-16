@@ -246,3 +246,35 @@ describe("econ persona agents (OL-9.1c/9.3d)", () => {
     }
   })
 })
+
+// Websearch-wiring lock (2026-07-16): the tool went default-advertised elsewhere (registry.ts /
+// websearch.ts / runtime-flags), so this guards the other half — that every econ seat can actually
+// invoke it once advertised. Ties the permission floor + every tier agent + every persona
+// (ECON_PERSONAS-derived, never a hardcoded name list) to allow, mirroring the existing webfetch
+// coverage above so a future persona/tier addition can't silently narrow websearch off.
+describe("websearch reaches every seat (4 tiers + 6 personas)", () => {
+  const defaults = econDefaultConfig()
+
+  it("the permission floor carries both websearch and webfetch as allow", () => {
+    expect(defaults.permission!.websearch).toBe("allow")
+    expect(defaults.permission!.webfetch).toBe("allow")
+  })
+
+  it("no tier agent narrows websearch off its physical toolset or permission", () => {
+    for (const [name, agent] of Object.entries<any>(defaults.agent!)) {
+      if (agent?.disable === true) continue
+      expect(agent.tools?.websearch, `agent "${name}" tools must not set websearch:false`).not.toBe(false)
+      const perm = agent.permission?.websearch
+      expect(perm === undefined || perm === "allow", `agent "${name}" permission.websearch must not deny/ask (got "${perm}")`).toBe(true)
+    }
+  })
+
+  it("no persona narrows websearch off its physical toolset or permission (ECON_PERSONAS-derived)", () => {
+    for (const persona of ECON_PERSONAS) {
+      const agent = (defaults.agent as any)[persona]
+      expect(agent.tools?.websearch, `persona "${persona}" tools must not set websearch:false`).not.toBe(false)
+      const perm = agent.permission?.websearch
+      expect(perm === undefined || perm === "allow", `persona "${persona}" permission.websearch must not deny/ask (got "${perm}")`).toBe(true)
+    }
+  })
+})

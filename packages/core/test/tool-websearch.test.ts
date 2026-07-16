@@ -23,7 +23,8 @@ describe("WebSearchTool provider selection", () => {
     expect(() => decode({ query: "x", numResults: WebSearchTool.MAX_NUM_RESULTS + 1 })).toThrow()
     expect(() => decode({ query: "x", contextMaxCharacters: WebSearchTool.MAX_CONTEXT_CHARACTERS + 1 })).toThrow()
   })
-  test("selects a stable provider per session", () => {
+  test("defaults to Exa deterministically (no per-session coin flip)", () => {
+    expect(WebSearchTool.selectProvider(sessionID)).toBe("exa")
     expect(WebSearchTool.selectProvider(sessionID)).toBe(WebSearchTool.selectProvider(sessionID))
   })
 
@@ -34,12 +35,48 @@ describe("WebSearchTool provider selection", () => {
     expect(WebSearchTool.selectProvider(sessionID, { enableExa: false, enableParallel: false }, "exa")).toBe("exa")
   })
 
-  test("prefers Parallel when both explicit flags are enabled", () => {
-    expect(WebSearchTool.selectProvider(sessionID, { enableExa: true, enableParallel: true })).toBe("parallel")
+  test("prefers Exa when both explicit flags are enabled (Parallel only wins when Exa is off)", () => {
+    expect(WebSearchTool.selectProvider(sessionID, { enableExa: true, enableParallel: true })).toBe("exa")
+    expect(WebSearchTool.selectProvider(sessionID, { enableExa: false, enableParallel: true })).toBe("parallel")
   })
 
   test("prefers Exa when only its explicit flag is enabled", () => {
     expect(WebSearchTool.selectProvider(sessionID, { enableExa: true, enableParallel: false })).toBe("exa")
+  })
+})
+
+describe("WebSearchTool defaultConfigLayer", () => {
+  const readConfig = () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* WebSearchTool.ConfigService
+      }).pipe(Effect.provide(WebSearchTool.defaultConfigLayer)),
+    )
+
+  test("enables Exa by default when no flags are set", async () => {
+    const original = process.env.OPENCODE_DISABLE_WEBSEARCH
+    try {
+      delete process.env.OPENCODE_DISABLE_WEBSEARCH
+      const config = await readConfig()
+      expect(config.enableExa).toBe(true)
+      expect(config.enableParallel).toBe(false)
+    } finally {
+      if (original === undefined) delete process.env.OPENCODE_DISABLE_WEBSEARCH
+      else process.env.OPENCODE_DISABLE_WEBSEARCH = original
+    }
+  })
+
+  test("OPENCODE_DISABLE_WEBSEARCH=1 de-advertises the tool by resolving both providers false", async () => {
+    const original = process.env.OPENCODE_DISABLE_WEBSEARCH
+    try {
+      process.env.OPENCODE_DISABLE_WEBSEARCH = "1"
+      const config = await readConfig()
+      expect(config.enableExa).toBe(false)
+      expect(config.enableParallel).toBe(false)
+    } finally {
+      if (original === undefined) delete process.env.OPENCODE_DISABLE_WEBSEARCH
+      else process.env.OPENCODE_DISABLE_WEBSEARCH = original
+    }
   })
 })
 
@@ -193,6 +230,33 @@ describe("WebSearchTool registration", () => {
           },
         },
       ])
+    }),
+  )
+
+  it.effect("applies econ-lean defaults (numResults: 5, contextMaxCharacters: 8000) when omitted", () =>
+    Effect.gen(function* () {
+      requests.length = 0
+      assertions.length = 0
+      responseBody = payload("exa results")
+      config = { provider: "exa", enableExa: false, enableParallel: false }
+      const registry = yield* ToolRegistry.Service
+
+      yield* executeTool(registry, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "call-defaults", name: "websearch", input: { query: "lean defaults" } },
+      })
+
+      expect(requests[0]).toMatchObject({
+        body: {
+          params: {
+            arguments: {
+              numResults: 5,
+              contextMaxCharacters: 8000,
+            },
+          },
+        },
+      })
     }),
   )
 

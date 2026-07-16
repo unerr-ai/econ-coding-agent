@@ -28,15 +28,16 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
     broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
     direct: bool("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"),
   }).pipe(Config.map((flags) => flags.broad || flags.direct)),
-  enableExa: Config.all({
-    experimental,
-    enabled: bool("OPENCODE_ENABLE_EXA"),
-    legacy: bool("OPENCODE_EXPERIMENTAL_EXA"),
-  }).pipe(Config.map((flags) => flags.experimental || flags.enabled || flags.legacy)),
+  // econ: Exa-backed web search ships default-on across every provider path.
+  // OPENCODE_ENABLE_EXA/OPENCODE_EXPERIMENTAL_EXA (and the umbrella OPENCODE_EXPERIMENTAL)
+  // are kept parseable but redundant now that the default is true. The single kill
+  // switch is OPENCODE_DISABLE_WEBSEARCH — truthy suppresses both providers.
+  enableExa: bool("OPENCODE_DISABLE_WEBSEARCH").pipe(Config.map((disabled) => !disabled)),
   enableParallel: Config.all({
+    disabled: bool("OPENCODE_DISABLE_WEBSEARCH"),
     enabled: bool("OPENCODE_ENABLE_PARALLEL"),
     legacy: bool("OPENCODE_EXPERIMENTAL_PARALLEL"),
-  }).pipe(Config.map((flags) => flags.enabled || flags.legacy)),
+  }).pipe(Config.map((flags) => !flags.disabled && (flags.enabled || flags.legacy))),
   enableExperimentalModels: bool("OPENCODE_ENABLE_EXPERIMENTAL_MODELS"),
   enableQuestionTool: bool("OPENCODE_ENABLE_QUESTION_TOOL"),
   experimentalReferences: enabledByExperimental("OPENCODE_EXPERIMENTAL_REFERENCES"),

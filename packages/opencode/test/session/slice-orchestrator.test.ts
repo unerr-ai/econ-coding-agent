@@ -3445,11 +3445,10 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
   })
 
-  it("explorer children still get the four core tools — bash/edit/webfetch all allow", () => {
+  it("explorer children still get the two core tools — bash/edit allow (web is no longer part of this overlay)", () => {
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, true, "explorer"))
     expect(Permission.evaluate("bash", 'node -e "probe()"', effective).action).toBe("allow")
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
-    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("allow")
   })
 
   it("denies the blocking question surface", () => {
@@ -3457,10 +3456,34 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     expect(Permission.evaluate("question", "anything", effective).action).toBe("deny")
   })
 
-  it("allows the network (webfetch/websearch) for every seat — no longer researcher-only", () => {
-    const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false))
-    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("allow")
-    expect(Permission.evaluate("websearch", "anything", effective).action).toBe("allow")
+  it("web resolves from AGENT config, not this overlay: an agent-level deny is never overridden", () => {
+    const agentDeniesWeb: PermissionV1.Ruleset = [
+      ...BASE_AGENT_RULES,
+      { permission: "webfetch", pattern: "*", action: "deny" },
+      { permission: "websearch", pattern: "*", action: "deny" },
+    ]
+    const effective = Permission.merge(agentDeniesWeb, childSlicePermission(undefined, false))
+    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("deny")
+    expect(Permission.evaluate("websearch", "anything", effective).action).toBe("deny")
+  })
+
+  it("arena/user web deny survives slice dispatch (findLast: agent deny not overridden by overlay)", () => {
+    // Mirrors real merge order: the econ config-floor allow lands first in agent.permission,
+    // then an explicit arena/user deny is appended after it — findLast means the deny already
+    // wins at the agent layer. The regression this guards: childSlicePermission used to append
+    // its own webfetch/websearch allow LAST in the merged (agent + session) ruleset, which — by
+    // findLast — clobbered this deny for every slice child. Now that the overlay no longer
+    // touches web, the agent-layer deny stays the last match and wins.
+    const arenaNoWebRules: PermissionV1.Ruleset = [
+      ...BASE_AGENT_RULES,
+      { permission: "webfetch", pattern: "*", action: "allow" }, // config-floor default
+      { permission: "websearch", pattern: "*", action: "allow" }, // config-floor default
+      { permission: "webfetch", pattern: "*", action: "deny" }, // arena/user override, appended after
+      { permission: "websearch", pattern: "*", action: "deny" }, // arena/user override, appended after
+    ]
+    const effective = Permission.merge(arenaNoWebRules, childSlicePermission(undefined, false))
+    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("deny")
+    expect(Permission.evaluate("websearch", "anything", effective).action).toBe("deny")
   })
 
   it("denies task even when the merged ruleset includes a task allow from the agent/config side", () => {
@@ -3474,7 +3497,9 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
   })
 
   it("no-ask invariant: no overlaid permission ever resolves to ask, for every persona and the no-persona default", () => {
-    const permissions = ["bash", "edit", "question", "webfetch", "websearch", "skill", "doom_loop", "task"]
+    // webfetch/websearch are excluded: they're no longer part of this overlay, so they resolve
+    // purely from the agent/config layer, which is free to leave them at "ask".
+    const permissions = ["bash", "edit", "question", "skill", "doom_loop", "task"]
     for (const persona of [undefined, ...ECON_PERSONAS] as const) {
       const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, persona))
       for (const permission of permissions) {
@@ -3497,10 +3522,8 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
   })
 
-  it("researcher persona gets webfetch/websearch allow plus bash+edit allow like every other seat", () => {
+  it("researcher persona gets bash+edit allow like every other seat; web now resolves from config, not persona", () => {
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, "researcher"))
-    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("allow")
-    expect(Permission.evaluate("websearch", "anything", effective).action).toBe("allow")
     expect(Permission.evaluate("bash", "pwd", effective).action).toBe("allow")
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
   })
@@ -3510,20 +3533,18 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
   })
 
-  it("write-lane personas keep bash/edit allowed and now also get webfetch allow", () => {
+  it("write-lane personas keep bash/edit allowed; web is no longer persona- or overlay-scoped", () => {
     for (const persona of ECON_PERSONAS.filter((p) => p !== "researcher" && p !== "explorer")) {
       const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, persona))
-      expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("allow")
       expect(Permission.evaluate("bash", "pwd", effective).action).toBe("allow")
       expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
     }
   })
 
-  it("explorer gets bash/edit/webfetch allow regardless of readOnly", () => {
+  it("explorer gets bash/edit allow regardless of readOnly", () => {
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false, "explorer"))
     expect(Permission.evaluate("bash", "pwd", effective).action).toBe("allow")
     expect(Permission.evaluate("edit", "src/x.ts", effective).action).toBe("allow")
-    expect(Permission.evaluate("webfetch", "https://x", effective).action).toBe("allow")
   })
 
   it("readOnly no longer denies edit — bash and edit both allow regardless of the flag", () => {
