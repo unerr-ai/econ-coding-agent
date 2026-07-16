@@ -1,6 +1,10 @@
 ---
 name: unerr-opus
-description: User-invoked Claude Code sub-agent pinned to Opus (the strongest model). Started only when you explicitly spawn it (Task subagent_type:'unerr-opus') to run a scoped task on Opus — makes the minimal correct edit from the senior's recon digest and self-verifies. Not part of automatic delegation routing.
+description: >-
+  Manual-only: spawn ONLY when the user explicitly asks for Opus by name (e.g. 'use unerr-opus',
+  'run this on Opus'). NEVER select this agent automatically — for ordinary delegation use
+  unerr-worker or unerr-junior. Runs one scoped task pinned to Opus: makes the minimal correct
+  edit from the senior's recon digest and self-verifies.
 model: opus
 tools: mcp__unerr__search_code, mcp__unerr__file_read, mcp__unerr__file_outline, mcp__unerr__get_references, mcp__unerr__file_edit, Read, Edit, Write, Bash, mcp__unerr__fetch_url, WebSearch, WebFetch
 ---

@@ -1,6 +1,20 @@
 ---
 name: unerr-junior
-description: Junior-tier executor for brainless delegable tasks (read-only recon, web research, codebase Q&A, audits, lint/format, docstrings/@sem, verify-runs). Spawned by the senior with a recon digest; returns a digest or makes the minimal edit and self-verifies. Not for design, new features, or bug root-causing.
+description: >-
+  Use PROACTIVELY for every read-only or mechanical side task instead of doing it in the main
+  thread — codebase investigation (find/trace/map/where/how questions), inventory and audits
+  (find-all usages), web research and docs/API/changelog lookups, log and error triage, bug
+  reproduction (run and report, no edit), lint/format runs, docstrings/@sem upkeep, verify-runs
+  (typecheck + targeted tests + lint), post-edit code review, security audits, benchmark/profiling
+  runs, git operations (branch/PR prep), and shell-command sequences. MUST BE USED whenever the
+  deliverable is a digest or report rather than a design decision. <example>Context: user asks
+  'where is the idle timeout enforced?' assistant: 'Spawning the unerr-junior agent to trace
+  idle-timeout handling and report back.' <commentary>Codebase Q&A is read-only recon — delegate
+  it instead of searching in the main thread.</commentary></example> <example>Context: edits just
+  landed and need verification. assistant: 'Spawning unerr-junior to run typecheck, targeted
+  tests, and lint, and return the failure list.' <commentary>Verify-runs are junior work; the main
+  thread only reads the digest.</commentary></example> Not for design, new features, or bug
+  root-causing.
 model: haiku
 tools: mcp__unerr__search_code, mcp__unerr__file_read, mcp__unerr__file_outline, mcp__unerr__get_references, mcp__unerr__file_edit, Read, Edit, Write, Bash, mcp__unerr__fetch_url, WebSearch, WebFetch
 ---

@@ -1,6 +1,10 @@
 ---
 name: unerr-fable
-description: User-invoked Claude Code sub-agent pinned to Fable. Started only when you explicitly spawn it (Task subagent_type:'unerr-fable') to run a scoped task on Fable — makes the minimal correct edit from the senior's recon digest and self-verifies. Not part of automatic delegation routing.
+description: >-
+  Manual-only: spawn ONLY when the user explicitly asks for Fable by name (e.g. 'use unerr-fable',
+  'run this on Fable'). NEVER select this agent automatically — for ordinary delegation use
+  unerr-worker or unerr-junior. Runs one scoped task pinned to Fable: makes the minimal correct
+  edit from the senior's recon digest and self-verifies.
 model: fable
 tools: mcp__unerr__search_code, mcp__unerr__file_read, mcp__unerr__file_outline, mcp__unerr__get_references, mcp__unerr__file_edit, Read, Edit, Write, Bash, mcp__unerr__fetch_url, WebSearch, WebFetch
 ---
