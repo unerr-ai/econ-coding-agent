@@ -73,6 +73,17 @@ describe("SystemPrompt.toolUsage", () => {
     expect(out).not.toContain("- `read`")
   })
 
+  test("get_references note present when get_references is in ids (G1)", () => {
+    const out = toolUsage(["get_references", "bash"])
+    expect(out).toContain("- `get_references`")
+    expect(out).toContain("before editing a widely-used entity")
+  })
+
+  test("get_references note absent when get_references is not in ids", () => {
+    const out = toolUsage(["bash", "edit"])
+    expect(out).not.toContain("- `get_references`")
+  })
+
   test("webfetch note present when webfetch is in ids", () => {
     const out = toolUsage(["webfetch", "bash"])
     expect(out).toContain("- `webfetch`")

@@ -58,11 +58,18 @@ describe("graph tools — registration", () => {
     expect(GraphFileOutlineTool.id).toBe("file_outline")
   })
 
-  test("recon/get_references fold into the unified search tool (hidden from the model); search/file_outline stay advertised", () => {
+  test("recon folds into the unified search tool (hidden from the model); search/file_outline/get_references stay advertised", () => {
     expect(HIDDEN_FROM_MODEL.has(GraphReconTool.id)).toBe(true)
-    expect(HIDDEN_FROM_MODEL.has(GraphGetReferencesTool.id)).toBe(true)
     expect(HIDDEN_FROM_MODEL.has(GraphSearchCodeTool.id)).toBe(false)
+    expect(HIDDEN_FROM_MODEL.has(GraphGetReferencesTool.id)).toBe(false)
     expect(CATALOG_TOOL_IDS.has(GraphFileOutlineTool.id)).toBe(true)
+  })
+
+  // G1 — get_references re-registered as a direct, catalog-compacted model tool
+  // (same treatment as file_outline/note_save), replacing the phase-1 fold into search.
+  test("get_references is catalog-compacted (on-demand) rather than hidden — same treatment as file_outline", () => {
+    expect(CATALOG_TOOL_IDS.has(GraphGetReferencesTool.id)).toBe(true)
+    expect(HIDDEN_FROM_MODEL.has(GraphGetReferencesTool.id)).toBe(false)
   })
 })
 

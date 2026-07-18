@@ -2,7 +2,10 @@
  * Signature-change cascade detector for econ's code-intelligence layer.
  * Given an in-flight edit, detects whether any entity's signature changed and
  * resolves depth-1 callers at risk — process-agnostic and testable without a
- * live graph.
+ * live graph. Also carries the post-edit counterpart (G3): once an edit has
+ * landed, diffs the file's pre-edit entity list against a fresh re-parse of
+ * the new content to catch a REMOVED export the in-flight content-diff can't
+ * see (there's no "changed" fragment left to match against).
  *
  * Lifted from unerr-cli's edit-impact.ts and adapted to econ's Entity/Reference
  * graph types. Federation (cross-repo) features are out of scope for this layer.
@@ -11,6 +14,7 @@
  */
 
 import type { Entity, Reference } from "./index.js"
+import type { ExtractedEntity } from "./ast-extractor.js"
 
 /**
  * A single depth-1 caller that may need updating after a signature change.
@@ -423,4 +427,149 @@ export async function computeEditImpact(
   }
 
   return warnings
+}
+
+// ---------------------------------------------------------------------------
+// G3 — post-edit breaking-change scan. computeEditImpact above runs while an
+// edit is IN FLIGHT and regex-diffs raw old/new content; that diff has no
+// representation for "this name is gone entirely" (there's no changed
+// fragment to match against), so a removed export slips through silently.
+// detectBreakingChanges runs AFTER the edit lands and diffs two authoritative
+// entity lists instead — the graph's pre-edit list (still valid until the
+// next re-index) against a fresh single-file re-parse of the new content —
+// which sees a removal directly as "name present in preEntities, absent from
+// postEntities."
+// ---------------------------------------------------------------------------
+
+/** Max caller sites resolved per breaking change before the rest defer to get_references. */
+const MAX_BREAKING_CHANGE_CALLERS = 5
+
+/**
+ * One exported entity whose public surface changed enough, after an edit
+ * landed, to break existing callers: either it no longer exists in the file
+ * (REMOVED — a straight delete and a rename look identical from a name diff)
+ * or its re-parsed signature no longer matches what callers were written
+ * against (SIGNATURE_CHANGED). `text_occurrences` is populated by the
+ * calling wiring layer for a REMOVED entity — residue the call graph itself
+ * can't see (a stale string, a config key, a dynamic-dispatch site).
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export interface BreakingChange {
+  entity_name: string
+  entity_key: string
+  entity_file: string
+  change_type: "removed" | "signature_changed"
+  callers: CallerAtRisk[]
+  callers_total: number
+  text_occurrences?: Array<{ file: string; line: number }>
+}
+
+/**
+ * Lightweight `export <kind> <name>` probe against raw source (TS/JS only,
+ * mirrors the declaration shapes detectSignatureChange's fallback path
+ * recognises). Scopes breaking-change detection to a file's public surface —
+ * an unexported helper losing its last in-file caller is a refactor, not a
+ * breaking change.
+ */
+function isExportedName(content: string, name: string): boolean {
+  const escaped = escapeRegex(name)
+  const re = new RegExp(
+    `export\\s+(?:default\\s+)?(?:async\\s+)?(?:function|class|interface|type|const|let|var)\\s+${escaped}\\b`,
+  )
+  return re.test(content)
+}
+
+/**
+ * Diffs a file's pre-edit entity list (from the graph — still reflects the
+ * old content until the next re-index) against its post-edit entity list
+ * (freshly re-parsed from the new content, e.g. via ast-extractor's
+ * extractEntities — no re-index needed) and reports every exported entity
+ * that was removed or whose signature changed. A post-parse yielding zero
+ * entities for a file that had entities before is treated as a parser miss
+ * rather than a mass deletion and returns [] rather than flooding "removed"
+ * for the whole file. Callers are resolved via graph.getCallers on the
+ * pre-edit entity's still-valid key, filtered to sites outside the edited
+ * file and capped at MAX_BREAKING_CHANGE_CALLERS; an entity with zero
+ * outside callers is silently dropped — nothing broke.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function detectBreakingChanges(
+  graph: EditImpactGraph,
+  oldContent: string,
+  preEntities: Entity[],
+  postEntities: ExtractedEntity[],
+): Promise<BreakingChange[]> {
+  if (postEntities.length === 0 && preEntities.length > 0) return []
+
+  const postByKey = new Map<string, ExtractedEntity>()
+  for (const e of postEntities) postByKey.set(`${e.name}::${e.kind}`, e)
+
+  const changes: BreakingChange[] = []
+
+  for (const pre of preEntities) {
+    if (!isExportedName(oldContent, pre.name)) continue
+
+    const post = postByKey.get(`${pre.name}::${pre.kind}`)
+    const changeType: BreakingChange["change_type"] | null = !post
+      ? "removed"
+      : post.signature.trim() !== pre.signature.trim()
+        ? "signature_changed"
+        : null
+    if (!changeType) continue
+
+    const callerRefs = dedupeCallerRefs(await graph.getCallers(pre.key)).filter(
+      (ref) => ref.fromFile !== pre.filePath,
+    )
+    if (callerRefs.length === 0) continue
+
+    changes.push({
+      entity_name: pre.name,
+      entity_key: pre.key,
+      entity_file: pre.filePath,
+      change_type: changeType,
+      callers: callerRefs.slice(0, MAX_BREAKING_CHANGE_CALLERS).map(toCallerAtRisk),
+      callers_total: callerRefs.length,
+    })
+  }
+
+  return changes
+}
+
+/**
+ * Renders detectBreakingChanges output as inline `ur|brk` lines for the
+ * edit/write tool response, mirroring renderInlineBlastRadius's shape so a
+ * model already reading `ur|rsk` recognises the sibling signal. Each change
+ * lists its top outside-file callers plus, for a REMOVED entity, any
+ * text_occurrences the wiring layer found outside the call graph.
+ *
+ * @sem domain=intelligence role=presenter
+ */
+export function renderBreakingChangeWarning(changes: BreakingChange[]): string | null {
+  if (changes.length === 0) return null
+
+  const lines = changes.map((c) => {
+    const shown = c.callers
+      .map((caller) =>
+        caller.line > 0 ? `${caller.entity} (${caller.file}:${caller.line})` : `${caller.entity} (${caller.file})`,
+      )
+      .join(", ")
+    const overflow = c.callers_total - c.callers.length
+    const more =
+      overflow > 0
+        ? `, +${overflow} more via get_references({key:'${c.entity_key}', direction:'callers'})`
+        : ""
+
+    const verb = c.change_type === "removed" ? "removed" : "signature-changed"
+    let line = `ur|brk ${c.entity_name} was ${verb} in ${c.entity_file} — ${c.callers_total} live caller(s) still reference it: ${shown}${more}`
+
+    if (c.text_occurrences && c.text_occurrences.length > 0) {
+      const sites = c.text_occurrences.map((o) => `${o.file}:${o.line}`).join(", ")
+      line += `; also found as text outside the call graph: ${sites}`
+    }
+    return line
+  })
+
+  return lines.join("\n")
 }

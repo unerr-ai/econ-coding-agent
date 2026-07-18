@@ -14,7 +14,7 @@ import { tmpdir } from "node:os"
 import { execSync } from "node:child_process"
 import { BunSqliteGraph } from "@opencode-ai/code-intelligence"
 import type { EditImpactGraph } from "@opencode-ai/code-intelligence"
-import { callersAtRiskWarning } from "../../src/tool/edit-governance"
+import { callersAtRiskWarning, breakingChangeWarning } from "../../src/tool/edit-governance"
 import { RSK_CALLER_THRESHOLD } from "../../src/tool/graph-tools-enrich"
 
 const COUPLING_FIXTURE = join(import.meta.dir, "fixtures/ol79-coupling")
@@ -100,6 +100,157 @@ describe("S6.3 — callersAtRiskWarning", () => {
 
   it("RSK_CALLER_THRESHOLD stays the single source of truth for the chokepoint cutoff", () => {
     expect(RSK_CALLER_THRESHOLD).toBe(10)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// G3 — breakingChangeWarning: post-edit removed/signature-changed scan.
+// Uses a throwaway git-initialized fixture (not the shared ol79-coupling
+// fixture above) so the git-grep residue half has real tracked content to
+// search, isolated from the rest of this repo.
+// ---------------------------------------------------------------------------
+
+describe("G3 — breakingChangeWarning", () => {
+  let bcDir: string
+  let bcGraph: BunSqliteGraph
+  let libSource: string
+
+  function gitCommit(message: string) {
+    execSync("git -c user.email=t@t -c user.name=t add -A", { cwd: bcDir })
+    execSync(`git -c user.email=t@t -c user.name=t commit -q -m ${JSON.stringify(message)}`, { cwd: bcDir })
+  }
+
+  beforeAll(async () => {
+    bcDir = mkdtempSync(join(tmpdir(), "breaking-change-"))
+    writeFileSync(
+      join(bcDir, "lib.ts"),
+      [
+        "export function doThing(): number {",
+        "  return 1",
+        "}",
+        "",
+        "export function orphanFn(): number {",
+        "  return 9",
+        "}",
+        "",
+        "function localHelper(): number {",
+        "  return 3",
+        "}",
+        "",
+      ].join("\n"),
+    )
+    writeFileSync(
+      join(bcDir, "caller1.ts"),
+      "import { doThing } from './lib'\nexport function useDoThing() { return doThing() }\n",
+    )
+    writeFileSync(
+      join(bcDir, "caller2.ts"),
+      "import { doThing } from './lib'\nexport function useDoThing2() { return doThing() }\n",
+    )
+    execSync("git init -q", { cwd: bcDir })
+    gitCommit("init")
+
+    bcGraph = new BunSqliteGraph(":memory:", bcDir)
+    await bcGraph.index(bcDir)
+    libSource = readFileSync(join(bcDir, "lib.ts"), "utf8")
+  })
+
+  afterAll(() => {
+    bcGraph.close()
+    rmSync(bcDir, { recursive: true, force: true })
+  })
+
+  it("a removed export with live callers outside the file yields a warning", async () => {
+    const changedSource = libSource.replace(/export function doThing[\s\S]*?\n}\n\n/, "")
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).not.toBeNull()
+    expect(warning).toContain("ur|brk")
+    expect(warning).toContain("doThing")
+    expect(warning).toContain("removed")
+    expect(warning).toMatch(/caller1\.ts|caller2\.ts/)
+  })
+
+  it("a signature change to an exported entity with outside callers yields a warning", async () => {
+    const changedSource = libSource.replace(
+      "export function doThing(): number {",
+      "export function doThing(x: number): number {",
+    )
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).not.toBeNull()
+    expect(warning).toContain("signature")
+  })
+
+  it("a removed export with zero outside-file callers stays silent", async () => {
+    const changedSource = libSource.replace(/export function orphanFn[\s\S]*?\n}\n\n/, "")
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).toBeNull()
+  })
+
+  it("removing an unexported (internal) helper stays silent", async () => {
+    const changedSource = libSource.replace(/function localHelper[\s\S]*?\n}\n/, "")
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).toBeNull()
+  })
+
+  it("a body-only edit (signature unchanged) yields no warning", async () => {
+    const changedSource = libSource.replace("return 1", "return 42")
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).toBeNull()
+  })
+
+  it("a brand-new file (empty oldContent) yields no warning", async () => {
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), "", libSource, bcGraph, bcDir)
+    expect(warning).toBeNull()
+  })
+
+  it("a test file is skipped", async () => {
+    const changedSource = libSource.replace(/export function doThing[\s\S]*?\n}\n\n/, "")
+    const warning = await breakingChangeWarning(
+      join(bcDir, "lib.test.ts"),
+      libSource,
+      changedSource,
+      bcGraph,
+      bcDir,
+    )
+    expect(warning).toBeNull()
+  })
+
+  it("defensive: a throwing graph resolves null, never throws", async () => {
+    const throwingGraph: EditImpactGraph = {
+      getEntitiesInFile: async () => {
+        throw new Error("graph unavailable")
+      },
+      getCallers: async () => {
+        throw new Error("graph unavailable")
+      },
+    }
+    const changedSource = libSource.replace(/export function doThing[\s\S]*?\n}\n\n/, "")
+    await expect(
+      breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, throwingGraph, bcDir),
+    ).resolves.toBeNull()
+  })
+
+  it("a cold/unindexed file (empty entity list) yields no warning", async () => {
+    const changedSource = libSource.replace(/export function doThing[\s\S]*?\n}\n\n/, "")
+    const coldGraph: EditImpactGraph = {
+      getEntitiesInFile: async () => [],
+      getCallers: async () => [],
+    }
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, coldGraph, bcDir)
+    expect(warning).toBeNull()
+  })
+
+  it("residue half: a removed export's stale text mention elsewhere is surfaced via git-grep", async () => {
+    // A note in a third file still mentions the doomed export by name — the
+    // call graph never sees this (no import/call edge), only the bounded
+    // word-boundary git-grep pass does.
+    writeFileSync(join(bcDir, "notes.md"), "TODO: doThing needs a rewrite\n")
+    gitCommit("residue")
+
+    const changedSource = libSource.replace(/export function doThing[\s\S]*?\n}\n\n/, "")
+    const warning = await breakingChangeWarning(join(bcDir, "lib.ts"), libSource, changedSource, bcGraph, bcDir)
+    expect(warning).not.toBeNull()
+    expect(warning).toContain("notes.md")
   })
 })
 

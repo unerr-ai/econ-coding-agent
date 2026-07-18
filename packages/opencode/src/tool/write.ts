@@ -17,6 +17,7 @@ import * as Bom from "@/util/bom"
 import { seedReadDedup } from "./_shared"
 import {
   callersAtRiskWarning,
+  breakingChangeWarning,
   isTestFilePath,
   testEditGateArmed,
   testEditDenialMessage,
@@ -356,6 +357,16 @@ export const WriteTool = Tool.define(
             callersAtRiskWarning(filepath, contentOld, contentNew),
           )
           if (callersAtRisk) output += `\n\n${callersAtRisk}`
+
+          // G3 post-edit breaking-change scan: non-blocking, fail-closed warning
+          // for an exported entity that was removed or signature-changed while
+          // live callers outside the file still reference it (never rejects).
+          // contentOld is "" for a brand-new file, so breakingChangeWarning's
+          // own !oldContent check already skips it — no separate `exists` gate.
+          const breakingChange = yield* Effect.promise(() =>
+            breakingChangeWarning(filepath, contentOld, contentNew),
+          )
+          if (breakingChange) output += `\n\n${breakingChange}`
 
           return {
             title: path.relative(instance.worktree, filepath),

@@ -20,6 +20,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "@/util/bom"
 import {
   callersAtRiskWarning,
+  breakingChangeWarning,
   isTestFilePath,
   testEditGateArmed,
   testEditDenialMessage,
@@ -455,6 +456,14 @@ export const EditTool = Tool.define(
             callersAtRiskWarning(filePath, contentOld, contentNew),
           )
           if (callersAtRisk) output += `\n\n${callersAtRisk}`
+
+          // G3 post-edit breaking-change scan: non-blocking, fail-closed warning
+          // for an exported entity that was removed or signature-changed while
+          // live callers outside the file still reference it (never rejects).
+          const breakingChange = yield* Effect.promise(() =>
+            breakingChangeWarning(filePath, contentOld, contentNew),
+          )
+          if (breakingChange) output += `\n\n${breakingChange}`
 
           return {
             metadata: {

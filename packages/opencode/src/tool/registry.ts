@@ -88,14 +88,17 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/To
 
 // Sprint 4 Phase-1: tool ids hidden from the model-facing advertised list.
 // These remain in all() — still executable by id at zero cost, just filtered from
-// the model's advertised list. recon/get_references/grep/glob all fold into the
-// unified `search` tool (modes: default / refs / literal|regex / glob). webfetch is
-// now the compressed impl (Sprint 6), so it is advertised — no longer hidden.
+// the model's advertised list. recon/grep/glob all fold into the unified `search`
+// tool (modes: default / refs / literal|regex / glob). webfetch is now the
+// compressed impl (Sprint 6), so it is advertised — no longer hidden.
+// get_references is re-registered as a direct, catalog-compacted model tool (G1
+// — the harness itself queries callers at several gates; the model needs the
+// same blast-radius visibility before editing a widely-used entity) — see
+// CATALOG_TOOL_IDS below, not hidden here.
 export const HIDDEN_FROM_MODEL = new Set<string>([
-  GraphReconTool.id,           // "recon"          → search (default task bundle)
-  GraphGetReferencesTool.id,   // "get_references" → search (mode:refs)
-  GrepTool.id,                 // "grep"           → search (mode:literal|regex)
-  GlobTool.id,                 // "glob"           → search (mode:glob)
+  GraphReconTool.id, // "recon" → search (default task bundle)
+  GrepTool.id,       // "grep"  → search (mode:literal|regex)
+  GlobTool.id,       // "glob"  → search (mode:glob)
 ])
 
 // AC-7.1 — progressive tool-schema disclosure. Heavier/less-frequently-used tools that
@@ -109,6 +112,7 @@ export const CATALOG_TOOL_IDS = new Set<string>([
   SkillTool.id,
   QuestionTool.id,
   GraphFileOutlineTool.id,
+  GraphGetReferencesTool.id, // G1 — same catalog-compacted treatment as file_outline
   GraphNoteSaveTool.id,
   CompactionRefetchTool.id,
   InvalidTool.id,

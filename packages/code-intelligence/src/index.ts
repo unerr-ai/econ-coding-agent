@@ -272,12 +272,18 @@ export {
   buildSuggestion,
   isTestFilePath,
   DEFAULT_EDIT_IMPACT_CONFIG,
+  detectBreakingChanges,
+  renderBreakingChangeWarning,
   type CallerAtRisk,
   type CascadeWarning,
   type SignatureChangeType,
   type EditImpactGraph,
   type EditImpactConfig,
+  type BreakingChange,
 } from "./edit-impact.js"
+// G3 — post-edit breaking-change scan needs a single-file re-parse without a
+// full re-index; ast-extractor's regex extractor is that entry point.
+export { extractEntities, detectLanguage, type ExtractedEntity } from "./ast-extractor.js"
 export {
   computeBoundaryViolations,
   parseImports,

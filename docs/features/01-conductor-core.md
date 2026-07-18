@@ -176,11 +176,18 @@ Reads a source file with 1-based line numbers, or returns an entity profile
 
 #### `get_references`
 ```
-input:  { entity: string, direction?: "callers" | "callees" }  — default direction: "callers"
-output: JSON string — Reference[] { fromEntity, fromFile, toEntity, kind }
+input:  { entity: string, direction?: "callers" | "callees", depth?: 1 | 2, limit?: number,
+          include_text_occurrences?: boolean }   — default direction: "callers"
+output: JSON — { references: ReferenceRow[], direction, total, truncated }
+        ReferenceRow { file, line, name, kind, fan_in, domain?, role?, summary?, chokepoint?, hop }
 ```
 Returns the caller list (blast-radius fan-in, default) or callee list (outgoing imports/calls)
-for a named entity. Maps directly to `BunSqliteGraph.getCallers()` / `.getReferences()`.
+for a named entity, enriched with the semantic fields (`domain`/`role`/`summary`).
+`chokepoint: true` — plus an inline `ur|rsk` line — marks a row whose own fan-in meets
+`RSK_CALLER_THRESHOLD` (the same constant the edit-time cascade warning uses). `depth: 2` walks
+one bounded, cycle-safe extra hop (`hop` tags each row); callees are deduped by target;
+`include_text_occurrences: true` keeps the original rename-sweep output shape. Per
+[docs/design/graph-navigation-audit.md §2](../design/graph-navigation-audit.md) (G1).
 
 ### Registration path
 

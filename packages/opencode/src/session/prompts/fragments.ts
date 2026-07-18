@@ -78,6 +78,12 @@ export function toolUsage(toolIds: readonly string[]): string {
     notes.push(
       "- `file_outline` lists a file's entities (name, kind, line range) and imports — call it before reading a large file to jump straight to the part you need.",
     )
+  // G1 — the harness itself queries callers at several gates; give the model the same
+  // blast-radius visibility before it touches a widely-used entity, not just the harness.
+  if (has("get_references"))
+    notes.push(
+      "- `get_references` lists a symbol's callers/callees with fan-in — call it before editing a widely-used entity to see who's affected, and re-check it after changing a signature.",
+    )
   if (has("webfetch"))
     notes.push(
       "- `webfetch` returns compressed, relevance-ranked passages — pass a `prompt` to focus the ranking and page with `cache_ref` at near-zero cost.",

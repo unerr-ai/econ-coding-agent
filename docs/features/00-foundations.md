@@ -582,6 +582,25 @@ happens via `SessionTools.resolve()` and add a lint rule flagging direct calls t
 
 ---
 
+## Post-edit breaking-change scan (S0.6, Wave G3)
+
+**Status:** delivered 2026-07-18. After every `edit`/`write` lands, `breakingChangeWarning`
+(`tool/edit-governance.ts`) diffs the graph's pre-edit entity list against a fresh single-file
+re-parse (`detectBreakingChanges`, `code-intelligence/src/edit-impact.ts`) and appends one inline
+`ur|brk` line per **exported** entity that was removed or signature-changed while ≥1 caller
+*outside the edited file* still references it — no threshold; one live caller is enough (top 5
+listed, the rest deferred to `get_references`). For a removed name it also runs a bounded
+word-boundary `git grep` sweep (cap 5, 500 ms) for residue the call graph can't see (config
+keys, routes, fixtures, strings).
+
+CONVERT-shaped (never blocks), raced against `GOVERNANCE_GRAPH_BUDGET_MS`, fail-closed on any
+cold-graph/parse/git miss (including zero re-parsed entities for a previously non-empty file —
+treated as a parser miss, not a mass removal). Complements the in-flight `callersAtRiskWarning`,
+which regex-diffs old/new content *during* the edit and structurally cannot see a full removal.
+Per [docs/design/graph-navigation-audit.md §2](../design/graph-navigation-audit.md) (G3).
+
+---
+
 ## Verification status (S0.9)
 
 Date: 2026-06-27. Tooling: **bun 1.3.14** — this is a bun workspace (`bun.lock` +

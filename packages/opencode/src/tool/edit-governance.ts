@@ -19,7 +19,12 @@ import { join } from "node:path"
 import {
   computeEditImpact,
   renderInlineBlastRadius,
+  detectBreakingChanges,
+  renderBreakingChangeWarning,
+  extractEntities,
+  detectLanguage,
   type EditImpactGraph,
+  type BreakingChange,
 } from "@opencode-ai/code-intelligence"
 import type { StuckSignal } from "../../../code-intelligence/src/orchestration-fsm"
 import { getGraph, issueSymbolDefinitionSitesIfReady } from "./graph-tools"
@@ -294,6 +299,116 @@ export async function callersAtRiskWarning(
     ])
     if (result === timedOut) return null
     return renderInlineBlastRadius(result)
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// G3 — post-edit breaking-change scan. callersAtRiskWarning above catches a
+// signature change while the edit is IN FLIGHT via a regex diff of raw old/
+// new content; it can't see a full removal (there's no "changed" fragment
+// left to diff against). breakingChangeWarning runs AFTER the edit lands,
+// diffing the graph's pre-edit entity list against a fresh single-file
+// re-parse of the new content, and adds a bounded git-grep word-boundary
+// pass for a removed/renamed name's residue outside the call graph (a
+// string, a config key, a dynamic-dispatch site). Same shape as
+// callersAtRiskWarning: convert-only (never blocks), fail-closed on any
+// graph/parse/git failure, bounded by the same governance graph budget.
+// ---------------------------------------------------------------------------
+
+/** Max repo-wide text-occurrence sites listed per removed/renamed entity. */
+const MAX_BREAKING_TEXT_OCCURRENCES = 5
+
+/**
+ * Bounded word-boundary literal search for `name` across git-tracked files
+ * via `git grep -w -F`, scoped to `worktree` with a `.`-relative pathspec so
+ * the same call scans "the whole repo" in production (worktree = repo root)
+ * and "just this fixture" in a test (worktree = a fixture subdir) — the same
+ * git-scoped-not-full-fs-walk approach snapshotTestTree uses above, so
+ * node_modules/dist/.git never get walked. Never throws: a missing git
+ * binary, a non-repo cwd, a timeout, or zero matches all resolve to [].
+ */
+function textOccurrencesOutsideGraph(
+  worktree: string,
+  name: string,
+  skipFile: string,
+): Array<{ file: string; line: number }> {
+  try {
+    const raw = execSync(`git grep -n -w -I -F -e ${JSON.stringify(name)} -- .`, {
+      cwd: worktree,
+      encoding: "utf8",
+      timeout: 500,
+    })
+    const hits: Array<{ file: string; line: number }> = []
+    for (const row of raw.split("\n")) {
+      if (!row) continue
+      const m = /^(.+?):(\d+):/.exec(row)
+      if (!m) continue
+      const file = m[1]!
+      if (file === skipFile) continue
+      hits.push({ file, line: Number(m[2]) })
+      if (hits.length >= MAX_BREAKING_TEXT_OCCURRENCES) break
+    }
+    return hits
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Evaluate a just-landed edit for a removed or signature-changed exported
+ * entity that live callers outside the file still reference, and return an
+ * inline `ur|brk`-style warning, or null when there's nothing to surface (no
+ * breaking change, zero outside callers, a test file, a brand-new file, an
+ * unsupported language, or the graph/git is cold/unavailable). Never throws
+ * and never blocks past its graph budget — callers append the result
+ * directly to a tool's output string, same as callersAtRiskWarning.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function breakingChangeWarning(
+  filePath: string,
+  oldContent: string | null,
+  newContent: string | null,
+  graph: EditImpactGraph = getGraph() as unknown as EditImpactGraph,
+  worktree: string = process.cwd(),
+): Promise<string | null> {
+  if (!oldContent || !newContent) return null // new file, or nothing pre-existing to break
+  if (isTestFilePath(filePath)) return null
+  if (!detectLanguage(filePath)) return null
+
+  try {
+    const timedOut = Symbol("governance-breaking-change-budget-timeout")
+    const budget = new Promise<typeof timedOut>((resolve) =>
+      setTimeout(() => resolve(timedOut), GOVERNANCE_GRAPH_BUDGET_MS),
+    )
+    const result = await Promise.race([
+      (async (): Promise<string | null> => {
+        const preEntities = await graph.getEntitiesInFile(filePath)
+        if (preEntities.length === 0) return null // cold/unindexed file — fail closed
+
+        const postEntities = extractEntities(newContent, filePath)
+        const changes: BreakingChange[] = await detectBreakingChanges(
+          graph,
+          oldContent,
+          preEntities,
+          postEntities,
+        )
+        if (changes.length === 0) return null
+
+        for (const change of changes) {
+          if (change.change_type !== "removed") continue
+          const occurrences = textOccurrencesOutsideGraph(worktree, change.entity_name, change.entity_file)
+          if (occurrences.length > 0) change.text_occurrences = occurrences
+        }
+
+        return renderBreakingChangeWarning(changes)
+      })(),
+      budget,
+    ])
+    if (result === timedOut) return null
+    return result
   } catch {
     return null
   }

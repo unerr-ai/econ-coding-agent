@@ -18,7 +18,7 @@ import { BunSqliteGraph, makeReconTool, makeGetReferencesTool, makeSearchCodeToo
 import * as Tool from "./tool"
 import { Effect, Schema } from "effect"
 import { withMeta, hashInputs, getSlice, recordToolCall } from "./_shared"
-import { enrichEntities } from "./graph-tools-enrich"
+import { enrichEntities, buildReferenceRows, RSK_CALLER_THRESHOLD } from "./graph-tools-enrich"
 import type { LeanEntity } from "./graph-tools-enrich"
 // Sprint 4: glob mode uses Glob.scanSync (sync, no Effect service needed)
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -1329,11 +1329,20 @@ const GetReferencesParameters = Schema.Struct({
       "Default false. Set true for a RENAME — also returns word-boundary literal matches of " +
       "the entity name the call graph cannot see. Only applies with direction:'callers'.",
   }),
+  depth: Schema.optional(Schema.Number).annotate({
+    description:
+      "Traversal depth: 1 = direct callers/callees only (default); 2 = also include their own " +
+      "callers/callees — bounded (capped by limit) and cycle-safe. Ignored with include_text_occurrences.",
+  }),
 })
 
 /**
- * `get_references` tool: returns the caller list (blast radius) or callee
- * list for a named entity, backed by the in-process SQLite graph.
+ * `get_references` tool: direct model-facing callers/callees for a named
+ * entity — file:line, kind, fan-in, and semantic fields (domain/role/summary)
+ * when present, with a chokepoint marker and an optional bounded depth-2
+ * walk — backed by the in-process SQLite graph. Re-registered (G1) so the
+ * model can check blast radius before editing a widely-used entity, not just
+ * the harness's own gates.
  *
  * @sem domain=intelligence role=tools
  */
@@ -1343,8 +1352,11 @@ export const GraphGetReferencesTool = Tool.define(
     const ripgrep = yield* Ripgrep.Service
     return {
     description:
-      "Return the caller list (fan-in) or callee list (outgoing imports/calls) for a " +
-      "named entity. Use direction='callers' to see blast radius; 'callees' for dependencies.",
+      "Return the caller list (fan-in) or callee list (outgoing imports/calls) for a named " +
+      "entity: file:line, kind, fan-in, and semantic fields (domain/role/summary) when present. " +
+      "Use direction='callers' to see blast radius before editing a widely-used entity; " +
+      "'callees' for dependencies. depth:2 bounded-walks one more hop (cycle-safe, capped by limit). " +
+      `ur|rsk [chokepoint] marks a row whose own fan-in is >= ${RSK_CALLER_THRESHOLD}.`,
     parameters: GetReferencesParameters,
     execute: (
       input: Schema.Schema.Type<typeof GetReferencesParameters>,
@@ -1352,11 +1364,30 @@ export const GraphGetReferencesTool = Tool.define(
     ) =>
       Effect.promise(async () => {
         const root = process.cwd()
+        const direction = input.direction ?? "callers"
         try {
           const gate = await ensureGraphReadyBounded()
           if (gate.ready) {
-            const output = await makeGetReferencesTool(gate.graph, root).execute(input as Record<string, unknown>)
-            const meta = withMeta(output, output)
+            if (input.include_text_occurrences && direction === "callers") {
+              // Rename support has no equivalent in the enriched row builder
+              // below — keep the original code-intelligence tool's combined
+              // {references, text_occurrences} shape for this path.
+              const output = await makeGetReferencesTool(gate.graph, root).execute(input as Record<string, unknown>)
+              const meta = withMeta(output, output)
+              recordToolCall({ tool: "get_references", ...meta })
+              return { title: "get_references", metadata: { meta } as Record<string, unknown>, output }
+            }
+
+            const { rows, truncated, signals } = await buildReferenceRows({
+              graph: gate.graph,
+              entityKey: input.entity,
+              direction,
+              depth: input.depth,
+              limit: input.limit,
+            })
+            const rawJson = JSON.stringify({ references: rows, direction, total: rows.length, truncated }, null, 2)
+            const output = rawJson + (signals.length > 0 ? "\n\n" + signals.join("\n") : "")
+            const meta = withMeta(rawJson, output)
             recordToolCall({ tool: "get_references", ...meta })
             return { title: "get_references", metadata: { meta } as Record<string, unknown>, output }
           }

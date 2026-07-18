@@ -46,6 +46,8 @@ exact OpenCode seams it touches, and its status. Index + integration-zone model 
 seam table: [features/README.md](./features/README.md).
 
 ### `design/` — deeper design notes
+- [graph-navigation-audit.md](./design/graph-navigation-audit.md) — signals completeness audit
+  (recon, edit, finish phases); gap inventory × SOTA reference; ranked Wave G implementation roadmap.
 - [adaptive-compute.md](./design/adaptive-compute.md) — the "compute dial": divide cost on the
   common path, multiply accuracy on the hard tail.
 - [AUTO_COMPACTION_AND_CONTEXT.md](./design/AUTO_COMPACTION_AND_CONTEXT.md) — auto-compaction
