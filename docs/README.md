@@ -113,6 +113,10 @@ seam table: [features/README.md](./features/README.md).
 - [POSITIONING.md](./strategy/POSITIONING.md) — who econ is for, the wedge, and the
   one-product/three-triggers regional model; [COMPETITORS.md](./strategy/COMPETITORS.md) covers
   the competitive field.
+- [FUNDRAISING.md](./strategy/FUNDRAISING.md) — the fundraising narrative: the three-part
+  story, comparable-raise evidence (is "cheaper AI" fundable), the two-kinds-of-learning
+  defensibility claim (memory vs trained dispatcher, say/never-say), projected benchmark
+  position, investor pushback → answers, and the accelerator/application plan with deadlines.
 - [ENTERPRISE_SEGMENTATION.md](./strategy/ENTERPRISE_SEGMENTATION.md) — the cross-segment,
   global demand map: affordability × independence as two axes (affordability splitting into
   parity vs scale), the 2×2 by business type and region, the model-per-tier config that lets one

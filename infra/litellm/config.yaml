@@ -38,6 +38,11 @@ model_list:
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/glm-5p2
       api_key: os.environ/FIREWORKS_API_KEY
+      # oracle tier (ECON_TIER_BINDING). Allow-list so a DEDICATED-deployment flip
+      # (econ-entrypoint.sh rewrites this model line to the #deployments/... form)
+      # forwards these verbatim to Fireworks instead of LiteLLM rejecting them with
+      # UnsupportedParamsError. Harmless on serverless — mirrors the minimax-m3 entry.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
       input_cost_per_token: 0.0000014
       output_cost_per_token: 0.0000044
       cache_read_input_token_cost: 0.00000014
@@ -50,6 +55,11 @@ model_list:
     litellm_params:
       model: fireworks_ai/accounts/fireworks/models/deepseek-v4-pro
       api_key: os.environ/FIREWORKS_API_KEY
+      # reasoner tier (ECON_TIER_BINDING). Allow-list so a DEDICATED-deployment flip
+      # (econ-entrypoint.sh rewrites this model line to the #deployments/... form)
+      # forwards these verbatim to Fireworks instead of LiteLLM rejecting them with
+      # UnsupportedParamsError. Harmless on serverless — mirrors the minimax-m3 entry.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
       input_cost_per_token: 0.00000174
       output_cost_per_token: 0.00000348
       cache_read_input_token_cost: 0.00000015
@@ -64,6 +74,10 @@ model_list:
       api_key: os.environ/FIREWORKS_API_KEY
       # Fireworks priority tier — see the conductor entry's comment.
       service_tier: "priority"
+      # executor tier (ECON_TIER_BINDING). Allow-list so a DEDICATED-deployment flip
+      # (econ-entrypoint.sh) forwards these verbatim instead of LiteLLM rejecting them
+      # with UnsupportedParamsError. Harmless on serverless — mirrors minimax-m3.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
       input_cost_per_token: 0.00000015
       output_cost_per_token: 0.0000006
       cache_read_input_token_cost: 0.00000001

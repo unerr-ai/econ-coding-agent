@@ -1,37 +1,68 @@
 #!/usr/bin/env sh
-# econ gateway entrypoint wrapper — OPTIONAL conductor-tier flip to a dedicated
-# Fireworks deployment, chained in front of the base litellm image entrypoint.
+# econ gateway entrypoint wrapper — OPTIONAL per-tier flip to dedicated Fireworks
+# deployments, chained in front of the base litellm image entrypoint.
 #
-# Default (secret unset): a no-op — config.yaml is served verbatim (conductor on
-# Fireworks SERVERLESS), so nothing about the committed dumb-pipe config or the
-# OL-8.B2 drift test changes. The flip is done at RUNTIME, in the container's copy
-# of config.yaml only, never in the repo file.
+# Default (no *_DEPLOYMENT_PATH secret set): a no-op — config.yaml is served
+# verbatim (every tier on Fireworks SERVERLESS), so nothing about the committed
+# dumb-pipe config or the OL-8.B2 drift test changes. The flip is done at RUNTIME,
+# in the container's copy of config.yaml only, never in the repo file.
 #
-# When CONDUCTOR_DEPLOYMENT_PATH is set (by the benchmark runner's
-# DEDICATED_CONDUCTOR=1 flag, via `fly secrets set`), rewrite ONLY the conductor
-# entry's upstream path (minimax-m3 serverless -> the dedicated `#deployments/...`
-# form) before launching. The runner sets the secret when it brings the dedicated
-# GPU up and unsets it at teardown, so the gateway auto-reverts to serverless.
+# When a <TIER>_DEPLOYMENT_PATH secret is set (by gpu-flip.sh via `fly secrets set`
+# on the econ-litellm app), rewrite ONLY that tier's litellm_params.model line
+# (serverless base model -> the dedicated `#deployments/...` form) before launching.
+# Tiers map to Fireworks base-model slugs exactly as ECON_TIER_BINDING does in econ's
+# model-registry.ts (the drift-tested source of truth):
+#     conductor -> minimax-m3        oracle   -> glm-5p2
+#     reasoner  -> deepseek-v4-pro   executor -> gpt-oss-120b
+# gpu-flip.sh sets the secret when the caller's dedicated GPU is up and unsets it at
+# teardown, so the gateway auto-reverts to serverless. CONDUCTOR_DEPLOYMENT_PATH keeps
+# its original single-tier behaviour (back-compat with DEDICATED_CONDUCTOR runs).
 #
-# We CHAIN the base image entrypoint (/app/docker/entrypoint.sh) rather than exec
+# NOTE: a dedicated deployment's param support cannot be resolved by LiteLLM, so with
+# drop_params:false it would REJECT tool_choice/reasoning_effort (UnsupportedParamsError)
+# and that tier's calls would fail. The flipped tiers' config entries therefore carry
+# allowed_openai_params:["tool_choice","reasoning_effort"] (already on minimax-m3; added
+# to glm-5p2 + deepseek-v4-pro for oracle/reasoner). Harmless on serverless.
+#
+# We CHAIN the base image entrypoint (/app/docker/prod_entrypoint.sh) rather than exec
 # litellm directly so its startup work (prisma / spend-logs DB setup) still runs.
 set -eu
 
 CONFIG="${ECON_CONFIG_PATH:-/app/config.yaml}"
 
-if [ -n "${CONDUCTOR_DEPLOYMENT_PATH:-}" ]; then
-  # Match ONLY the conductor's litellm_params.model line: `  model: fireworks_ai/accounts/fireworks/models/minimax-m3`
-  # (anchored end-of-line so no other tier / the model_name slug is touched). `|`
-  # delimiter because the dedicated path contains `#` (and `/`, but never `|`).
-  if grep -qE '^[[:space:]]*model:[[:space:]]*fireworks_ai/accounts/fireworks/models/minimax-m3[[:space:]]*$' "$CONFIG"; then
-    sed -i -E "s|^([[:space:]]*model:[[:space:]]*)fireworks_ai/accounts/fireworks/models/minimax-m3[[:space:]]*\$|\1${CONDUCTOR_DEPLOYMENT_PATH}|" "$CONFIG"
-    echo "[econ-entrypoint] conductor flipped to DEDICATED: ${CONDUCTOR_DEPLOYMENT_PATH}"
+# Flip one tier's model line to its dedicated deployment path, if that path is set.
+# $1=tier label (logs)  $2=fireworks base-model slug  $3=deployment path.
+# Anchored end-of-line match so ONLY the serverless base-model line is touched, never
+# the model_name slug or another tier. `|` sed delimiter because the dedicated path
+# contains `#` and `/` (but never `|`).
+flip_tier() {
+  _tier="$1"; _slug="$2"; _path="$3"
+  [ -n "$_path" ] || return 0
+  _re="^[[:space:]]*model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$"
+  if grep -qE "$_re" "$CONFIG"; then
+    sed -i -E "s|^([[:space:]]*model:[[:space:]]*)fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$|\\1${_path}|" "$CONFIG"
+    echo "[econ-entrypoint] ${_tier} flipped to DEDICATED: ${_path}"
   else
-    echo "[econ-entrypoint] WARN: CONDUCTOR_DEPLOYMENT_PATH set but the serverless conductor line was not found in $CONFIG — serving config as-is" >&2
+    echo "[econ-entrypoint] WARN: ${_tier}_DEPLOYMENT_PATH set but the serverless ${_tier} line (${_slug}) was not found in $CONFIG — serving as-is" >&2
   fi
-else
-  echo "[econ-entrypoint] conductor on serverless (CONDUCTOR_DEPLOYMENT_PATH unset)"
-fi
+}
+
+# tier:slug:path — path LAST (it contains no ':' , only '#' and '/'). POSIX sh, no arrays.
+FLIPPED=0
+for _spec in \
+  "conductor:minimax-m3:${CONDUCTOR_DEPLOYMENT_PATH:-}" \
+  "oracle:glm-5p2:${ORACLE_DEPLOYMENT_PATH:-}" \
+  "reasoner:deepseek-v4-pro:${REASONER_DEPLOYMENT_PATH:-}" \
+  "executor:gpt-oss-120b:${EXECUTOR_DEPLOYMENT_PATH:-}" \
+; do
+  _t=$(printf '%s' "$_spec" | cut -d: -f1)
+  _s=$(printf '%s' "$_spec" | cut -d: -f2)
+  _p=$(printf '%s' "$_spec" | cut -d: -f3-)
+  [ -n "$_p" ] || continue
+  flip_tier "$_t" "$_s" "$_p"
+  FLIPPED=1
+done
+[ "$FLIPPED" = 0 ] && echo "[econ-entrypoint] all tiers on serverless (no *_DEPLOYMENT_PATH secrets set)"
 
 # Hand off to the base image's REAL server entrypoint. In the berriai/litellm image
 # `docker/prod_entrypoint.sh` is the ENTRYPOINT (`exec litellm "$@"`, which runs the
