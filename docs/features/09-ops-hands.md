@@ -1,7 +1,16 @@
 # 09 — Ops hands: long-running work, background jobs, monitor/wait, ops persona
 
-**Status:** PLANNED 2026-07-18 (this doc is the implementation plan). Design frozen; slices
-delegated. Validation target: one real Terminal-Bench 2.1 task (`build-pmars`) run locally.
+**Status:** IMPLEMENTED + LIVE-VALIDATED 2026-07-18 (commits `304fb43be` slices A+B,
+`2bd99385b` slice C, `5444d50c3` degrade-path fix). Validation, same day, local arm64 docker:
+(1) **build-pmars (real Terminal-Bench 2.1 task): 4/4 verifier tests PASS, reward=1**, ~12 min
+wall, agent raised foreground timeouts (180-300s) per the new shell.txt guidance — background
+machinery correctly stayed inert on a task that didn't need it; one lossy shell-compression
+save observed. (2) **Targeted job live-fire: PASS** — `background:true` → `job_1`, concurrent
+file work while the job ran, exactly ONE `job wait` (zero poll loops), job output harvested.
+Found + fixed live: turn-read nulled (`turn_read_degraded`) which silently dropped the OPS
+playbook + time-budget line — the deadline line now also rides the null-verdict path
+(`timeBudgetLine()`, preambles.ts). Residual: OPS_PLAYBOOK still requires a non-null turn-read
+verdict; single-run numbers are smoke, not claims (§6.6 variance rules).
 
 **Why.** The 2026-07-18 Terminal-Bench research (memory: terminal-bench-pro-live-research)
 found econ's *brain* is not fix-bound — turn-triage already models `run-only`/`build`/`audit`
