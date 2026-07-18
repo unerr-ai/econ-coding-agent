@@ -38,8 +38,9 @@ export interface UnresolvedSeenRed {
 
 // A test-shaped command: a pytest/Django-style runner invocation, or a
 // `repro*` script — never a bare non-test shell command (grep, ls, a build
-// step) whose failure carries no verification meaning.
-const TEST_SHAPED_COMMAND_RE = /pytest|(?:^|[\s/])tests?(?:[\s/._]|$)|runtests|manage\.py test|repro/i
+// step) whose failure carries no verification meaning. Exported for F21's
+// interpreter harvest (regression-neighbors.ts) so both keep one definition.
+export const TEST_SHAPED_COMMAND_RE = /pytest|(?:^|[\s/])tests?(?:[\s/._]|$)|runtests|manage\.py test|repro/i
 
 // The output actually carries a test-failure signature — a non-zero exit
 // from a test-shaped command alone (e.g. a collection warning) is not
@@ -51,12 +52,12 @@ const TEST_FAILURE_SIGNATURE_RE = /FAILED|AssertionError|Traceback|FAIL:|ERROR:|
 // prints for a red run (django/unittest "FAILED (failures=…)"/"FAIL: ",
 // pytest "FAILED tests/…"/"2 failed") — never on a mere failure-shaped word
 // (Traceback/ERROR:) that legitimately appears in verbose green output.
-const LAUNDERED_FAILURE_SIGNATURE_RE = /FAILED\s*\(|(?:^|\n)\s*FAILED\b|\b[1-9]\d* failed\b|(?:^|\n)FAIL: /
+export const LAUNDERED_FAILURE_SIGNATURE_RE = /FAILED\s*\(|(?:^|\n)\s*FAILED\b|\b[1-9]\d* failed\b|(?:^|\n)FAIL: /
 
 // An interpreter path (`python`, `python3.9`, `.venv/bin/python`) is shared
 // by nearly every command a turn runs — treating it as a test target let any
 // later exit-0 python invocation falsely clear a red (11885 live shape).
-const INTERPRETER_TOKEN_RE = /(?:^|\/)python[\w.]*$/i
+export const INTERPRETER_TOKEN_RE = /(?:^|\/)python[\w.]*$/i
 // A bare module label trailing the runner (django's `runtests.py delete`).
 const BARE_LABEL_RE = /^[A-Za-z_]\w*$/
 

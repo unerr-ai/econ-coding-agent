@@ -37,6 +37,7 @@ export type EconSignalName =
   | "convention_divergence" // wave-11 first pause
   | "convention_divergence_repeat" // evidenced family conflict on identical retry — hard tail
   | "interpreter_mismatch" // agent probe ran a non-project interpreter
+  | "interpreter_harvested" // F21: interpreter reused from the turn's own green test run — converts an F14a probe-miss gate skip into a live gate
   | "gate_block" // S4 governance BLOCK ledger entry
   | "deferral_armed" // consumer record: pre-pass planted (evidence.consumed names the tail signal)
   | "deferral_dispatched" // consumer record: the escalation slice actually ran

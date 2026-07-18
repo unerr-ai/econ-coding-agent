@@ -78,6 +78,7 @@ export type EconSignalName =
   | "convention_divergence"         // wave-11 first pause
   | "convention_divergence_repeat"  // evidenced family conflict on identical retry — HARD TAIL
   | "interpreter_mismatch"          // agent probe ran a non-project interpreter
+  | "interpreter_harvested"         // F21: interpreter reused from the turn's own green test run
   | "gate_block"                    // S4 governance BLOCK ledger entry
   | "deferral_armed"                // consumer record: pre-pass planted
   | "deferral_dispatched"           // consumer record: slice actually ran
@@ -169,6 +170,7 @@ children). Interactive sessions may still defer; oracle-inversion prefers SURFAC
 | Convention 1st | `edit.ts:232` / `write.ts:147` | `convention_divergence` (info → convert) |
 | Convention evidenced retry | gate (new, §7) | `convention_divergence_repeat` (tail → defer) |
 | Interpreter rewrite | probe-run sites (§9) | `interpreter_mismatch` (info → convert) |
+| F21 turn-harvest hit | M4 site + F11 site (§9) | `interpreter_harvested` (info → convert) |
 
 `resetSignals` runs at fresh-turn open next to `resetResolveAttempts`
 (`prompt.ts:3550-3564` region); continuation turns inherit, matching pin/arming
@@ -380,6 +382,19 @@ TypeError came from base-conda py3.11 vs testbed py3.6).
 written, honoring absolute paths — round-F 11848's repro lived at `/var/folders/…/T/opencode/`
 and the old basename-only extraction degraded to file-missing. Used by both the drift
 detector and the fidelity dispatcher.
+
+**New 2026-07-18 (F20/F21, from the shapely-2226/linkding-995 `live_verified`
+forensics).** F14a governs interpreter *discovery* for the regression gate;
+`harvestTurnInterpreter` (F21) now runs FIRST at both that gate and the M4 pinned-probe
+site — it scans the turn's own bash executions for a green, test-shaped, python-headed
+run and reuses its interpreter token before F14a's `sys.path`-stripped synthetic probe,
+publishing `interpreter_harvested` on a hit (linkding-995's gate skip was exactly a
+probe-miss the transcript already disproved). Sibling fix `collectGraphNeighborCandidates`
+(F20) extends F11's neighbor selection itself — filename/stem rungs alone missed
+shapely-2226's call-graph-only regression — by walking reverse-call edges from touched
+files via the in-process graph. Full mechanism detail, caps, and degrade behavior:
+[HARNESS_AND_VARIANCE_REPORT.md](../testing/HARNESS_AND_VARIANCE_REPORT.md) I.5 item 5
+and Part IX.
 
 ---
 

@@ -324,9 +324,36 @@ being used as the exit door on real failures.
    steps / 17 reasoner escalations inventing verification for a fix never in scope.
    wave-10 ran-no-real-test deny (once per session, ever)                  (:3111-3167)
    S3 unverified-finish: no pin, or pin+zero source edits → nudge ≤3 → loud (:3176-3243)
-5. F11/F16 regression gate: ≤3 neighbor suites (exact-twin → proximity → F17 module
-   stems, round-robin across files, scratch-dir filtered); regressed → the failing
-   neighbor REPLACES the pinned probe (F16 pin promotion, :3345-3358) + nudge once → loud
+5. F11/F16 regression gate: ≤3 neighbor suites (F19 Django exact-twin → F17/proximity
+   module stems → F20 graph-derived reach, round-robin across files, scratch-dir
+   filtered); regressed → the failing neighbor REPLACES the pinned probe (F16 pin
+   promotion, :3345-3358) + nudge once → loud    (regression-neighbors.ts, prompt.ts)
+   F19 Django exact-twin (2026-07-13): for a Django repo, scans every
+   `tests/<dir>/test_<stem>.py` for an exact filename hit on each touched file's
+   stem and ranks it FIRST, ahead of F17's fuzzy `tests/<dir>` substring match —
+   `regression-neighbors.ts` `collectFileNeighborCandidates` pass 0.
+   **F20 graph-derived neighbor reach (2026-07-18, IMPLEMENTED, live re-fire
+   pending).** Every rung above is filename/stem-shaped, so a fix whose blast
+   radius flows through the call graph with zero filename overlap stayed
+   invisible (shapely-2226 below). `collectGraphNeighborCandidates` walks reverse-
+   call edges from the touched files' entities via the in-process BunSqliteGraph
+   (2 bounded hops, tests-only at the far hop, `existsSync`-filtered); each file's
+   novel candidates — not already findable by the filename rungs — slot in AFTER
+   that file's Django exact twins and BEFORE its fuzzy hits, capped 2/file
+   (`GRAPH_NOVEL_NEIGHBOR_CAP`), overall cap still 3. Gated by
+   `ensureGraphReadyBounded` (5s budget); a cold/missing graph degrades to the
+   filename rungs alone — never a false red. (`regression-neighbors.ts:472` +
+   `prompt.ts:4076-4113`.)
+   **F21 turn-harvested interpreter (2026-07-18, IMPLEMENTED, live re-fire
+   pending).** F14a's interpreter probe strips `sys.path[0]` by design, so a
+   Django-project package importable only from the repo root fails every
+   candidate and the gate skips (linkding-995 below). `harvestTurnInterpreter`
+   scans the turn's own bash executions (latest first) for a green, test-shaped,
+   python-headed run and reuses its interpreter token BEFORE F14a's synthetic
+   probe runs — observed-green evidence outranks a synthetic probe. Wired at both
+   the M4 pinned-probe gate (`prompt.ts:3252-3266`) and this F11 gate site
+   (`prompt.ts:4125-4139`); publishes `interpreter_harvested` (info → convert,
+   `signal-bus.ts:40`) on a hit, falls through to F14a's probe on a miss.
 6. break — turn ends                                                        (:3401)
 ```
 
@@ -1330,6 +1357,33 @@ instances passed a same-binary rerun**:
 confirmation): the 11964 rerun *passed* while `unverified_finish` fired 7× and
 `deferral_armed` 2×, all unconsumed — same as they fired unconsumed on 11885-r2's
 shipped-red. Consuming them at finish is the companion follow-up to the hatch.
+
+---
+
+## Part IX — post-forensic addendum (2026-07-18): the regression-gate blind-spot class (shapely-2226, linkding-995)
+
+**Trigger.** SWE-bench-Live `live_verified` forensics on two shipped regressions the
+F11/F16 gate should have caught but didn't — both root back to the gate's neighbor
+selection and interpreter discovery being FILENAME-shaped, and the failing case wasn't.
+
+**shapely-2226 — the gate fired GREEN on the wrong neighbors.** The edit touched
+`geometry/collection.py`; the 9 tests it actually broke (`test_split`,
+`test_clip_by_rect`, …) reach the edit through `ops.py` — CALL-GRAPH neighbors with
+zero filename/stem overlap with `collection.py`. Every filename rung (F17/F19)
+selected collection-stem suites, ran them green, and the turn shipped the regression.
+
+**linkding-995 — the gate was SKIPPED entirely on a false env-red.** F14a's
+interpreter probe imports the touched top-level package via a `sys.path[0]`-stripped
+run; a Django-project package importable only from the repo root fails every
+candidate (`turn_regression_env probed=2`), so the gate skipped rather than ran —
+while the SAME turn had already run `python -m pytest …` green with a working
+interpreter the probe never consulted.
+
+**Fixes: F20 graph-derived neighbor reach + F21 turn-harvested interpreter
+(IMPLEMENTED 2026-07-18, live re-fire pending).** Mechanism detail lives at I.5
+item 5. Both are strictly additive and fail closed: a cold/missing graph or an empty
+transcript degrades to the prior filename-rung / synthetic-probe behavior — never a
+new false red, never a new gate skip.
 
 ---
 

@@ -43,6 +43,29 @@
  * adds its module-level test command. Ranked ahead of both fuzzy passes so
  * `MAX_NEIGHBOR_COMMANDS` trims fuzzy hits first, never an exact twin.
  *
+ * F20 — graph-derived reach: every filename rung above sees only stem-shaped
+ * proximity, so a fix whose blast radius flows through the CALL GRAPH stays
+ * invisible (shapely-2226: editing geometry/collection.py regressed
+ * test_split/test_clip_by_rect, which reach the edit through ops.py — zero
+ * filename overlap; the gate ran collection-stem suites and passed green).
+ * `collectGraphNeighborCandidates` walks reverse-call edges from the touched
+ * files' entities (one hop to callers, one more hop through non-test caller
+ * files, tests-only at the far hop) and hands back runnable commands for the
+ * TEST files that call the touched code. Each file's novel ones — not
+ * already findable by the filename rungs — slot in AFTER its exact twins and
+ * BEFORE its fuzzy hits, capped at `GRAPH_NOVEL_NEIGHBOR_CAP` so proximity
+ * is never crowded out. A cold/missing graph degrades to the filename rungs
+ * alone — never a false red, never a throw.
+ *
+ * F21 — `harvestTurnInterpreter` reuses the interpreter from the turn's own
+ * green test-shaped run BEFORE F14a's synthetic import probe runs: the probe
+ * strips `sys.path[0]` by design, so a Django-project-style package that is
+ * only importable from the repo root fails every candidate and the gate
+ * skips — while the transcript already holds a command that provably ran the
+ * suite (linkding-995: `python -m pytest …` green in-turn, probe missed 2/2,
+ * gate skipped, one regression shipped). Observed-green evidence outranks a
+ * synthetic probe.
+ *
  * @sem domain=routing role=neighbor-discovery
  */
 import { existsSync, readdirSync, type Dirent } from "node:fs"
@@ -50,10 +73,21 @@ import { homedir } from "node:os"
 import { dirname, extname, join, relative, basename as pathBasename } from "node:path"
 import type { VerifyCommand, CommandRunner } from "@opencode-ai/code-intelligence"
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
+import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "./seen-red"
+import type { SeenRedExecution } from "./seen-red"
+import { isTestLikePath } from "../tool/graph-tools"
 
 const MAX_NEIGHBOR_COMMANDS = 3
 /** Bound on the recursive descent under `<cwd>/tests/` for the pytest-style fallback. */
 const PYTEST_TESTS_DIR_MAX_DEPTH = 3
+// F20 bounds — entities walked per touched file, distinct non-test hop-1
+// caller files walked onward, and graph candidates kept per touched file
+// (before the novel-only merge cap below).
+const GRAPH_NEIGHBOR_ENTITY_CAP = 12
+const GRAPH_NEIGHBOR_HOP1_FILE_CAP = 8
+const GRAPH_NEIGHBOR_CANDIDATES_PER_FILE = 4
+/** Graph candidates admitted per touched file into the merged rank — leaves ≥1 of `MAX_NEIGHBOR_COMMANDS` slots for same-file proximity on a single-file turn. */
+const GRAPH_NOVEL_NEIGHBOR_CAP = 2
 
 /** Strip extension, surrounding underscores, and a leading "test_" — the topic name shared between a source file and the test that covers it. */
 function neighborTopic(filePath: string): string {
@@ -241,29 +275,31 @@ function collectFileNeighborCandidates(
   cwd: string,
   isDjangoRepo: boolean,
   testTreeRoots: readonly string[],
+  graphCandidates: readonly string[] = [],
 ): string[] {
-  const candidates: string[] = []
-
   // Pass 0 — Django exact-twin (F19), highest rank.
+  const twins: string[] = []
   if (isDjangoRepo) {
     for (const command of djangoExactTwinCommands(cwd, sourceFile)) {
-      candidates.push(command)
+      twins.push(command)
     }
   }
+
+  const fuzzy: string[] = []
 
   // Pass 1 — same-file proximity (F11, unchanged).
   const topic = neighborTopic(sourceFile)
   if (topic) {
     if (isDjangoRepo) {
       for (const dirName of djangoNeighborDirs(cwd, topic)) {
-        candidates.push(`python tests/runtests.py ${dirName} --parallel 1`)
+        fuzzy.push(`python tests/runtests.py ${dirName} --parallel 1`)
       }
     } else {
       const matches = new Set<string>()
       collectPytestMatches(join(cwd, "tests"), topic, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
       collectPytestMatches(dirname(join(cwd, sourceFile)), topic, 0, 0, matches)
       for (const match of matches) {
-        candidates.push(`python -m pytest ${relative(cwd, match)} -x -q`)
+        fuzzy.push(`python -m pytest ${relative(cwd, match)} -x -q`)
       }
     }
   }
@@ -273,7 +309,7 @@ function collectFileNeighborCandidates(
     for (const variant of stemVariants(stem)) {
       if (isDjangoRepo) {
         for (const dirName of djangoNeighborDirs(cwd, variant)) {
-          candidates.push(`python tests/runtests.py ${dirName} --parallel 1`)
+          fuzzy.push(`python tests/runtests.py ${dirName} --parallel 1`)
         }
         continue
       }
@@ -283,20 +319,28 @@ function collectFileNeighborCandidates(
         collectPytestMatches(root, variant, 0, PYTEST_TESTS_DIR_MAX_DEPTH, matches)
       }
       for (const match of matches) {
-        candidates.push(`python -m pytest ${relative(cwd, match)} -x -q`)
+        fuzzy.push(`python -m pytest ${relative(cwd, match)} -x -q`)
       }
     }
   }
 
-  return candidates
+  // Pass 0.5 — graph-derived reach (F20): only candidates the filename rungs
+  // could NOT find (novelty = exact command-string dedup, both sides share
+  // one formation), ranked after this file's exact twins and before its
+  // fuzzy hits, capped so proximity keeps a slot under the overall cap.
+  const known = new Set([...twins, ...fuzzy])
+  const graphNovel = graphCandidates.filter((c) => !known.has(c)).slice(0, GRAPH_NOVEL_NEIGHBOR_CAP)
+
+  return [...twins, ...graphNovel, ...fuzzy]
 }
 
 /**
  * Discover a small set of pre-existing test commands whose scope plausibly
  * covers `opts.touchedSourceFiles`. Each touched file gets its own
  * rank-ordered candidate list (`collectFileNeighborCandidates`: Django
- * exact-twin, then same-file proximity, then module-package breadth — same
- * per-file ordering as before), and the lists are then filled into the
+ * exact-twin, then novel graph-derived reach (F20) when the caller supplies
+ * it, then same-file proximity, then module-package breadth), and the lists
+ * are then filled into the
  * result ROUND-ROBIN across files — file1's 1st, file2's 1st, file1's 2nd,
  * ... — instead of file-major: a django-11885 round-C replay showed one
  * touched file's fuzzy matches (an unrelated scaffolded `models.py`) filling
@@ -312,8 +356,13 @@ function collectFileNeighborCandidates(
  *
  * @sem domain=routing role=neighbor-discovery
  */
-export function discoverNeighborTests(opts: { touchedSourceFiles: readonly string[]; cwd: string }): VerifyCommand[] {
-  const { touchedSourceFiles, cwd } = opts
+export function discoverNeighborTests(opts: {
+  touchedSourceFiles: readonly string[]
+  cwd: string
+  /** F20 — per-touched-file graph-derived commands from `collectGraphNeighborCandidates`; absent/empty = filename rungs only. */
+  graphCandidates?: ReadonlyMap<string, readonly string[]>
+}): VerifyCommand[] {
+  const { touchedSourceFiles, cwd, graphCandidates } = opts
   const commands: VerifyCommand[] = []
   const seen = new Set<string>()
   const pushCommand = (command: string) => {
@@ -326,7 +375,7 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
   const testTreeRoots = isDjangoRepo ? [] : discoverTestTreeRoots(cwd)
 
   const perFileCandidates = touchedSourceFiles.map((sourceFile) =>
-    collectFileNeighborCandidates(sourceFile, cwd, isDjangoRepo, testTreeRoots),
+    collectFileNeighborCandidates(sourceFile, cwd, isDjangoRepo, testTreeRoots, graphCandidates?.get(sourceFile) ?? []),
   )
 
   const maxCandidates = perFileCandidates.reduce((max, list) => Math.max(max, list.length), 0)
@@ -338,6 +387,110 @@ export function discoverNeighborTests(opts: { touchedSourceFiles: readonly strin
   }
 
   return commands
+}
+
+/** Minimal reverse-call query surface F20 needs — structurally satisfied by BunSqliteGraph; unit tests inject a fake. */
+export interface NeighborGraphPort {
+  getEntitiesInFile(filePath: string): Promise<{ name: string; filePath: string; kind: string }[]>
+  getCallers(entityKey: string): Promise<{ from_file: string; from_entity: string }[]>
+}
+
+/** A graph file path relativized against `cwd` — BunSqliteGraph rows may carry absolute or root-relative paths depending on the query. */
+function relativeToCwd(file: string, cwd: string): string {
+  return file.startsWith("/") ? relative(cwd, file) : file
+}
+
+/**
+ * The test files reachable from `sourceFile`'s entities over reverse-call
+ * edges: hop 1 collects test-file callers directly and remembers non-test
+ * caller files (with WHICH entities called in, so hop 2 walks only those,
+ * never a whole file's unrelated exports); hop 2 collects test-file callers
+ * of those entities and never widens further. Insertion order is depth
+ * order, so nearer tests rank first; files the graph knows but the disk no
+ * longer holds are dropped.
+ */
+async function graphReachableTestFiles(sourceFile: string, cwd: string, graph: NeighborGraphPort): Promise<string[]> {
+  const testFiles = new Set<string>()
+  const hop1CallerEntities = new Map<string, Set<string>>()
+
+  const entities = (await graph.getEntitiesInFile(sourceFile)).slice(0, GRAPH_NEIGHBOR_ENTITY_CAP)
+  for (const entity of entities) {
+    for (const ref of await graph.getCallers(`${entity.filePath}:${entity.name}:${entity.kind}`)) {
+      const rel = relativeToCwd(ref.from_file, cwd)
+      if (rel === sourceFile || rel.startsWith("..")) continue
+      if (isTestLikePath(rel)) {
+        testFiles.add(rel)
+      } else if (hop1CallerEntities.size < GRAPH_NEIGHBOR_HOP1_FILE_CAP || hop1CallerEntities.has(rel)) {
+        const names = hop1CallerEntities.get(rel) ?? new Set<string>()
+        names.add(ref.from_entity)
+        hop1CallerEntities.set(rel, names)
+      }
+    }
+  }
+
+  for (const [callerFile, callerNames] of hop1CallerEntities) {
+    const callerEntities = (await graph.getEntitiesInFile(callerFile))
+      .filter((entity) => callerNames.has(entity.name))
+      .slice(0, GRAPH_NEIGHBOR_ENTITY_CAP)
+    for (const entity of callerEntities) {
+      for (const ref of await graph.getCallers(`${entity.filePath}:${entity.name}:${entity.kind}`)) {
+        const rel = relativeToCwd(ref.from_file, cwd)
+        if (rel.startsWith("..")) continue
+        if (isTestLikePath(rel)) testFiles.add(rel)
+      }
+    }
+  }
+
+  return [...testFiles].filter((rel) => existsSync(join(cwd, rel)))
+}
+
+/** Forms the runnable command for one graph-reached test file, matching the filename rungs' formation byte-for-byte so the novelty dedup in `collectFileNeighborCandidates` works on exact strings. Non-runnable shapes (a Django test file outside `tests/`, a non-Python file) return null. */
+function graphTestFileCommand(relTestFile: string, isDjangoRepo: boolean): string | null {
+  if (isDjangoRepo) {
+    const segments = relTestFile.split("/")
+    if (segments[0] === "tests" && segments.length >= 2 && segments[1]) {
+      return `python tests/runtests.py ${segments[1]} --parallel 1`
+    }
+    return null
+  }
+  if (extname(relTestFile) !== ".py") return null
+  return `python -m pytest ${relTestFile} -x -q`
+}
+
+/**
+ * F20 — graph-derived neighbor reach: per touched file, the runnable test
+ * commands for TEST files that call the touched code (reverse-call walk,
+ * two bounded hops — see `graphReachableTestFiles`), the blast radius the
+ * filename rungs cannot see (shapely-2226's gate passed green on
+ * collection-stem suites while call-graph neighbors test_split /
+ * test_clip_by_rect broke through ops.py). Any per-file graph error or an
+ * unindexed file degrades to an empty entry so the F11 gate falls back to
+ * pure filename discovery — never a false red, never a throw.
+ *
+ * @sem domain=routing role=neighbor-discovery
+ */
+export async function collectGraphNeighborCandidates(opts: {
+  touchedSourceFiles: readonly string[]
+  cwd: string
+  graph: NeighborGraphPort
+}): Promise<Map<string, string[]>> {
+  const { touchedSourceFiles, cwd, graph } = opts
+  const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
+  const result = new Map<string, string[]>()
+  for (const sourceFile of touchedSourceFiles) {
+    try {
+      const commands: string[] = []
+      for (const rel of await graphReachableTestFiles(sourceFile, cwd, graph)) {
+        if (commands.length >= GRAPH_NEIGHBOR_CANDIDATES_PER_FILE) break
+        const command = graphTestFileCommand(rel, isDjangoRepo)
+        if (command && !commands.includes(command)) commands.push(command)
+      }
+      if (commands.length > 0) result.set(sourceFile, commands)
+    } catch {
+      // Graph unavailable or partial for this file — the filename rungs still run.
+    }
+  }
+  return result
 }
 
 /**
@@ -471,6 +624,42 @@ export async function discoverProjectInterpreter(opts: {
 /** How many candidates `discoverProjectInterpreter` would probe for `cwd` — used only to size the discovery-failure log's count without shelling out a second time. */
 export function projectInterpreterCandidateCount(cwd: string): number {
   return buildInterpreterCandidates(cwd).length
+}
+
+// A green run the F21 harvest may trust: a runner summary proving at least
+// one test passed (pytest "N passed", unittest/django "OK" / "OK (skipped=…)").
+// Exit 0 alone is NOT enough — `pytest --version` or a collection-only run
+// exits 0 without proving the interpreter can run this suite.
+const GREEN_RUN_SIGNATURE_RE = /\b[1-9]\d* passed\b|(?:^|\n)\s*OK\b/
+
+/**
+ * F21 — turn-harvested interpreter: scans the turn's own bash executions
+ * (latest first) for a green, test-shaped, python-headed run and returns
+ * that command's interpreter token. An observed green suite run outranks
+ * F14a's synthetic import probe, which strips `sys.path[0]` by design and
+ * therefore fails on every repo whose package resolves only from the repo
+ * root (Django-project layouts — linkding-995's gate skip shipped a
+ * regression this way). Null when the transcript holds no trustworthy
+ * specimen; callers fall back to the probe. Piped/substituted commands are
+ * skipped (the exit code may not belong to the test run), as are
+ * env-prefixed heads (only a bare or pathed `python*` head is evidence of
+ * WHICH interpreter ran).
+ *
+ * @sem domain=routing role=interpreter-discovery
+ */
+export function harvestTurnInterpreter(executions: readonly SeenRedExecution[]): string | null {
+  for (let i = executions.length - 1; i >= 0; i--) {
+    const { command, exitCode, output } = executions[i]!
+    if (exitCode !== 0) continue
+    if (/[|`]/.test(command) || command.includes("$(")) continue
+    if (!TEST_SHAPED_COMMAND_RE.test(command)) continue
+    if (!GREEN_RUN_SIGNATURE_RE.test(output)) continue
+    if (LAUNDERED_FAILURE_SIGNATURE_RE.test(output)) continue
+    const head = command.match(/^(?:cd .+? && )?(\S+)/)?.[1]
+    if (!head || !INTERPRETER_TOKEN_RE.test(head)) continue
+    return head
+  }
+  return null
 }
 
 /** Replaces the leading `python`/`python3` token of each command — including one following a `cd <dir> && ` prefix — with the discovered absolute interpreter path; a command not shaped like a bare python invocation passes through untouched. */

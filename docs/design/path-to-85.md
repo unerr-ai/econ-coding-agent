@@ -120,7 +120,10 @@ rest, in cost order.
 - **Issue-relevant regression selection (TestPrune-style).** Selecting existing tests
   by relevance to the issue cut SWE-Agent cost 23% *and* reduced false positives
   (arXiv:2510.18270). Our F11 neighbor machinery already selects; tightening selection
-  to issue-relevance is a refinement, not new spend.
+  to issue-relevance is a refinement, not new spend. F20/F21 landed 2026-07-18 (graph-
+  derived neighbor reach + turn-harvested interpreter, from the live_verified
+  shapely-2226/linkding-995 forensics — see the [variance
+  report](../testing/HARNESS_AND_VARIANCE_REPORT.md) I.5 item 5 and Part IX).
 - **The turn-economy wave (2026-07-15, ⧗ UNCOMMITTED — IN VALIDATION, mixed).** Seven
   always-on, inert-by-signature mechanisms attacking *turns* rather than tokens: a compiled
   brief + a 12-step cap for first-hop reasoner/oracle slices (an above-conductor slice is an
@@ -283,7 +286,7 @@ has Django/pytest specifics baked into exactly the places that must generalize:
 | F19 "Django exact-twin" neighbor pass, `tests/<dir>` scanning (`regression-neighbors.ts:239-341`) | Twin discovery per ecosystem convention (`__tests__/`, `_test.go`, `src/test/java`, `tests/` crates). |
 | Repro seed assumes interpreted run (`repro_issue.py`) | **Build-first discipline** for compiled targets: the adapter inserts a **compilation-verification rung BEFORE any test/probe rung**, and a build/typecheck failure (`cargo check`, `go vet`, `tsc`, `mvn compile`) is a deterministic gate block — never advisory, never conflated with a test red (the ts-repair result: speculative-apply + immediate typecheck loops erase an entire variance class at compile time). |
 | Python import resolution in the graph (wave-5 fixed Python specifically; edges were 30%→84.7%) | **Per-language edge parity** in BunSqliteGraph via tree-sitter + light type resolution; **measure edge-coverage per language before trusting risk signals there** — pointing the graph at a C++/Java repo without upgraded edges starves the risk router of dependency signals and the engine silently degrades to a blind, unguided cheap-model loop (wave-5's exact failure mode, rediscovered per language). Known floors: C macros (~0.58 quality), C++ templates, Java overloads. Adapter contract: an ecosystem whose edge coverage is unmeasured reports `coupling=unknown`, which routes to the judge rung — degraded-but-loud, never silent. |
-| Interpreter discovery (F14a) for regression gate only | Extend to the agent's own repro/probe runs (report item 6) — per-ecosystem toolchain discovery (venv/conda, nvm, GOPATH, cargo workspace). |
+| Interpreter discovery (F14a) for regression gate only | Extend to the agent's own repro/probe runs (report item 6) — per-ecosystem toolchain discovery (venv/conda, nvm, GOPATH, cargo workspace). F21 (2026-07-18) already has the probe fall BEHIND a harvest step: it now reuses the interpreter from the turn's own observed-green test run first, falling back to the F14a synthetic probe only on a miss. |
 
 Cautionary datum: graph-*guided localization* overfits (AutoCodeRover 45%→19% under
 stricter tests). Our graph routes **risk and verification strictness**, not

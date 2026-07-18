@@ -18,7 +18,12 @@
  * exit) regression-gate failure to pin, skipping MISSING_FILE/MODULE_MISSING-shaped and
  * exit-0 entries, `null` on an empty list — and RF-6's rewriteInterpreterCommand: the shared
  * per-command rewrite point (bare python/python3 head swap across `&&`/`;` segments, pipe/
- * backtick/`$(` bail-out, undefined-interpreter passthrough, idempotence on a second pass).
+ * backtick/`$(` bail-out, undefined-interpreter passthrough, idempotence on a second pass) —
+ * and F20's collectGraphNeighborCandidates (two-hop reverse-call walk, hop-2 never widening,
+ * throw-safe empty-map degrade, disk-existence filtering, Django command formation) plus
+ * discoverNeighborTests' graphCandidates merge (ranked after twins/before fuzzy, capped,
+ * novelty-deduped, round-robin unchanged) — and F21's harvestTurnInterpreter (green/test-shaped/
+ * python-headed detection, piped/env-prefixed/laundered-mixed rejection, latest-run-wins).
  */
 
 import { describe, it, expect, afterEach } from "bun:test"
@@ -33,7 +38,11 @@ import {
   rewriteInterpreterCommand,
   deriveTopLevelPackage,
   selectRegressionPinCandidate,
+  collectGraphNeighborCandidates,
+  harvestTurnInterpreter,
 } from "../../src/session/regression-neighbors"
+import type { NeighborGraphPort } from "../../src/session/regression-neighbors"
+import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "../../src/session/seen-red"
 
 const dirs: string[] = []
 
@@ -621,5 +630,341 @@ describe("selectRegressionPinCandidate", () => {
 
   it("returns null for an empty list", () => {
     expect(selectRegressionPinCandidate([])).toBeNull()
+  })
+})
+
+describe("collectGraphNeighborCandidates — F20 graph-derived reach", () => {
+  it("shapely-2226 shape: two-hop reverse-call walk reaches BOTH the direct test caller and the caller-of-caller test, depth-1 first", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "shapely", "geometry"), { recursive: true })
+    writeFileSync(join(cwd, "shapely", "geometry", "collection.py"), "")
+    mkdirSync(join(cwd, "shapely", "tests", "geometry"), { recursive: true })
+    writeFileSync(join(cwd, "shapely", "tests", "geometry", "test_collection.py"), "")
+    writeFileSync(join(cwd, "shapely", "tests", "test_split.py"), "")
+
+    const graph: NeighborGraphPort = {
+      async getEntitiesInFile(filePath) {
+        if (filePath === "shapely/geometry/collection.py") {
+          return [{ name: "GeometryCollection", filePath: "shapely/geometry/collection.py", kind: "class" }]
+        }
+        if (filePath === "shapely/ops.py") {
+          return [{ name: "split", filePath: "shapely/ops.py", kind: "function" }]
+        }
+        return []
+      },
+      async getCallers(entityKey) {
+        if (entityKey === "shapely/geometry/collection.py:GeometryCollection:class") {
+          return [
+            { from_file: "shapely/ops.py", from_entity: "split" },
+            { from_file: "shapely/tests/geometry/test_collection.py", from_entity: "test_x" },
+          ]
+        }
+        if (entityKey === "shapely/ops.py:split:function") {
+          return [{ from_file: "shapely/tests/test_split.py", from_entity: "test_split_line" }]
+        }
+        return []
+      },
+    }
+
+    const result = await collectGraphNeighborCandidates({
+      touchedSourceFiles: ["shapely/geometry/collection.py"],
+      cwd,
+      graph,
+    })
+
+    expect(result.get("shapely/geometry/collection.py")).toEqual([
+      "python -m pytest shapely/tests/geometry/test_collection.py -x -q",
+      "python -m pytest shapely/tests/test_split.py -x -q",
+    ])
+  })
+
+  it("hop-2 never widens: a non-test caller-of-caller file is ignored, only its test-file siblings count", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "mod.py"), "")
+    mkdirSync(join(cwd, "pkg", "tests"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "tests", "test_bar.py"), "")
+
+    const graph: NeighborGraphPort = {
+      async getEntitiesInFile(filePath) {
+        if (filePath === "pkg/mod.py") return [{ name: "foo", filePath: "pkg/mod.py", kind: "function" }]
+        if (filePath === "pkg/caller.py") return [{ name: "bar", filePath: "pkg/caller.py", kind: "function" }]
+        return []
+      },
+      async getCallers(entityKey) {
+        if (entityKey === "pkg/mod.py:foo:function") {
+          return [{ from_file: "pkg/caller.py", from_entity: "bar" }]
+        }
+        if (entityKey === "pkg/caller.py:bar:function") {
+          return [
+            { from_file: "pkg/other_caller.py", from_entity: "baz" },
+            { from_file: "pkg/tests/test_bar.py", from_entity: "test_bar" },
+          ]
+        }
+        return []
+      },
+    }
+
+    const result = await collectGraphNeighborCandidates({
+      touchedSourceFiles: ["pkg/mod.py"],
+      cwd,
+      graph,
+    })
+
+    expect(result.get("pkg/mod.py")).toEqual(["python -m pytest pkg/tests/test_bar.py -x -q"])
+  })
+
+  it("a graph port whose methods throw resolves to an empty map, never rejects", async () => {
+    const cwd = makeFixture()
+    const graph: NeighborGraphPort = {
+      async getEntitiesInFile() {
+        throw new Error("graph unavailable")
+      },
+      async getCallers() {
+        throw new Error("graph unavailable")
+      },
+    }
+
+    const result = await collectGraphNeighborCandidates({
+      touchedSourceFiles: ["pkg/mod.py"],
+      cwd,
+      graph,
+    })
+
+    expect(result).toEqual(new Map())
+  })
+
+  it("drops a graph-known test file that does not exist on disk", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "mod.py"), "")
+    // pkg/tests/test_missing.py is deliberately never created on disk.
+
+    const graph: NeighborGraphPort = {
+      async getEntitiesInFile(filePath) {
+        if (filePath === "pkg/mod.py") return [{ name: "foo", filePath: "pkg/mod.py", kind: "function" }]
+        return []
+      },
+      async getCallers(entityKey) {
+        if (entityKey === "pkg/mod.py:foo:function") {
+          return [{ from_file: "pkg/tests/test_missing.py", from_entity: "test_x" }]
+        }
+        return []
+      },
+    }
+
+    const result = await collectGraphNeighborCandidates({
+      touchedSourceFiles: ["pkg/mod.py"],
+      cwd,
+      graph,
+    })
+
+    expect(result.has("pkg/mod.py")).toBe(false)
+  })
+
+  it("forms the Django runtests command for a graph-reached tests/<dir>/tests.py file", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+    mkdirSync(join(cwd, "tests", "delete_regress"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "delete_regress", "tests.py"), "")
+
+    const graph: NeighborGraphPort = {
+      async getEntitiesInFile(filePath) {
+        if (filePath === "django/db/models/deletion.py") {
+          return [{ name: "delete_objects", filePath: "django/db/models/deletion.py", kind: "function" }]
+        }
+        return []
+      },
+      async getCallers(entityKey) {
+        if (entityKey === "django/db/models/deletion.py:delete_objects:function") {
+          return [{ from_file: "tests/delete_regress/tests.py", from_entity: "test_delete" }]
+        }
+        return []
+      },
+    }
+
+    const result = await collectGraphNeighborCandidates({
+      touchedSourceFiles: ["django/db/models/deletion.py"],
+      cwd,
+      graph,
+    })
+
+    expect(result.get("django/db/models/deletion.py")).toEqual([
+      "python tests/runtests.py delete_regress --parallel 1",
+    ])
+  })
+})
+
+describe("discoverNeighborTests — F20 graphCandidates param", () => {
+  it("ranks a touched file's novel graph candidates AFTER its Django exact twin and BEFORE its fuzzy hits, capped at 2 per file", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "model_meta"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "model_meta", "test_deletion.py"), "")
+    mkdirSync(join(cwd, "tests", "delete"), { recursive: true })
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+
+    const graphCandidates = new Map<string, string[]>([
+      [
+        "django/db/models/deletion.py",
+        [
+          "python tests/runtests.py delete_regress --parallel 1",
+          "python tests/runtests.py auth_tests --parallel 1",
+          "python tests/runtests.py flatpages_tests --parallel 1",
+        ],
+      ],
+    ])
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["django/db/models/deletion.py"],
+      cwd,
+      graphCandidates,
+    })
+
+    expect(result.map((c) => c.command)).toEqual([
+      "python tests/runtests.py model_meta.test_deletion --parallel 1",
+      "python tests/runtests.py delete_regress --parallel 1",
+      "python tests/runtests.py auth_tests --parallel 1",
+    ])
+  })
+
+  it("does not double-count a graph candidate that is byte-identical to a filename-rung candidate", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "test_alpha_one.py"), "")
+    mkdirSync(join(cwd, "pkg", "sub"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "sub", "alpha.py"), "")
+
+    const graphCandidates = new Map<string, string[]>([
+      [
+        "pkg/sub/alpha.py",
+        [
+          "python -m pytest tests/test_alpha_one.py -x -q",
+          "python -m pytest tests/test_alpha_extra.py -x -q",
+        ],
+      ],
+    ])
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["pkg/sub/alpha.py"],
+      cwd,
+      graphCandidates,
+    })
+
+    const commands = result.map((c) => c.command)
+    expect(commands).toEqual([
+      "python -m pytest tests/test_alpha_extra.py -x -q",
+      "python -m pytest tests/test_alpha_one.py -x -q",
+    ])
+    expect(commands.filter((c) => c === "python -m pytest tests/test_alpha_one.py -x -q")).toHaveLength(1)
+  })
+
+  it("keeps round-robin across touched files unchanged when both files carry graph candidates", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "a.py"), "")
+    writeFileSync(join(cwd, "pkg", "b.py"), "")
+
+    const graphCandidates = new Map<string, string[]>([
+      ["pkg/a.py", ["python -m pytest tests/test_a1.py -x -q", "python -m pytest tests/test_a2.py -x -q"]],
+      ["pkg/b.py", ["python -m pytest tests/test_b1.py -x -q", "python -m pytest tests/test_b2.py -x -q"]],
+    ])
+
+    const result = discoverNeighborTests({
+      touchedSourceFiles: ["pkg/a.py", "pkg/b.py"],
+      cwd,
+      graphCandidates,
+    })
+
+    expect(result.map((c) => c.command)).toEqual([
+      "python -m pytest tests/test_a1.py -x -q",
+      "python -m pytest tests/test_b1.py -x -q",
+      "python -m pytest tests/test_a2.py -x -q",
+    ])
+  })
+})
+
+describe("harvestTurnInterpreter — F21 turn-harvested interpreter", () => {
+  it("returns 'python' for a green 'python -m pytest tests/ -q' run reporting N passed", () => {
+    const result = harvestTurnInterpreter([{ command: "python -m pytest tests/ -q", exitCode: 0, output: "12 passed" }])
+    expect(result).toBe("python")
+  })
+
+  it("returns the full interpreter path for a green venv-pathed pytest run", () => {
+    const result = harvestTurnInterpreter([
+      { command: "/testbed/venv/bin/python -m pytest x.py -q", exitCode: 0, output: "1 passed" },
+    ])
+    expect(result).toBe("/testbed/venv/bin/python")
+  })
+
+  it("returns 'python' for a green run behind a 'cd <dir> && ' prefix", () => {
+    const result = harvestTurnInterpreter([{ command: "cd /testbed && python -m pytest a.py", exitCode: 0, output: "1 passed" }])
+    expect(result).toBe("python")
+  })
+
+  it("skips an exit-0 run whose output has no green test signature (e.g. a bare version print)", () => {
+    const result = harvestTurnInterpreter([{ command: "python -m pytest --version", exitCode: 0, output: "pytest 7.4.0" }])
+    expect(result).toBeNull()
+  })
+
+  it("skips a laundered mixed result ('N passed, M failed')", () => {
+    const result = harvestTurnInterpreter([
+      { command: "python -m pytest tests/ -q", exitCode: 0, output: "3 passed, 1 failed" },
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("skips a piped command — the exit code may not belong to the test run", () => {
+    const result = harvestTurnInterpreter([{ command: "python -m pytest a.py | tail -5", exitCode: 0, output: "1 passed" }])
+    expect(result).toBeNull()
+  })
+
+  it("skips an env-prefixed command — only a bare or pathed python* head is evidence of which interpreter ran", () => {
+    const result = harvestTurnInterpreter([
+      { command: "DJANGO_SETTINGS_MODULE=x python -m pytest a.py", exitCode: 0, output: "1 passed" },
+    ])
+    expect(result).toBeNull()
+  })
+
+  it("skips a red (non-zero exit) run", () => {
+    const result = harvestTurnInterpreter([{ command: "python -m pytest a.py", exitCode: 1, output: "1 passed" }])
+    expect(result).toBeNull()
+  })
+
+  it("skips a non-test-shaped green run", () => {
+    const result = harvestTurnInterpreter([{ command: "python setup.py build", exitCode: 0, output: "OK" }])
+    expect(result).toBeNull()
+  })
+
+  it("returns the LATER interpreter when two green runs are present", () => {
+    const result = harvestTurnInterpreter([
+      { command: "python -m pytest a.py -q", exitCode: 0, output: "1 passed" },
+      { command: "/opt/venv/bin/python -m pytest b.py -q", exitCode: 0, output: "1 passed" },
+    ])
+    expect(result).toBe("/opt/venv/bin/python")
+  })
+
+  it("returns null for an empty executions list", () => {
+    expect(harvestTurnInterpreter([])).toBeNull()
+  })
+
+  it("returns 'python' for a Django runtests.py run whose output ends in 'OK'", () => {
+    const result = harvestTurnInterpreter([
+      { command: "python tests/runtests.py delete --parallel 1", exitCode: 0, output: "Ran 3 tests in 0.012s\n\nOK" },
+    ])
+    expect(result).toBe("python")
+  })
+})
+
+describe("seen-red.ts exports the regexes harvestTurnInterpreter depends on", () => {
+  it("still exports TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, and INTERPRETER_TOKEN_RE", () => {
+    expect(TEST_SHAPED_COMMAND_RE).toBeInstanceOf(RegExp)
+    expect(LAUNDERED_FAILURE_SIGNATURE_RE).toBeInstanceOf(RegExp)
+    expect(INTERPRETER_TOKEN_RE).toBeInstanceOf(RegExp)
   })
 })

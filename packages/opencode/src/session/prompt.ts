@@ -22,6 +22,7 @@ import {
   probeSliceTestStrength,
   probeSliceVerifyCommands,
   ensureGraphReady,
+  ensureGraphReadyBounded,
   issueSymbolDefinitionSites,
 } from "../tool/graph-tools"
 import { ProviderTransform } from "@/provider/transform"
@@ -136,6 +137,8 @@ import {
   projectInterpreterCandidateCount,
   deriveTopLevelPackage,
   selectRegressionPinCandidate,
+  collectGraphNeighborCandidates,
+  harvestTurnInterpreter,
 } from "./regression-neighbors"
 import {
   runConductorOrchestration,
@@ -334,6 +337,10 @@ const PIN_PROBE_COMMAND_TOOLS = new Set(["shell", "bash"])
 // commands (discoverNeighborTests caps at 3); divided evenly across however
 // many neighbors were actually discovered so the whole gate always fits.
 const REGRESSION_GATE_TOTAL_BUDGET_MS = 240_000
+
+// F20 — bounded wait for the in-process graph index before the graph-derived
+// neighbor pass; on timeout/miss the gate runs on filename rungs alone.
+const GRAPH_NEIGHBOR_READY_BUDGET_MS = 5_000
 
 // F13d — extensions checked, in order, for an on-disk scratch repro script
 // when an "unpinnable-red" drift recurs with no pin — mirrors
@@ -3242,15 +3249,31 @@ export const layer = Layer.effect(
                 finishLandedSourceEdits &&
                 /^python3?\b/.test(turnPinnedProbe.probe.command)
               ) {
-                const probePackage = deriveTopLevelPackage(finishLandedSourceEditFiles[0], process.cwd())
-                if (probePackage) {
-                  turnDiscoveredInterpreter = yield* Effect.promise(() =>
-                    discoverProjectInterpreter({
-                      cwd: process.cwd(),
-                      topLevelPackage: probePackage,
-                      runner: makeShellCommandRunner({ timeoutMs: 5000 }),
-                    }),
-                  )
+                // F21 — harvest before probing: a green test-shaped run in
+                // this turn's own transcript proves an interpreter works
+                // where F14a's sys.path-stripped import probe cannot (a
+                // Django-project package imports only from the repo root).
+                const harvestedInterpreter = harvestTurnInterpreter(extractTurnBashExecutions(finishAssistantParts))
+                if (harvestedInterpreter !== null) {
+                  turnDiscoveredInterpreter = harvestedInterpreter
+                  yield* publishSignalFx({
+                    name: "interpreter_harvested",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { interpreter: harvestedInterpreter, site: "m4-probe" },
+                  })
+                } else {
+                  const probePackage = deriveTopLevelPackage(finishLandedSourceEditFiles[0], process.cwd())
+                  if (probePackage) {
+                    turnDiscoveredInterpreter = yield* Effect.promise(() =>
+                      discoverProjectInterpreter({
+                        cwd: process.cwd(),
+                        topLevelPackage: probePackage,
+                        runner: makeShellCommandRunner({ timeoutMs: 5000 }),
+                      }),
+                    )
+                  }
                 }
               }
               const gateCommand =
@@ -4050,9 +4073,43 @@ export const layer = Layer.effect(
               // probe, replacing the now-green repro pin, so the finish gate
               // won't release the turn on a stale repro alone.
               if (landedSourceEdits) {
+                // F20 — graph-derived reach: bounded-wait for the in-process
+                // graph, then collect reverse-call test neighbors per touched
+                // file; any miss (cold index, timeout, query error) degrades
+                // to the filename rungs alone (shapely-2226's gap).
+                const graphCandidates = yield* Effect.promise(() =>
+                  ensureGraphReadyBounded(GRAPH_NEIGHBOR_READY_BUDGET_MS)
+                    .then((readiness) =>
+                      readiness.ready
+                        ? collectGraphNeighborCandidates({
+                            touchedSourceFiles: landedSourceEditFiles,
+                            cwd: process.cwd(),
+                            graph: {
+                              getEntitiesInFile: (filePath) => readiness.graph.getEntitiesInFile(filePath),
+                              getCallers: (entityKey) =>
+                                readiness.graph
+                                  .getCallers(entityKey)
+                                  .then((refs) => refs.map((ref) => ({ from_file: ref.fromFile, from_entity: ref.fromEntity }))),
+                            },
+                          })
+                        : undefined,
+                    )
+                    .catch(() => undefined),
+                )
+                const graphCandidateCount = graphCandidates
+                  ? [...graphCandidates.values()].reduce((n, list) => n + list.length, 0)
+                  : 0
+                if (graphCandidateCount > 0) {
+                  yield* Effect.logInfo("turn_regression_graph_neighbors", {
+                    "session.id": sessionID,
+                    files: graphCandidates!.size,
+                    candidates: graphCandidateCount,
+                  })
+                }
                 const neighbors = discoverNeighborTests({
                   touchedSourceFiles: landedSourceEditFiles,
                   cwd: process.cwd(),
+                  graphCandidates,
                 })
                 if (neighbors.length > 0) {
                   // F14a — discover an interpreter that can actually import
@@ -4064,6 +4121,23 @@ export const layer = Layer.effect(
                   // per turn (discovery shells out, at most once); a miss
                   // logs one marker and skips the gate entirely rather than
                   // reject-nudging on a false-red environment failure.
+                  if (turnDiscoveredInterpreter === undefined) {
+                    // F21 — harvest-first (see the M4 site): observed-green
+                    // in-turn evidence outranks the synthetic import probe
+                    // and un-skips the gate on Django-project layouts
+                    // (linkding-995's turn_regression_env probed=2 miss).
+                    const harvestedInterpreter = harvestTurnInterpreter(extractTurnBashExecutions(turnAssistantParts))
+                    if (harvestedInterpreter !== null) {
+                      turnDiscoveredInterpreter = harvestedInterpreter
+                      yield* publishSignalFx({
+                        name: "interpreter_harvested",
+                        sessionID,
+                        severity: "info",
+                        decision: "convert",
+                        evidence: { interpreter: harvestedInterpreter, site: "regression-gate" },
+                      })
+                    }
+                  }
                   if (turnDiscoveredInterpreter === undefined) {
                     const topLevelPackage = deriveTopLevelPackage(landedSourceEditFiles[0], process.cwd())
                     if (!topLevelPackage) {
