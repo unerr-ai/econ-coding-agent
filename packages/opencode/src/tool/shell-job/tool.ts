@@ -43,7 +43,12 @@ type Metadata = {
   jobId: string
 }
 
-function compress(command: string, chunk: string, exitCode: number | undefined, cwd: string): string {
+/**
+ * D6 output-compression treatment shared with the headless completion re-entry gate
+ * (prompt.ts, via `backgroundJobCompletionNudgeText`) — the job tool's own `output`/`wait`
+ * actions and the D4 finish-time nudge must never diverge on how a job's log is presented.
+ */
+export function compressJobOutput(command: string, chunk: string, exitCode: number | undefined, cwd: string): string {
   if (Buffer.byteLength(chunk, "utf-8") <= COMPRESS_ABOVE_BYTES) return chunk
   return compressShellOutput(command, chunk, undefined, exitCode, cwd).text
 }
@@ -82,7 +87,7 @@ export const JobTool = Tool.define(
 
         case "output": {
           const result = registry.readOutput(job.id, params.fromByte)
-          const text = compress(job.command, result.chunk, result.exitCode, job.cwd)
+          const text = compressJobOutput(job.command, result.chunk, result.exitCode, job.cwd)
           const skipped = result.skippedBytes ? `\n(skipped ${result.skippedBytes} older bytes)` : ""
           const status = result.running ? "running" : `finished (exit ${result.exitCode ?? "null"})`
           const output = `Job ${job.id} — ${status}${skipped}\n\n${text || "(no new output)"}\n\nFull log: ${job.logPath} (next byte: ${result.nextByte})`
@@ -96,7 +101,7 @@ export const JobTool = Tool.define(
             return { title: `job ${job.id} wait`, output: `Job ${job.id} — invalid pattern: ${result.error}`, metadata: { jobId: job.id } }
           }
           const fresh = registry.readOutput(job.id)
-          const text = compress(job.command, fresh.chunk, result.exitCode, job.cwd)
+          const text = compressJobOutput(job.command, fresh.chunk, result.exitCode, job.cwd)
           const output = `${waitLead(job.id, result)}\n\n${text || "(no new output)"}\n\nFull log: ${job.logPath}`
           return { title: `job ${job.id} wait`, output, metadata: { jobId: job.id } }
         }

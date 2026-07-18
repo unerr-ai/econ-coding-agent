@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "fs/promises"
 import os from "os"
 import path from "path"
-import { createJobRegistry, type JobRegistry } from "../../src/tool/shell-job/registry"
+import { createJobRegistry, waitAnyForSession, type JobRegistry } from "../../src/tool/shell-job/registry"
 import { JobTool } from "../../src/tool/shell-job/tool"
 import { HIDDEN_FROM_MODEL, CATALOG_TOOL_IDS } from "../../src/tool/registry"
 
@@ -110,6 +110,67 @@ describe("createJobRegistry — readOutput", () => {
       expect(auto1.chunk).toBe(full.chunk)
       const auto2 = registry.readOutput(job.id)
       expect(auto2.chunk).toBe("")
+    },
+    10_000,
+  )
+})
+
+describe("waitAnyForSession", () => {
+  test("no running jobs for the session -> kind:'none' (the cheap inert path)", async () => {
+    const result = await waitAnyForSession("ses_test", 1000, registry)
+    expect(result.kind).toBe("none")
+  })
+
+  test("a job started by a DIFFERENT session doesn't count -> kind:'none'", async () => {
+    registry.startJob({
+      command: "sleep 5",
+      cwd: process.cwd(),
+      shell: "/bin/sh",
+      env: process.env as NodeJS.ProcessEnv,
+      sessionID: "ses_other",
+    })
+    const result = await waitAnyForSession("ses_test", 500, registry)
+    expect(result.kind).toBe("none")
+    registry.listJobs("ses_other").forEach((job) => registry.kill(job.id))
+  })
+
+  test(
+    "the session's job exits before the timeout -> kind:'exit' with the job",
+    async () => {
+      const job = start("echo start; sleep 0.2; echo done")
+      const result = await waitAnyForSession("ses_test", 5000, registry)
+      expect(result.kind).toBe("exit")
+      if (result.kind === "exit") {
+        expect(result.job.id).toBe(job.id)
+        expect(result.job.exitCode).toBe(0)
+      }
+    },
+    10_000,
+  )
+
+  test(
+    "the session's job outlives the timeout -> kind:'timeout' listing it as still running",
+    async () => {
+      const job = start("sleep 5")
+      const result = await waitAnyForSession("ses_test", 300, registry)
+      expect(result.kind).toBe("timeout")
+      if (result.kind === "timeout") {
+        expect(result.running.map((j) => j.id)).toContain(job.id)
+      }
+      registry.kill(job.id)
+    },
+    10_000,
+  )
+
+  test(
+    "resolves on the FIRST of several running jobs to exit, not the slowest",
+    async () => {
+      const slow = start("sleep 5")
+      const fast = start("sleep 0.2; echo fast-done")
+      const result = await waitAnyForSession("ses_test", 5000, registry)
+      expect(result.kind).toBe("exit")
+      if (result.kind === "exit") expect(result.job.id).toBe(fast.id)
+      registry.kill(slow.id)
     },
     10_000,
   )

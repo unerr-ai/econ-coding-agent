@@ -348,6 +348,52 @@ export function seenRedEnvBlockedNudgeText(blocked: readonly { command: string; 
  * probe's own red repeats an environment-shaped signature — the pin then
  * stops binding as green-required for the rest of the turn.
  */
+function formatJobDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.floor(totalSec / 60)
+  const seconds = totalSec % 60
+  return minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`
+}
+
+/**
+ * D4 (09-ops-hands) — background-job completion nudge: prompt.ts's headless completion
+ * re-entry gate (`decideHeadlessCompletionReentry`, turn-supervisor.ts) injects this when a
+ * background job the session started (job tool, D1/D3) exits while the assistant is trying to
+ * finish in headless mode — the session must act on the result and verify the task's end
+ * state instead of ending silently with the job's outcome unseen. `chunk` is the job's fresh
+ * output since its last-served cursor, already routed through `compressShellOutput` (D6).
+ */
+export function backgroundJobCompletionNudgeText(input: {
+  id: string
+  command: string
+  exitCode: number | undefined
+  elapsedMs: number
+  chunk: string
+  logPath: string
+}): string {
+  const duration = formatJobDuration(input.elapsedMs)
+  const output = input.chunk.trim() || "(no new output)"
+  return `Background job ${input.id} (\`${input.command}\`) exited with code ${input.exitCode ?? "null"} after ${duration}. Fresh output (compressed): ${output}. Full log: ${input.logPath}. Act on this result, verify the task's end state, then finish.`
+}
+
+/**
+ * D4 (09-ops-hands) — background-job heartbeat nudge: the same gate's timeout branch, fired
+ * ONCE per still-running job before the termination rule (`heartbeatFlaggedJobIds`,
+ * headless-reentry-store.ts) lets a later finish pass — the model must not mistake "still
+ * running" for silence-is-fine, but the hold itself must never repeat past one nudge for the
+ * same job.
+ */
+export function backgroundJobHeartbeatNudgeText(input: {
+  id: string
+  command: string
+  elapsedMs: number
+  waitedMs: number
+}): string {
+  const duration = formatJobDuration(input.elapsedMs)
+  const waitedMinutes = Math.max(1, Math.round(input.waitedMs / 60_000))
+  return `Background job ${input.id} (\`${input.command}\`) is still running after ${duration} (waited ${waitedMinutes} more minutes). If the task depends on it, wait again with the job tool; if it is runaway, kill it; otherwise you may finish.`
+}
+
 export function probeEnvBlockedNudgeText(probeCommand: string, outputTail: string): string {
   return `The pinned reproduction (\`${probeCommand}\`) keeps failing with the SAME environment-shaped signature:\n${outputTail}\nThis is a broken/unconfigured test environment (a missing backend, service, or binary), not something your code change can fix — the pin no longer binds as green-required. Stop re-running it, and state the environment gap plainly in your final answer.`
 }

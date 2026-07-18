@@ -466,3 +466,31 @@ export function shouldDenyUnverifiedFinish(input: {
   if (input.alreadyDenied) return false
   return true
 }
+
+/** D4 (09-ops-hands) — headless completion re-entry's three possible outcomes. */
+export type HeadlessCompletionReentryDecision = "proceed" | "wait" | "heartbeat-pass"
+
+/**
+ * Pure gate decision for D4's headless completion re-entry — a headless session must not
+ * finish silently while background jobs it started (job tool, 09-ops-hands D1/D3) are still
+ * running, but the hold must always terminate. Interactive sessions, sessions with no running
+ * jobs, and a spent re-entry budget all "proceed" (the inert path, untouched when the feature
+ * never applies); once every currently-running job has already fired its one heartbeat nudge
+ * (heartbeat-flagged), a later finish "heartbeat-pass"es instead of holding forever — a
+ * bounded-retry gate must never become an unbounded loop in bounded-retry costume.
+ *
+ * @sem domain=routing role=gate
+ */
+export function decideHeadlessCompletionReentry(input: {
+  interactive: boolean
+  runningJobIds: readonly string[]
+  heartbeatFlaggedJobIds: ReadonlySet<string>
+  reentryCount: number
+  maxReentries: number
+}): HeadlessCompletionReentryDecision {
+  if (input.interactive) return "proceed"
+  if (input.runningJobIds.length === 0) return "proceed"
+  if (input.reentryCount >= input.maxReentries) return "proceed"
+  if (input.runningJobIds.every((id) => input.heartbeatFlaggedJobIds.has(id))) return "heartbeat-pass"
+  return "wait"
+}

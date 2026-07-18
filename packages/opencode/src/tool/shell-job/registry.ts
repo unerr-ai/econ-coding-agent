@@ -336,3 +336,29 @@ export function jobRegistry(): JobRegistry {
   if (!singleton) singleton = createJobRegistry()
   return singleton
 }
+
+export type WaitAnyResult = { kind: "exit"; job: JobInfo } | { kind: "timeout"; running: JobInfo[] } | { kind: "none" }
+
+/**
+ * D4 (09-ops-hands) — headless completion re-entry's harness-side wait: the FIRST currently
+ * running job started by `sessionID` to exit, or `timeoutMs` elapsed, whichever comes first.
+ * `"none"` is the cheap fast path (no running jobs at all) prompt.ts's finish gate checks
+ * before paying for a poll — the inert case. Reuses each job's own `wait()` poll loop via
+ * `Promise.race` rather than a second poller; a `"timeout"` result carries every job still
+ * running at that point, not just the one that raced first.
+ *
+ * @sem domain=tool role=job-registry
+ */
+export async function waitAnyForSession(
+  sessionID: string,
+  timeoutMs: number,
+  registry: JobRegistry = jobRegistry(),
+): Promise<WaitAnyResult> {
+  const running = registry.listJobs(sessionID).filter((job) => job.status === "running")
+  if (running.length === 0) return { kind: "none" }
+
+  const first = await Promise.race(running.map((job) => registry.wait(job.id, { timeoutMs })))
+  if (first.reason === "exit") return { kind: "exit", job: first }
+
+  return { kind: "timeout", running: registry.listJobs(sessionID).filter((job) => job.status === "running") }
+}

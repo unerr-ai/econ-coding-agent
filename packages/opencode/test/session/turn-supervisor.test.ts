@@ -11,6 +11,7 @@ import {
   SLOW_COMMAND_MS,
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
+  decideHeadlessCompletionReentry,
 } from "../../src/session/turn-supervisor"
 import {
   stuckNudgeText,
@@ -18,6 +19,8 @@ import {
   reproDriftNudgeText,
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
+  backgroundJobCompletionNudgeText,
+  backgroundJobHeartbeatNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
   unverifiedFinishGateNudgeText,
@@ -725,5 +728,99 @@ describe("unverifiedFinishGateNudgeText", () => {
   it("falls back to a generic ask when no command could be derived", () => {
     const text = unverifiedFinishGateNudgeText()
     expect(text.toLowerCase()).toContain("run the project's test suite")
+  })
+})
+
+// -- D4 (09-ops-hands): decideHeadlessCompletionReentry ----------------------
+
+describe("decideHeadlessCompletionReentry", () => {
+  const base = {
+    interactive: false,
+    runningJobIds: ["job_1"],
+    heartbeatFlaggedJobIds: new Set<string>(),
+    reentryCount: 0,
+    maxReentries: 20,
+  }
+
+  it("proceeds untouched on an interactive session (v1 scope)", () => {
+    expect(decideHeadlessCompletionReentry({ ...base, interactive: true })).toBe("proceed")
+  })
+
+  it("proceeds when the session has no running jobs — the inert path", () => {
+    expect(decideHeadlessCompletionReentry({ ...base, runningJobIds: [] })).toBe("proceed")
+  })
+
+  it("proceeds once the re-entry budget is spent, even with jobs still running", () => {
+    expect(decideHeadlessCompletionReentry({ ...base, reentryCount: 20 })).toBe("proceed")
+  })
+
+  it("waits when headless with a running, un-flagged job under budget", () => {
+    expect(decideHeadlessCompletionReentry(base)).toBe("wait")
+  })
+
+  it("heartbeat-passes once every running job is already heartbeat-flagged", () => {
+    expect(
+      decideHeadlessCompletionReentry({ ...base, heartbeatFlaggedJobIds: new Set(["job_1"]) }),
+    ).toBe("heartbeat-pass")
+  })
+
+  it("still waits when only SOME running jobs are heartbeat-flagged (a new job started)", () => {
+    expect(
+      decideHeadlessCompletionReentry({
+        ...base,
+        runningJobIds: ["job_1", "job_2"],
+        heartbeatFlaggedJobIds: new Set(["job_1"]),
+      }),
+    ).toBe("wait")
+  })
+})
+
+describe("backgroundJobCompletionNudgeText", () => {
+  it("names the job id, command, exit code, duration, output, and log path", () => {
+    const text = backgroundJobCompletionNudgeText({
+      id: "job_2",
+      command: "make",
+      exitCode: 0,
+      elapsedMs: 581_000,
+      chunk: "build finished",
+      logPath: "/tmp/job-output/job_2.log",
+    })
+    expect(text).toContain("job_2")
+    expect(text).toContain("`make`")
+    expect(text).toContain("exited with code 0")
+    expect(text).toContain("9m41s")
+    expect(text).toContain("build finished")
+    expect(text).toContain("/tmp/job-output/job_2.log")
+    expect(text.toLowerCase()).toContain("finish")
+  })
+
+  it("falls back to '(no new output)' on an empty chunk", () => {
+    const text = backgroundJobCompletionNudgeText({
+      id: "job_3",
+      command: "true",
+      exitCode: 0,
+      elapsedMs: 1000,
+      chunk: "   ",
+      logPath: "/tmp/job_3.log",
+    })
+    expect(text).toContain("(no new output)")
+  })
+})
+
+describe("backgroundJobHeartbeatNudgeText", () => {
+  it("names the job, elapsed duration, and the wait window, and offers wait/kill/finish", () => {
+    const text = backgroundJobHeartbeatNudgeText({
+      id: "job_1",
+      command: "pytest -x",
+      elapsedMs: 601_000,
+      waitedMs: 600_000,
+    })
+    expect(text).toContain("job_1")
+    expect(text).toContain("`pytest -x`")
+    expect(text).toContain("still running")
+    expect(text).toContain("waited 10 more minutes")
+    expect(text.toLowerCase()).toContain("job tool")
+    expect(text.toLowerCase()).toContain("kill")
+    expect(text.toLowerCase()).toContain("finish")
   })
 })

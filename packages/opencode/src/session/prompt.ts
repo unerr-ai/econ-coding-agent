@@ -52,6 +52,7 @@ import {
   createRerunDedupeTracker,
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
+  decideHeadlessCompletionReentry,
   normalizeResult,
 } from "./turn-supervisor"
 import {
@@ -75,6 +76,8 @@ import {
   identicalRunDedupeNudgeText,
   seenRedEnvBlockedNudgeText,
   probeEnvBlockedNudgeText,
+  backgroundJobCompletionNudgeText,
+  backgroundJobHeartbeatNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
 import {
@@ -85,6 +88,14 @@ import {
   type SeenRedExecution,
 } from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
+import {
+  headlessReentryCount,
+  incrementHeadlessReentryCount,
+  heartbeatFlaggedJobIds,
+  markHeartbeatFlagged,
+} from "./headless-reentry-store"
+import { jobRegistry, waitAnyForSession } from "../tool/shell-job/registry"
+import { compressJobOutput } from "../tool/shell-job/tool"
 import {
   runReproFidelityJudge,
   DEGRADED_REPRO_FIDELITY,
@@ -293,6 +304,21 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
 
+// D4 (09-ops-hands) — headless completion re-entry's hold budget: up to 10
+// minutes, or whatever remains of ECON_TASK_DEADLINE_MS (an absolute
+// epoch-ms deadline the harness sets when a run carries an overall
+// wall-clock budget) if that's sooner. A missing/invalid env value falls
+// back to the 10-minute cap — never a bare "wait forever".
+const HEADLESS_HOLD_MAX_MS = 10 * 60_000
+
+function headlessHoldMs(): number {
+  const raw = process.env["ECON_TASK_DEADLINE_MS"]
+  if (!raw) return HEADLESS_HOLD_MAX_MS
+  const deadline = Number(raw)
+  if (!Number.isFinite(deadline)) return HEADLESS_HOLD_MAX_MS
+  return Math.max(0, Math.min(HEADLESS_HOLD_MAX_MS, deadline - Date.now()))
+}
+
 const GATE_BLOCK_TOOLS = new Set(["edit", "write", "apply_patch"])
 // The reason guardrail.ts throws on a block starts "[econ-gate] BLOCKED: ... in <file>. " on
 // its own first line (see packages/code-intelligence/src/guardrail.ts) — captures the file.
@@ -318,6 +344,14 @@ export const REPRO_PIN_DEADLINE_STEPS = 12
 // calls and no second finish attempt — every done-time bar lives in the
 // !hasToolCalls exit path, which a tool-calling agent can evade forever).
 export const POST_FIX_CONVERGE_STEPS = 8
+
+// D4 (09-ops-hands) — the headless completion re-entry gate's own bounded
+// retry: how many times total this session's finish may be held for a
+// running background job before the gate gives up and lets it proceed
+// unconditionally — the outer stop on top of the heartbeat-flagged
+// termination rule (decideHeadlessCompletionReentry, turn-supervisor.ts),
+// never an unbounded loop in bounded-retry costume.
+export const MAX_HEADLESS_REENTRIES = 20
 
 // S9 — how many SM4-observed steps a turn may keep "verifying" broadly AFTER
 // its pinned reproduction has already run GREEN before the finish nudge
@@ -4294,6 +4328,113 @@ export const layer = Layer.effect(
                     }
                   }
                 }
+              }
+            }
+
+            // D4 (09-ops-hands) — headless completion re-entry: a session
+            // must not finish silently while background jobs it started
+            // (job tool, D1/D3) are still running in headless mode. Mirrors
+            // every sibling finish gate above (continue-with-nudge on a
+            // reject) but is not bugShaped-gated — a background job can be
+            // started on any turn. Bounded by MAX_HEADLESS_REENTRIES plus
+            // the heartbeat-flagged termination rule
+            // (decideHeadlessCompletionReentry), and fails OPEN to a normal
+            // finish on any registry error or race — a job-tracking bug
+            // must never wedge a session, including one that never touched
+            // the job tool (the inert "proceed" path).
+            {
+              const headlessDecision = decideHeadlessCompletionReentry({
+                interactive: interactiveSession(),
+                runningJobIds: jobRegistry()
+                  .listJobs(sessionID)
+                  .filter((job) => job.status === "running")
+                  .map((job) => job.id),
+                heartbeatFlaggedJobIds: heartbeatFlaggedJobIds(sessionID),
+                reentryCount: headlessReentryCount(sessionID),
+                maxReentries: MAX_HEADLESS_REENTRIES,
+              })
+              if (headlessDecision === "heartbeat-pass") {
+                yield* Effect.logInfo("finish_gate_headless_heartbeat_pass", { "session.id": sessionID })
+              } else if (headlessDecision === "wait") {
+                const holdMs = headlessHoldMs()
+                const result = yield* Effect.promise(() =>
+                  waitAnyForSession(sessionID, holdMs).catch(
+                    (): Awaited<ReturnType<typeof waitAnyForSession>> => ({ kind: "none" }),
+                  ),
+                )
+                incrementHeadlessReentryCount(sessionID)
+                if (result.kind === "exit") {
+                  const fresh = jobRegistry().readOutput(result.job.id)
+                  const chunk = compressJobOutput(result.job.command, fresh.chunk, result.job.exitCode, result.job.cwd)
+                  yield* Effect.logInfo("finish_gate_headless_job_exit", {
+                    "session.id": sessionID,
+                    job: result.job.id,
+                    exitCode: result.job.exitCode ?? null,
+                  })
+                  const jobExitNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(jobExitNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: jobExitNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: backgroundJobCompletionNudgeText({
+                      id: result.job.id,
+                      command: result.job.command,
+                      exitCode: result.job.exitCode,
+                      elapsedMs: Date.now() - result.job.startedAt,
+                      chunk,
+                      logPath: result.job.logPath,
+                    }),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                } else if (result.kind === "timeout") {
+                  markHeartbeatFlagged(
+                    sessionID,
+                    result.running.map((job) => job.id),
+                  )
+                  yield* Effect.logInfo("finish_gate_headless_job_heartbeat", {
+                    "session.id": sessionID,
+                    running: result.running.map((job) => job.id),
+                  })
+                  const lead = result.running[0]
+                  if (lead) {
+                    const jobHeartbeatNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(jobHeartbeatNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: jobHeartbeatNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: backgroundJobHeartbeatNudgeText({
+                        id: lead.id,
+                        command: lead.command,
+                        elapsedMs: Date.now() - lead.startedAt,
+                        waitedMs: holdMs,
+                      }),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                  }
+                  continue
+                }
+                // kind:"none" — every running job exited between the
+                // decision and the wait call, or the registry failed open;
+                // fall through and finish normally, same as "proceed".
               }
             }
 
