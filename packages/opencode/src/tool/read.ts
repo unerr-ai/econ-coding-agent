@@ -9,7 +9,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
-import { ensureGraphReadyBounded } from "./graph-tools"
+import { ensureGraphReadyBounded, GRAPH_TOOL_READY_TIMEOUT_MS } from "./graph-tools"
 import { makeFileReadTool } from "@opencode-ai/code-intelligence"
 import {
   withMeta,
@@ -299,7 +299,7 @@ export const ReadTool = Tool.define<
       // full raw read below, so the call always succeeds. Records an econ meter entry on the graph path.
       if (params.entity) {
         const profile = yield* Effect.promise(() =>
-          ensureGraphReadyBounded().then(({ graph, ready }) =>
+          ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS).then(({ graph, ready }) =>
             ready
               ? makeFileReadTool(graph, instance.directory).execute({ path: filepath, entity: params.entity })
               : undefined,

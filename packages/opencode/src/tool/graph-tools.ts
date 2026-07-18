@@ -243,26 +243,43 @@ export async function prepareGraphIndex(
 }
 
 /**
- * Graph-tool execute paths bound their wait on the initial index to this long
- * before degrading to a "still indexing" response — longer than the turn-open
- * risk probe's budget (RISK_PROBE_INDEX_BUDGET_MS) since a tool call the model
- * deliberately invoked is worth waiting longer for.
+ * G4 — the single shared default for ensureGraphReadyBounded, adopted so
+ * every recon-layer caller with no documented reason to differ waits the
+ * same length rather than each picking its own magic number (the audit
+ * found 3s/15s/5s scattered across layers — graph-navigation-audit.md G4).
+ * A caller with a genuinely different latency requirement keeps its own
+ * named+commented constant instead of a bare number — see
+ * GRAPH_TOOL_READY_TIMEOUT_MS (graph-tool execute paths, deliberately
+ * longer) and RISK_PROBE_INDEX_BUDGET_MS (turn-open probe, deliberately
+ * shorter) below.
  */
-const GRAPH_TOOL_READY_TIMEOUT_MS = 15_000
+export const GRAPH_READY_BUDGET_MS = 5_000
+
+/**
+ * Graph-tool execute paths (recon, get_references, search_code,
+ * file_outline, note_save, and read.ts's entity-enrichment path) bound their
+ * wait on the initial index to this long before degrading to a "still
+ * indexing" response — longer than GRAPH_READY_BUDGET_MS since a tool call
+ * the model deliberately invoked is worth waiting longer for. Every one of
+ * those call sites passes this explicitly rather than relying on
+ * ensureGraphReadyBounded's default, so the longer wait is visible at each
+ * site, not implicit.
+ */
+export const GRAPH_TOOL_READY_TIMEOUT_MS = 15_000
 
 /**
  * Bounded readiness gate for graph tool execute paths: races the canonical
- * root's index promise against GRAPH_TOOL_READY_TIMEOUT_MS so a huge first
- * index can't stall a tool call forever. `ready:false` on timeout — callers
- * surface a "graph still indexing" result (or, for the read tool's entity
- * path, silently skip enrichment) instead of querying a not-yet-ready graph,
- * which would otherwise return an empty result and send the model shelling
- * out to grep.
+ * root's index promise against `timeoutMs` (default GRAPH_READY_BUDGET_MS)
+ * so a huge first index can't stall a tool call forever. `ready:false` on
+ * timeout — callers surface a "graph still indexing" result (or, for the
+ * read tool's entity path, silently skip enrichment) instead of querying a
+ * not-yet-ready graph, which would otherwise return an empty result and
+ * send the model shelling out to grep.
  *
  * @sem domain=intelligence role=query
  */
 export async function ensureGraphReadyBounded(
-  timeoutMs: number = GRAPH_TOOL_READY_TIMEOUT_MS,
+  timeoutMs: number = GRAPH_READY_BUDGET_MS,
   startDir: string = process.cwd(),
 ): Promise<{ graph: BunSqliteGraph; ready: boolean }> {
   const entry = getOrCreateEntry(startDir)
@@ -565,6 +582,48 @@ async function resolveIssueSymbolSites(
 }
 
 /**
+ * G4 — bounded per-graph-instance cache for resolveIssueSymbolSites, shared
+ * by `issueSymbolDefinitionSites` and `issueSymbolDefinitionSitesIfReady`:
+ * both re-resolve the SAME symbol against the SAME graph across a session's
+ * turns (dispatch-time hub-design judge, then every later hub-edit-gate
+ * evaluation) uncached otherwise — a ~50ms/miss graph.search + precision-
+ * filter pass neither caller ever shared with the other
+ * (graph-navigation-audit.md G4). Keyed outer-first by the BunSqliteGraph
+ * instance itself (a WeakMap) then by symbol — getOrCreateEntry only ever
+ * hands out a NEW instance for a root on first touch or after a forced
+ * reindex (prepareGraphIndex's `force` path deletes the registry entry), and
+ * neither BunSqliteGraph nor the registry exposes a separate index-
+ * generation counter to invalidate against, so tying the cache lifetime to
+ * instance identity is the simplest correct invalidation: a fresh instance
+ * starts with an empty inner map, and the old instance's entries are simply
+ * dropped with it. Bounded at DEF_SITES_CACHE_MAX entries per instance; on
+ * overflow the whole inner map is cleared rather than an LRU eviction — call
+ * volume here is turn-scoped, not a hot loop, so the simplest policy is enough.
+ */
+const DEF_SITES_CACHE_MAX = 256
+const defSitesCache = new WeakMap<
+  BunSqliteGraph,
+  Map<string, Array<{ symbol: string; kind: string; file: string }>>
+>()
+
+async function resolveIssueSymbolSitesCached(
+  symbol: string,
+  graph: BunSqliteGraph,
+): Promise<Array<{ symbol: string; kind: string; file: string }>> {
+  let inner = defSitesCache.get(graph)
+  if (!inner) {
+    inner = new Map()
+    defSitesCache.set(graph, inner)
+  }
+  const cached = inner.get(symbol)
+  if (cached) return cached
+  const sites = await resolveIssueSymbolSites(symbol, graph)
+  if (inner.size >= DEF_SITES_CACHE_MAX) inner.clear()
+  inner.set(symbol, sites)
+  return sites
+}
+
+/**
  * Wave 7/8b — grounding for the hub-design judge (session/hub-design-judge.ts
  * via prompt.ts's `hubDesignDispatch`) and, via `issueSymbolDefinitionSitesIfReady`
  * below, the hub-edit gate's lazy defining-file allowlist: resolves the issue
@@ -601,7 +660,7 @@ export async function issueSymbolDefinitionSites(
     if (symbols.length === 0) return []
     const out: Array<{ symbol: string; kind: string; file: string }> = []
     for (const symbol of symbols) {
-      out.push(...(await resolveIssueSymbolSites(symbol, graph)))
+      out.push(...(await resolveIssueSymbolSitesCached(symbol, graph)))
     }
     return out
   } catch {
@@ -622,7 +681,8 @@ export async function issueSymbolDefinitionSites(
  * or on any thrown error, so the caller can tell "still cold, retry next
  * evaluation" apart from "graph is ready and genuinely found no defining
  * sites" (a real `[]`). When ready, resolution goes through the same
- * `resolveIssueSymbolSites` precision filter `issueSymbolDefinitionSites` uses.
+ * `resolveIssueSymbolSites` precision filter (and the same G4 def-sites
+ * cache) `issueSymbolDefinitionSites` uses.
  *
  * @sem domain=routing role=analysis
  */
@@ -648,7 +708,7 @@ export async function issueSymbolDefinitionSitesIfReady(
     if (symbols.length === 0) return []
     const out: Array<{ symbol: string; kind: string; file: string }> = []
     for (const symbol of symbols) {
-      out.push(...(await resolveIssueSymbolSites(symbol, graph)))
+      out.push(...(await resolveIssueSymbolSitesCached(symbol, graph)))
     }
     return out
   } catch {
@@ -1258,7 +1318,7 @@ export const GraphReconTool = Tool.define(
           // getOrCreateEntry's `new BunSqliteGraph` throw surfaces here — so a not-
           // ready, unloadable, or query-erroring graph all downgrade to the
           // ripgrep floor below instead of hard-erroring.
-          const gate = await ensureGraphReadyBounded()
+          const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
           if (gate.ready) {
             const rawOutput = await makeReconTool(gate.graph).execute(input as Record<string, unknown>)
 
@@ -1366,7 +1426,7 @@ export const GraphGetReferencesTool = Tool.define(
         const root = process.cwd()
         const direction = input.direction ?? "callers"
         try {
-          const gate = await ensureGraphReadyBounded()
+          const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
           if (gate.ready) {
             if (input.include_text_occurrences && direction === "callers") {
               // Rename support has no equivalent in the enriched row builder
@@ -1546,7 +1606,7 @@ export const GraphSearchCodeTool = Tool.define(
       if (input.mode === "refs") {
         return Effect.promise(async () => {
           try {
-            const gate = await ensureGraphReadyBounded()
+            const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
             if (gate.ready) {
               const refsInput: Record<string, unknown> = {
                 entity: input.query,
@@ -1583,7 +1643,7 @@ export const GraphSearchCodeTool = Tool.define(
         const mode = input.mode
         const cwd = input.path ?? root
         try {
-          const gate = await ensureGraphReadyBounded()
+          const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
           if (gate.ready) {
             const rawOutput = await makeSearchCodeTool(gate.graph, root).execute(
               input as Record<string, unknown>,
@@ -1722,7 +1782,7 @@ export const GraphFileOutlineTool = Tool.define(
           return { title: "file_outline", metadata: { meta } as Record<string, unknown>, output }
         }
         try {
-          const gate = await ensureGraphReadyBounded()
+          const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
           if (gate.ready) {
             const output = await makeFileOutlineTool(gate.graph, root).execute(input as Record<string, unknown>)
             const meta = withMeta(output, output)
@@ -1779,7 +1839,7 @@ export const GraphNoteSaveTool = Tool.define(
     parameters: NoteSaveParameters,
     execute: (input: Schema.Schema.Type<typeof NoteSaveParameters>, _ctx: Tool.Context) =>
       Effect.promise(async () => {
-        const gate = await ensureGraphReadyBounded()
+        const gate = await ensureGraphReadyBounded(GRAPH_TOOL_READY_TIMEOUT_MS)
         if (!gate.ready) {
           const output = "Graph still indexing the repo — retry this call shortly for full results."
           const meta = withMeta(output, output)

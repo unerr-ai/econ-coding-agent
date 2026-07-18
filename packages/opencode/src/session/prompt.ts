@@ -24,6 +24,7 @@ import {
   ensureGraphReady,
   ensureGraphReadyBounded,
   issueSymbolDefinitionSites,
+  GRAPH_READY_BUDGET_MS,
 } from "../tool/graph-tools"
 import { ProviderTransform } from "@/provider/transform"
 import {
@@ -340,7 +341,9 @@ const REGRESSION_GATE_TOTAL_BUDGET_MS = 240_000
 
 // F20 — bounded wait for the in-process graph index before the graph-derived
 // neighbor pass; on timeout/miss the gate runs on filename rungs alone.
-const GRAPH_NEIGHBOR_READY_BUDGET_MS = 5_000
+// G4: aliases the shared ensureGraphReadyBounded default (graph-tools.ts)
+// rather than its own 5_000 literal — see GRAPH_READY_BUDGET_MS.
+const GRAPH_NEIGHBOR_READY_BUDGET_MS = GRAPH_READY_BUDGET_MS
 
 // F13d — extensions checked, in order, for an on-disk scratch repro script
 // when an "unpinnable-red" drift recurs with no pin — mirrors

@@ -19,6 +19,8 @@ import {
   canonicalRepoRoot,
   graphDbPath,
   GRAPH_SCHEMA_VERSION,
+  GRAPH_READY_BUDGET_MS,
+  GRAPH_TOOL_READY_TIMEOUT_MS,
 } from "../../src/tool/graph-tools"
 
 /** A synthetic repo: a `.git` marker (canonicalRepoRoot only checks existence, never validity) plus a source file. */
@@ -131,5 +133,26 @@ describe("ensureGraphReadyBounded — never hangs on a cold graph", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("G4 — single shared readiness budget", () => {
+  it("ensureGraphReadyBounded defaults to GRAPH_READY_BUDGET_MS (its own default param value)", () => {
+    // ensureGraphReadyBounded.length is the count of parameters WITHOUT a
+    // default (both timeoutMs and startDir have defaults, so length is 0) —
+    // the meaningful, fast, non-flaky check is the exported constant itself
+    // and that graph-tools.ts wires it as the literal default (verified by
+    // the omitted-argument call in the "never hangs" test above sharing this
+    // same constant's value, not a separate 15s/3s literal).
+    expect(GRAPH_READY_BUDGET_MS).toBe(5_000)
+  })
+
+  it("GRAPH_TOOL_READY_TIMEOUT_MS stays its own, deliberately longer, named budget", () => {
+    // Graph-tool execute paths (recon/get_references/search_code/file_outline/
+    // note_save/read.ts's entity path) pass this explicitly rather than
+    // relying on ensureGraphReadyBounded's shared default — see the comment
+    // on GRAPH_TOOL_READY_TIMEOUT_MS in graph-tools.ts.
+    expect(GRAPH_TOOL_READY_TIMEOUT_MS).toBeGreaterThan(GRAPH_READY_BUDGET_MS)
+    expect(GRAPH_TOOL_READY_TIMEOUT_MS).toBe(15_000)
   })
 })

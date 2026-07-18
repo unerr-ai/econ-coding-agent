@@ -8,6 +8,7 @@
 
 import { Database } from "bun:sqlite"
 import { readdir, readFile, stat } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { join, relative, extname } from "node:path"
 import { createHash } from "node:crypto"
 import { extractEntities, extractEdges, detectLanguage, type ExtractedEntity } from "./ast-extractor.js"
@@ -718,7 +719,8 @@ export class BunSqliteGraph implements CodeIntelligence {
    * hands the joined terms to search(), so multi-term FTS5/bm25 ranking
    * decides the match order; falls back to the raw phrase when
    * tokenization yields nothing. Notes are fetched for both the file (f:)
-   * and entity (e:) anchors of each matched entity.
+   * and entity (e:) anchors of each matched entity, then passed through
+   * `enforceNoteStaleness` before injection.
    *
    * @sem domain=intelligence role=analysis
    */
@@ -738,8 +740,60 @@ export class BunSqliteGraph implements CodeIntelligence {
         ...entities.map((e) => `e:${e.name}`),
       ]),
     ]
-    const notes = await this.getNotesForAnchors(anchors)
+    const rawNotes = await this.getNotesForAnchors(anchors)
+    const notes = await this.enforceNoteStaleness(rawNotes)
     return { entities, references, notes }
+  }
+
+  /**
+   * G4 — injection-time staleness enforcement for a recon bundle's notes
+   * (path-to-85 §4: surface or gate, never log-only). The ghost-file sweep
+   * in index() computes `note.stale` for f:<path> anchors but every known
+   * consumer (the search_code/recon tool JSON output, brief.ts's
+   * `briefFromContext`) previously passed the field straight through
+   * unread/unacted-on — an advisory-only signal (graph-navigation-audit.md
+   * G4). Re-checks each note's own anchor against the LIVE filesystem/graph
+   * state right before it's handed back, rather than trusting the cached
+   * `stale` column (only refreshed on the last index() pass, so it can lag
+   * reality): an f:<path> anchor whose file is actually gone right now, or
+   * an e:<name> anchor whose entity no longer exists, is dropped outright
+   * rather than injected as a misleading rule. An f:<path> anchor whose
+   * cached `stale` flag says gone but a fresh check right now finds the
+   * file back — index()'s last pass hasn't caught up with the file's
+   * return — is kept but prefixed `[stale-anchor]` so the model treats it
+   * as suspect rather than authoritative. g:<glob>/p: anchors have no
+   * single resolvable target and always pass through unchanged. Fails
+   * closed on any per-note error — inject that note unchanged rather than
+   * risk dropping a live warning. Not private — recon()'s own anchor
+   * construction only ever passes it notes whose anchor is drawn from a
+   * CURRENTLY-matched entity (self-consistently "resolves" by construction),
+   * so exercising the drop/mark branches end-to-end needs a hand-built
+   * `AnchoredNote[]` a test calls this with directly.
+   *
+   * @sem domain=intelligence role=analysis
+   */
+  async enforceNoteStaleness(notes: AnchoredNote[]): Promise<AnchoredNote[]> {
+    const out: AnchoredNote[] = []
+    for (const n of notes) {
+      try {
+        if (n.anchor.startsWith("f:")) {
+          const path = n.anchor.slice(2)
+          const abs = path.startsWith("/") ? path : join(this.root, path)
+          if (!existsSync(abs)) continue
+          if (n.stale) {
+            out.push({ ...n, content: `[stale-anchor] ${n.content}` })
+            continue
+          }
+        } else if (n.anchor.startsWith("e:")) {
+          const found = await this.getEntity(n.anchor.slice(2))
+          if (!found) continue
+        }
+        out.push(n)
+      } catch {
+        out.push(n)
+      }
+    }
+    return out
   }
 
   /**
