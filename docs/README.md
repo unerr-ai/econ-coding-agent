@@ -40,7 +40,8 @@ the checked-out Claude Code source, and the 2026-07 model/reasoning/cost researc
 
 ### `features/` — the build docs
 One doc per feature area (foundations → conductor core → context engine → router → model team
-→ long-horizon → observability → hardening/hosting/ship → signal bus & variance hardening).
+→ long-horizon → observability → hardening/hosting/ship → signal bus & variance hardening →
+ops hands: long-running work & background jobs).
 Each says what the feature is, the
 exact OpenCode seams it touches, and its status. Index + integration-zone model + verified
 seam table: [features/README.md](./features/README.md).

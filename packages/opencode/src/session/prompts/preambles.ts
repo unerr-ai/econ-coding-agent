@@ -48,6 +48,20 @@ const READ_ONLY_PLAYBOOK = [
   "Investigate with the graph/read tools and reply directly; when the answer lies OUTSIDE the repo — an API's behavior, a version, a post-cutoff fact — one `websearch` (then `webfetch` the source) is the path, not more repo digging. Authoring a repro script, editing source or tests, and running the full suite are OUT OF SCOPE unless the user explicitly asks — and a question needs no fix to confirm, so do not open todos to 'verify' an answer.",
 ].join("\n")
 
+// D5 (09-ops-hands.md) — the ops playbook, appended when the turn has a
+// run-only or build goal and no diagnosis goal: real ops work (builds,
+// benchmarks, migrations, training jobs) is graded on the machine's END
+// STATE, not on narration, and long commands are a tool-contract question
+// (raise `timeout` vs `background`+`job wait`) rather than a reason to poll.
+// Positively framed per the same negative-constraint caution as
+// READ_ONLY_PLAYBOOK.
+const OPS_PLAYBOOK = [
+  "OPS PLAYBOOK: the task is graded by the END STATE of the machine — files present, services answering, binaries installed. Verify that end state, then stop.",
+  "Size `timeout` (ms) to the job, or run it with `background: true` and issue ONE `job` tool call with action \"wait\" — never poll in a loop. A running job IS progress: never restart a job that is still running, and never re-run one that already succeeded.",
+  "Observe a job's progress through the `job` tool's incremental output (compressed; the full log path is always given) — not by re-running commands.",
+  "When a deadline is present, check the remaining time budget before starting anything long.",
+].join("\n")
+
 /**
  * B3 — the no-test-edit gate's upfront rule, printed as the FIRST line of the
  * turn's model-visible preamble whenever `testEditGateArmed` is true for the
@@ -73,7 +87,10 @@ export const TEST_EDIT_GATE_RULE =
  * Task #52 — when the arming decision flagged the turn
  * ambiguous or hard, appends a decomposition-bias line steering the conductor
  * toward `todowrite` over an inline single-shot, so the work reaches the
- * per-slice tier allocator instead of being authored inline.
+ * per-slice tier allocator instead of being authored inline. D5 (09-ops-hands.md)
+ * — appends OPS_PLAYBOOK for a run-only/build turn with no diagnosis goal, and
+ * (the one time-varying exception to byte-stability) a `Time budget` line
+ * computed from `ECON_TASK_DEADLINE_MS` when that env var is set.
  *
  * @sem domain=routing role=config
  */
@@ -93,6 +110,11 @@ export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): 
   if (verdict.goals.some((goal) => goal.shape.startsWith("diagnosis"))) lines.push(DIAGNOSIS_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "research")) lines.push(RESEARCH_PLAYBOOK)
   if (verdict.goals.some((goal) => goal.shape === "refactor")) lines.push(REFACTOR_PLAYBOOK)
+  if (
+    verdict.goals.some((goal) => goal.shape === "run-only" || goal.shape === "build") &&
+    !verdict.goals.some((goal) => goal.shape.startsWith("diagnosis"))
+  )
+    lines.push(OPS_PLAYBOOK)
   if (arming.ambiguity === "ambiguous" || arming.hardness === "hard") {
     const flags = [arming.ambiguity === "ambiguous" ? "AMBIGUOUS" : null, arming.hardness === "hard" ? "HARD" : null]
       .filter((x): x is string => x !== null)
@@ -100,6 +122,14 @@ export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): 
     lines.push(
       `TURN FLAGGED ${flags}: prefer todowrite over inline single-shot handling — decompose so each goal routes through the per-slice tier allocator.`,
     )
+  }
+  const rawDeadline = process.env.ECON_TASK_DEADLINE_MS
+  if (rawDeadline) {
+    const deadlineMs = Number(rawDeadline)
+    if (Number.isFinite(deadlineMs)) {
+      const remainingMinutes = Math.max(0, Math.floor((deadlineMs - Date.now()) / 60000))
+      lines.push(`Time budget: ~${remainingMinutes}m remaining for this task.`)
+    }
   }
   return lines.join("\n")
 }

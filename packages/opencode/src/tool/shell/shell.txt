@@ -19,3 +19,7 @@ ${commandSection}
 - Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.
 - Review all commits included in the PR, not just the latest commit.
 - Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.
+
+# Long-running commands
+- There is no maximum `timeout` — the default is noted above, but pass any `timeout` in milliseconds sized to the job (a compile or training run may legitimately need 20-60 minutes).
+- For anything expected to exceed ~10 minutes, or when there is other useful work to do meanwhile, prefer `background: true` and then issue ONE `job` tool call with action "wait" — never poll in a loop. `job` "wait" is free while it waits and always returns the moment the process exits.

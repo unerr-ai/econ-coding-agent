@@ -136,6 +136,10 @@ export function econDefaultConfig(): ConfigV1.Info {
       websearch: "allow",
       doom_loop: "ask",
       skill: "ask",
+      // 09-ops-hands D1/D3: job actions (status/output/wait/kill) only ever touch jobs this
+      // process itself spawned via bash's background:true — same trust boundary as bash, safe
+      // to allow headless.
+      job: "allow",
       external_directory: "deny",
       bash: {
         "*": "allow",

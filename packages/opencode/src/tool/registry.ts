@@ -5,6 +5,7 @@ import { PlanExitTool } from "./plan"
 import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
 import { ShellTool } from "./shell"
+import { JobTool } from "./shell-job/tool"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
@@ -138,6 +139,10 @@ export const layer = Layer.effect(
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
+    // 09-ops-hands D3 — model control surface for background jobs shell.ts's `background:true`
+    // starts; same registration treatment as shell (always advertised, never hidden/catalog-
+    // compacted — see CATALOG_TOOL_IDS/HIDDEN_FROM_MODEL above).
+    const job = yield* JobTool
     const globtool = yield* GlobTool
     const writetool = yield* WriteTool
     const edit = yield* EditTool
@@ -246,6 +251,7 @@ export const layer = Layer.effect(
         const tool = yield* Effect.all({
           invalid: Tool.init(invalid),
           shell: Tool.init(shell),
+          job: Tool.init(job),
           read: Tool.init(read),
           glob: Tool.init(globtool),
           grep: Tool.init(greptool),
@@ -311,6 +317,7 @@ export const layer = Layer.effect(
             tool.invalid,
             ...(questionEnabled ? [tool.question] : []),
             tool.shell,
+            tool.job,
             tool.read,
             tool.glob,
             tool.grep,

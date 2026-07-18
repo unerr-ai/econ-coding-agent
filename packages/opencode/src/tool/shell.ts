@@ -18,6 +18,7 @@ import { ShellID } from "./shell/id"
 import * as Truncate from "./truncate"
 import { compressShellOutput, shellQualityMonitor } from "./shell-compress/index"
 import { noteVerifyCommand } from "./verify-tail-nudge"
+import { jobRegistry } from "./shell-job/registry"
 import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -747,12 +748,37 @@ export const ShellTool = Tool.define(
                 }),
               )
 
+              const env = yield* shellEnv(ctx, cwd)
+
+              // 09-ops-hands D2 — same permission scan+ask above, same resolved shell/cwd/env;
+              // spawns via jobRegistry() and returns immediately instead of entering run(). Absent
+              // (the default), this branch never runs and the foreground path below is untouched.
+              if (params.background === true) {
+                const job = jobRegistry().startJob({
+                  command: params.command,
+                  cwd,
+                  shell,
+                  env,
+                  sessionID: ctx.sessionID,
+                  callID: ctx.callID,
+                })
+                return {
+                  title: params.command,
+                  metadata: { jobId: job.id, logPath: job.logPath },
+                  output:
+                    `Started background job ${job.id} (pid ${job.pid ?? "unknown"}).\n` +
+                    `Log: ${job.logPath}\n` +
+                    `Use the job tool: action "wait" to block until it finishes (or a pattern appears), ` +
+                    `"output" to read incrementally, "status", or "kill".`,
+                }
+              }
+
               return yield* run(
                 {
                   shell,
                   command: params.command,
                   cwd,
-                  env: yield* shellEnv(ctx, cwd),
+                  env,
                   timeout,
                 },
                 ctx,

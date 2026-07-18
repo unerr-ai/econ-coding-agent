@@ -8,7 +8,7 @@
  * (arming-judge.ts), which both this line and that stand-down gate on.
  */
 
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, afterEach } from "bun:test"
 import { triagePreamble } from "../../src/session/prompts/preambles"
 import { decideArming } from "../../src/session/arming-judge"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
@@ -62,5 +62,59 @@ describe("triagePreamble — diagnosis playbook", () => {
   test("a build-only verdict does NOT carry the DIAGNOSIS PLAYBOOK line", () => {
     const text = preambleOf(verdictOf([{ quote: "add a retry to the boot path", shape: "build", deliverable: "shipped" }]))
     expect(text).not.toContain("DIAGNOSIS PLAYBOOK")
+  })
+})
+
+describe("triagePreamble — ops playbook (D5, 09-ops-hands.md)", () => {
+  test("a build-only verdict carries the OPS PLAYBOOK line", () => {
+    const text = preambleOf(verdictOf([{ quote: "build the pmars binary", shape: "build", deliverable: "binary installed" }]))
+    expect(text).toContain("OPS PLAYBOOK")
+  })
+
+  test("a run-only verdict also carries the OPS PLAYBOOK line", () => {
+    const text = preambleOf(verdictOf([{ quote: "run the migration script", shape: "run-only", deliverable: "migration applied" }]))
+    expect(text).toContain("OPS PLAYBOOK")
+  })
+
+  test("a verdict containing a diagnosis-shaped goal does NOT carry the OPS PLAYBOOK line", () => {
+    const text = preambleOf(
+      verdictOf([
+        { quote: "build the artifact", shape: "build", deliverable: "artifact built" },
+        { quote: "fix the failing build step", shape: "diagnosis-grounded", deliverable: "build green" },
+      ]),
+    )
+    expect(text).not.toContain("OPS PLAYBOOK")
+  })
+
+  test("a pure qa verdict does NOT carry the OPS PLAYBOOK line", () => {
+    const text = preambleOf(verdictOf([{ quote: "where is resolve_redirects", shape: "qa", deliverable: "answer" }]))
+    expect(text).not.toContain("OPS PLAYBOOK")
+  })
+})
+
+describe("triagePreamble — deadline line (D5, 09-ops-hands.md)", () => {
+  const previous = process.env.ECON_TASK_DEADLINE_MS
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.ECON_TASK_DEADLINE_MS
+    else process.env.ECON_TASK_DEADLINE_MS = previous
+  })
+
+  test("carries a Time budget line when ECON_TASK_DEADLINE_MS is set", () => {
+    process.env.ECON_TASK_DEADLINE_MS = String(Date.now() + 5 * 60_000)
+    const text = preambleOf(verdictOf([{ quote: "build the artifact", shape: "build", deliverable: "artifact built" }]))
+    expect(text).toMatch(/Time budget: ~\d+m remaining for this task\./)
+  })
+
+  test("omits the Time budget line when ECON_TASK_DEADLINE_MS is unset", () => {
+    delete process.env.ECON_TASK_DEADLINE_MS
+    const text = preambleOf(verdictOf([{ quote: "build the artifact", shape: "build", deliverable: "artifact built" }]))
+    expect(text).not.toContain("Time budget:")
+  })
+
+  test("omits the Time budget line when ECON_TASK_DEADLINE_MS is unparsable", () => {
+    process.env.ECON_TASK_DEADLINE_MS = "not-a-number"
+    const text = preambleOf(verdictOf([{ quote: "build the artifact", shape: "build", deliverable: "artifact built" }]))
+    expect(text).not.toContain("Time budget:")
   })
 })

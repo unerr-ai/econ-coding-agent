@@ -1,0 +1,9 @@
+Inspect and control a background shell job started with the shell tool's `background: true` parameter.
+
+Actions (`action` parameter):
+- "status" — a compact snapshot: job id, command, status (running/exited/killed), uptime, exit code, log path. No token cost beyond the reply.
+- "output" — read new output since your last read (or from an explicit `fromByte`). Output over 2KB is compressed the same way shell output is. The full, uncompressed log always stays on disk; its path is echoed on every reply.
+- "wait" — block until the job finishes, exits, or a pattern appears in NEW output — for free. Waiting costs no tokens and no turns: it happens harness-side while you are idle, not by you polling in a loop. It ALWAYS returns when the job exits, no matter what `pattern` was given (silence is never treated as success) — the reply always says which of exit / pattern-match / timeout happened, so you can never mistake "still running" for "done". Pass `pattern` (a regex) to also wake up early on a specific log line (e.g. a build's "BUILD SUCCESSFUL", a server's "listening on port"). Default `timeoutMs` is 300000 (5 minutes); raise it for a longer job and just call `wait` again if it times out — never spin a manual poll loop calling "status"/"output" in a tight cycle.
+- "kill" — SIGTERM the job (SIGKILL after 3s if it hasn't stopped).
+
+Never start a second job to redo work an existing job is already doing — check "status" first, and never restart a job that's still running.

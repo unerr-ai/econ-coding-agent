@@ -19,6 +19,12 @@ export function parameterSchema() {
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),
+    background: Schema.optional(Schema.Boolean).annotate({
+      description:
+        'Run the command as a background job: returns immediately with a job id and log path. Use for ' +
+        "commands expected to exceed ~10 minutes or when you have other work to do meanwhile; then use the " +
+        'job tool (action:"wait") to wait for completion.',
+    }),
   })
 }
 
