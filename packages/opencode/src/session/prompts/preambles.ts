@@ -67,15 +67,37 @@ const OPS_PLAYBOOK = [
  * turn's model-visible preamble whenever `testEditGateArmed` is true for the
  * session. Injected on BOTH the triage-verdict path (prefixed onto
  * `triagePreamble`'s output) and the P5 neutral-degrade (null-verdict) path,
- * where no other preamble text reaches the model at all — an enhancement-shaped
- * prompt with zero defect words ("Combine fast delete queries") armed the
- * structural gate but the model never saw the rule stated, and rewrote an
- * existing test's expectations to launder a design divergence.
+ * where otherwise no preamble text would reach the model at all (only the
+ * deterministic `timeBudgetLine()` deadline line rides beside it there) — an
+ * enhancement-shaped prompt with zero defect words ("Combine fast delete
+ * queries") armed the structural gate but the model never saw the rule
+ * stated, and rewrote an existing test's expectations to launder a design
+ * divergence.
  *
  * @sem domain=routing role=config
  */
 export const TEST_EDIT_GATE_RULE =
   "Do not modify existing test files — the grader runs the original tests; fix the source instead. Leave unrelated config files (package manifests, lockfiles, CI configs) alone unless the task itself is about them."
+
+/**
+ * The `Time budget: ~Nm remaining` line, computed straight from
+ * `ECON_TASK_DEADLINE_MS`. Split out of `triagePreamble` so this deterministic,
+ * env-derived signal can also reach the model on the P5 neutral-degrade
+ * (null-verdict) path — where `triagePreamble` never runs because turn-read
+ * triage nulled out — instead of silently riding only on the flaky LLM
+ * extraction succeeding. Returns null when the env var is unset or
+ * unparsable; floors remaining minutes at 0.
+ *
+ * @sem domain=routing role=config
+ */
+export function timeBudgetLine(): string | null {
+  const rawDeadline = process.env.ECON_TASK_DEADLINE_MS
+  if (!rawDeadline) return null
+  const deadlineMs = Number(rawDeadline)
+  if (!Number.isFinite(deadlineMs)) return null
+  const remainingMinutes = Math.max(0, Math.floor((deadlineMs - Date.now()) / 60000))
+  return `Time budget: ~${remainingMinutes}m remaining for this task.`
+}
 
 /**
  * §1.1/§4.1 — the turn-scoped preamble built from a non-null turn-read
@@ -89,8 +111,8 @@ export const TEST_EDIT_GATE_RULE =
  * toward `todowrite` over an inline single-shot, so the work reaches the
  * per-slice tier allocator instead of being authored inline. D5 (09-ops-hands.md)
  * — appends OPS_PLAYBOOK for a run-only/build turn with no diagnosis goal, and
- * (the one time-varying exception to byte-stability) a `Time budget` line
- * computed from `ECON_TASK_DEADLINE_MS` when that env var is set.
+ * (the one time-varying exception to byte-stability) a `Time budget` line via
+ * `timeBudgetLine()` when `ECON_TASK_DEADLINE_MS` is set.
  *
  * @sem domain=routing role=config
  */
@@ -123,13 +145,7 @@ export function triagePreamble(verdict: TriageVerdict, arming: ArmingDecision): 
       `TURN FLAGGED ${flags}: prefer todowrite over inline single-shot handling — decompose so each goal routes through the per-slice tier allocator.`,
     )
   }
-  const rawDeadline = process.env.ECON_TASK_DEADLINE_MS
-  if (rawDeadline) {
-    const deadlineMs = Number(rawDeadline)
-    if (Number.isFinite(deadlineMs)) {
-      const remainingMinutes = Math.max(0, Math.floor((deadlineMs - Date.now()) / 60000))
-      lines.push(`Time budget: ~${remainingMinutes}m remaining for this task.`)
-    }
-  }
+  const deadlineLine = timeBudgetLine()
+  if (deadlineLine) lines.push(deadlineLine)
   return lines.join("\n")
 }

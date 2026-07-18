@@ -9,7 +9,7 @@
  */
 
 import { describe, test, expect, afterEach } from "bun:test"
-import { triagePreamble } from "../../src/session/prompts/preambles"
+import { triagePreamble, timeBudgetLine } from "../../src/session/prompts/preambles"
 import { decideArming } from "../../src/session/arming-judge"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 
@@ -116,5 +116,24 @@ describe("triagePreamble — deadline line (D5, 09-ops-hands.md)", () => {
     process.env.ECON_TASK_DEADLINE_MS = "not-a-number"
     const text = preambleOf(verdictOf([{ quote: "build the artifact", shape: "build", deliverable: "artifact built" }]))
     expect(text).not.toContain("Time budget:")
+  })
+})
+
+describe("timeBudgetLine", () => {
+  const previous = process.env.ECON_TASK_DEADLINE_MS
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.ECON_TASK_DEADLINE_MS
+    else process.env.ECON_TASK_DEADLINE_MS = previous
+  })
+
+  test("returns null when ECON_TASK_DEADLINE_MS is unset", () => {
+    delete process.env.ECON_TASK_DEADLINE_MS
+    expect(timeBudgetLine()).toBeNull()
+  })
+
+  test("returns the Time budget line when ECON_TASK_DEADLINE_MS is set", () => {
+    process.env.ECON_TASK_DEADLINE_MS = String(Date.now() + 5 * 60_000)
+    expect(timeBudgetLine()).toMatch(/^Time budget: ~\d+m remaining for this task\.$/)
   })
 })

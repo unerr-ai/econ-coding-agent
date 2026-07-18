@@ -109,7 +109,7 @@ import {
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
 import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
-import { triagePreamble, TEST_EDIT_GATE_RULE } from "./prompts/preambles"
+import { triagePreamble, TEST_EDIT_GATE_RULE, timeBudgetLine } from "./prompts/preambles"
 import {
   DEFERRAL_SLICE_PREFIX,
   GRIND_DESIGN_SLICE_CONTENT,
@@ -5121,9 +5121,17 @@ export const layer = Layer.effect(
             // the triage-verdict path (prefixed onto turnPreamble) and the P5
             // neutral-degrade path (turnPreamble is undefined there — the
             // rule alone still reaches the model, gated only on the store,
-            // never on triage having run).
+            // never on triage having run). The deadline line is deterministic
+            // and env-derived (not LLM-extracted), so on that same
+            // null-verdict path it rides beside TEST_EDIT_GATE_RULE too —
+            // otherwise a turn_read_degraded turn silently loses it.
             if (testEditGateArmed(sessionID)) {
-              system.push(turnPreamble ? `${TEST_EDIT_GATE_RULE}\n${turnPreamble}` : TEST_EDIT_GATE_RULE)
+              if (turnPreamble) {
+                system.push(`${TEST_EDIT_GATE_RULE}\n${turnPreamble}`)
+              } else {
+                const deadlineLine = timeBudgetLine()
+                system.push(deadlineLine ? `${TEST_EDIT_GATE_RULE}\n${deadlineLine}` : TEST_EDIT_GATE_RULE)
+              }
             } else if (turnPreamble) {
               system.push(turnPreamble)
             }

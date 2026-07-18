@@ -714,7 +714,7 @@ describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
     expect(preamble).toContain("TURN FLAGGED AMBIGUOUS/HARD")
   })
 
-  it("P3 — a research goal appends the cited-digest playbook; other shapes don't", () => {
+  it("P3 — a research goal appends the cited-digest playbook; a build goal gets the ops playbook instead", () => {
     const research: TriageVerdict = {
       goals: [{ quote: "what changed in zod v4", shape: "research", deliverable: "a cited digest" }],
       constraints: [],
@@ -731,9 +731,10 @@ describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
       constraints: [],
       confidence: "high",
     }
-    expect(triagePreamble(build, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })).not.toContain(
-      "PLAYBOOK",
-    )
+    const buildPreamble = triagePreamble(build, { armLocalization: false, hardness: "trivial", ambiguity: "clear" })
+    expect(buildPreamble).toContain("OPS PLAYBOOK")
+    expect(buildPreamble).not.toContain("RESEARCH PLAYBOOK")
+    expect(buildPreamble).not.toContain("REFACTOR PLAYBOOK")
   })
 
   it("P3 — a refactor goal appends the behavior-preserving playbook (mechanical default, suite green, no signature breaks)", () => {
