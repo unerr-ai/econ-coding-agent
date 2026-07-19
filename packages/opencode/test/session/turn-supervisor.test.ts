@@ -16,6 +16,8 @@ import {
   detectPatchSanityGap,
   shouldDenyPatchSanity,
   shouldDenyF2pClaim,
+  resolveBugShapedFallback,
+  shouldArmHubBounceDeferral,
 } from "../../src/session/turn-supervisor"
 import {
   stuckNudgeText,
@@ -975,5 +977,118 @@ describe("f2pClaimNudgeText", () => {
     expect(text).toContain("tests/test_bar.py::test_baz")
     expect(text).toContain("tests/test_qux.py::test_it")
     expect(text.toLowerCase()).toContain("re-run")
+  })
+})
+
+// -- tracker #29: resolveBugShapedFallback -----------------------------------
+
+describe("resolveBugShapedFallback", () => {
+  it("a present verdict is byte-identical: the fix-signal disjunct alone decides, evidence irrelevant", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: true,
+        verdictReadOnly: false,
+        testEditGateArmed: true,
+        hasTurnEvidence: false,
+      }),
+    ).toBe(true)
+  })
+
+  it("a present verdict with the fix-signal disjunct false is never bug-shaped, evidence irrelevant", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: true,
+        verdictReadOnly: false,
+        testEditGateArmed: false,
+        hasTurnEvidence: true,
+      }),
+    ).toBe(false)
+  })
+
+  it("a read-only verdict is never bug-shaped even with the disjunct armed", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: true,
+        verdictReadOnly: true,
+        testEditGateArmed: true,
+        hasTurnEvidence: true,
+      }),
+    ).toBe(false)
+  })
+
+  it("a null verdict with the gate armed but zero turn evidence is NOT bug-shaped — the fix (a plain \"hello\" no longer loops the S3 gate)", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: false,
+        verdictReadOnly: false,
+        testEditGateArmed: true,
+        hasTurnEvidence: false,
+      }),
+    ).toBe(false)
+  })
+
+  it("a null verdict with the gate armed AND turn evidence present IS bug-shaped", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: false,
+        verdictReadOnly: false,
+        testEditGateArmed: true,
+        hasTurnEvidence: true,
+      }),
+    ).toBe(true)
+  })
+
+  it("a null verdict with the gate NOT armed is never bug-shaped, evidence irrelevant", () => {
+    expect(
+      resolveBugShapedFallback({
+        verdictPresent: false,
+        verdictReadOnly: false,
+        testEditGateArmed: false,
+        hasTurnEvidence: true,
+      }),
+    ).toBe(false)
+  })
+})
+
+// -- tracker #30: H9 flip — shouldArmHubBounceDeferral -----------------------
+
+describe("shouldArmHubBounceDeferral", () => {
+  const base = {
+    isChildSession: false,
+    bugShaped: true,
+    landedSourceEdits: true,
+    hubBounceRepeat: true,
+    deferralAvailable: true,
+  }
+
+  it("arms on the otherwise-clean path: bug-shaped root turn, landed edits, an evidence-bearing hub bounce, budget available", () => {
+    expect(shouldArmHubBounceDeferral(base)).toBe(true)
+  })
+
+  it("never arms on a child session", () => {
+    expect(shouldArmHubBounceDeferral({ ...base, isChildSession: true })).toBe(false)
+  })
+
+  it("never arms a non-bug-shaped turn", () => {
+    expect(shouldArmHubBounceDeferral({ ...base, bugShaped: false })).toBe(false)
+  })
+
+  it("never arms without a landed source edit", () => {
+    expect(shouldArmHubBounceDeferral({ ...base, landedSourceEdits: false })).toBe(false)
+  })
+
+  it("never arms once the turn's one-shot deferral budget is spent", () => {
+    expect(shouldArmHubBounceDeferral({ ...base, deferralAvailable: false })).toBe(false)
+  })
+
+  // 14369 replay ($1.01/188t escalation that landed nothing) — repro_unresolved
+  // alone must NEVER arm this gate. This helper only ever sees `hubBounceRepeat`
+  // (the caller derives it from `signalsFor(sessionID)` filtering on the
+  // `hub_bounce_repeat` signal name, never on `repro_unresolved`), so the
+  // negative case is: a turn with everything else true but NO live
+  // hub_bounce_repeat fact — e.g. one that only carries a repro_unresolved
+  // signal — must not arm.
+  it("never arms on hubBounceRepeat:false — repro_unresolved (the 14369 replay) is not a valid trigger for this gate", () => {
+    expect(shouldArmHubBounceDeferral({ ...base, hubBounceRepeat: false })).toBe(false)
   })
 })

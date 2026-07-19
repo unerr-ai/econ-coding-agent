@@ -58,6 +58,8 @@ import {
   shouldDenyPatchSanity,
   shouldDenyF2pClaim,
   normalizeResult,
+  resolveBugShapedFallback,
+  shouldArmHubBounceDeferral,
 } from "./turn-supervisor"
 import {
   stuckNudgeText,
@@ -133,6 +135,7 @@ import {
 import { synthesizeRoundtripWitness } from "./roundtrip-witness"
 import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
 import { triagePreamble, TEST_EDIT_GATE_RULE, degradedTurnPreamble, timeBudgetCheckpointLine } from "./prompts/preambles"
+import { SLICE_CONFIDENCE_PROBE_MARKER } from "./prompts/judges"
 import {
   DEFERRAL_SLICE_PREFIX,
   GRIND_DESIGN_SLICE_CONTENT,
@@ -148,6 +151,7 @@ import {
   markDeferralUsed,
   publishSignalFx,
   resetSignals,
+  signalsFor,
   summaryLogLine,
 } from "./signal-bus"
 import { detectOracleInversion, extractIssueExpectations, extractIssueThresholds } from "./issue-expectations"
@@ -3998,10 +4002,27 @@ export const layer = Layer.effect(
               // diagnosis shape (11885's enhancement wording) — those are NOT
               // read-only, so their protection is untouched; a null verdict
               // (P5 degrade) is not read-only either and stays protected.
-              const bugShaped =
-                !verdictIsReadOnly(storedVerdict) &&
-                ((storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
-                  testEditGateArmed(sessionID))
+              // tracker #29 — a null verdict (prompt.test.ts disables triage,
+              // or any live P5 degrade) made `testEditGateArmed` the WHOLE
+              // disjunct, and that gate defaults armed for any prompt that
+              // doesn't authorize test edits — so a plain "hello" turn was
+              // bug-shaped too and looped the S3 gate. `resolveBugShapedFallback`
+              // (turn-supervisor.ts) keeps a present verdict byte-identical
+              // and, only for a null verdict, additionally requires this
+              // turn to show real evidence (a landed source edit, an
+              // observed red test/repro execution, or a pinned probe)
+              // before calling it bug-shaped.
+              const bugShaped = resolveBugShapedFallback({
+                verdictPresent: storedVerdict != null,
+                verdictReadOnly: verdictIsReadOnly(storedVerdict),
+                testEditGateArmed:
+                  (storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
+                  testEditGateArmed(sessionID),
+                hasTurnEvidence:
+                  finishLandedSourceEdits ||
+                  collectObservedRedTestIds(extractTurnBashExecutions(finishAssistantParts)).length > 0 ||
+                  turnPinnedProbe != null,
+              })
               // H4.1 — an ops-shaped turn (run-only/build goal, no diagnosis
               // goal) claims "done" against a deliverable checklist — same
               // condition OPS_PLAYBOOK gates on in preambles.ts.
@@ -5001,6 +5022,56 @@ export const layer = Layer.effect(
                       })
                     }
                   }
+                }
+              }
+
+              // H9 flip (tracker #30) — hub_bounce_repeat arms the deferral
+              // escalation on the OTHERWISE-CLEAN finish path: placed AFTER
+              // every failure-evidence gate above (none of them rejected
+              // this arrival — every reject above `continue`s back to the
+              // top before reaching here). A second, evidence-bearing
+              // hub-edit bounce (`hub_bounce`+`hub_bounce_repeat`, published
+              // by edit.ts/write.ts) on a bug-shaped root turn that landed
+              // source edits is precisely the django-11265 replay shape: a
+              // LOCALLY-GREEN finish whose fix landed on/near a
+              // high-coupling hub after two evidence-bearing bounces.
+              // `repro_unresolved` alone (the 14369 replay — a $1.01/188t
+              // escalation that landed nothing) never arms this — only a
+              // live `hub_bounce_repeat` fact does.
+              {
+                const hubBounceSignals = signalsFor(sessionID).filter(
+                  (s) => s.name === "hub_bounce" || s.name === "hub_bounce_repeat",
+                )
+                const hubBounceRepeatSignal = hubBounceSignals.find((s) => s.name === "hub_bounce_repeat")
+                if (
+                  shouldArmHubBounceDeferral({
+                    isChildSession: !!session.parentID,
+                    bugShaped,
+                    landedSourceEdits,
+                    hubBounceRepeat: hubBounceRepeatSignal !== undefined,
+                    deferralAvailable: deferralAvailable(sessionID),
+                  })
+                ) {
+                  const bouncedFiles = [
+                    ...new Set(hubBounceSignals.map((s) => String(s.evidence.file ?? "")).filter(Boolean)),
+                  ]
+                  const importers = hubBounceSignals.find((s) => s.name === "hub_bounce")?.evidence.importers ?? null
+                  const definingSites = hubBounceRepeatSignal?.evidence.definingSites ?? null
+                  yield* armDeferral({
+                    signal: "hub_bounce_repeat",
+                    gateEvidence:
+                      `The conductor's fix landed on/near a high-coupling hub after two evidence-bearing bounces this turn ` +
+                      `(bounced file${bouncedFiles.length === 1 ? "" : "s"}: ${bouncedFiles.join(", ") || "unknown"}` +
+                      `${importers !== null ? `, importers: ${importers}` : ""}` +
+                      `${definingSites !== null ? `, named defining sites: ${definingSites}` : ""}). ` +
+                      `Every deterministic check is GREEN — this is the symptom-layer shape, not a failing gate. ` +
+                      `Re-derive the ROOT-MOST layer for this behavior: enumerate candidate layers (the bounced hub, ` +
+                      `its importers/callers, and the landed edit sites below), and choose the fix layer with evidence.`,
+                    candidates: [...new Set([...landedSourceEditFiles, ...bouncedFiles, ...getTurnFiles(sessionID)])],
+                    expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
+                    statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
+                  })
+                  continue
                 }
               }
             }
@@ -6258,7 +6329,7 @@ export const layer = Layer.effect(
                     )
                     const language = yield* provider.getLanguage(resolved)
                     const probe =
-                      'You reviewed one slice of a larger coding task. On a 0.0-1.0 scale, how confident are you that the work below solved the INTENDED problem correctly (not merely that it runs)? Reply with ONLY a JSON object: {"confidence": <number between 0 and 1>}.\n\n## Slice output\n' +
+                      `${SLICE_CONFIDENCE_PROBE_MARKER} On a 0.0-1.0 scale, how confident are you that the work below solved the INTENDED problem correctly (not merely that it runs)? Reply with ONLY a JSON object: {"confidence": <number between 0 and 1>}.\n\n## Slice output\n` +
                       output.slice(0, 4000)
                     const out = yield* Effect.tryPromise({
                       try: () =>

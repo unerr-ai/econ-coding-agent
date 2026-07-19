@@ -3,8 +3,8 @@ import * as Http from "node:http"
 import { Deferred, Effect, Layer, Context, Stream } from "effect"
 import * as HttpServer from "effect/unstable/http/HttpServer"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
-import { TURN_READ_PROMPT_MARKER } from "../../src/session/prompts/judges"
 import { TITLE_GENERATION_PROMPT_MARKER } from "../../src/session/prompts/protocol"
+import { isDispatchRequest } from "../../src/session/dispatch-marker"
 
 export type Usage = { input: number; output: number }
 
@@ -611,12 +611,6 @@ function isTitleRequest(body: unknown): boolean {
   return JSON.stringify(body).includes(TITLE_GENERATION_PROMPT_MARKER)
 }
 
-/** Turn-open turn-read call (§4.1) — detected by the extractor's stable system-prompt prefix so it can be answered out-of-band, same as a title call. */
-function isTurnReadRequest(body: unknown): boolean {
-  if (!body || typeof body !== "object") return false
-  return JSON.stringify(body).includes(TURN_READ_PROMPT_MARKER)
-}
-
 namespace TestLLMServer {
   export interface Service {
     readonly url: string
@@ -634,6 +628,8 @@ namespace TestLLMServer {
     readonly hold: (value: string, wait: PromiseLike<unknown>) => Effect.Effect<void>
     readonly reset: Effect.Effect<void>
     readonly hits: Effect.Effect<Hit[]>
+    /** Root-turn orchestration-dispatch calls (turn-read, repro-fidelity, hub-design, verifier judge, confidence probe) answered out-of-band — never counted in `hits`/`calls`, exposed for tests that want to assert on dispatch traffic. */
+    readonly dispatchHits: Effect.Effect<Hit[]>
     readonly calls: Effect.Effect<number>
     readonly wait: (count: number) => Effect.Effect<void>
     readonly inputs: Effect.Effect<Record<string, unknown>[]>
@@ -653,6 +649,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
       let list: Queue[] = []
       let waits: Wait[] = []
       let misses: Hit[] = []
+      let dispatchHits: Hit[] = []
 
       const queue = (...input: (Item | Reply)[]) => {
         list = [...list, ...input.map((value) => ({ item: item(value) }))]
@@ -680,24 +677,29 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
       const handle = Effect.fn("TestLLMServer.handle")(function* (mode: "chat" | "responses") {
         const req = yield* HttpServerRequest.HttpServerRequest
         const body = yield* req.json.pipe(Effect.orElseSucceed(() => ({})))
-        // Turn-open housekeeping calls (the turn-read, session title) are answered
-        // out-of-band: no queue dequeue, no hits/inputs/calls recording — they
-        // run ahead of every scripted turn and would otherwise shift it off by one.
-        // The turn-read dispatch is NON-streaming (generateText), so it gets a
-        // plain JSON completion; its content fails turn-read parse validation by
-        // design, landing the turn on the P5 neutral-degrade path.
-        if (isTurnReadRequest(body)) {
+        // Any root-turn orchestration dispatch (turn-read, repro-fidelity,
+        // hub-design, verifier judge, confidence probe) is answered
+        // out-of-band: no queue dequeue, no hits/inputs/calls recording — it
+        // runs ahead of or beside the scripted main round and would otherwise
+        // consume a queued reply and shift the round off by one. All of these
+        // are NON-streaming (generateText), so a plain JSON completion is
+        // correct; its stub content fails each dispatch's own parse
+        // validation by design, landing on that dispatch's existing
+        // degrade/neutral path (unrelated to the main round under test).
+        if (isDispatchRequest(body)) {
+          dispatchHits = [...dispatchHits, hit(req.originalUrl, body)]
           return HttpServerResponse.jsonUnsafe({
-            id: "chatcmpl-turn-open-stub",
+            id: "chatcmpl-dispatch-stub",
             object: "chat.completion",
             created: 0,
             model: modelFrom(body),
-            choices: [
-              { index: 0, message: { role: "assistant", content: "turn-open-stub" }, finish_reason: "stop" },
-            ],
+            choices: [{ index: 0, message: { role: "assistant", content: "dispatch-stub" }, finish_reason: "stop" }],
             usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
           })
         }
+        // Turn-open housekeeping (the session-title call) is answered out-of-band:
+        // no queue dequeue, no hits/inputs/calls recording — it runs ahead of every
+        // scripted turn and would otherwise shift it off by one.
         if (isTitleRequest(body)) {
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("test session"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
@@ -785,8 +787,10 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           list = []
           waits = []
           misses = []
+          dispatchHits = []
         }),
         hits: Effect.sync(() => [...hits]),
+        dispatchHits: Effect.sync(() => [...dispatchHits]),
         calls: Effect.sync(() => hits.length),
         wait: Effect.fn("TestLLMServer.wait")(function* (count: number) {
           if (hits.length >= count) return

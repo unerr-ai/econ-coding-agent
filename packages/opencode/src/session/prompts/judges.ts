@@ -75,3 +75,10 @@ At most 3 gaps. Each gap must name the CONCRETE missing assert (the value/expres
 export const HUB_DESIGN_PROMPT_MARKER = "You are the root-cause design pass"
 
 export const HUB_DESIGN_SYSTEM_PROMPT = `${HUB_DESIGN_PROMPT_MARKER} for a code fix. The executing agent's edits keep landing on shared hub modules — files many other modules import — which is the classic symptom-layer mistake. Decide the ROOT-MOST fix site: the module that DEFINES the misbehaving class or function the issue names. Coercions/conversions/wrappers at consumption or assignment sites are NOT acceptable answers; fixing the defining module's own behavior (e.g. its dunder/interface methods) is. HARD CONSTRAINT: when the user message lists "Definition sites of symbols the issue names", those listed files are the graph-derived root-most definers of the issue's named symbols — your "file" MUST be one of those listed files, verbatim. Never name a call-site, consumer, or descriptor/wrapper layer instead, even if it looks like the more natural fix; pick the entity and change WITHIN one of the listed files. Answer STRICT JSON: {"file": "<repo-relative path>", "entity": "<class or function to change>", "change": "<one-sentence concrete change>"}. End your response with the JSON object on its own final line.`
+
+// #59 — the verbalized-confidence probe (prompt.ts, confidenceGenerate): a
+// one-shot, tool-free completion asking a slice's own completed digest how
+// confident the conductor tier is that it solved the INTENDED problem.
+
+/** Stable, single-line prefix of the confidence-probe prompt (prompt.ts's `confidenceGenerate`) — lets a scripted LLM stub in tests recognize the probe by its opening sentence without duplicating the full prompt text. */
+export const SLICE_CONFIDENCE_PROBE_MARKER = "You reviewed one slice of a larger coding task."

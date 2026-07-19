@@ -74,9 +74,14 @@ const MISSING_RE = /^MISSING:\s*(.+)$/im
  *
  * @sem domain=routing role=verify-ladder
  */
+
+/** Stable, single-line prefix of `buildJudgePrompt`'s output — lets a scripted LLM stub in tests recognize a cross-model-judge request by its opening sentence without duplicating the full prompt text. */
+export const CROSS_MODEL_JUDGE_PROMPT_MARKER =
+  "You are a cross-model verifier. Judge whether the OUTPUT below correctly and completely satisfies the TASK."
+
 export function buildJudgePrompt(input: CrossModelJudgeInput): string {
   const parts = [
-    "You are a cross-model verifier. Judge whether the OUTPUT below correctly and completely satisfies the TASK.",
+    CROSS_MODEL_JUDGE_PROMPT_MARKER,
     'Boundary inputs: for every repro input the output exercised, name its empty/zero/falsy variant ("" / 0 / [] / None / undefined) and state whether the change handles it — check, don\'t assume.',
     "Sibling branches: if the change edits one branch of a conditional or one member of a parallel case set, inspect the sibling branch(es) for the same defect and state the finding.",
     "Reply with exactly one verdict token — [[ACCEPT]] or [[REJECT]] — then a one-line reason.",

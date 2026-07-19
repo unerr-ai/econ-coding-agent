@@ -598,3 +598,69 @@ export function shouldDenyF2pClaim(input: {
   if (input.alreadyDenied) return false
   return true
 }
+
+// ---------------------------------------------------------------------------
+// tracker #29 — bugShaped's null-verdict fallback needs turn evidence
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure gate decision for bugShaped's null-verdict fallback (tracker #29,
+ * prompt.ts's finish-time S3 bar). A PRESENT verdict is untouched: the
+ * pre-existing disjunct (a diagnosis-shaped goal, or the no-test-edit gate
+ * armed — folded by the caller into `testEditGateArmed`) decides
+ * bug-shapedness exactly as before this change. A NULL verdict
+ * (prompt.test.ts's triage-disabled harness, or any live P5 degrade) can no
+ * longer ride `testEditGateArmed` alone: the gate defaults armed for any
+ * turn that doesn't authorize test edits, so every plain prompt (e.g.
+ * "hello") was bug-shaped too and looped the S3 unverified-finish gate. A
+ * null verdict additionally needs real turn evidence — a landed source
+ * edit, an observed red test/repro execution, or a pinned probe — before
+ * counting as bug-shaped.
+ *
+ * @sem domain=routing role=gate
+ */
+export function resolveBugShapedFallback(input: {
+  verdictPresent: boolean
+  verdictReadOnly: boolean
+  testEditGateArmed: boolean
+  hasTurnEvidence: boolean
+}): boolean {
+  if (input.verdictReadOnly) return false
+  if (!input.testEditGateArmed) return false
+  if (input.verdictPresent) return true
+  return input.hasTurnEvidence
+}
+
+// ---------------------------------------------------------------------------
+// tracker #30 — H9 flip: hub_bounce_repeat arms the deferral escalation
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure gate decision for the H9 flip (tracker #30): `hub_bounce_repeat` is a
+ * second, evidence-bearing hub-edit bounce this turn — precisely the signal
+ * that fires on a LOCALLY-GREEN finish (django-11265 replay: bounce at step
+ * 48/49, every deterministic check green, the fix was symptom-layer).
+ * Unlike the seven failure-evidence deferral arms in prompt.ts, this one
+ * fires on the otherwise-CLEAN finish path: a bug-shaped ROOT turn that
+ * landed source edits and drew a `hub_bounce_repeat` this turn gets the
+ * one-shot escalation slice, same one-shot budget (`deferralAvailable`) as
+ * every other arm. `repro_unresolved` (the 14369 replay — a $1.01/188t
+ * escalation that landed nothing) is deliberately NOT a valid trigger for
+ * this gate: only a live `hubBounceRepeat` fact arms it.
+ *
+ * @sem domain=routing role=gate
+ */
+export function shouldArmHubBounceDeferral(input: {
+  isChildSession: boolean
+  bugShaped: boolean
+  landedSourceEdits: boolean
+  hubBounceRepeat: boolean
+  deferralAvailable: boolean
+}): boolean {
+  if (input.isChildSession) return false
+  if (!input.bugShaped) return false
+  if (!input.landedSourceEdits) return false
+  if (!input.hubBounceRepeat) return false
+  if (!input.deferralAvailable) return false
+  return true
+}

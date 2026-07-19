@@ -2189,17 +2189,35 @@ it.instance(
 
 it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails open loud", () =>
   Effect.gen(function* () {
-    const { llm } = yield* useServerConfig(providerCfg)
+    const { dir, llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
-    const session = yield* sessions.create({ title: "Bug report" })
+    const session = yield* sessions.create({
+      title: "Bug report",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
 
-    // Four text-only, no-tool-call, finish="stop" replies: the model never
-    // authors/runs a repro and never cancels the repro todo — three rejected
-    // finish arrivals (escalating nudges), then a loud fourth.
+    // tracker #29 — this harness disables triage (a null turn-read verdict),
+    // so bugShaped now needs real turn evidence before this scenario counts
+    // as bug-shaped at all (resolveBugShapedFallback, turn-supervisor.ts).
+    // One landed (non-test) source edit supplies that evidence — it also
+    // arms the SEPARATE wave-10 unverified-finish gate for exactly one
+    // reject (landedSourceEdits && zero real test executions), so the first
+    // "investigating" reply below absorbs that reject before the S3 gate's
+    // own three-reject-then-loud sequence starts (S3 fires independently of
+    // landedSourceEdits — its own condition is `!turnPinnedProbe`, still
+    // true throughout: no repro is ever pinned or run). Once S3's bound is
+    // spent, round F plants its own one-shot deferral rung before the loud
+    // break — one more reply absorbs that too.
+    yield* llm.tool("write", {
+      filePath: path.resolve(dir, "src/parser.ts"),
+      content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
+    })
+    yield* llm.text("investigating")
     yield* llm.text("still investigating")
     yield* llm.text("still investigating")
     yield* llm.text("still investigating")
+    yield* llm.text("still investigating after deferral")
     yield* llm.text("done, no repro run")
 
     const result = yield* prompt.prompt({
@@ -2210,7 +2228,10 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
 
     expect(result.info.role).toBe("assistant")
     if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
-    expect(yield* llm.calls).toBe(4)
+    // 1 write + 6 text replies: wave-10 (1), S3's own 3 rejects, round F's
+    // one-shot deferral rung once S3's bound is spent, then the final loud
+    // accept.
+    expect(yield* llm.calls).toBe(7)
 
     const msgs = yield* sessions.messages({ sessionID: session.id })
     const nudgeTexts = msgs
