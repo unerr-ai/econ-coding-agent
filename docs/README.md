@@ -72,6 +72,9 @@ seam table: [features/README.md](./features/README.md).
   batched tool calls per step, step-granular pruning, verify-loop dedup, design-escalation
   for grinder tickets. Grounded in the Claude Code source + the SWE-mini-10 receipts.
 - [models.md](./design/models.md) — the open-weight model facts and the per-role selection.
+- [benchmark-reference.md](./design/benchmark-reference.md) — external SWE-bench Pro +
+  Terminal-Bench 2.1 reference scores (July 2026 snapshot) with the integrity caveats
+  (SWE-Pro retraction, scaffold sensitivity, TB version incomparability).
 - [native-loop-gap.md](./design/native-loop-gap.md) — brainstorm: the mini-swe-agent 75.8%/$0.07
   datum, the five verified engine suppressions (code receipts), the 85% target arithmetic, and
   the E0–E3 measurement plan (null-harness control, un-suppress probe, thin-gate mode).
