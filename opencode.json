@@ -178,7 +178,8 @@
   },
 
   // econ LiteLLM gateway provider — the always-available global baseline. econ's self-hosted
-  // LiteLLM gateway (infra/litellm/config.yaml) is an OpenAI-compatible custom provider that fronts
+  // LiteLLM gateway (config lives in the sibling unerr-benchmarks repo, infra/litellm/config.yaml,
+  // moved 2026-07-19) is an OpenAI-compatible custom provider that fronts
   // all four econ models with usage passthrough, so we declare it via @ai-sdk/openai-compatible
   // and pin the four tier model IDs so they resolve regardless of the upstream models.dev catalog.
   //

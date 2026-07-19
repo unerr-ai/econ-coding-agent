@@ -1,5 +1,9 @@
 # 08 — LiteLLM gateway (Sprint OL-8)
 
+**Moved 2026-07-19:** the gateway infra (Dockerfile/config.yaml/fly.toml/econ-entrypoint.sh/probe.sh)
+now lives in the `unerr-benchmarks` repo at `infra/litellm/`; this doc stays as the FEATURE/design
+doc, but all deploy commands run from there.
+
 **Status:** IMPLEMENTED — 2026-07-04. Gateway live on Fly.io (`econ-litellm`, org `vamsee-k-933`, region `sin`
 with bom relocation pending when capacity returns); all three phases (A/B/C) verified green with cache hit 48.9% and no silent
 model substitutions.
@@ -121,7 +125,7 @@ All against the built binary through the live gateway (2026-07-04):
 
 **Deploy a new version:**
 ```bash
-cd infra/litellm && fly deploy --remote-only --ha=false
+cd ../unerr-benchmarks/infra/litellm && fly deploy --remote-only --ha=false
 ```
 Fly auto-restarts the 1 machine on success; health checks resume automatically.
 
@@ -164,9 +168,9 @@ The LiteLLM image (`ghcr.io/berriai/litellm:main-stable`) moves fast. Upgrade pr
    docker pull ghcr.io/berriai/litellm:main-stable
    docker inspect ghcr.io/berriai/litellm:main-stable | jq -r '.[0].RepoDigests'
    ```
-2. Update `infra/litellm/Dockerfile` `FROM` line with the new digest.
+2. Update `../unerr-benchmarks/infra/litellm/Dockerfile` `FROM` line with the new digest.
 3. Redeploy: `fly deploy --remote-only --ha=false`
-4. Re-run `infra/litellm/probe.sh` + the C3 tool-call smoke test to confirm no streaming regressions.
+4. Re-run `../unerr-benchmarks/infra/litellm/probe.sh` + the C3 tool-call smoke test to confirm no streaming regressions.
 
 ### Memory floor note
 

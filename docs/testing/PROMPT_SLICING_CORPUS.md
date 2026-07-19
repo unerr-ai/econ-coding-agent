@@ -292,7 +292,7 @@ cd packages/opencode && bun run test/arming-rig/run.ts
 ```
 Live (spends a few cents — validates the *real* judge on the conductor tier):
 ```
-set -a; source infra/litellm/.env.local; set +a
+set -a; source ../unerr-benchmarks/infra/litellm/.env.local; set +a  # moved to sibling repo 2026-07-19
 export LITELLM_API_KEY="$LITELLM_MASTER_KEY"
 cd packages/opencode && RIG_LIVE=1 bun run test/arming-rig/run.ts
 ```

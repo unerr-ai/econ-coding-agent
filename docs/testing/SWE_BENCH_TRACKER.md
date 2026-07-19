@@ -179,7 +179,8 @@ Docker**. Real LiteLLM gateway spend (~$0.09/instance).
 - **Binary:** `packages/opencode/dist/opencode-darwin-arm64/bin/opencode` — rebuild with
   `cd packages/opencode && bun run build` when the engine changes.
 - **Python 3.9:** `~/.pyenv/versions/3.9.19/bin/python3.9` (Django 3.1-dev needs <3.11).
-- **LiteLLM env:** `infra/litellm/.env.local` (exports `LITELLM_MASTER_KEY`).
+- **LiteLLM env:** `../unerr-benchmarks/infra/litellm/.env.local` (exports `LITELLM_MASTER_KEY`).
+  Gateway infra moved to the sibling `unerr-benchmarks` repo on 2026-07-19.
 - **Dataset:** `princeton-nlp/SWE-bench_Verified` via the `datasets` package — only
   `/opt/homebrew/bin/python3` has it installed.
 - **Session DB (run artifacts):** `~/.local/share/opencode/opencode-main.db`.
@@ -252,7 +253,7 @@ cp ../PROMPT.txt .
 **Step 3 — run econ against the arena** (real spend). Put the arena venv on PATH so
 `python` = venv python for both the agent's tools and the econ turn-probe gate:
 ```bash
-set -a; source infra/litellm/.env.local; set +a
+set -a; source ../unerr-benchmarks/infra/litellm/.env.local; set +a  # moved to sibling repo 2026-07-19
 export LITELLM_API_KEY="$LITELLM_MASTER_KEY"
 export PATH="$PWD/arena-django-12039/.venv/bin:$PATH"
 cd arena-django-12039

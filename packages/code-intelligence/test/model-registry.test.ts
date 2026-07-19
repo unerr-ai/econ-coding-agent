@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   ECON_MODELS,
@@ -110,10 +110,31 @@ describe("referential integrity", () => {
 })
 
 describe("infra/litellm/config.yaml vs ECON_MODELS (drift guard — OL-8.B2)", () => {
-  // Repo root is three levels up from packages/code-intelligence/test/, same as OPENCODE_JSON_PATH
-  // above. Dependency-free line parse (no yaml lib in this package) is sufficient: config.yaml's
-  // `model_name:` and `litellm_params.model:` values never span multiple lines.
-  const LITELLM_CONFIG_PATH = join(import.meta.dir, "..", "..", "..", "infra", "litellm", "config.yaml")
+  // 2026-07-19: the gateway infra (incl. config.yaml) moved out of this repo into the sibling
+  // unerr-benchmarks checkout. Repo root is three levels up from packages/code-intelligence/test/
+  // (same as OPENCODE_JSON_PATH above); one more level up + across into the sibling repo's
+  // infra/litellm/. Dependency-free line parse (no yaml lib in this package) is sufficient:
+  // config.yaml's `model_name:` and `litellm_params.model:` values never span multiple lines.
+  const LITELLM_CONFIG_PATH = join(
+    import.meta.dir,
+    "..",
+    "..",
+    "..",
+    "..",
+    "unerr-benchmarks",
+    "infra",
+    "litellm",
+    "config.yaml",
+  )
+
+  if (!existsSync(LITELLM_CONFIG_PATH)) {
+    it.skip(
+      "gateway config lives in sibling repo unerr-benchmarks — checkout missing, drift guard skipped",
+      () => {},
+    )
+    return
+  }
+
   const configText = readFileSync(LITELLM_CONFIG_PATH, "utf-8")
   const modelNames = [...configText.matchAll(/^\s*-\s*model_name:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
   const upstreamModels = [...configText.matchAll(/^\s*model:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
