@@ -45,6 +45,17 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 
 ---
 
+> **Build status (2026-07-19, wave 1 shipped):** kernel (claim-evidence contract) + H1 +
+> H2 + H8 + H3 + H4 (engine gate/teeth + infra deadline/telemetry; SWE path deliberately
+> excluded — see the H4 scope note) + H7 + §4.3 ladder collapse/switches + H9 triggers +
+> §4.4 profiles/direct-Anthropic path are ALL implemented and committed
+> (`4ef0c3079`…`feat(gates): H3…` lineage; unerr-benchmarks `a19c3b4`). Open follow-ups:
+> F2P tooth-3 wiring, diff-aware judge inputs at call sites, ECON_JUDGE_TIER=off live
+> wiring, signal-audit scan-scope widening, and a PRE-EXISTING prompt.test.ts loop-harness
+> failure (bisect-proven to predate the wave). Validation: 3-specimen hard replay
+> (14369/13236/11265) in flight; mini-10 ×3 band + full-500 gate still ahead — no score
+> claims until those run (§5.4).
+
 ## 1. Gap inventory (evidence-ranked)
 
 | ID | Gap | Live evidence (2026-07-19) | Class |
