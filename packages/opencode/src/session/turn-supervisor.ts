@@ -576,3 +576,25 @@ export function shouldDenyPatchSanity(input: {
   if (input.alreadyDenied) return false
   return true
 }
+
+/**
+ * H1 tooth 3 (gap-closure-plan §2.7) — pure gate decision for the F2P
+ * full-set finish claim: a bug-shaped root turn whose own observed red test
+ * ids are not all covered by the LATEST run (`checkTestSetCoverage`,
+ * repro-fidelity-judge.ts) gets ONE reject-with-nudge cycle
+ * (`alreadyDenied`, tracked in f2p-claim-store.ts), never for a child
+ * session, which inherits the parent's verification rather than owing its
+ * own — same shape as `shouldDenyPatchSanity`/`shouldDenyUnverifiedFinish`.
+ *
+ * @sem domain=routing role=gate
+ */
+export function shouldDenyF2pClaim(input: {
+  isChildSession: boolean
+  covered: boolean
+  alreadyDenied: boolean
+}): boolean {
+  if (input.isChildSession) return false
+  if (input.covered) return false
+  if (input.alreadyDenied) return false
+  return true
+}

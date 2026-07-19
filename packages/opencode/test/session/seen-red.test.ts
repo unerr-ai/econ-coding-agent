@@ -22,6 +22,8 @@ import {
   partitionSeenRedByInversion,
   isEnvBlockedSignature,
   partitionSeenRedByEnvBlock,
+  collectObservedRedTestIds,
+  observedTestVerdicts,
   type SeenRedExecution,
   type UnresolvedSeenRed,
 } from "../../src/session/seen-red"
@@ -462,5 +464,101 @@ describe("partitionSeenRedByEnvBlock", () => {
     const result = partitionSeenRedByEnvBlock([plainOnce, envBlocked], executions)
     expect(result.binding).toEqual([plainOnce])
     expect(result.envBlocked.map((e) => e.command)).toEqual([envBlocked.command])
+  })
+})
+
+describe("collectObservedRedTestIds — H1 tooth 3 (gap-closure-plan §2.7)", () => {
+  it("collects a test-target id from a single red execution", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+    ]
+    expect(collectObservedRedTestIds(executions)).toEqual(["tests/test_bar.py::test_baz"])
+  })
+
+  it("keeps an id that a LATER green execution clears — this is the full-set scope, never bounded to the unresolved-3 cap", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 0, output: "1 passed in 0.01s" },
+    ]
+    expect(collectObservedRedTestIds(executions)).toEqual(["tests/test_bar.py::test_baz"])
+  })
+
+  it("dedupes the same id seen red twice", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+    ]
+    expect(collectObservedRedTestIds(executions)).toEqual(["tests/test_bar.py::test_baz"])
+  })
+
+  it("falls back to the whole command when no test-target token is extractable", () => {
+    const executions: SeenRedExecution[] = [{ command: "pytest", exitCode: 1, output: "1 failed" }]
+    expect(collectObservedRedTestIds(executions)).toEqual(["pytest"])
+  })
+
+  it("ignores a non-test bash failure and env-red output, same as isRedTestExecution", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "grep foo bar.txt", exitCode: 1, output: "no match" },
+      {
+        command: "pytest repro_issue.py",
+        exitCode: 2,
+        output: "python: can't open file 'repro_issue.py': [Errno 2] No such file or directory",
+      },
+    ]
+    expect(collectObservedRedTestIds(executions)).toEqual([])
+  })
+
+  it("accumulates across multiple distinct reds, never bounded to 3 (unlike findUnresolvedSeenRed)", () => {
+    const executions: SeenRedExecution[] = Array.from({ length: 5 }, (_, i) => ({
+      command: `pytest tests/test_mod${i}.py::test_x`,
+      exitCode: 1,
+      output: `FAILED tests/test_mod${i}.py::test_x - AssertionError`,
+    }))
+    expect(collectObservedRedTestIds(executions)).toHaveLength(5)
+  })
+})
+
+describe("observedTestVerdicts — H1 tooth 3 (gap-closure-plan §2.7)", () => {
+  it("a red-only id reads 'fail'", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+    ]
+    expect(observedTestVerdicts(executions).get("tests/test_bar.py::test_baz")).toBe("fail")
+  })
+
+  it("the LATEST execution wins: red then a clean green re-run reads 'pass'", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 0, output: "1 passed in 0.01s" },
+    ]
+    expect(observedTestVerdicts(executions).get("tests/test_bar.py::test_baz")).toBe("pass")
+  })
+
+  it("green then red reads 'fail' (the latest run is the one that matters)", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 0, output: "1 passed in 0.01s" },
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+    ]
+    expect(observedTestVerdicts(executions).get("tests/test_bar.py::test_baz")).toBe("fail")
+  })
+
+  it("a laundered (exit-0 but red-signatured) re-run never overwrites a prior fail with a false pass", () => {
+    const launderedRed =
+      '.venv/bin/python tests/runtests.py delete delete_regress 2>&1 | grep -E "^(test_|FAIL|ERROR|OK|PASS|Ran|FAILED|test_) |^[0-9]+ tests" | tail -40; echo "---INSPECT---"; .venv/bin/python repro_inspect_combined.py'
+    const launderedRedOutput =
+      "Ran 63 tests in 0.511s\nFAILED (failures=2, errors=7, skipped=3)\n---INSPECT---\ncomposed WHERE clause: (OR: ...)"
+    const executions: SeenRedExecution[] = [{ command: launderedRed, exitCode: 0, output: launderedRedOutput }]
+    // The laundered run itself is red-shaped (isRedTestExecution catches it),
+    // so it records "fail", not "pass" — never a false-green id.
+    const verdicts = observedTestVerdicts(executions)
+    const [, verdict] = [...verdicts.entries()][0]!
+    expect(verdict).toBe("fail")
+  })
+
+  it("an id with no execution at all is absent from the map (undefined, not 'pass')", () => {
+    const executions: SeenRedExecution[] = [
+      { command: "pytest tests/test_bar.py::test_baz", exitCode: 1, output: "FAILED tests/test_bar.py::test_baz" },
+    ]
+    expect(observedTestVerdicts(executions).get("tests/test_other.py::test_x")).toBeUndefined()
   })
 })

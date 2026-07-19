@@ -24,6 +24,8 @@ export type EconSignalName =
   | "probe_rerun_dedupe" // Round-H: same command produced identical output for the 3rd+ time — no new information
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
   | "patch_sanity_unverified" // H3: landed patch touches none of the issue's candidate sites, or is unjustified test-infra-only (2nd arrival = tail surface)
+  | "f2p_claim_unverified" // H1 tooth 3: finish claim covers only a strict subset of the turn's own observed red test ids (2nd arrival = tail surface)
+  | "judge_tier_off" // gap-closure §4.3 (#27): ECON_JUDGE_TIER=off skipped a judge dispatch — surfaced once per session
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
   | "unverifiable_regression_surface" // H2.2: a non-trivial code edit's regression lane selected zero tests and no sibling test file exists — surfaced, never silent
   | "deliverable_checklist" // H4.1: end-state finish gate — ops-shaped turn's deliverable checklist (1st denial converts; a pass-through with gaps still open surfaces verifiedScope, never a silent allow)

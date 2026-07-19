@@ -307,6 +307,19 @@ export function patchSanityNudgeText(
 }
 
 /**
+ * H1 tooth 3 (gap-closure-plan §2.7) — F2P full-set claim nudge: prompt.ts's
+ * finish-time block injects this once, when `checkTestSetCoverage`
+ * (repro-fidelity-judge.ts) finds a test id the turn's OWN transcript saw
+ * fail red (never a benchmark-provided F2P list — strip-the-future) with no
+ * later green re-run in the LATEST run. Names the missing ids directly so
+ * the model re-runs exactly those, not the whole suite again.
+ */
+export function f2pClaimNudgeText(missing: readonly string[]): string {
+  const list = missing.map((id) => `- ${id}`).join("\n")
+  return `You claimed this fix is complete, but these test id(s) you SAW fail red this turn were never re-run and confirmed green in your latest test run:\n${list}\nRe-run each one now and confirm it passes before finishing again — a red you observed and never re-verified is not a fixed claim.`
+}
+
+/**
  * Wave 11 stage 2 — convention-divergence gate nudge: edit.ts/write.ts throw
  * this once per session, at the moment `detectReceiverMethodDivergence`
  * (convention-divergence.ts) flags an added `<receiver>.<method>(...)` call

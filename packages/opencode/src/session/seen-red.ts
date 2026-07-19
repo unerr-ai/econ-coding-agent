@@ -180,6 +180,54 @@ export function findUnresolvedSeenRed(
   return unresolved.slice(-3)
 }
 
+/**
+ * H1 tooth 3 (gap-closure-plan §2.7, F2P full-set claim) — every test-target
+ * id (or, when none is extractable, the whole command) that appeared in a
+ * RED execution anywhere in `executions`, deduped. This is the finish
+ * claim's SCOPE: the agent's OWN observed reds, never a benchmark-provided
+ * F2P list (strip-the-future). Unlike `findUnresolvedSeenRed` this is not
+ * bounded to the last 3 and does not drop an id a later execution cleared —
+ * the caller (prompt.ts's turn-scoped accumulator) needs the full set ever
+ * seen red this turn; `observedTestVerdicts` below supplies each id's
+ * LATEST verdict for the actual coverage check.
+ *
+ * @sem domain=routing role=gate
+ */
+export function collectObservedRedTestIds(executions: readonly SeenRedExecution[]): string[] {
+  const ids = new Set<string>()
+  for (const exec of executions) {
+    if (!isRedTestExecution(exec)) continue
+    const targets = extractTestTargetTokens(exec.command)
+    for (const id of targets.length > 0 ? targets : [exec.command]) ids.add(id)
+  }
+  return [...ids]
+}
+
+/**
+ * H1 tooth 3 — the LATEST verdict per test-target id across `executions`, in
+ * transcript order (a later execution overwrites an earlier one) — the
+ * evidence `checkTestSetCoverage` (repro-fidelity-judge.ts) checks
+ * `collectObservedRedTestIds`'s claim scope against. Only a red execution
+ * (`isRedTestExecution`) records "fail"; only a clean, non-laundered green
+ * (`exitCode === 0` and no laundered-failure signature — the same green
+ * `clears()` already recognizes as a legitimate clearing re-run) records
+ * "pass". Any other shape (undefined exit, ambiguous output) leaves a prior
+ * entry untouched rather than guessing.
+ *
+ * @sem domain=routing role=gate
+ */
+export function observedTestVerdicts(executions: readonly SeenRedExecution[]): Map<string, "pass" | "fail"> {
+  const verdicts = new Map<string, "pass" | "fail">()
+  for (const exec of executions) {
+    const red = isRedTestExecution(exec)
+    const cleanGreen = exec.exitCode === 0 && !LAUNDERED_FAILURE_SIGNATURE_RE.test(exec.output)
+    if (!red && !cleanGreen) continue
+    const targets = extractTestTargetTokens(exec.command)
+    for (const id of targets.length > 0 ? targets : [exec.command]) verdicts.set(id, red ? "fail" : "pass")
+  }
+  return verdicts
+}
+
 /** An unresolved red whose failure is oracle-inversion-shaped: a COMMITTED visible test still expects the value the issue calls wrong while the code now produces the issue's stated desired form. Sanctioned — exempt from the confirm-GREEN demand; the finish owes a stated verdict instead. */
 export interface SeenRedInversion extends UnresolvedSeenRed {
   desiredLiteral?: string

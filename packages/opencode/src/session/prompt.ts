@@ -56,6 +56,7 @@ import {
   decideHeadlessCompletionReentry,
   detectPatchSanityGap,
   shouldDenyPatchSanity,
+  shouldDenyF2pClaim,
   normalizeResult,
 } from "./turn-supervisor"
 import {
@@ -77,6 +78,7 @@ import {
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
   patchSanityNudgeText,
+  f2pClaimNudgeText,
   identicalRunDedupeNudgeText,
   seenRedEnvBlockedNudgeText,
   probeEnvBlockedNudgeText,
@@ -90,6 +92,8 @@ import {
   partitionSeenRedByInversion,
   partitionSeenRedByEnvBlock,
   isEnvBlockedSignature,
+  collectObservedRedTestIds,
+  observedTestVerdicts,
   type SeenRedExecution,
 } from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
@@ -100,6 +104,8 @@ import {
   markDeliverableFinishDenied,
 } from "./deliverable-checklist"
 import { hasDeniedPatchSanity, markPatchSanityDenied } from "./patch-sanity-store"
+import { hasDeniedF2pClaim, markF2pClaimDenied } from "./f2p-claim-store"
+import { hasNotedJudgeTierOff, markJudgeTierOffNoted } from "./judge-tier-store"
 import {
   headlessReentryCount,
   incrementHeadlessReentryCount,
@@ -121,6 +127,7 @@ import {
   detectMissingRoundtripAssert,
   missingRequiredLiterals,
   hasAssertionTeeth,
+  checkTestSetCoverage,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
 import { synthesizeRoundtripWitness } from "./roundtrip-witness"
@@ -153,6 +160,7 @@ import {
   createRmVerifierRung,
   resolveVerifierTier,
   resolveJudgeTier,
+  resolveJudgeTierSwitch,
   isReadOnlySlice,
   runRegressionGate,
   checkClaimCoverage,
@@ -413,6 +421,46 @@ async function readRegressionGateHeadContent(filePath: string): Promise<string |
     command: `git show HEAD:${rel}`,
   })
   return result.exitCode === 0 ? result.stdout : null
+}
+
+// H3 (gap-closure §2, #26) — cap on the unified diff text handed to a judge
+// prompt: a hunk section is scaffolding, not the whole patch review — keeps
+// the judge prompt bounded even on a wide multi-file turn.
+export const DIFF_HUNK_MAX_LINES = 200
+
+/**
+ * H3 (#26) — pure truncation for `readTurnDiffHunks`'s raw `git diff`
+ * output: a diff at or under DIFF_HUNK_MAX_LINES passes through unchanged;
+ * a longer one is cut to the first DIFF_HUNK_MAX_LINES lines plus a
+ * trailing marker naming how many lines were dropped, so the judge prompt
+ * never carries an unbounded blob. `""` in, `""` out.
+ *
+ * @sem domain=routing role=verify-ladder
+ */
+export function truncateDiffHunks(diff: string): string {
+  if (!diff) return ""
+  const lines = diff.split("\n")
+  if (lines.length <= DIFF_HUNK_MAX_LINES) return diff
+  return `${lines.slice(0, DIFF_HUNK_MAX_LINES).join("\n")}\n... (truncated, +${lines.length - DIFF_HUNK_MAX_LINES} more lines)`
+}
+
+// H3 (#26) — unified diff of the turn's touched files, sourced via `git
+// diff` through the same injected shell runner readRegressionGateHeadContent
+// uses (never a direct child_process call). Feeds the diff-aware judge
+// scaffolding (hub-design, repro-fidelity) with the actual before/after
+// hunks instead of a prose description. An empty file list or any git
+// error/empty diff returns "" (never a throw), so a caller with nothing to
+// diff simply omits the section (buildJudgePrompt-style: absent stays
+// absent). Truncation is `truncateDiffHunks` above.
+async function readTurnDiffHunks(files: readonly string[]): Promise<string> {
+  if (files.length === 0) return ""
+  const rels = files.map((f) => (path.isAbsolute(f) ? path.relative(process.cwd(), f) : f))
+  const result = await makeShellCommandRunner({ cwd: process.cwd(), timeoutMs: 5000 })({
+    kind: "guard",
+    command: `git diff -- ${rels.map((r) => `'${r.replace(/'/g, `'\\''`)}'`).join(" ")}`,
+  })
+  if (result.exitCode !== 0 || !result.stdout) return ""
+  return truncateDiffHunks(result.stdout)
 }
 
 // F20 — bounded wait for the in-process graph index before the graph-derived
@@ -861,13 +909,36 @@ export const layer = Layer.effect(
      * @sem domain=routing role=repro-judge
      */
     const reproFidelityDispatch = Effect.fn("SessionPrompt.reproFidelityDispatch")(function* (input: {
+      sessionID: SessionID
       issueText: string
       reproContent: string
       statedRules?: readonly string[]
       issueExpectedActual?: string
       witnesses?: readonly string[]
+      diffHunks?: string
     }) {
-      const { issueText, reproContent, statedRules, issueExpectedActual, witnesses } = input
+      const { sessionID, issueText, reproContent, statedRules, issueExpectedActual, witnesses, diffHunks } = input
+      // Gap-closure §4.3 (#27) — the ECON_JUDGE_TIER master switch: when off,
+      // skip this judge call entirely (deterministic gates only — the caller's
+      // deterministic teeth stack still runs against DEGRADED_REPRO_FIDELITY
+      // exactly as it does for the model-unresolved degrade below), surfaced
+      // ONCE per session loudly via the same signal-bus + log shape every
+      // other gate here uses.
+      const judgeTierSwitch = resolveJudgeTierSwitch(process.env["ECON_JUDGE_TIER"])
+      if (!judgeTierSwitch.enabled) {
+        if (!hasNotedJudgeTierOff(sessionID)) {
+          markJudgeTierOffNoted(sessionID)
+          yield* publishSignalFx({
+            name: "judge_tier_off",
+            sessionID,
+            severity: "info",
+            decision: "surface",
+            evidence: {},
+          })
+          yield* Effect.logWarning("judge_tier_off", { "session.id": sessionID })
+        }
+        return { verdict: DEGRADED_REPRO_FIDELITY, degradedReason: "judge-tier-off" as const }
+      }
       const m = resolveSliceModel("executor")
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
@@ -887,7 +958,15 @@ export const layer = Layer.effect(
         return out.text.trim() || (out.reasoningText ?? "")
       }
       const verdict = yield* Effect.promise(() =>
-        runReproFidelityJudge({ issueText, reproContent, statedRules, issueExpectedActual, witnesses, complete }),
+        runReproFidelityJudge({
+          issueText,
+          reproContent,
+          statedRules,
+          issueExpectedActual,
+          witnesses,
+          diffHunks,
+          complete,
+        }),
       )
       return {
         verdict,
@@ -917,12 +996,35 @@ export const layer = Layer.effect(
      * @sem domain=routing role=hub-design-judge
      */
     const hubDesignDispatch = Effect.fn("SessionPrompt.hubDesignDispatch")(function* (input: {
+      sessionID: SessionID
       issueText: string
       bouncedFiles: readonly string[]
       definitionSites: readonly { symbol: string; kind: string; file: string }[]
       issueExpectedActual?: string
+      witnesses?: readonly string[]
+      diffHunks?: string
     }) {
-      const { issueText, bouncedFiles, definitionSites, issueExpectedActual } = input
+      const { sessionID, issueText, bouncedFiles, definitionSites, issueExpectedActual, witnesses, diffHunks } = input
+      // Gap-closure §4.3 (#27) — the ECON_JUDGE_TIER master switch: when off,
+      // skip this judge call entirely (deterministic gates only — the
+      // caller's existing DEGRADED_HUB_DESIGN fallback, hubDesignDegradedNudgeText,
+      // is unchanged), surfaced ONCE per session loudly via the same
+      // signal-bus + log shape every other gate here uses.
+      const judgeTierSwitch = resolveJudgeTierSwitch(process.env["ECON_JUDGE_TIER"])
+      if (!judgeTierSwitch.enabled) {
+        if (!hasNotedJudgeTierOff(sessionID)) {
+          markJudgeTierOffNoted(sessionID)
+          yield* publishSignalFx({
+            name: "judge_tier_off",
+            sessionID,
+            severity: "info",
+            decision: "surface",
+            evidence: {},
+          })
+          yield* Effect.logWarning("judge_tier_off", { "session.id": sessionID })
+        }
+        return { verdict: DEGRADED_HUB_DESIGN, degradedReason: "judge-tier-off" as const }
+      }
       const m = resolveSliceModel("reasoner")
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
@@ -942,7 +1044,15 @@ export const layer = Layer.effect(
         return [out.reasoningText ?? "", out.text ?? ""].filter(Boolean).join("\n")
       }
       const result = yield* Effect.promise(() =>
-        runHubDesignJudge({ issueText, bouncedFiles, definitionSites, issueExpectedActual, complete }),
+        runHubDesignJudge({
+          issueText,
+          bouncedFiles,
+          definitionSites,
+          issueExpectedActual,
+          witnesses,
+          diffHunks,
+          complete,
+        }),
       )
       return {
         verdict: result.verdict,
@@ -2022,6 +2132,16 @@ export const layer = Layer.effect(
         // H8 — pre-existing (baseline) reds are reported to the model once,
         // loudly, then never re-flagged on a later arrival within the turn.
         let turnBaselineRedsReported = false
+        // H1 tooth 3 (gap-closure-plan §2.7, F2P full-set claim) — every
+        // test-target id the turn's OWN transcript has shown fail red at
+        // ANY point so far (seen-red.ts's `collectObservedRedTestIds`),
+        // accumulated turn-wide as the F18 seen-red scan below re-derives
+        // it on each finish arrival — same turn-scoped state shape as
+        // `turnRegressionBaseline` above, but additive rather than
+        // compute-once (accumulation is cheap: no shell-out, pure over
+        // already-extracted executions). This is the finish claim's scope;
+        // it is NEVER a benchmark-provided F2P list (strip-the-future).
+        const turnObservedRedTestIds = new Set<string>()
         // The turn's OPENING user message id, captured once at step 0 before
         // any synthetic nudge (stuck/grind/batch/probe-gate/S2/S3) can shift
         // `lastUser` forward — the stable anchor S3 scans "this turn's"
@@ -2135,11 +2255,23 @@ export const layer = Layer.effect(
           const issueExpectedActual = getIssueExpectations(sessionID)
             .map((l) => `${l.kind}: ${l.value}`)
             .join("\n")
+          // H1 tooth 2's own witness list, computed here (rather than at its
+          // later use below) so the judge scaffolding (#26) sees the same
+          // required literals the deterministic teeth stack checks against.
+          const requiredLiterals = getIssueExpectations(sessionID)
+            .filter((l) => l.kind === "expected")
+            .map((l) => l.value)
+          // H3 (#26) — the turn's own touched-file diff, diff-aware
+          // scaffolding for the judge in place of a prose summary.
+          const reproFidelityDiffHunks = yield* Effect.promise(() => readTurnDiffHunks(getTurnFiles(sessionID)))
           const fidelityOutcome = yield* reproFidelityDispatch({
+            sessionID,
             issueText,
             reproContent,
             statedRules,
             issueExpectedActual,
+            witnesses: requiredLiterals,
+            diffHunks: reproFidelityDiffHunks,
           })
           // RF-4 §8 — the deterministic teeth stack: assertion teeth (F14b),
           // the rendered-assert detector (11790's `'maxlength="254"' in html`
@@ -2150,9 +2282,9 @@ export const layer = Layer.effect(
           // side stringifies the very value under test proves representation,
           // not type) — each merges as a forced gap exactly like the teeth
           // gap; the LLM verdict still covers what mechanics can't see.
-          const requiredLiterals = getIssueExpectations(sessionID)
-            .filter((l) => l.kind === "expected")
-            .map((l) => l.value)
+          // requiredLiterals is computed above, ahead of the dispatch call,
+          // so the judge scaffolding (#26) and this deterministic check see
+          // the identical list.
           // H1 tooth 2 (gap-closure-plan §2.7) — roundtrip witness
           // synthesis: resolve the issue's named symbol(s) to their
           // defining site, then ask the graph for a same-file read/write
@@ -3127,11 +3259,22 @@ export const layer = Layer.effect(
               const hubDesignIssueExpectedActual = getIssueExpectations(sessionID)
                 .map((l) => `${l.kind}: ${l.value}`)
                 .join("\n")
+              // H1 tooth 1's own witness list — the same required literals
+              // the repro-fidelity gate checks against.
+              const hubDesignWitnesses = getIssueExpectations(sessionID)
+                .filter((l) => l.kind === "expected")
+                .map((l) => l.value)
+              // H3 (#26) — the turn's own touched-file diff, diff-aware
+              // scaffolding for the judge in place of a prose summary.
+              const hubDesignDiffHunks = yield* Effect.promise(() => readTurnDiffHunks(getTurnFiles(sessionID)))
               const hubDesignResult = yield* hubDesignDispatch({
+                sessionID,
                 issueText,
                 bouncedFiles: bouncedHubFiles,
                 definitionSites: sites,
                 issueExpectedActual: hubDesignIssueExpectedActual,
+                witnesses: hubDesignWitnesses,
+                diffHunks: hubDesignDiffHunks,
               })
               const hubNudge: SessionV1.User = {
                 id: MessageID.ascending(),
@@ -3888,6 +4031,11 @@ export const layer = Layer.effect(
               // arrival.
               if (landedSourceEdits) {
                 const seenRedExecutions = extractTurnBashExecutions(turnAssistantParts)
+                // H1 tooth 3 — accumulate every test id this scan's
+                // executions show red, turn-wide (never dropped once a
+                // later run clears it — that's `checkTestSetCoverage`'s job
+                // below at finish-intent, not this accumulator's).
+                for (const id of collectObservedRedTestIds(seenRedExecutions)) turnObservedRedTestIds.add(id)
                 const allUnresolvedSeenRed = findUnresolvedSeenRed(
                   seenRedExecutions,
                   turnPinnedProbeRanGreen ? turnPinnedProbe?.probe.command : undefined,
@@ -4209,6 +4357,85 @@ export const layer = Layer.effect(
                         files: landedSourceEditFiles,
                       })
                     }
+                  }
+                }
+
+                // H1 tooth 3 (gap-closure-plan §2.7, F2P full-set claim) —
+                // the finish claim's scope is the agent's OWN observed red
+                // tests (`turnObservedRedTestIds`, accumulated by the F18
+                // scan above), NEVER a benchmark-provided F2P list
+                // (strip-the-future). Every id ever seen red this turn is
+                // checked against the LATEST run's per-test verdict through
+                // the same claim-evidence kernel H2/H8 use —
+                // `checkTestSetCoverage` (repro-fidelity-judge.ts) is the
+                // ready-made F2P-set primitive, consumed here rather than
+                // duplicated. A red the agent saw but never re-ran green
+                // denies once, naming the missing ids; a still-uncovered
+                // retry fails open LOUD with the honest verifiedScope
+                // instead of denying again — same bounded-deny-then-loud-pass
+                // discipline as H3 above (f2p-claim-store.ts).
+                if (landedSourceEdits && turnObservedRedTestIds.size > 0) {
+                  const observedRedIds = [...turnObservedRedTestIds]
+                  const f2pResults = observedTestVerdicts(extractTurnBashExecutions(turnAssistantParts))
+                  const f2pVerdict = checkTestSetCoverage(observedRedIds, f2pResults)
+                  const alreadyDeniedF2p = hasDeniedF2pClaim(sessionID)
+                  if (
+                    shouldDenyF2pClaim({
+                      isChildSession: Boolean(session.parentID),
+                      covered: f2pVerdict.covered,
+                      alreadyDenied: alreadyDeniedF2p,
+                    })
+                  ) {
+                    markF2pClaimDenied(sessionID)
+                    yield* publishSignalFx({
+                      name: "f2p_claim_unverified",
+                      sessionID,
+                      severity: "info",
+                      decision: "convert",
+                      evidence: { missing: f2pVerdict.missing.length, total: observedRedIds.length },
+                    })
+                    yield* Effect.logInfo("finish_gate_f2p_claim_denied", {
+                      "session.id": sessionID,
+                      missing: f2pVerdict.missing,
+                    })
+                    const f2pClaimNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(f2pClaimNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: f2pClaimNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: f2pClaimNudgeText(f2pVerdict.missing),
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  } else if (!f2pVerdict.covered && alreadyDeniedF2p) {
+                    // Bounded: the one deny is already spent — fail open
+                    // LOUD instead of denying (or looping) again.
+                    yield* publishSignalFx({
+                      name: "f2p_claim_unverified",
+                      sessionID,
+                      severity: "tail",
+                      decision: "surface",
+                      evidence: { missing: f2pVerdict.missing.length, total: observedRedIds.length },
+                    })
+                    yield* Effect.logWarning("finish_gate_f2p_claim_surfaced", {
+                      "session.id": sessionID,
+                      verifiedScope: f2pVerdict.verifiedScope,
+                      missing: f2pVerdict.missing,
+                    })
+                  } else {
+                    yield* Effect.logInfo("finish_gate_f2p_claim_ok", {
+                      "session.id": sessionID,
+                      verifiedScope: f2pVerdict.verifiedScope,
+                    })
                   }
                 }
 
@@ -5697,7 +5924,27 @@ export const layer = Layer.effect(
               // sampler is fine — runCrossModelJudge awaits and degrades to the
               // next rung — so failures reject here rather than being swallowed.
               const judgeTier = resolveJudgeTier(process.env["ECON_VERIFIER_JUDGE"])
-              const judgeGenerate = judgeTier.enabled
+              // Gap-closure §4.3 (#27) — the ECON_JUDGE_TIER master switch,
+              // ANDed onto the existing ECON_VERIFIER_JUDGE-derived
+              // `judgeTier.enabled` check below: either one disabling is
+              // enough to fall through to `judgeGenerate: undefined`, the
+              // SAME shape ECON_VERIFIER_JUDGE=off already produces (the
+              // verifier ladder's deterministic sound/qe/accept-unverified
+              // chain, unchanged). Surfaced ONCE per session loudly, never
+              // silent.
+              const judgeTierSwitch = resolveJudgeTierSwitch(process.env["ECON_JUDGE_TIER"])
+              if (!judgeTierSwitch.enabled && !hasNotedJudgeTierOff(sessionID)) {
+                markJudgeTierOffNoted(sessionID)
+                yield* publishSignalFx({
+                  name: "judge_tier_off",
+                  sessionID,
+                  severity: "info",
+                  decision: "surface",
+                  evidence: {},
+                })
+                yield* Effect.logWarning("judge_tier_off", { "session.id": sessionID })
+              }
+              const judgeGenerate = judgeTier.enabled && judgeTierSwitch.enabled
                 ? (judgePrompt: string): Promise<string> =>
                     bridge.promise(
                       Effect.gen(function* () {

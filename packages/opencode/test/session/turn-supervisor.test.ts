@@ -15,6 +15,7 @@ import {
   isTestInfraFilePath,
   detectPatchSanityGap,
   shouldDenyPatchSanity,
+  shouldDenyF2pClaim,
 } from "../../src/session/turn-supervisor"
 import {
   stuckNudgeText,
@@ -29,6 +30,7 @@ import {
   unverifiedFinishGateNudgeText,
   identicalRunDedupeNudgeText,
   patchSanityNudgeText,
+  f2pClaimNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
@@ -944,5 +946,34 @@ describe("patchSanityNudgeText", () => {
     const text = patchSanityNudgeText("test-infra-unjustified", ["conftest.py"], [])
     expect(text).toContain("conftest.py")
     expect(text.toLowerCase()).toContain("test-infrastructure")
+  })
+})
+
+describe("shouldDenyF2pClaim — H1 tooth 3 (gap-closure-plan §2.7)", () => {
+  const base = { isChildSession: false, covered: false, alreadyDenied: false }
+
+  it("denies once: not covered, root session, not yet denied", () => {
+    expect(shouldDenyF2pClaim(base)).toBe(true)
+  })
+
+  it("never denies when the claim is covered (every observed red re-ran green)", () => {
+    expect(shouldDenyF2pClaim({ ...base, covered: true })).toBe(false)
+  })
+
+  it("never denies a child session", () => {
+    expect(shouldDenyF2pClaim({ ...base, isChildSession: true })).toBe(false)
+  })
+
+  it("never denies twice — the bounded floor, second arrival fails open", () => {
+    expect(shouldDenyF2pClaim({ ...base, alreadyDenied: true })).toBe(false)
+  })
+})
+
+describe("f2pClaimNudgeText", () => {
+  it("names every missing test id", () => {
+    const text = f2pClaimNudgeText(["tests/test_bar.py::test_baz", "tests/test_qux.py::test_it"])
+    expect(text).toContain("tests/test_bar.py::test_baz")
+    expect(text).toContain("tests/test_qux.py::test_it")
+    expect(text.toLowerCase()).toContain("re-run")
   })
 })
