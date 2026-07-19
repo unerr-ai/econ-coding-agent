@@ -66,10 +66,23 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 > `repro_unresolved`), finish gate refused 5× (honest 0-byte patch), $1.01/188t —
 > the expensive-fail class again; cost lever = abstention on `repro_unresolved` headless.
 >
-> Remaining open: signal-audit scan-scope widening; prompt.test.ts loop-harness failures —
-> root-caused to `e756be7df` (2026-07-13, root-turn arming on EVERY turn → orchestration
-> dispatches consume scripted replies before the main round; harness-contract drift, not a
-> product defect — fix = dispatch-aware test harness, not a product change). mini-10 ×3
+> **Round 2 (same day, post-replay):** H9 FLIPPED read-only → decision-influencing
+> (`82434466a`): `hub_bounce_repeat` now arms the one-shot deferral escalation on the
+> otherwise-CLEAN finish path (`shouldArmHubBounceDeferral` in turn-supervisor.ts, arm
+> block in prompt.ts after the failure-evidence gates) — the 11265 shape: locally-green
+> finish, symptom-layer fix on a high-coupling hub. `repro_unresolved` deliberately never
+> arms (14369: $1.01/188t escalation landing nothing). Same commit fixes the
+> prompt.test.ts loop-harness class for real: the first root cause (dispatches eat the
+> scripted queue) was DISPROVEN by live debug-logging — the true mechanism was
+> `bugShaped`'s null-verdict fallback riding the always-armed test-edit gate, looping the
+> S3 gate on plain conversational prompts (also a live P5-degrade thrash). Fix =
+> `resolveBugShapedFallback`: null verdict additionally requires turn evidence (landed
+> source edit | observed red run | pinned probe); present-verdict paths byte-identical.
+> prompt.test.ts 12 fail → 0. Signal-audit widened to all of src/ with corrected gate
+> file targets, zero findings (`99b543323`).
+>
+> Remaining open: 11265 replay re-fire with the flipped binary (in flight — the
+> falsifiable prediction: escalation above conductor after the second bounce); mini-10 ×3
 > band + full-500 gate still ahead — no score claims until those run (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
