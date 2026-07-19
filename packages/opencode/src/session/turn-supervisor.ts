@@ -11,7 +11,7 @@
  * @sem domain=routing role=digest
  */
 import type { StepObservation } from "../../../code-intelligence/src/orchestration-fsm"
-import { isTestFilePath } from "../tool/edit-governance"
+import { isTestFilePath, pathsRefer } from "../tool/edit-governance"
 
 const FILE_EDIT_TOOLS = new Set(["edit", "write", "apply_patch"])
 const COMMAND_TOOLS = new Set(["shell", "bash"])
@@ -493,4 +493,86 @@ export function decideHeadlessCompletionReentry(input: {
   if (input.reentryCount >= input.maxReentries) return "proceed"
   if (input.runningJobIds.every((id) => input.heartbeatFlaggedJobIds.has(id))) return "heartbeat-pass"
   return "wait"
+}
+
+// ---------------------------------------------------------------------------
+// H3 — patch-level sanity floor (deterministic, ~$0 cost shape)
+// ---------------------------------------------------------------------------
+
+const TEST_INFRA_FILE_RE =
+  /(^|\/)conftest\.py$|(^|\/)setup\.(py|cfg)$|(^|\/)\.github\/workflows\/[^/]+\.ya?ml$|(^|\/)\.circleci\/config\.ya?ml$|(^|\/)\.gitlab-ci\.ya?ml$|(^|\/)azure-pipelines\.ya?ml$|(^|\/)\.travis\.ya?ml$/
+
+/**
+ * H3 — is this path a test-infrastructure file (conftest.py, setup.py/
+ * setup.cfg, or a CI config) rather than application code? These are almost
+ * never a legitimate FIX site — `detectPatchSanityGap` requires an explicit
+ * issue-text justification before accepting a patch that touches ONLY files
+ * like these.
+ *
+ * @sem domain=routing role=gate
+ */
+export function isTestInfraFilePath(filePath: string): boolean {
+  return TEST_INFRA_FILE_RE.test(filePath.replaceAll("\\", "/"))
+}
+
+/** True when the issue text explicitly names EVERY one of the given (test-infra) files, by basename. */
+function issueJustifiesTestInfra(issueText: string, patchFiles: readonly string[]): boolean {
+  const haystack = issueText.toLowerCase()
+  return patchFiles.every((f) => haystack.includes((f.split("/").pop() ?? f).toLowerCase()))
+}
+
+/** H3 — the two ways a landed patch can fail the sanity floor; `undefined` means the patch is sane. */
+export type PatchSanityGapReason = "no-overlap" | "test-infra-unjustified"
+
+/**
+ * H3 — the deterministic patch-level sanity floor: extends the hub-design
+ * judge's own sanity check (`hub-design-judge.ts`'s `pathsRefer`-against-
+ * `definitionSites` floor, `runHubDesignJudge`) from one judge-picked file to
+ * the WHOLE landed patch. `files(patch) ∩ (issue-named files/symbols ∪
+ * localization-probe candidates)` empty ⇒ `"no-overlap"` — the astropy-7166
+ * shape (a $1.31 escalated fix that shipped a conftest.py-only patch with
+ * zero relation to the issue). A patch whose files ALL overlap but are ALSO
+ * all test-infrastructure (`isTestInfraFilePath`) additionally needs the
+ * issue text to explicitly name every one of them — a graph-coincidental
+ * symbol match inside a conftest.py is not the same as the issue actually
+ * asking for that file to change. Zero candidate sites (issue text too
+ * sparse to resolve anything, or the graph never warmed) is nothing to check
+ * the patch against, so this fails open (`undefined`) rather than
+ * false-firing on missing evidence.
+ *
+ * @sem domain=routing role=gate
+ */
+export function detectPatchSanityGap(input: {
+  patchFiles: readonly string[]
+  candidateSites: readonly string[]
+  issueText: string
+}): PatchSanityGapReason | undefined {
+  if (input.patchFiles.length === 0) return undefined
+  if (input.candidateSites.length === 0) return undefined
+  const overlaps = input.patchFiles.some((f) => input.candidateSites.some((site) => pathsRefer(site, f)))
+  if (!overlaps) return "no-overlap"
+  if (input.patchFiles.every(isTestInfraFilePath) && !issueJustifiesTestInfra(input.issueText, input.patchFiles)) {
+    return "test-infra-unjustified"
+  }
+  return undefined
+}
+
+/**
+ * H3 — pure gate decision wrapping `detectPatchSanityGap`'s reason: a
+ * bug-shaped root turn's insane patch gets ONE reject-with-nudge cycle
+ * (`alreadyDenied`, tracked in patch-sanity-store.ts), never for a child
+ * session, which inherits the parent's verification rather than owing its
+ * own — same shape as `shouldDenyUnverifiedFinish`.
+ *
+ * @sem domain=routing role=gate
+ */
+export function shouldDenyPatchSanity(input: {
+  isChildSession: boolean
+  reason: PatchSanityGapReason | undefined
+  alreadyDenied: boolean
+}): boolean {
+  if (input.isChildSession) return false
+  if (input.reason === undefined) return false
+  if (input.alreadyDenied) return false
+  return true
 }

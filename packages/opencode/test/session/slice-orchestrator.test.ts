@@ -1368,7 +1368,11 @@ describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", ()
     expect(REPRO_SLICE_CONTENT).toMatch(/never `; echo "exit=\$\?"`/)
     expect(REPRO_SLICE_CONTENT).toMatch(/never wrapped in `git stash`/)
     expect(REPRO_SLICE_CONTENT).toMatch(/assert EVERY one of them/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/one assert per symptom/)
+    // H1 all-witness single-run contract (gap-closure §2): one execution,
+    // per-witness reporting — replaced the older "one assert per symptom" line.
+    expect(REPRO_SLICE_CONTENT).toMatch(/as ONE execution/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/witness\[0\]: PASS/)
+    expect(REPRO_SLICE_CONTENT).toMatch(/never a silently narrowed subset/)
   })
 
   // django-11964: the issue text literally quoted `str(self.my_str_value)` but

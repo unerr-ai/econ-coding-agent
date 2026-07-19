@@ -114,3 +114,47 @@ describe("judgeRung — ExtraRungFn adapter", () => {
     expect(verdict?.pass).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// H3 — diff-aware judge scaffolding (buildJudgePrompt)
+// ---------------------------------------------------------------------------
+
+describe("buildJudgePrompt — H3 diff-aware scaffolding", () => {
+  it("omits all three H3 sections when absent — byte-for-byte unchanged prompt shape", () => {
+    const prompt = buildJudgePrompt({ ...base, generate: async () => "" })
+    expect(prompt).not.toContain("## Issue expected/actual")
+    expect(prompt).not.toContain("## Candidate patch")
+    expect(prompt).not.toContain("## Witnesses")
+  })
+
+  it("includes the issue expected/actual block only when supplied", () => {
+    const prompt = buildJudgePrompt({
+      ...base,
+      issueExpectedActual: "Expected: {}\nActual: undefined",
+      generate: async () => "",
+    })
+    expect(prompt).toContain("## Issue expected/actual")
+    expect(prompt).toContain("Expected: {}\nActual: undefined")
+  })
+
+  it("includes the candidate patch's unified diff only when supplied", () => {
+    const prompt = buildJudgePrompt({
+      ...base,
+      diffHunks: "-  return cfg\n+  return cfg ?? {}",
+      generate: async () => "",
+    })
+    expect(prompt).toContain("## Candidate patch (unified diff)")
+    expect(prompt).toContain("+  return cfg ?? {}")
+  })
+
+  it("includes the H1 witness list only when supplied, one bullet per witness", () => {
+    const prompt = buildJudgePrompt({
+      ...base,
+      witnesses: ["test_parseConfig_empty", "test_parseConfig_null"],
+      generate: async () => "",
+    })
+    expect(prompt).toContain("## Witnesses the fix claims to cover")
+    expect(prompt).toContain("- test_parseConfig_empty")
+    expect(prompt).toContain("- test_parseConfig_null")
+  })
+})

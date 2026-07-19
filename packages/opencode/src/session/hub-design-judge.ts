@@ -63,24 +63,49 @@ export interface RunHubDesignJudgeInput {
   readonly bouncedFiles: readonly string[]
   readonly definitionSites: readonly { symbol: string; kind: string; file: string }[]
   readonly complete: HubDesignComplete
+  /** H3: unified before/after hunks of the bounced files' current (wrong-layer) patch (optional) — the judge reads the actual diff instead of inferring it from `bouncedFiles`' names alone. */
+  readonly diffHunks?: string
+  /** H3: the issue's quoted expected/actual block, verbatim (optional). */
+  readonly issueExpectedActual?: string
+  /** H3: the H1 witness list this fix claims to cover (optional). */
+  readonly witnesses?: readonly string[]
 }
 
-/** Builds the user prompt: the issue, the denied hub files, and the graph's definition-site evidence. */
+/**
+ * Builds the user prompt: the issue, the denied hub files, and the graph's
+ * definition-site evidence. H3: `diffHunks`/`issueExpectedActual`/
+ * `witnesses` each add their own section when supplied — diff-aware
+ * scaffolding in place of a prose summary; all absent leaves the prompt
+ * byte-for-byte unchanged from before H3.
+ */
 function buildHubDesignUserPrompt(input: {
   issueText: string
   bouncedFiles: readonly string[]
   definitionSites: readonly { symbol: string; kind: string; file: string }[]
+  diffHunks?: string
+  issueExpectedActual?: string
+  witnesses?: readonly string[]
 }): string {
-  const { issueText, bouncedFiles, definitionSites } = input
+  const { issueText, bouncedFiles, definitionSites, diffHunks, issueExpectedActual, witnesses } = input
   const sitesText = definitionSites.length
     ? definitionSites.map((s) => `${s.symbol} — ${s.kind} — ${s.file}`).join("\n")
     : "(none found)"
-  return (
-    `## Issue\n${issueText}\n\n` +
-    `## Denied edit sites\nEdits so far were DENIED on these shared hub files (do not name them unless one is genuinely the defining module): ${bouncedFiles.join(", ")}\n\n` +
-    `## Definition sites of symbols the issue names (from the code graph)\n${sitesText}\n\n` +
-    `## Question\nWhich module DEFINES the misbehaving class or function, and what is the concrete fix there?`
-  )
+  const sections = [
+    `## Issue\n${issueText}`,
+    `## Denied edit sites\nEdits so far were DENIED on these shared hub files (do not name them unless one is genuinely the defining module): ${bouncedFiles.join(", ")}`,
+    `## Definition sites of symbols the issue names (from the code graph)\n${sitesText}`,
+  ]
+  if (issueExpectedActual && issueExpectedActual.trim().length > 0) {
+    sections.push(`## Issue expected/actual\n${issueExpectedActual}`)
+  }
+  if (diffHunks && diffHunks.trim().length > 0) {
+    sections.push(`## Current (bounced) patch (unified diff)\n${diffHunks}`)
+  }
+  if (witnesses && witnesses.length > 0) {
+    sections.push(`## Witnesses the fix claims to cover\n${witnesses.map((w) => `- ${w}`).join("\n")}`)
+  }
+  sections.push(`## Question\nWhich module DEFINES the misbehaving class or function, and what is the concrete fix there?`)
+  return sections.join("\n\n")
 }
 
 /**
@@ -204,19 +229,29 @@ export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
  * well-formed (and allowlist-passing) verdict whose `entity`/`change` share
  * no non-trivial token with it (`verdictGroundedInIssue`) degrades the same
  * way, WITH `rawHead` — an unfounded verdict carries no design signal
- * either. Omitting `issueText` skips this floor entirely.
+ * either. Omitting `issueText` skips this floor entirely. H3: `diffHunks`/
+ * `issueExpectedActual`/`witnesses` are optional diff-aware scaffolding
+ * (`buildHubDesignUserPrompt`) — each absent leaves the prompt, and this
+ * function's behavior, unchanged from before H3.
  *
  * @sem domain=routing role=hub-design-judge
  */
 export async function runHubDesignJudge(
   input: RunHubDesignJudgeInput,
 ): Promise<{ verdict: HubDesignVerdict; rawHead?: string }> {
-  const { issueText, bouncedFiles, definitionSites, complete } = input
+  const { issueText, bouncedFiles, definitionSites, complete, diffHunks, issueExpectedActual, witnesses } = input
   let raw: string
   try {
     raw = await complete({
       system: HUB_DESIGN_SYSTEM_PROMPT,
-      user: buildHubDesignUserPrompt({ issueText: issueText ?? "", bouncedFiles, definitionSites }),
+      user: buildHubDesignUserPrompt({
+        issueText: issueText ?? "",
+        bouncedFiles,
+        definitionSites,
+        diffHunks,
+        issueExpectedActual,
+        witnesses,
+      }),
     })
   } catch {
     return { verdict: DEGRADED_HUB_DESIGN }

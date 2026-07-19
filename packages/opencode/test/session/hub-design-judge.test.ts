@@ -331,3 +331,76 @@ describe("HUB_DESIGN_SYSTEM_PROMPT", () => {
     expect(HUB_DESIGN_SYSTEM_PROMPT).toContain("End your response with the JSON object on its own final line.")
   })
 })
+
+// ---------------------------------------------------------------------------
+// H3 — diff-aware judge scaffolding
+// ---------------------------------------------------------------------------
+
+describe("runHubDesignJudge — H3 diff-aware scaffolding", () => {
+  const issueText = "The bug is in how Field renders its value — `widget.attrs['maxlength']` should be an int."
+  const bouncedFiles = ["django/db/models/base.py", "django/forms/widgets.py"]
+  const definitionSites = [{ symbol: "Field", kind: "class", file: "django/db/models/fields/__init__.py" }]
+
+  test("omits all three H3 sections when absent — byte-for-byte unchanged prompt shape", async () => {
+    let seenUser = ""
+    const complete: HubDesignComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field", change: "fix it there" })
+    }
+    await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
+    expect(seenUser).not.toContain("## Issue expected/actual")
+    expect(seenUser).not.toContain("## Current (bounced) patch")
+    expect(seenUser).not.toContain("## Witnesses")
+  })
+
+  test("includes the issue expected/actual block only when supplied", async () => {
+    let seenUser = ""
+    const complete: HubDesignComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field", change: "fix it there" })
+    }
+    await runHubDesignJudge({
+      issueText,
+      bouncedFiles,
+      definitionSites,
+      issueExpectedActual: "expected: int(254)\nactual: str(254)",
+      complete,
+    })
+    expect(seenUser).toContain("## Issue expected/actual")
+    expect(seenUser).toContain("expected: int(254)")
+  })
+
+  test("includes the candidate patch's unified diff only when supplied", async () => {
+    let seenUser = ""
+    const complete: HubDesignComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field", change: "fix it there" })
+    }
+    await runHubDesignJudge({
+      issueText,
+      bouncedFiles,
+      definitionSites,
+      diffHunks: "-  return str(v)\n+  return int(v)",
+      complete,
+    })
+    expect(seenUser).toContain("## Current (bounced) patch (unified diff)")
+    expect(seenUser).toContain("+  return int(v)")
+  })
+
+  test("includes the H1 witness list only when supplied, one bullet per witness", async () => {
+    let seenUser = ""
+    const complete: HubDesignComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ file: "django/db/models/fields/__init__.py", entity: "Field", change: "fix it there" })
+    }
+    await runHubDesignJudge({
+      issueText,
+      bouncedFiles,
+      definitionSites,
+      witnesses: ["test_maxlength_is_int"],
+      complete,
+    })
+    expect(seenUser).toContain("## Witnesses the fix claims to cover")
+    expect(seenUser).toContain("- test_maxlength_is_int")
+  })
+})

@@ -12,6 +12,9 @@ import {
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
   decideHeadlessCompletionReentry,
+  isTestInfraFilePath,
+  detectPatchSanityGap,
+  shouldDenyPatchSanity,
 } from "../../src/session/turn-supervisor"
 import {
   stuckNudgeText,
@@ -25,6 +28,7 @@ import {
   hubDesignDegradedNudgeText,
   unverifiedFinishGateNudgeText,
   identicalRunDedupeNudgeText,
+  patchSanityNudgeText,
 } from "../../src/session/prompts/nudges"
 import { createStuckSupervisor } from "../../../code-intelligence/src/orchestration-fsm"
 import { GRIND_DESIGN_PREPASS_TODO } from "../../src/session/slice-orchestrator"
@@ -822,5 +826,123 @@ describe("backgroundJobHeartbeatNudgeText", () => {
     expect(text.toLowerCase()).toContain("job tool")
     expect(text.toLowerCase()).toContain("kill")
     expect(text.toLowerCase()).toContain("finish")
+  })
+})
+
+// -- H3: isTestInfraFilePath / detectPatchSanityGap / shouldDenyPatchSanity -
+
+describe("isTestInfraFilePath", () => {
+  it("matches a root-level conftest.py", () => {
+    expect(isTestInfraFilePath("conftest.py")).toBe(true)
+    expect(isTestInfraFilePath("astropy/conftest.py")).toBe(true)
+  })
+
+  it("matches setup.py and setup.cfg", () => {
+    expect(isTestInfraFilePath("setup.py")).toBe(true)
+    expect(isTestInfraFilePath("setup.cfg")).toBe(true)
+  })
+
+  it("matches a GitHub Actions workflow file", () => {
+    expect(isTestInfraFilePath(".github/workflows/ci.yml")).toBe(true)
+  })
+
+  it("does not match real application code", () => {
+    expect(isTestInfraFilePath("astropy/io/fits/hdu/base.py")).toBe(false)
+  })
+})
+
+describe("detectPatchSanityGap", () => {
+  // The astropy-7166 shape: a $1.31 escalated fix that shipped a
+  // conftest.py-only patch with ZERO overlap with the issue.
+  it("7166 shape: a conftest-only patch with no candidate-site overlap and no issue justification denies, naming the sites", () => {
+    const gap = detectPatchSanityGap({
+      patchFiles: ["astropy/conftest.py"],
+      candidateSites: ["astropy/io/fits/hdu/base.py", "astropy/io/fits/header.py"],
+      issueText: "The FITS header parser mis-handles a continuation card.",
+    })
+    expect(gap).toBe("no-overlap")
+  })
+
+  it("legitimate-fix shape: the patch intersects an issue-named/graph-resolved site — no gap (false-fire guard)", () => {
+    const gap = detectPatchSanityGap({
+      patchFiles: ["astropy/io/fits/hdu/base.py"],
+      candidateSites: ["astropy/io/fits/hdu/base.py"],
+      issueText: "The FITS header parser mis-handles a continuation card.",
+    })
+    expect(gap).toBeUndefined()
+  })
+
+  it("a defining-site edit under a shared subtree still passes via the pathsRefer suffix match", () => {
+    const gap = detectPatchSanityGap({
+      patchFiles: ["/repo/astropy/io/fits/hdu/base.py"],
+      candidateSites: ["astropy/io/fits/hdu/base.py"],
+      issueText: "issue text irrelevant to this check",
+    })
+    expect(gap).toBeUndefined()
+  })
+
+  it("test-infra-with-justification shape: the issue text names conftest.py — allowed even though the patch touches ONLY test infra", () => {
+    const gap = detectPatchSanityGap({
+      patchFiles: ["conftest.py"],
+      candidateSites: ["conftest.py"],
+      issueText: "The `numpy_extension` fixture in conftest.py needs a session scope.",
+    })
+    expect(gap).toBeUndefined()
+  })
+
+  it("test-infra-unjustified shape: a test-infra-only patch that overlaps a candidate site but the issue never names the file", () => {
+    const gap = detectPatchSanityGap({
+      patchFiles: ["astropy/conftest.py"],
+      // A graph-coincidental symbol match placed conftest.py in the
+      // candidate list even though the issue text below never asks for it.
+      candidateSites: ["astropy/conftest.py"],
+      issueText: "The FITS header parser mis-handles a continuation card.",
+    })
+    expect(gap).toBe("test-infra-unjustified")
+  })
+
+  it("fails open (undefined) when the patch is empty", () => {
+    expect(detectPatchSanityGap({ patchFiles: [], candidateSites: ["a.py"], issueText: "x" })).toBeUndefined()
+  })
+
+  it("fails open (undefined) when there are zero candidate sites to check against — never a false-fire on missing evidence", () => {
+    expect(
+      detectPatchSanityGap({ patchFiles: ["astropy/conftest.py"], candidateSites: [], issueText: "x" }),
+    ).toBeUndefined()
+  })
+})
+
+describe("shouldDenyPatchSanity", () => {
+  const base = { isChildSession: false, reason: "no-overlap" as const, alreadyDenied: false }
+
+  it("denies once: a reason is present, root session, not yet denied", () => {
+    expect(shouldDenyPatchSanity(base)).toBe(true)
+  })
+
+  it("never denies when there is no reason (a sane patch)", () => {
+    expect(shouldDenyPatchSanity({ ...base, reason: undefined })).toBe(false)
+  })
+
+  it("never denies a child session", () => {
+    expect(shouldDenyPatchSanity({ ...base, isChildSession: true })).toBe(false)
+  })
+
+  it("never denies twice — the bounded floor, second arrival fails open", () => {
+    expect(shouldDenyPatchSanity({ ...base, alreadyDenied: true })).toBe(false)
+  })
+})
+
+describe("patchSanityNudgeText", () => {
+  it("no-overlap: names the touched patch files and the candidate sites", () => {
+    const text = patchSanityNudgeText("no-overlap", ["astropy/conftest.py"], ["astropy/io/fits/hdu/base.py"])
+    expect(text).toContain("astropy/conftest.py")
+    expect(text).toContain("astropy/io/fits/hdu/base.py")
+    expect(text.toLowerCase()).toContain("wrong-file")
+  })
+
+  it("test-infra-unjustified: names the test-infra files and asks for justification", () => {
+    const text = patchSanityNudgeText("test-infra-unjustified", ["conftest.py"], [])
+    expect(text).toContain("conftest.py")
+    expect(text.toLowerCase()).toContain("test-infrastructure")
   })
 })

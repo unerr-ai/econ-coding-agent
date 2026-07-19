@@ -24,7 +24,14 @@ export interface JudgeVerdict extends ExtraRungVerdict {
   raw: string
 }
 
-/** Structured inputs for one cross-model judge call. */
+/**
+ * Structured inputs for one cross-model judge call. H3 (gap-closure §2) adds
+ * diff-aware scaffolding — `diffHunks`/`issueExpectedActual`/`witnesses` —
+ * per the HackerOne finding that a scaffolded judge reaches 98% cross-model
+ * agreement where a prose-summary judge does not; all three are optional
+ * and prompt-side only, so an absent field leaves `buildJudgePrompt`'s
+ * output byte-for-byte unchanged for existing callers.
+ */
 export interface CrossModelJudgeInput {
   /** The slice task / question the output is supposed to satisfy. */
   readonly task: string
@@ -32,6 +39,12 @@ export interface CrossModelJudgeInput {
   readonly output: string
   /** Deterministic wiring facts the judge should hold the output against (optional). */
   readonly wiring?: string
+  /** Unified before/after hunks of the candidate patch (optional) — lets the judge read the actual diff instead of a prose description of it. */
+  readonly diffHunks?: string
+  /** The issue's quoted expected/actual block, verbatim (optional) — the same worked-example text `extractIssueExpectations` parses, given to the judge unparsed. */
+  readonly issueExpectedActual?: string
+  /** The H1 witness list (repro-fidelity-judge.ts) this fix claims to cover (optional) — the judge checks the output against each named witness rather than an implied "all tests". */
+  readonly witnesses?: readonly string[]
   /**
    * Injected sampler that calls a DIFFERENT model family than the generator and
    * returns the judge's raw reply. Self-judging is unreliable, so the caller is
@@ -53,7 +66,11 @@ const MISSING_RE = /^MISSING:\s*(.+)$/im
  * sibling-branch discipline checks — replying with a single [[ACCEPT]] or
  * [[REJECT]] token, a one-line reason, and — on reject — a "MISSING: ..." line
  * naming the evidence that would flip the verdict (OL-9.4c). Kept small and
- * stable so a judge tier's cache stays warm across slices.
+ * stable so a judge tier's cache stays warm across slices. H3: when
+ * `issueExpectedActual`/`diffHunks`/`witnesses` are supplied, each gets its
+ * own section ahead of `## Output` — diff-aware scaffolding in place of a
+ * prose summary, per the HackerOne 98%-agreement finding; any/all absent
+ * leaves the prompt byte-for-byte unchanged from before H3.
  *
  * @sem domain=routing role=verify-ladder
  */
@@ -68,6 +85,15 @@ export function buildJudgePrompt(input: CrossModelJudgeInput): string {
   ]
   if (input.wiring && input.wiring.trim().length > 0) {
     parts.push(`## Wiring (deterministic facts the output must respect)\n${input.wiring}`)
+  }
+  if (input.issueExpectedActual && input.issueExpectedActual.trim().length > 0) {
+    parts.push(`## Issue expected/actual\n${input.issueExpectedActual}`)
+  }
+  if (input.diffHunks && input.diffHunks.trim().length > 0) {
+    parts.push(`## Candidate patch (unified diff)\n${input.diffHunks}`)
+  }
+  if (input.witnesses && input.witnesses.length > 0) {
+    parts.push(`## Witnesses the fix claims to cover\n${input.witnesses.map((w) => `- ${w}`).join("\n")}`)
   }
   parts.push(`## Output\n${input.output}`)
   return parts.join("\n\n")

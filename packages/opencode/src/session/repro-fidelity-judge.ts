@@ -119,6 +119,9 @@ export type ReproFidelityComplete = (request: { system: string; user: string }) 
  * "more than 50 years in the future") IS consumed by `runReproFidelityJudge`
  * itself — rendered into the judge prompt as a rubric asking it to check
  * both sides of each boundary are exercised; absent/empty changes nothing.
+ * H3 adds the same diff-aware scaffolding as the cross-model and hub-design
+ * judges — `diffHunks`/`issueExpectedActual`/`witnesses`, all optional and
+ * prompt-side only; absent leaves the prompt byte-for-byte unchanged.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -128,6 +131,12 @@ export interface RunReproFidelityJudgeInput {
   readonly complete: ReproFidelityComplete
   readonly requiredLiterals?: readonly string[]
   readonly statedRules?: readonly string[]
+  /** H3: unified before/after hunks of the candidate patch (optional). */
+  readonly diffHunks?: string
+  /** H3: the issue's quoted expected/actual block, verbatim (optional). */
+  readonly issueExpectedActual?: string
+  /** H3: the H1 witness list this fix claims to cover (optional). */
+  readonly witnesses?: readonly string[]
 }
 
 /**
@@ -185,23 +194,52 @@ function renderStatedRulesRubric(statedRules: readonly string[] | undefined): st
 }
 
 /**
+ * H3: renders the optional diff-aware sections — the issue's quoted
+ * expected/actual block, the candidate patch's unified diff, and the H1
+ * witness list — appended to the judge prompt. Each section is omitted
+ * when its field is absent/empty, so the prompt is byte-for-byte unchanged
+ * for callers that never pass any of them.
+ */
+function renderDiffAwareSections(input: {
+  issueExpectedActual?: string
+  diffHunks?: string
+  witnesses?: readonly string[]
+}): string {
+  const sections: string[] = []
+  if (input.issueExpectedActual && input.issueExpectedActual.trim().length > 0) {
+    sections.push(`\n\n## Issue expected/actual\n${input.issueExpectedActual}`)
+  }
+  if (input.diffHunks && input.diffHunks.trim().length > 0) {
+    sections.push(`\n\n## Candidate patch (unified diff)\n${input.diffHunks}`)
+  }
+  if (input.witnesses && input.witnesses.length > 0) {
+    sections.push(`\n\n## Witnesses the fix claims to cover\n${input.witnesses.map((w) => `- ${w}`).join("\n")}`)
+  }
+  return sections.join("")
+}
+
+/**
  * Run the repro-fidelity judge: ONE forced-JSON completion checking the
  * pinned repro's asserts against the issue text — no retry, this fires at
  * most once per turn (the caller enforces that). When `statedRules` is
  * non-empty, the prompt gains a rubric section naming each rule (pure
- * plumbing — no new call, no behavior change when absent/empty). A thrown
- * `complete`, or any parse failure, degrades to `DEGRADED_REPRO_FIDELITY`
- * (assume faithful) — never blocks the pin, never throws.
+ * plumbing — no new call, no behavior change when absent/empty). H3:
+ * `diffHunks`/`issueExpectedActual`/`witnesses` each add their own optional
+ * section the same way (`renderDiffAwareSections`) — diff-aware scaffolding
+ * in place of a prose summary; all absent leaves the prompt unchanged from
+ * before H3. A thrown `complete`, or any parse failure, degrades to
+ * `DEGRADED_REPRO_FIDELITY` (assume faithful) — never blocks the pin, never
+ * throws.
  *
  * @sem domain=routing role=repro-judge
  */
 export async function runReproFidelityJudge(input: RunReproFidelityJudgeInput): Promise<ReproFidelityVerdict> {
-  const { issueText, reproContent, complete, statedRules } = input
+  const { issueText, reproContent, complete, statedRules, diffHunks, issueExpectedActual, witnesses } = input
   let raw: string
   try {
     raw = await complete({
       system: REPRO_FIDELITY_SYSTEM_PROMPT,
-      user: `## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}${renderStatedRulesRubric(statedRules)}`,
+      user: `## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}${renderStatedRulesRubric(statedRules)}${renderDiffAwareSections({ issueExpectedActual, diffHunks, witnesses })}`,
     })
   } catch {
     return DEGRADED_REPRO_FIDELITY

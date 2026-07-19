@@ -19,6 +19,8 @@ import {
   tiersForModel,
   resolveVerifierTier,
   resolveJudgeTier,
+  resolveOracleTier,
+  resolveJudgeTierSwitch,
   resolveFrontierHatch,
   resolveTierModelRef,
   resolveOracleProfile,
@@ -416,6 +418,35 @@ describe("resolveJudgeTier (OL-7.8)", () => {
   it("an unrecognized value falls back to the default rather than disabling the rung", () => {
     expect(resolveJudgeTier("bogus")).toEqual({ enabled: true, tier: "reasoner" })
     expect(resolveJudgeTier("")).toEqual({ enabled: true, tier: "reasoner" })
+  })
+})
+
+describe("resolveOracleTier (gap-closure §4.3 per-tier disable switch)", () => {
+  it("defaults to enabled when unset", () => {
+    expect(resolveOracleTier(undefined)).toEqual({ enabled: true })
+  })
+
+  it("is disabled for the literal 'off'", () => {
+    expect(resolveOracleTier("off")).toEqual({ enabled: false })
+  })
+
+  it("any other value leaves the oracle enabled (fails safe to available, not disabled)", () => {
+    expect(resolveOracleTier("bogus")).toEqual({ enabled: true })
+    expect(resolveOracleTier("")).toEqual({ enabled: true })
+  })
+})
+
+describe("resolveJudgeTierSwitch (gap-closure §4.3 per-tier disable switch)", () => {
+  it("defaults to enabled when unset", () => {
+    expect(resolveJudgeTierSwitch(undefined)).toEqual({ enabled: true })
+  })
+
+  it("is disabled for the literal 'off'", () => {
+    expect(resolveJudgeTierSwitch("off")).toEqual({ enabled: false })
+  })
+
+  it("any other value leaves the judge tier enabled", () => {
+    expect(resolveJudgeTierSwitch("bogus")).toEqual({ enabled: true })
   })
 })
 

@@ -54,6 +54,8 @@ import {
   looksLikeTestExecution,
   shouldDenyUnverifiedFinish,
   decideHeadlessCompletionReentry,
+  detectPatchSanityGap,
+  shouldDenyPatchSanity,
   normalizeResult,
 } from "./turn-supervisor"
 import {
@@ -74,11 +76,13 @@ import {
   unverifiedFinishGateNudgeText,
   hubDesignVerdictNudgeText,
   hubDesignDegradedNudgeText,
+  patchSanityNudgeText,
   identicalRunDedupeNudgeText,
   seenRedEnvBlockedNudgeText,
   probeEnvBlockedNudgeText,
   backgroundJobCompletionNudgeText,
   backgroundJobHeartbeatNudgeText,
+  deliverableFinishGateNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
 import {
@@ -89,6 +93,13 @@ import {
   type SeenRedExecution,
 } from "./seen-red"
 import { hasDeniedUnverifiedFinish, markUnverifiedFinishDenied } from "./unverified-finish-store"
+import {
+  evaluateOpsDeliverableFinish,
+  shouldDenyDeliverableFinish,
+  hasDeniedDeliverableFinish,
+  markDeliverableFinishDenied,
+} from "./deliverable-checklist"
+import { hasDeniedPatchSanity, markPatchSanityDenied } from "./patch-sanity-store"
 import {
   headlessReentryCount,
   incrementHeadlessReentryCount,
@@ -114,7 +125,7 @@ import {
 } from "./repro-fidelity-judge"
 import { synthesizeRoundtripWitness } from "./roundtrip-witness"
 import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
-import { triagePreamble, TEST_EDIT_GATE_RULE, timeBudgetLine } from "./prompts/preambles"
+import { triagePreamble, TEST_EDIT_GATE_RULE, degradedTurnPreamble, timeBudgetCheckpointLine } from "./prompts/preambles"
 import {
   DEFERRAL_SLICE_PREFIX,
   GRIND_DESIGN_SLICE_CONTENT,
@@ -853,8 +864,10 @@ export const layer = Layer.effect(
       issueText: string
       reproContent: string
       statedRules?: readonly string[]
+      issueExpectedActual?: string
+      witnesses?: readonly string[]
     }) {
-      const { issueText, reproContent, statedRules } = input
+      const { issueText, reproContent, statedRules, issueExpectedActual, witnesses } = input
       const m = resolveSliceModel("executor")
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
@@ -873,7 +886,9 @@ export const layer = Layer.effect(
         })
         return out.text.trim() || (out.reasoningText ?? "")
       }
-      const verdict = yield* Effect.promise(() => runReproFidelityJudge({ issueText, reproContent, statedRules, complete }))
+      const verdict = yield* Effect.promise(() =>
+        runReproFidelityJudge({ issueText, reproContent, statedRules, issueExpectedActual, witnesses, complete }),
+      )
       return {
         verdict,
         degradedReason: verdict === DEGRADED_REPRO_FIDELITY ? ("judge-degraded" as const) : undefined,
@@ -905,8 +920,9 @@ export const layer = Layer.effect(
       issueText: string
       bouncedFiles: readonly string[]
       definitionSites: readonly { symbol: string; kind: string; file: string }[]
+      issueExpectedActual?: string
     }) {
-      const { issueText, bouncedFiles, definitionSites } = input
+      const { issueText, bouncedFiles, definitionSites, issueExpectedActual } = input
       const m = resolveSliceModel("reasoner")
       const mdl = Option.getOrUndefined(
         yield* provider.getModel(ProviderV2.ID.make(m.providerID), ModelV2.ID.make(m.modelID)).pipe(Effect.option),
@@ -926,7 +942,7 @@ export const layer = Layer.effect(
         return [out.reasoningText ?? "", out.text ?? ""].filter(Boolean).join("\n")
       }
       const result = yield* Effect.promise(() =>
-        runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete }),
+        runHubDesignJudge({ issueText, bouncedFiles, definitionSites, issueExpectedActual, complete }),
       )
       return {
         verdict: result.verdict,
@@ -2112,7 +2128,19 @@ export const layer = Layer.effect(
             return { gap: false }
           }
           const statedRules = getIssueThresholds(sessionID).map((t) => t.quote)
-          const fidelityOutcome = yield* reproFidelityDispatch({ issueText, reproContent, statedRules })
+          // H3 — the same issue-expectations literals other finish-time
+          // nudges already quote (`expectations: getIssueExpectations(...)`)
+          // given to the judge directly instead of relying on it to
+          // re-derive the expected/actual pair from `issueText` prose alone.
+          const issueExpectedActual = getIssueExpectations(sessionID)
+            .map((l) => `${l.kind}: ${l.value}`)
+            .join("\n")
+          const fidelityOutcome = yield* reproFidelityDispatch({
+            issueText,
+            reproContent,
+            statedRules,
+            issueExpectedActual,
+          })
           // RF-4 §8 — the deterministic teeth stack: assertion teeth (F14b),
           // the rendered-assert detector (11790's `'maxlength="254"' in html`
           // face, judged repro_fidelity_ok on 0713), required-literal
@@ -3092,10 +3120,18 @@ export const layer = Layer.effect(
               if (!hubEditDefiningResolved(sessionID) && hubEditIssueText(sessionID) !== undefined) {
                 yield* Effect.promise(() => memoizeHubEditDefiningSites(sessionID, sites))
               }
+              // H3 — same issue-expectations literals other finish-time
+              // nudges already quote, given to the judge directly instead
+              // of relying on it to re-derive the expected/actual pair from
+              // `issueText` prose alone.
+              const hubDesignIssueExpectedActual = getIssueExpectations(sessionID)
+                .map((l) => `${l.kind}: ${l.value}`)
+                .join("\n")
               const hubDesignResult = yield* hubDesignDispatch({
                 issueText,
                 bouncedFiles: bouncedHubFiles,
                 definitionSites: sites,
+                issueExpectedActual: hubDesignIssueExpectedActual,
               })
               const hubNudge: SessionV1.User = {
                 id: MessageID.ascending(),
@@ -3823,6 +3859,12 @@ export const layer = Layer.effect(
                 !verdictIsReadOnly(storedVerdict) &&
                 ((storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false) ||
                   testEditGateArmed(sessionID))
+              // H4.1 — an ops-shaped turn (run-only/build goal, no diagnosis
+              // goal) claims "done" against a deliverable checklist — same
+              // condition OPS_PLAYBOOK gates on in preambles.ts.
+              const opsShaped =
+                (storedVerdict?.goals.some((g) => g.shape === "run-only" || g.shape === "build") ?? false) &&
+                !(storedVerdict?.goals.some((g) => g.shape.startsWith("diagnosis")) ?? false)
               // F11 — the shared trajectory scan is hoisted ABOVE the M4 gate
               // (round F): one scan per finish arrival, reused by M4's
               // interpreter discovery and every gate here — the "never a
@@ -4082,6 +4124,94 @@ export const layer = Layer.effect(
                   }
                 }
 
+                // H3 — patch-level sanity floor: extends the hub-design
+                // judge's own sanity floor (hub-design-judge.ts's
+                // `pathsRefer`-against-`definitionSites` check) from one
+                // judge-picked file to the WHOLE landed patch. The
+                // astropy-7166 shape — a $1.31 escalated fix that shipped a
+                // conftest.py-only patch with ZERO overlap with the issue —
+                // is caught here at ~$0 (a graph query, never a judge call).
+                // Bounded to ONE deny per session (patch-sanity-store.ts,
+                // same "never a wedge" discipline as the unverified-finish
+                // gate above); a still-insane retry fails open LOUD (a tail
+                // signal folded into signalSummary's turn-end payload)
+                // rather than denying again. Zero candidate sites (issue
+                // text too sparse to resolve anything, or the graph never
+                // warmed) is nothing to check the patch against, so it fails
+                // open silently — never a false-fire on missing evidence.
+                if (landedSourceEdits) {
+                  const patchSanityIssueText = hubEditIssueText(sessionID) ?? ""
+                  if (patchSanityIssueText) {
+                    const patchSanityCandidateSites = hubEditDefiningResolved(sessionID)
+                      ? hubEditDefiningFiles(sessionID)
+                      : (yield* Effect.promise(() => issueSymbolDefinitionSites(patchSanityIssueText))).map(
+                          (site) => site.file,
+                        )
+                    const patchSanityGap = detectPatchSanityGap({
+                      patchFiles: landedSourceEditFiles,
+                      candidateSites: patchSanityCandidateSites,
+                      issueText: patchSanityIssueText,
+                    })
+                    const alreadyDeniedPatchSanity = hasDeniedPatchSanity(sessionID)
+                    if (
+                      patchSanityGap !== undefined &&
+                      shouldDenyPatchSanity({
+                        isChildSession: Boolean(session.parentID),
+                        reason: patchSanityGap,
+                        alreadyDenied: alreadyDeniedPatchSanity,
+                      })
+                    ) {
+                      markPatchSanityDenied(sessionID)
+                      yield* publishSignalFx({
+                        name: "patch_sanity_unverified",
+                        sessionID,
+                        severity: "info",
+                        decision: "convert",
+                        evidence: { reason: patchSanityGap, sites: patchSanityCandidateSites.length },
+                      })
+                      yield* Effect.logInfo("finish_gate_patch_sanity_denied", {
+                        "session.id": sessionID,
+                        reason: patchSanityGap,
+                        files: landedSourceEditFiles,
+                        sites: patchSanityCandidateSites,
+                      })
+                      const patchSanityNudge: SessionV1.User = {
+                        id: MessageID.ascending(),
+                        sessionID,
+                        role: "user",
+                        time: { created: Date.now() },
+                        agent: lastUser.agent,
+                        model: lastUser.model,
+                      }
+                      yield* sessions.updateMessage(patchSanityNudge)
+                      yield* sessions.updatePart({
+                        id: PartID.ascending(),
+                        messageID: patchSanityNudge.id,
+                        sessionID,
+                        type: "text",
+                        text: patchSanityNudgeText(patchSanityGap, landedSourceEditFiles, patchSanityCandidateSites),
+                        synthetic: true,
+                      } satisfies SessionV1.TextPart)
+                      continue
+                    } else if (patchSanityGap !== undefined && alreadyDeniedPatchSanity && !session.parentID) {
+                      // Bounded: the one deny is already spent — fail open
+                      // LOUD instead of denying (or looping) again.
+                      yield* publishSignalFx({
+                        name: "patch_sanity_unverified",
+                        sessionID,
+                        severity: "tail",
+                        decision: "surface",
+                        evidence: { reason: patchSanityGap, sites: patchSanityCandidateSites.length },
+                      })
+                      yield* Effect.logWarning("finish_gate_patch_sanity_surfaced", {
+                        "session.id": sessionID,
+                        reason: patchSanityGap,
+                        files: landedSourceEditFiles,
+                      })
+                    }
+                  }
+                }
+
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro
                 // cannot legitimately flip green with zero source changes —
@@ -4187,6 +4317,83 @@ export const layer = Layer.effect(
                       reproCancelled: false,
                     })
                   }
+                }
+              }
+
+              // H4.1 — end-state finish gate (gap-closure-plan.md §2 H4,
+              // kernel §2.7): an ops-shaped turn claims "done" against a
+              // deliverable checklist deterministically extracted from the
+              // instruction (deliverable-checklist.ts owns extraction +
+              // evidence + the checkClaimCoverage call). Mirrors S3/Wave10's
+              // reject-once-then-fail-open-loud discipline exactly: ONE deny
+              // per session, then always allowed — but never a silent allow,
+              // the honest verifiedScope is surfaced via the signal bus on
+              // the pass-through instead (targets the 10x TB
+              // clean-finish-reward-0 class).
+              if (opsShaped) {
+                const deliverableUserText = (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
+                  .map((p) => (p.type === "text" ? p.text : ""))
+                  .filter(Boolean)
+                  .join("\n")
+                const deliverableVerdict = yield* Effect.promise(() =>
+                  evaluateOpsDeliverableFinish({
+                    instruction: deliverableUserText,
+                    goals: storedVerdict?.goals,
+                    cwd: process.cwd(),
+                  }),
+                )
+                const alreadyDeniedDeliverables = hasDeniedDeliverableFinish(sessionID)
+                if (
+                  shouldDenyDeliverableFinish({
+                    isChildSession: Boolean(session.parentID),
+                    opsShaped,
+                    covered: deliverableVerdict.covered,
+                    alreadyDenied: alreadyDeniedDeliverables,
+                  })
+                ) {
+                  markDeliverableFinishDenied(sessionID)
+                  yield* publishSignalFx({
+                    name: "deliverable_checklist",
+                    sessionID,
+                    severity: "info",
+                    decision: "convert",
+                    evidence: { missing: deliverableVerdict.missing.length, failing: deliverableVerdict.failing.length },
+                  })
+                  yield* Effect.logInfo("finish_gate_deliverables_denied", {
+                    "session.id": sessionID,
+                    missing: deliverableVerdict.missing,
+                    failing: deliverableVerdict.failing,
+                  })
+                  const deliverableNudge: SessionV1.User = {
+                    id: MessageID.ascending(),
+                    sessionID,
+                    role: "user",
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                  }
+                  yield* sessions.updateMessage(deliverableNudge)
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: deliverableNudge.id,
+                    sessionID,
+                    type: "text",
+                    text: deliverableFinishGateNudgeText(deliverableVerdict),
+                    synthetic: true,
+                  } satisfies SessionV1.TextPart)
+                  continue
+                } else if (!deliverableVerdict.covered) {
+                  yield* publishSignalFx({
+                    name: "deliverable_checklist",
+                    sessionID,
+                    severity: "tail",
+                    decision: "surface",
+                    evidence: { verifiedScope: deliverableVerdict.verifiedScope },
+                  })
+                  yield* Effect.logWarning("finish_gate_deliverables_unverified", {
+                    "session.id": sessionID,
+                    verifiedScope: deliverableVerdict.verifiedScope,
+                  })
                 }
               }
 
@@ -5361,20 +5568,23 @@ export const layer = Layer.effect(
             // the triage-verdict path (prefixed onto turnPreamble) and the P5
             // neutral-degrade path (turnPreamble is undefined there — the
             // rule alone still reaches the model, gated only on the store,
-            // never on triage having run). The deadline line is deterministic
-            // and env-derived (not LLM-extracted), so on that same
-            // null-verdict path it rides beside TEST_EDIT_GATE_RULE too —
-            // otherwise a turn_read_degraded turn silently loses it.
+            // never on triage having run). H4.2 (F09 residual close) —
+            // degradedTurnPreamble() folds OPS_PLAYBOOK and the deadline line
+            // onto that same null-verdict path too: both are deterministic,
+            // goal-shape-independent content that never needed the verdict to
+            // justify itself, so a turn_read_degraded ops turn no longer
+            // silently loses them.
             if (testEditGateArmed(sessionID)) {
-              if (turnPreamble) {
-                system.push(`${TEST_EDIT_GATE_RULE}\n${turnPreamble}`)
-              } else {
-                const deadlineLine = timeBudgetLine()
-                system.push(deadlineLine ? `${TEST_EDIT_GATE_RULE}\n${deadlineLine}` : TEST_EDIT_GATE_RULE)
-              }
+              system.push(turnPreamble ? `${TEST_EDIT_GATE_RULE}\n${turnPreamble}` : degradedTurnPreamble())
             } else if (turnPreamble) {
               system.push(turnPreamble)
             }
+            // H4.2 — T-minus time-budget checkpoint: fires at most once per
+            // session, independent of goal shape or triage having run, so it
+            // rides every path above (including the fully-degraded,
+            // gate-unarmed one where nothing else is pushed).
+            const checkpointLine = timeBudgetCheckpointLine(sessionID)
+            if (checkpointLine) system.push(checkpointLine)
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

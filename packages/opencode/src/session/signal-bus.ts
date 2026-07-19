@@ -23,8 +23,10 @@ export type EconSignalName =
   | "probe_env_blocked" // F18c/M4: pinned probe's own red repeats an environment-shaped signature — pin release, hard tail
   | "probe_rerun_dedupe" // Round-H: same command produced identical output for the 3rd+ time — no new information
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
+  | "patch_sanity_unverified" // H3: landed patch touches none of the issue's candidate sites, or is unjustified test-infra-only (2nd arrival = tail surface)
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
   | "unverifiable_regression_surface" // H2.2: a non-trivial code edit's regression lane selected zero tests and no sibling test file exists — surfaced, never silent
+  | "deliverable_checklist" // H4.1: end-state finish gate — ops-shaped turn's deliverable checklist (1st denial converts; a pass-through with gaps still open surfaces verifiedScope, never a silent allow)
   | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail
   | "repro_unresolved" // S2 deadline abstention
   | "repro_drift" // drift detector (kind in evidence)

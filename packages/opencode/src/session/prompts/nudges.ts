@@ -280,6 +280,33 @@ export function unverifiedFinishGateNudgeText(command?: string): string {
 }
 
 /**
+ * H3 — patch-sanity-floor nudge: prompt.ts's finish-time block injects this
+ * once, when `detectPatchSanityGap` (turn-supervisor.ts) flags the landed
+ * patch — either it touches NONE of the candidate definition sites the
+ * issue names or the graph resolves for it (the astropy-7166 shape: a
+ * conftest.py-only patch with zero relation to the issue), or it touches
+ * ONLY test-infrastructure files (conftest.py/setup.py/setup.cfg/CI config)
+ * with no explicit issue-text justification for that being the whole fix.
+ * Same enumerate-then-choose shape as `hubDesignDegradedNudgeText`: names
+ * the concrete candidate sites instead of asking the model to re-derive them.
+ */
+export function patchSanityNudgeText(
+  reason: "no-overlap" | "test-infra-unjustified",
+  patchFiles: readonly string[],
+  candidateSites: readonly string[],
+): string {
+  const filesLine = patchFiles.join(", ")
+  const sitesLine =
+    candidateSites.length > 0
+      ? ` Per the code graph, the symbols this issue names are defined in: ${candidateSites.join(", ")}.`
+      : ""
+  if (reason === "test-infra-unjustified") {
+    return `Your patch touches ONLY test-infrastructure file(s) (${filesLine}) — never a legitimate fix site unless the issue itself explicitly calls one out.${sitesLine} Re-read the issue: if it never names these files, revert this edit and fix the actual reported behavior at the root-most site above instead.`
+  }
+  return `Your patch (${filesLine}) touches NONE of the files or symbols this issue actually names or the graph resolves for it — that is very likely a wrong-file fix, not a real one.${sitesLine} Enumerate the candidates above, choose the one that DEFINES the misbehaving behavior, and fix it THERE before finishing again.`
+}
+
+/**
  * Wave 11 stage 2 — convention-divergence gate nudge: edit.ts/write.ts throw
  * this once per session, at the moment `detectReceiverMethodDivergence`
  * (convention-divergence.ts) flags an added `<receiver>.<method>(...)` call
@@ -396,4 +423,23 @@ export function backgroundJobHeartbeatNudgeText(input: {
 
 export function probeEnvBlockedNudgeText(probeCommand: string, outputTail: string): string {
   return `The pinned reproduction (\`${probeCommand}\`) keeps failing with the SAME environment-shaped signature:\n${outputTail}\nThis is a broken/unconfigured test environment (a missing backend, service, or binary), not something your code change can fix — the pin no longer binds as green-required. Stop re-running it, and state the environment gap plainly in your final answer.`
+}
+
+/**
+ * H4.1 — end-state deliverable-checklist finish gate nudge: prompt.ts's
+ * finish-time block injects this once, on an ops-shaped turn (run-only/build
+ * goal, no diagnosis goal) whose deliverable checklist — deterministically
+ * extracted from the instruction, `deliverable-checklist.ts` — did not fully
+ * cover: a named file/artifact is absent, or a named check command did not
+ * exit 0. Names the concrete gaps so the model closes exactly what's
+ * missing, never a full re-verify.
+ */
+export function deliverableFinishGateNudgeText(verdict: { missing: readonly string[]; failing: readonly string[] }): string {
+  const lines = ["You are finishing an ops-shaped task, but its deliverable checklist is not fully covered."]
+  if (verdict.missing.length > 0) lines.push(`Missing/unverified: ${verdict.missing.join(", ")}`)
+  if (verdict.failing.length > 0) lines.push(`Failing checks: ${verdict.failing.join(", ")}`)
+  lines.push(
+    "Land the missing artifact(s) or make the named check command(s) exit 0, then finish again — the current best end-state must be verifiable, not narrated.",
+  )
+  return lines.join("\n")
 }

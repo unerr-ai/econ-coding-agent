@@ -200,6 +200,86 @@ describe("runReproFidelityJudge", () => {
     await runReproFidelityJudge({ issueText, reproContent, complete, statedRules: [] })
     expect(seenUser).toBe(`## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}`)
   })
+
+  // -- H3: diff-aware judge scaffolding --------------------------------------
+
+  test("H3: all three diff-aware fields absent leaves the prompt byte-for-byte unchanged", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({ issueText, reproContent, complete })
+    expect(seenUser).toBe(`## Issue\n${issueText}\n\n## Pinned reproduction\n${reproContent}`)
+    expect(seenUser).not.toContain("## Issue expected/actual")
+    expect(seenUser).not.toContain("## Candidate patch")
+    expect(seenUser).not.toContain("## Witnesses")
+  })
+
+  test("H3: includes the issue expected/actual block only when supplied", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({
+      issueText,
+      reproContent,
+      complete,
+      issueExpectedActual: 'expected: "Red"\nactual: str(Choices.RED)',
+    })
+    expect(seenUser).toContain("## Issue expected/actual")
+    expect(seenUser).toContain('expected: "Red"')
+  })
+
+  test("H3: includes the candidate patch's unified diff only when supplied", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({
+      issueText,
+      reproContent,
+      complete,
+      diffHunks: "-  return str(v)\n+  return v.name",
+    })
+    expect(seenUser).toContain("## Candidate patch (unified diff)")
+    expect(seenUser).toContain("+  return v.name")
+  })
+
+  test("H3: includes the H1 witness list only when supplied, one bullet per witness", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({
+      issueText,
+      reproContent,
+      complete,
+      witnesses: ["test_choices_str_roundtrip"],
+    })
+    expect(seenUser).toContain("## Witnesses the fix claims to cover")
+    expect(seenUser).toContain("- test_choices_str_roundtrip")
+  })
+
+  test("H3: diff-aware sections compose with statedRules — both render together", async () => {
+    let seenUser = ""
+    const complete: ReproFidelityComplete = async ({ user }) => {
+      seenUser = user
+      return JSON.stringify({ faithful: true, gaps: [] })
+    }
+    await runReproFidelityJudge({
+      issueText,
+      reproContent,
+      complete,
+      statedRules: ["more than 50 years in the future MUST interpret as past"],
+      witnesses: ["test_choices_str_roundtrip"],
+    })
+    expect(seenUser).toContain("## Stated boundary rules")
+    expect(seenUser).toContain("## Witnesses the fix claims to cover")
+  })
 })
 
 describe("reproFidelityNudgeText", () => {
