@@ -214,6 +214,13 @@ escalations). **Effort:** ~0.5–1 day. **Cost shape:** tail-only; priced per fi
 **Validation:** replay 3 reward-0 TB tasks + build-pmars regression (must stay 4/4); telemetry
 non-null on the next TB smoke. **Effort:** ~1–1.5 days across both repos.
 
+> **Scope note (2026-07-19, investigated):** the deadline wire is **TB-only by design**. The
+> SWE resolve path deliberately enforces NO per-instance wall-clock (`PER_INSTANCE_TIMEOUT`
+> is a never-binding 24h grade-side cap; `run-benchmark.py --timeout` is dead code; the agent
+> owns its own watchdog) — there is no real external budget to pace against, so exporting
+> `ECON_TASK_DEADLINE_MS` there would be synthetic pacing pressure tied to no scoring rule.
+> Do not "fix" this again.
+
 ### H7 — models.md drift (30 min)
 
 Rewrite Part II §1/§3 tables to match the live registry (`model-registry.ts`,
