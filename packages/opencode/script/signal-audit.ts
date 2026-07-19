@@ -2,10 +2,12 @@
 /**
  * H6.2 signal-consumer audit: static checker asserting three invariants over the econ signal bus.
  * Run: bun packages/opencode/script/signal-audit.ts from the repo root.
- * Scans src/session/*.ts for EconSignalName definitions, their publishSignal* call sites, and consumers
- * (signalsFor/tailSignals calls, gate trigger patterns, finish-summary folding). Reports three classes
- * of findings: (1) publisher-only signals (no consumer), (2) gates with silent pass on zero/exhausted,
- * (3) green verdicts that don't state verified scope. Exits nonzero if findings detected.
+ * Scans every *.ts file under packages/opencode/src/ (recursively — signal publishers/consumers
+ * span session/, tool/, and other subdirs, not just src/session/) for EconSignalName definitions,
+ * their publishSignal* call sites, and consumers (signalsFor/tailSignals calls, gate trigger
+ * patterns, finish-summary folding). Reports three classes of findings: (1) publisher-only signals
+ * (no consumer), (2) gates with silent pass on zero/exhausted, (3) green verdicts that don't state
+ * verified scope. Exits nonzero if findings detected.
  */
 
 import { readFileSync, readdirSync } from "fs"
@@ -74,6 +76,12 @@ const SIGNAL_NAMES: string[] = [
   "surface_asked",
 ]
 
+// Tier-2 reserved: consumer-record-only signal names in signal-bus.ts
+// (declared for a not-yet-built publish path, per their "consumer record"
+// type comments). No publisher exists for these by design — flag their
+// absence as noise, not a wiring gap.
+const RESERVED_TIER2_SIGNAL_NAMES = new Set(["deferral_armed", "deferral_dispatched", "surface_asked"])
+
 const GATE_FILES = [
   "turn-supervisor.ts",
   "regression-neighbors.ts",
@@ -82,18 +90,26 @@ const GATE_FILES = [
   "arming-judge.ts",
 ]
 
-const SESSION_DIR = resolve("packages/opencode/src/session")
+// Resolve relative to this script's own location (not cwd) so the audit
+// works whether invoked from the repo root or from packages/opencode/.
+const SRC_DIR = resolve(import.meta.dir, "../src")
 
-// Read all relevant files
-function readSessionFiles(): Map<string, string> {
-  const files = new Map<string, string>()
-  const entries = readdirSync(SESSION_DIR, { withFileTypes: true })
+// Recursively read every *.ts file under SRC_DIR. Signal publishers and
+// consumers span multiple src subdirectories (session/, tool/, etc.), not
+// just src/session/ — walk the whole tree so new subdirs are covered
+// without a script change. Keyed by path relative to SRC_DIR so files with
+// the same basename in different dirs (e.g. index.ts) don't collide.
+function readSourceFiles(dir = SRC_DIR, files: Map<string, string> = new Map()): Map<string, string> {
+  const entries = readdirSync(dir, { withFileTypes: true })
 
   for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith(".ts")) {
-      const fullPath = join(SESSION_DIR, entry.name)
+    const fullPath = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      readSourceFiles(fullPath, files)
+    } else if (entry.isFile() && entry.name.endsWith(".ts")) {
       try {
-        files.set(entry.name, readFileSync(fullPath, "utf-8"))
+        const relPath = fullPath.slice(SRC_DIR.length + 1)
+        files.set(relPath, readFileSync(fullPath, "utf-8"))
       } catch {
         // Skip unreadable files
       }
@@ -166,7 +182,7 @@ function findConsumers(files: Map<string, string>) {
     if ((match = tailSignalsRegex.exec(content))) {
       const line = content.substring(0, match.index).split("\n").length
       for (const signal of signals.values()) {
-        if (signal.name !== "deferral_armed" && signal.name !== "deferral_dispatched" && signal.name !== "surface_asked") {
+        if (!RESERVED_TIER2_SIGNAL_NAMES.has(signal.name)) {
           signal.consumed = true
           signal.consumedAt.push({ file: fileName, line, context: "tailSignals" })
         }
@@ -224,7 +240,11 @@ function auditGates(files: Map<string, string>) {
       ],
     },
     hub_design: {
-      file: /hub-design-judge/,
+      // Wave 12 fail-loud enforcement (deny/allow decision + publishSignalFx
+      // calls for hub_bounce_repeat/hub_bounce_judge_redirect/hub_gate_exhausted_allow)
+      // lives at the edit/write call sites, not inside the judge module itself —
+      // hub-design-judge.ts only builds the prompt and parses the verdict.
+      file: /^(session\/hub-design-judge\.ts|tool\/edit\.ts|tool\/write\.ts)$/,
       patterns: [
         /hub_bounce_repeat|hub_gate_exhausted/,
         /publishSignal.*hub/,
@@ -248,7 +268,10 @@ function auditGates(files: Map<string, string>) {
       ],
     },
     deliverable_checklist: {
-      file: /turn-supervisor/,
+      // H4.1's publish + verifiedScope surfacing (markDeliverableFinishDenied /
+      // publishSignalFx({name:"deliverable_checklist"}) at ~4582-4614) lives in
+      // session/prompt.ts, not turn-supervisor.ts.
+      file: /^session\/prompt\.ts$/,
       patterns: [
         /deliverable_checklist/,
         /verifiedScope|scope.*statement/i,
@@ -322,8 +345,12 @@ function reportFindings() {
 
     signalTable.push([signal.name, signal.published ? "✓" : "✗", pubAt, signal.consumed ? "✓" : "✗", conAt])
 
-    // Invariant 1a: Signal is consumed but never published (designed but not wired)
-    if (!signal.published && signal.consumed) {
+    // Invariant 1a: Signal is consumed but never published (designed but not wired).
+    // Exempt Tier-2 reserved names (see RESERVED_TIER2_SIGNAL_NAMES) — they're
+    // consumer-record placeholders with no publisher by design, and the blanket
+    // signalsFor() consumption match still marks them "consumed", so without this
+    // exemption they'd wrongly read as a designed-but-not-wired gap.
+    if (!signal.published && signal.consumed && !RESERVED_TIER2_SIGNAL_NAMES.has(signal.name)) {
       findings.push({
         kind: "publisher-only-signal",
         entity: signal.name,
@@ -425,10 +452,10 @@ function reportFindings() {
 // Main execution
 function main() {
   initializeSignals()
-  const files = readSessionFiles()
+  const files = readSourceFiles()
 
   if (files.size === 0) {
-    console.error("No session files found at", SESSION_DIR)
+    console.error("No source files found at", SRC_DIR)
     process.exit(1)
   }
 
