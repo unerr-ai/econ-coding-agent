@@ -81,28 +81,34 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 > prompt.test.ts 12 fail → 0. Signal-audit widened to all of src/ with corrected gate
 > file targets, zero findings (`99b543323`).
 >
-> **Round 3 (same day, flip validation):** replay #2 on the flipped binary did NOT arm —
-> log forensics read all five `shouldArmHubBounceDeferral` inputs true at the finish
-> arrival, yet no `deferral_armed` and the F11 regression block directly upstream logged
-> zero branches; the integration test reproducing the shape PASSES against unmodified
-> code, so the divergence is live-path-specific. Countermeasures (`21a10d59c`):
-> `h9_hub_bounce_arm_declined` decline telemetry (names the false input, or its absence
-> proves control never reaches the block) + underscore repro-file exclusion — a deleted
-> `_repro_field_error.py` scratch file slipped both repro-path regexes and was still
-> counted as a landed source edit (live-confirmed evidence contamination) + a permanent
-> H9 integration test. Replay #3 was then a null draw: the agent never presented a finish
-> at all (0 finish-cascade lines vs 5 `patch_sanity` in replay #2), timing out at
-> 2400s/94 steps — flip unexercised. The run DID surface a chronic defect: the
-> hub-design judge degraded in BOTH replays (#2 `rawHead` = reasoning prose truncated by
-> the 2500-token budget — the O-J1 class recurring; #3 `rawHead=undefined` — the catch
-> swallowed a thrown completion). Fixed O-J2 (`c208e2094`): 4096 budget (parity with the
-> fidelity dispatch on the same tier), 180s judge-scale hang bound (the 12s turn-read cap
-> would abort near-every reasoner pass), thrown path now carries `threw: <head>` through
-> `rawHead`. Replay #4 on the judge-fixed binary is in flight.
+> **Round 3 (same day, flip validation — RESOLVED as a stale-binary artifact):** three
+> replays (#2, #3, #4) all appeared to show the flip not arming — replay #2 read all
+> five `shouldArmHubBounceDeferral` inputs true at the finish arrival with no
+> `deferral_armed`; #4 (grepped clean: `turn_regression_green` fired 15 straight-line
+> lines above the H9 block, `hub_bounce_repeat` live on the same bus `turn_summary`
+> reads, neither H9 log line emitted) briefly looked like an impossible control-flow
+> hole. The actual cause: **`build_run_x.sh` never rebuilds the engine** — "build" in
+> its name is the *arena* build; it executes whatever `packages/opencode/dist/` holds
+> (`ECON_BIN` default). The dist snapshot predated the flip commit entirely: the binary
+> contained no `shouldArmHubBounceDeferral`, no `resolveBugShapedFallback`, no decline
+> telemetry, no O-J2. Every "mystery" (H9 silent, F11 zero branches, integration test
+> passing "against unmodified code") was the same artifact. The source control flow was
+> correct all along.
 >
-> Remaining open: replay #4 verdict (H9 arm exercised, or decline telemetry names the
-> fault); mini-10 ×3 band + full-500 gate still ahead — no score claims until those run
-> (§5.4).
+> Real fixes that DID come out of the rounds: `21a10d59c` — `h9_hub_bounce_arm_declined`
+> decline telemetry + underscore repro-file exclusion (a deleted `_repro_field_error.py`
+> scratch slipped both repro-path regexes and contaminated landed-source-edit evidence;
+> live-confirmed) + permanent H9 integration test; `c208e2094` (O-J2) — the hub-design
+> judge degraded in every replay on the stale binary's 2500-token budget (`rawHead` =
+> truncated reasoning prose; one run's catch also swallowed a thrown completion) → 4096
+> budget (parity with the fidelity dispatch, same tier), 180s judge-scale hang bound
+> (the 12s turn-read cap would abort near-every reasoner pass), thrown path carries
+> `threw: <head>`.
+>
+> Remaining open: replay #5 on a freshly built, marker-verified binary (grep the binary
+> for the commit's marker strings BEFORE attributing behavior to code — the new replay
+> protocol); mini-10 ×3 band + full-500 gate still ahead — no score claims until those
+> run (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
 
