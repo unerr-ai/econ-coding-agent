@@ -105,10 +105,50 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 > (the 12s turn-read cap would abort near-every reasoner pass), thrown path carries
 > `threw: <head>`.
 >
-> Remaining open: replay #5 on a freshly built, marker-verified binary (grep the binary
-> for the commit's marker strings BEFORE attributing behavior to code — the new replay
-> protocol); mini-10 ×3 band + full-500 gate still ahead — no score claims until those
-> run (§5.4).
+> **Round 4 — replay #5 on a marker-verified binary: 11265 CONVERTED (first ever).**
+> Independently re-graded on the main thread against gold (agent test edits reverted,
+> official `test_patch.diff` applied): F2P `test_with_exclude` **passes**, full
+> `filtered_relation` module **32 tests OK** (1 pre-existing skip) with only the
+> source-side patch applied. 195 turns / $0.9630, 65 turns above conductor (oracle
+> $0.3804 = 39.5% of spend) — a ~5× cost step over the pre-fix all-conductor FAIL
+> ($0.196/54t) to buy the conversion. Single run = a fact, not a rate.
+>
+> **The H9 arm still has NOT fired — and the decline telemetry proved why, exactly as
+> designed.** Verbatim: `h9_hub_bounce_arm_declined … bugShaped=true landedSourceEdits=true
+> hubBounceRepeat=true isChildSession=false deferralAvailable=false`. The conversion came
+> from a DIFFERENT arm: `deferral_armed … evidence.consumed=seen_red_unresolved` spent the
+> turn's one-shot deferral ~1000 log lines earlier; by the time control reached the H9
+> block the budget was gone. This is CORRECT behavior, not a defect — H9 is scoped to the
+> *otherwise-clean* finish, and this turn carried real failure evidence (4×
+> `seen_red_unresolved`), so the stronger, earlier signal rightly won the budget and the
+> escalation it bought resolved the instance. Consequence to track: H9's live reachability
+> is narrower than the design implied — it can only arm on a turn where no earlier arm did,
+> so it stays UNVALIDATED live (shipped, correct-by-construction, telemetry-confirmed
+> evaluating with four of five inputs true).
+>
+> **O-J3 (`1fbde0959`) — the judge degrade root cause, finally named** by O-J2's own
+> thrown-error evidence: `rawHead="threw: ProviderHeaderTimeoutError: Provider response
+> headers timed out after 45000ms"`. The litellm provider's `headerTimeout: 45_000`
+> (econ-defaults.ts:240) is applied inside its fetch wrapper (provider.ts:1686-1717) and
+> combined with the per-call signal via `AbortSignal.any` — a per-call abort can only
+> SHORTEN it, so O-J2's 180s bound was inert. A non-streaming reasoning completion returns
+> no headers until it finishes thinking, which routinely exceeds 45s at a 4096-token
+> budget: the reasoner-tier judges were structurally unable to survive the watchdog (and
+> O-J2's 2500→4096 raise traded truncation for timeout). Fix: `reproFidelityDispatch` +
+> `hubDesignDispatch` now STREAM (`streamText`), so headers arrive at the first chunk and
+> `chunkTimeout`/the per-call abort become the real bounds; return semantics preserved
+> byte-for-byte including the reasoning-then-text ordering the JSON parser depends on.
+> The hub-design judge has never once rendered a verdict on this instance across five
+> replays — O-J3 is the first build where it can.
+>
+> **Replay protocol (mandatory, learned the hard way):** `build_run_x.sh` builds the
+> ARENA, never the engine — it executes whatever `packages/opencode/dist/` holds. Before
+> attributing any behavior to code, `grep -c "<marker string from the commit>"` the
+> binary. `bun run build` in `packages/opencode` refreshes dist.
+>
+> Remaining open: H9 arm still unexercised live (needs a turn with no earlier arm);
+> O-J3 judge-verdict validation; mini-10 ×3 band + full-500 gate still ahead — no score
+> claims until those run (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
 
