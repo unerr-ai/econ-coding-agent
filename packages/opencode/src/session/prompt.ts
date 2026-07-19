@@ -11,7 +11,7 @@ import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 
-import { type Tool as AITool, tool, jsonSchema, generateText } from "ai"
+import { type Tool as AITool, tool, jsonSchema, generateText, streamText } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
@@ -908,7 +908,9 @@ export const layer = Layer.effect(
      * `DEGRADED_REPRO_FIDELITY` sentinel — "model-unresolved" (model/language
      * unavailable, never reached the judge) or "judge-degraded" (the judge
      * ran and itself degraded) — so silence is never mistaken for a
-     * confirmed-faithful verdict (F13c).
+     * confirmed-faithful verdict (F13c). Streams the completion so response
+     * headers arrive at the first chunk, keeping the provider's 45s header
+     * watchdog from killing a long reasoning pass.
      *
      * @sem domain=routing role=repro-judge
      */
@@ -951,7 +953,7 @@ export const layer = Layer.effect(
       const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
       if (!language) return { verdict: DEGRADED_REPRO_FIDELITY, degradedReason: "model-unresolved" as const }
       const complete: ReproFidelityComplete = async ({ system, user }) => {
-        const out = await generateText({
+        const out = streamText({
           model: language,
           system,
           prompt: user,
@@ -959,7 +961,8 @@ export const layer = Layer.effect(
           temperature: 0,
           providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
         })
-        return out.text.trim() || (out.reasoningText ?? "")
+        const [text, reasoningText] = await Promise.all([out.text, out.reasoningText])
+        return text.trim() || (reasoningText ?? "")
       }
       const verdict = yield* Effect.promise(() =>
         runReproFidelityJudge({
@@ -1008,7 +1011,10 @@ export const layer = Layer.effect(
      * judge-scale abort timeout — the reasoner tier spends most of its
      * budget reasoning before the JSON, so the 12s turn-read cap would
      * abort near-every call; this bound exists only to turn a true hang
-     * into a degrade instead of blocking the turn.
+     * into a degrade instead of blocking the turn. O-J3: streams the
+     * completion so response headers arrive at the first chunk, keeping the
+     * provider's 45s header watchdog from killing a long reasoning pass
+     * while the abort timeout above stays the real bound.
      *
      * @sem domain=routing role=hub-design-judge
      */
@@ -1050,7 +1056,7 @@ export const layer = Layer.effect(
       const language = Option.getOrUndefined(yield* provider.getLanguage(mdl).pipe(Effect.option))
       if (!language) return { verdict: DEGRADED_HUB_DESIGN, degradedReason: "model-unresolved" as const }
       const complete: HubDesignComplete = async ({ system, user }) => {
-        const out = await generateText({
+        const out = streamText({
           model: language,
           system,
           prompt: user,
@@ -1059,7 +1065,8 @@ export const layer = Layer.effect(
           abortSignal: AbortSignal.timeout(HUB_DESIGN_JUDGE_TIMEOUT_MS),
           providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
         })
-        return [out.reasoningText ?? "", out.text ?? ""].filter(Boolean).join("\n")
+        const [reasoningText, text] = await Promise.all([out.reasoningText, out.text])
+        return [reasoningText ?? "", text ?? ""].filter(Boolean).join("\n")
       }
       const result = yield* Effect.promise(() =>
         runHubDesignJudge({
