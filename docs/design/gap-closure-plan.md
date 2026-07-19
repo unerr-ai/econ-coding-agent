@@ -81,9 +81,28 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 > prompt.test.ts 12 fail → 0. Signal-audit widened to all of src/ with corrected gate
 > file targets, zero findings (`99b543323`).
 >
-> Remaining open: 11265 replay re-fire with the flipped binary (in flight — the
-> falsifiable prediction: escalation above conductor after the second bounce); mini-10 ×3
-> band + full-500 gate still ahead — no score claims until those run (§5.4).
+> **Round 3 (same day, flip validation):** replay #2 on the flipped binary did NOT arm —
+> log forensics read all five `shouldArmHubBounceDeferral` inputs true at the finish
+> arrival, yet no `deferral_armed` and the F11 regression block directly upstream logged
+> zero branches; the integration test reproducing the shape PASSES against unmodified
+> code, so the divergence is live-path-specific. Countermeasures (`21a10d59c`):
+> `h9_hub_bounce_arm_declined` decline telemetry (names the false input, or its absence
+> proves control never reaches the block) + underscore repro-file exclusion — a deleted
+> `_repro_field_error.py` scratch file slipped both repro-path regexes and was still
+> counted as a landed source edit (live-confirmed evidence contamination) + a permanent
+> H9 integration test. Replay #3 was then a null draw: the agent never presented a finish
+> at all (0 finish-cascade lines vs 5 `patch_sanity` in replay #2), timing out at
+> 2400s/94 steps — flip unexercised. The run DID surface a chronic defect: the
+> hub-design judge degraded in BOTH replays (#2 `rawHead` = reasoning prose truncated by
+> the 2500-token budget — the O-J1 class recurring; #3 `rawHead=undefined` — the catch
+> swallowed a thrown completion). Fixed O-J2 (`c208e2094`): 4096 budget (parity with the
+> fidelity dispatch on the same tier), 180s judge-scale hang bound (the 12s turn-read cap
+> would abort near-every reasoner pass), thrown path now carries `threw: <head>` through
+> `rawHead`. Replay #4 on the judge-fixed binary is in flight.
+>
+> Remaining open: replay #4 verdict (H9 arm exercised, or decline telemetry names the
+> fault); mini-10 ×3 band + full-500 gate still ahead — no score claims until those run
+> (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
 
