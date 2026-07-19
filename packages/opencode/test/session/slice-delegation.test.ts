@@ -207,7 +207,7 @@ describe("P11b — sub-planner example (reasoner seat delegates down through the
 })
 
 describe("P11b — refusals (every guardrail is code, not prompt text)", () => {
-  it("down-only: a design-shaped request from a reasoner seat allocates AT the caller and is refused as its own job", async () => {
+  it("down-only: a design-shaped request from a reasoner seat allocates ABOVE the caller (§4.3: design floors at the oracle) and is refused as its own job", async () => {
     const h = makeHarness()
     const seat = makeSeat(h.ports, { callerTier: "reasoner" })
 
@@ -227,14 +227,14 @@ describe("P11b — refusals (every guardrail is code, not prompt text)", () => {
       {
         parentSliceId: "parent slice",
         callerTier: "reasoner",
-        resolvedTier: "reasoner",
+        resolvedTier: "oracle",
         outcome: "refused",
         reason: expect.stringContaining("your job"),
       },
     ])
   })
 
-  it("down-only is relative: the SAME design-shaped request from an oracle seat dispatches on the reasoner", async () => {
+  it("down-only, post-§4.3: the SAME design-shaped request is refused even from an oracle seat — design floors at the oracle ceiling, so no seat sits strictly above it", async () => {
     const h = makeHarness()
     const seat = makeSeat(h.ports, { callerTier: "oracle" })
 
@@ -243,11 +243,11 @@ describe("P11b — refusals (every guardrail is code, not prompt text)", () => {
       sliceType: "design",
     })
 
-    expect(result.refused).toBe(false)
-    expect(h.requests.map((r) => r.tier)).toEqual(["reasoner"])
-    expect(h.requests[0]!.delegated).toBe(true)
-    expect(result.output).toStartWith("DELEGATED → reasoner")
-    expect(seat.used).toBe(1)
+    expect(result.refused).toBe(true)
+    expect(result.output).toStartWith("DELEGATE REFUSED")
+    expect(h.requests).toHaveLength(0)
+    expect(seat.used).toBe(0)
+    expect(h.telemetry[0]).toMatchObject({ callerTier: "oracle", resolvedTier: "oracle", outcome: "refused" })
   })
 
   it("bound: the call after the per-slice cap refuses without consuming budget or dispatching", async () => {

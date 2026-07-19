@@ -120,8 +120,8 @@ export function evaluate(ctx: EvalContext): EvalVerdict {
   reasons.push(`base: ${base.reason}`)
 
   // (2) Decision-shaped ambiguity rounds up — allocateSlice already forces the
-  //     reasoner floor for sliceType "design"; this rule's job here is only to
-  //     make sure step (3) never undercuts an ambiguous, decision-shaped goal.
+  //     oracle floor for sliceType "design" (§4.3); this rule's job here is
+  //     only to make sure step (3) never undercuts an ambiguous, decision-shaped goal.
   const decisionShaped =
     ctx.sliceType === "design" ||
     (ctx.triage.shape !== undefined && DECISION_SHAPED_TRIAGE_SHAPES.has(ctx.triage.shape))

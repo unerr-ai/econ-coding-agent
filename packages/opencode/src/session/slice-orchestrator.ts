@@ -26,9 +26,11 @@ import {
   REPRO_SLICE_CONTENT,
 } from "./prompts/seeds"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
+import { signalsFor } from "./signal-bus"
 import {
   runSliceLoop,
   tierModelRef,
+  resolveOracleTier,
   ECON_PERSONAS,
   ALLOCATION_RISK_TIEBREAK,
   validatePlan,
@@ -472,6 +474,8 @@ export interface ConductorLoopOptions {
   requestingTier?: EconTier
   /** P11b — files the requesting seat already has in scope (the venue rule's `sameFilesInScope` input, P6c). A delegate's mini-loop passes the parent slice's own scope. */
   parentScope?: ReadonlySet<string>
+  /** Gap-closure §4.3 oracle switch override, mainly for tests; production reads `ECON_ORACLE` via `resolveOracleTier` when absent. */
+  oracleEnabled?: boolean
 }
 
 /**
@@ -595,6 +599,9 @@ export async function runConductorSliceLoop(
     editScopeOf: (slice) => new Set(extractSliceFiles(`${slice.prompt}\n${slice.wiring ?? ""}`)),
     requestingTier: options?.requestingTier ?? "conductor",
     ...(options?.parentScope ? { parentScope: options.parentScope } : {}),
+    // Gap-closure §4.3 — ECON_ORACLE=off degrades to conductor-only; a test
+    // double overrides via options.oracleEnabled without touching env.
+    oracleEnabled: options?.oracleEnabled ?? resolveOracleTier(process.env["ECON_ORACLE"]).enabled,
   }
 
   return runSliceLoop(slices, deps)
@@ -2039,9 +2046,12 @@ export async function todosToLoopSlices(
  * The benefit gate (OL-9.5c): decomposition is DECLINED unless it is earned by
  * evidence the conductor did not author. Engaging costs 4-10x — a dispatched
  * slice pays fresh context re-derivation at a pricier tier, and an unverified
- * settle drags in the deferral cascade — so the default is inline.
+ * settle drags in the deferral cascade — so the default is inline. Since
+ * gap-closure §4.3 that "4-10x" is a one-hop bounded oracle draw (compiled
+ * brief + 12-step cap), not a multi-rung climb — the H9 signals below were
+ * unsafe to admit before that collapse landed.
  *
- * Four admissible signals:
+ * Seven admissible signals:
  *   - `harnessSeeded` — DERIVED at slice-build time (`todosToLoopSlices`,
  *     `HARNESS_SEED_CONTENTS`) by matching the slice's content against the
  *     harness's own injected prepass seeds (diagnosis/re-plan/plan/grind-
@@ -2063,53 +2073,100 @@ export async function todosToLoopSlices(
  *   - a CRITICAL slice — high coupling, or risk above `ALLOCATION_RISK_TIEBREAK`.
  *     Both are PROBE-derived (blast radius / fan-in), which is the one escalation
  *     input the lead model cannot talk itself into.
+ *   - H9 (gap-closure §2, 2026-07-19) — three deterministic signal-bus
+ *     facts, none conductor-authored: `hubBounceRepeat` (a second,
+ *     evidence-bearing hub-edit bounce this turn — `edit.ts`/`write.ts`
+ *     publish `hub_bounce_repeat`), `probeGateExhausted` (the pinned-probe
+ *     finish gate exhausted its bounded retries — `probe_gate_exhausted`),
+ *     and `reproUnresolved` (a reproduction stayed unresolved at
+ *     finish-intent — `repro_unresolved`). `deferralPrepassTodo`'s content
+ *     is deliberately excluded from `harnessSeeded` (the 11880/11964 cost
+ *     cliff on the OLD multi-rung ladder), so before this these three fired
+ *     on the signal bus and were silently discarded — 11265/10097/10999 all
+ *     stayed conductor-only, gate never opened. Safe to admit now because
+ *     §4.3's one-hop bounded draw is what the cost cliff blamed.
  *
  * What this gate deliberately does NOT key on (reversing run-21, 2026-07-15
  * live-fire): the ALLOCATED tier. Allocation reads `sliceType` and `need` — both
  * written by the conductor into its own todo — and its test-strength default is
  * `untestable` whenever the probe observed nothing. On a real repo that default
- * is the common case, and an unbacked mechanical slice then floors to `reasoner`
- * (allocation.ts), so a tier-keyed gate escalates on a MISSING probe signal plus
- * the model's self-report. Measured: 11848/11880/11885 each dispatched ONE
- * trivial-judged slice and burned 26-47 above-conductor turns at $0.48-0.54,
- * while 11790 solved the same bug conductor-only for $0.067 that it spent $0.6639
- * on when the gate opened. Letting the model price its own work is not a benefit
- * signal. A width-1 chain of cheap work gains nothing from being split (run-8:
- * 868 LLM calls for one trivial linear issue) — that reasoning always held; it
- * was the tier escape hatch that made it moot. The harness's own prepass seeds
- * previously cleared the gate as a SIDE EFFECT of that tier inference (their
- * `sliceType:"design"` floors to reasoner); losing the inference would have
- * silently broken the grind valve's one escape hatch for a stalled degraded
- * turn, so `harnessSeeded` makes that escape hatch explicit instead.
+ * is the common case, and an unbacked mechanical slice then floors to the oracle
+ * (allocation.ts, post-§4.3 — the reasoner never solves), so a tier-keyed gate
+ * escalates on a MISSING probe signal plus the model's self-report. Measured:
+ * 11848/11880/11885 each dispatched ONE trivial-judged slice and burned 26-47
+ * above-conductor turns at $0.48-0.54, while 11790 solved the same bug
+ * conductor-only for $0.067 that it spent $0.6639 on when the gate opened.
+ * Letting the model price its own work is not a benefit signal. A width-1
+ * chain of cheap work gains nothing from being split (run-8: 868 LLM calls for
+ * one trivial linear issue) — that reasoning always held; it was the tier
+ * escape hatch that made it moot. The harness's own prepass seeds previously
+ * cleared the gate as a SIDE EFFECT of that tier inference (their
+ * `sliceType:"design"` floored to reasoner, pre-§4.3); losing the inference
+ * would have silently broken the grind valve's one escape hatch for a stalled
+ * degraded turn, so `harnessSeeded` makes that escape hatch explicit instead.
  *
  * Applied once per engagement, right after `todosToLoopSlices`, before dispatch.
  *
  * @sem domain=routing role=router
  */
-export function shouldOrchestrate(slices: readonly LoopSlice[], goalCount?: number): boolean {
-  return explainOrchestrationGate(slices, goalCount).engage
+export function shouldOrchestrate(slices: readonly LoopSlice[], goalCount?: number, signals?: OrchestrationGateSignals): boolean {
+  return explainOrchestrationGate(slices, goalCount, signals).engage
 }
 
-/** Which of the gate's four admissible signals opened it; `"none"` on a decline. */
-export type OrchestrationGateTrigger = "harness-seed" | "breadth" | "goal-width" | "coupling-risk" | "none"
+/** Which of the gate's seven admissible signals opened it; `"none"` on a decline. */
+export type OrchestrationGateTrigger =
+  | "harness-seed"
+  | "breadth"
+  | "goal-width"
+  | "coupling-risk"
+  | "hub-bounce-repeat"
+  | "probe-gate-exhausted"
+  | "repro-unresolved"
+  | "none"
 
 /**
- * The reasoned form of `shouldOrchestrate`: the same four checks, in the same
- * order (harness-seed, breadth, goal-width, coupling-risk), but returns WHICH
- * one opened the gate instead of collapsing to a boolean — so a caller can log
- * WHY a benefit-gate decision landed the way it did, not just the verdict.
+ * H9's three deterministic signal-bus facts, derived by the caller from
+ * `signalsFor(sessionID)` (never a slice field — same self-report guard as
+ * `harnessSeeded`). All optional/absent-safe: a caller with no `sessionID`
+ * (a legacy/test double) passes nothing and the gate falls through to its
+ * original four checks unchanged.
+ *
+ * @sem domain=routing role=type
+ */
+export interface OrchestrationGateSignals {
+  /** A second, evidence-bearing hub-edit bounce fired this turn (`hub_bounce_repeat`). */
+  hubBounceRepeat?: boolean
+  /** The pinned-probe finish gate exhausted its bounded retries (`probe_gate_exhausted`). */
+  probeGateExhausted?: boolean
+  /** A reproduction stayed unresolved at finish-intent (`repro_unresolved`). */
+  reproUnresolved?: boolean
+}
+
+/**
+ * The reasoned form of `shouldOrchestrate`: the same seven checks, in the
+ * same order (harness-seed, breadth, goal-width, coupling-risk, then the H9
+ * signal-bus triple), but returns WHICH one opened the gate instead of
+ * collapsing to a boolean — so a caller can log WHY a benefit-gate decision
+ * landed the way it did, not just the verdict.
  *
  * @sem domain=routing role=router
  */
 export function explainOrchestrationGate(
   slices: readonly LoopSlice[],
   goalCount?: number,
+  signals?: OrchestrationGateSignals,
 ): { engage: boolean; trigger: OrchestrationGateTrigger } {
   if (slices.some((s) => s.harnessSeeded)) return { engage: true, trigger: "harness-seed" }
   if (slices.length >= 6) return { engage: true, trigger: "breadth" }
   if ((goalCount ?? 0) >= 2) return { engage: true, trigger: "goal-width" }
   if (slices.some((s) => s.coupling === "high" || (s.risk ?? 0) > ALLOCATION_RISK_TIEBREAK))
     return { engage: true, trigger: "coupling-risk" }
+  // H9 — checked last: none of these three is conductor-authored, but they
+  // carry no structural signal about THIS batch of slices the way
+  // coupling-risk does, so they only decide an otherwise-declined turn.
+  if (signals?.hubBounceRepeat) return { engage: true, trigger: "hub-bounce-repeat" }
+  if (signals?.probeGateExhausted) return { engage: true, trigger: "probe-gate-exhausted" }
+  if (signals?.reproUnresolved) return { engage: true, trigger: "repro-unresolved" }
   return { engage: false, trigger: "none" }
 }
 
@@ -2241,7 +2298,7 @@ export interface ConductorOrchestrationDeps {
   }) => void
   /** L4.2 — degraded stand-down telemetry sink: fires when a degraded (null turn-read) turn holds its conductor-authored mid-turn todos INLINE instead of orchestrating them. `grindEscapeHatch` is true when the grind valve's design prepass is present and still orchestrates. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
   onDegradedStandDown?: (info: { conductorTodos: number; grindEscapeHatch: boolean }) => void
-  /** OL-9.5c — benefit-gate decision telemetry: fires exactly once per gate evaluation (right after `todosToLoopSlices`, before dispatch) with the verdict and which of `explainOrchestrationGate`'s four admissible signals opened it (`"none"` on a decline). Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
+  /** OL-9.5c — benefit-gate decision telemetry: fires exactly once per gate evaluation (right after `todosToLoopSlices`, before dispatch) with the verdict and which of `explainOrchestrationGate`'s seven admissible signals opened it (`"none"` on a decline). H9 (gap-closure §2) adds the three signal-bus booleans alongside `trigger` for §5.4 route-determinism logging — `trigger` alone already discriminates WHICH one fired; these ride along as the same shape of evidence `maxCoupling`/`maxRisk`/`harnessSeeded` already are for the original four. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the log line). */
   onGateDecision?: (info: {
     verdict: "engaged" | "declined"
     sliceCount: number
@@ -2250,6 +2307,9 @@ export interface ConductorOrchestrationDeps {
     maxCoupling: "high" | "low"
     maxRisk: number
     harnessSeeded: boolean
+    hubBounceRepeat: boolean
+    probeGateExhausted: boolean
+    reproUnresolved: boolean
   }) => void
   /** #55 — mid-flight re-decomposition telemetry sink: fires after every settled run with the §4.2 triggers `redecompositionCheck` returned and the signals behind them, whether or not any trigger was acted on. Same callback-to-caller pattern as `onResolutionGate`. */
   onRedecomposition?: (info: {
@@ -2501,7 +2561,19 @@ export async function runConductorOrchestration(
       researchShaped: deps.researchShaped,
       fallbackFiles: deps.turnFiles,
     })
-    const gate = explainOrchestrationGate(slices, deps.goalCount)
+    // H9 — read-only signal-bus lookup (edit.ts/write.ts publish
+    // hub_bounce_repeat, prompt.ts publishes probe_gate_exhausted and
+    // repro_unresolved); a legacy/test double with no sessionID passes no
+    // signals and the gate falls through to its original four checks.
+    const h9Signals: OrchestrationGateSignals | undefined =
+      deps.sessionID !== undefined
+        ? {
+            hubBounceRepeat: signalsFor(deps.sessionID).some((s) => s.name === "hub_bounce_repeat"),
+            probeGateExhausted: signalsFor(deps.sessionID).some((s) => s.name === "probe_gate_exhausted"),
+            reproUnresolved: signalsFor(deps.sessionID).some((s) => s.name === "repro_unresolved"),
+          }
+        : undefined
+    const gate = explainOrchestrationGate(slices, deps.goalCount, h9Signals)
     deps.onGateDecision?.({
       verdict: gate.engage ? "engaged" : "declined",
       sliceCount: slices.length,
@@ -2510,6 +2582,9 @@ export async function runConductorOrchestration(
       maxCoupling: slices.some((s) => s.coupling === "high") ? "high" : "low",
       maxRisk: Math.max(0, ...slices.map((s) => s.risk ?? 0)),
       harnessSeeded: slices.some((s) => s.harnessSeeded),
+      hubBounceRepeat: h9Signals?.hubBounceRepeat ?? false,
+      probeGateExhausted: h9Signals?.probeGateExhausted ?? false,
+      reproUnresolved: h9Signals?.reproUnresolved ?? false,
     })
     if (!gate.engage) return { engaged: false }
     const todoIndexOf = (sliceId: string): number | undefined => {

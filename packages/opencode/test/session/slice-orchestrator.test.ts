@@ -652,6 +652,72 @@ describe("explainOrchestrationGate — trigger attribution", () => {
   })
 })
 
+// H9 (gap-closure §2, 2026-07-19) — three deterministic signal-bus facts
+// (hub_bounce_repeat / probe_gate_exhausted / repro_unresolved), none
+// conductor-authored, wired as three more admissible gate triggers. Each
+// opens the gate exactly once on an otherwise-declined batch — a single
+// pure-function call, so "fires exactly once, bounded" is the return value
+// itself: one call, one verdict, one trigger.
+describe("explainOrchestrationGate — H9 signal-bus triggers", () => {
+  const soloSlice = [{ id: "solo step", prompt: "" }]
+
+  it("hubBounceRepeat opens an otherwise-declined gate", () => {
+    expect(explainOrchestrationGate(soloSlice, undefined, { hubBounceRepeat: true })).toEqual({
+      engage: true,
+      trigger: "hub-bounce-repeat",
+    })
+  })
+
+  it("probeGateExhausted opens an otherwise-declined gate", () => {
+    expect(explainOrchestrationGate(soloSlice, undefined, { probeGateExhausted: true })).toEqual({
+      engage: true,
+      trigger: "probe-gate-exhausted",
+    })
+  })
+
+  it("reproUnresolved opens an otherwise-declined gate", () => {
+    expect(explainOrchestrationGate(soloSlice, undefined, { reproUnresolved: true })).toEqual({
+      engage: true,
+      trigger: "repro-unresolved",
+    })
+  })
+
+  it("absent or all-false signals never open the gate on their own", () => {
+    expect(explainOrchestrationGate(soloSlice)).toEqual({ engage: false, trigger: "none" })
+    expect(explainOrchestrationGate(soloSlice, undefined, {})).toEqual({ engage: false, trigger: "none" })
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, {
+        hubBounceRepeat: false,
+        probeGateExhausted: false,
+        reproUnresolved: false,
+      }),
+    ).toEqual({ engage: false, trigger: "none" })
+  })
+
+  it("the original four signals are checked first — a harness-seeded slice reports harness-seed even with an H9 signal also true", () => {
+    const seeded = [{ id: "grind valve seed", prompt: "", harnessSeeded: true as const }]
+    expect(explainOrchestrationGate(seeded, undefined, { hubBounceRepeat: true })).toEqual({
+      engage: true,
+      trigger: "harness-seed",
+    })
+  })
+
+  it("route-determinism (§5.4): with all three H9 signals true, exactly one trigger wins (hub-bounce-repeat, checked first)", () => {
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, {
+        hubBounceRepeat: true,
+        probeGateExhausted: true,
+        reproUnresolved: true,
+      }),
+    ).toEqual({ engage: true, trigger: "hub-bounce-repeat" })
+  })
+
+  it("shouldOrchestrate threads the signals param through to the same verdict", () => {
+    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: true })).toBe(true)
+    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: false })).toBe(false)
+  })
+})
+
 describe("triagePreamble — U1/§1.1/§4.1 turn-scoped preamble", () => {
   it("lists every goal with its shape/deliverable and every constraint", () => {
     const verdict: TriageVerdict = {
@@ -1475,11 +1541,12 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
   // ALLOCATED tier (executor vs reasoner) drove shouldOrchestrate directly —
   // exactly the self-reported-need coupling the new gate deliberately severed
   // (allocateSlice reads hardness/need, both conductor/arming-judge authored,
-  // not probe evidence). Allocation itself is UNCHANGED (still floors hard
-  // work to the reasoner); only the gate's read on it is gone — a lone slice
-  // with the same (low) probe-derived coupling now stays declined regardless
-  // of tier.
-  it("the writer seed is still DIFFICULTY-allocated (trivial → executor, hard → reasoner), but its ALLOCATED tier no longer drives shouldOrchestrate", async () => {
+  // not probe evidence). Allocation itself is UNCHANGED in shape (still floors
+  // hard work above the executor — post-§4.3, straight to the oracle, the
+  // reasoner being judge-only now); only the gate's read on it is gone — a
+  // lone slice with the same (low) probe-derived coupling now stays declined
+  // regardless of tier.
+  it("the writer seed is still DIFFICULTY-allocated (trivial → executor, hard → oracle post-§4.3), but its ALLOCATED tier no longer drives shouldOrchestrate", async () => {
     // No pin: a trivial, already-located bug converts to a testable mechanical
     // slice that allocates to the CHEAP executor.
     const trivial = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes("low"))
@@ -1489,11 +1556,12 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(allocateSlice(trivial[0]!).tier).toBe("executor")
     expect(shouldOrchestrate(trivial)).toBe(false)
 
-    // The difficulty floor still lifts the SAME seed's ALLOCATED tier to the
-    // reasoner when the arming judge rates the bug genuinely hard — but with
-    // the same low probe-derived coupling, the gate stays declined regardless.
+    // The difficulty floor still lifts the SAME seed's ALLOCATED tier when the
+    // arming judge rates the bug genuinely hard — §4.3 redirects that floor
+    // straight to the oracle (the reasoner is judge-only) — but with the same
+    // low probe-derived coupling, the gate stays declined regardless.
     const hard = await todosToLoopSlices([LOCALIZATION_PREPASS_TODO], fakeProbes("low"), { hardness: "hard" })
-    expect(allocateSlice(hard[0]!).tier).toBe("reasoner")
+    expect(allocateSlice(hard[0]!).tier).toBe("oracle")
     expect(shouldOrchestrate(hard)).toBe(false)
   })
 

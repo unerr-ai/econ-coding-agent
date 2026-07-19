@@ -9,13 +9,15 @@
  * slice therefore still does NOT escalate to oracle — the sound check is the
  * safety net — but now neither does a high-coupling *untestable* slice: it
  * stays on the executor while the verifier alone absorbs the coupling/risk.
- * A second load-bearing assertion (SM5): `design` routes to the reasoner
+ * A second load-bearing assertion (SM5): `design` routes to the oracle
  * regardless of coupling/test-strength. A third (the difficulty floor):
  * `hardness==="hard"` or `ambiguity==="ambiguous"` floors the generator at
- * the reasoner — and ambiguity is the one case that overrides the testable
+ * the oracle — and ambiguity is the one case that overrides the testable
  * clamp, because a sound check proves the code runs, never that it solved
- * the right problem. `reasonCode` pins the machine-readable factor behind
- * each tier.
+ * the right problem. Gap-closure §4.3 (2026-07-19): every generator path that
+ * used to land on the reasoner now redirects to the oracle — the reasoner is
+ * judge-only, never a solve rung. `reasonCode` pins the machine-readable
+ * factor behind each tier.
  */
 
 import { describe, it, expect } from "bun:test"
@@ -82,13 +84,14 @@ describe("allocateSlice — core invariant: testable never escalates to oracle",
 })
 
 // ---------------------------------------------------------------------------
-// Slice type — only `design` forces the reasoner floor
+// Slice type — only `design` forces the oracle floor (§4.3: the reasoner is
+// judge-only, so the insight-heavy floor lands one hop straight past it)
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — slice type", () => {
-  it("design → reasoner even when low-coupling and testable", () => {
+  it("design → oracle even when low-coupling and testable", () => {
     const a = allocateSlice({ sliceType: "design", coupling: "low", testStrength: "testable" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.reasonCode).toBe("design-insight")
   })
 
@@ -97,9 +100,9 @@ describe("allocateSlice — slice type", () => {
   // defaultdict(list) + reduce(operator.or_, …)) can sit in the
   // high-coupling·testable cell and still exceed executor capability — the
   // matrix must not demote it there because a sound check exists.
-  it("design → reasoner even with HIGH coupling and testable (the SM5 fix — insight-heavy work routes up regardless of coupling)", () => {
+  it("design → oracle even with HIGH coupling and testable (the SM5 fix — insight-heavy work routes up regardless of coupling)", () => {
     const a = allocateSlice({ sliceType: "design", coupling: "high", testStrength: "testable" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.tier).not.toBe("executor")
     expect(a.reasonCode).toBe("design-insight")
   })
@@ -109,9 +112,9 @@ describe("allocateSlice — slice type", () => {
     expect(a.verification).toBe("sound")
   })
 
-  it("design → judge verifier when untestable, tier stays reasoner (not oracle)", () => {
+  it("design → judge verifier when untestable, tier stays at the oracle floor (§4.3)", () => {
     const a = allocateSlice({ sliceType: "design", coupling: "high", testStrength: "untestable" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.verification).toBe("judge")
   })
 
@@ -174,29 +177,29 @@ describe("allocateSlice — consequence (coupling/risk) never escalates the gene
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — difficulty floor (the generator axis)", () => {
-  it("hardness=\"hard\" floors a testable slice at reasoner (overriding the executor default)", () => {
+  it("hardness=\"hard\" floors a testable slice at oracle (overriding the executor default, §4.3)", () => {
     const a = allocateSlice({ testStrength: "testable", hardness: "hard" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.verification).toBe("sound")
     expect(a.reasonCode).toBe("difficulty-floor")
   })
 
-  it("ambiguity=\"ambiguous\" overrides the testable clamp and floors at reasoner", () => {
+  it("ambiguity=\"ambiguous\" overrides the testable clamp and floors at oracle", () => {
     const a = allocateSlice({ testStrength: "testable", ambiguity: "ambiguous" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.verification).toBe("sound")
     expect(a.reasonCode).toBe("difficulty-floor")
   })
 
-  it("the floor never demotes: a trivial-hardness design slice stays reasoner (floor is a no-op)", () => {
+  it("the floor never demotes: a trivial-hardness design slice stays at oracle (floor is a no-op)", () => {
     const a = allocateSlice({ sliceType: "design", hardness: "trivial" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.reasonCode).toBe("design-insight")
   })
 
-  it("the floor never demotes: a hard design slice is already ≥reasoner, so reasonCode stays design-insight", () => {
+  it("the floor never demotes: a hard design slice is already ≥oracle, so reasonCode stays design-insight", () => {
     const a = allocateSlice({ sliceType: "design", hardness: "hard" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.reasonCode).toBe("design-insight")
   })
 })
@@ -224,21 +227,21 @@ describe("allocateSlice — need hint", () => {
     expect(a.reasonCode).toBe("testable-invariant")
   })
 
-  it("need IS allowed on a testable slice once ambiguity already broke the clamp", () => {
+  it("need is a no-op once ambiguity already floors the tier at the oracle ceiling (§4.3 — nothing higher to raise to, reasonCode stays difficulty-floor)", () => {
     const a = allocateSlice({ testStrength: "testable", ambiguity: "ambiguous", need: "oracle" })
     expect(a.tier).toBe("oracle")
-    expect(a.reasonCode).toBe("need-hint")
+    expect(a.reasonCode).toBe("difficulty-floor")
   })
 
-  it("need cannot lower a design slice below its reasoner floor (matrix decides the floor)", () => {
+  it("need cannot lower a design slice below its oracle floor (matrix decides the floor)", () => {
     const a = allocateSlice({ sliceType: "design", need: "executor" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
   })
 
-  it("need CAN raise a design slice above its reasoner floor to oracle", () => {
+  it("need at the design slice's oracle floor is a no-op — reasonCode stays design-insight, not need-hint", () => {
     const a = allocateSlice({ sliceType: "design", need: "oracle" })
     expect(a.tier).toBe("oracle")
-    expect(a.reasonCode).toBe("need-hint")
+    expect(a.reasonCode).toBe("design-insight")
   })
 
   it("a low-ranked need (conductor) cannot lower a high-coupling·untestable slice below its executor default", () => {
@@ -252,22 +255,24 @@ describe("allocateSlice — need hint", () => {
     expect(a.tier).toBe("executor")
   })
 
-  it("need raises an untestable slice to reasoner", () => {
+  it("a \"reasoner\" need hint redirects to oracle — the reasoner is judge-only, §4.3", () => {
     const a = allocateSlice({ coupling: "low", testStrength: "untestable", need: "reasoner" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
+    expect(a.reasonCode).toBe("need-hint")
   })
 })
 
 // ---------------------------------------------------------------------------
 // specBacked — an unbacked mechanical/untestable edit has neither a design
-// patch to transcribe nor a sound check to catch it, so the reasoner authors
-// it instead; a design patch (specBacked) or a sound check keeps it cheap.
+// patch to transcribe nor a sound check to catch it, so the oracle authors
+// it instead (§4.3 — the reasoner is judge-only); a design patch
+// (specBacked) or a sound check keeps it cheap.
 // ---------------------------------------------------------------------------
 
 describe("allocateSlice — specBacked (mechanical + untestable)", () => {
-  it("mechanical · untestable · low-coupling · unbacked → reasoner authors the edit (qe unchanged)", () => {
+  it("mechanical · untestable · low-coupling · unbacked → oracle authors the edit (qe unchanged)", () => {
     const a = allocateSlice({ sliceType: "mechanical", coupling: "low", testStrength: "untestable" })
-    expect(a.tier).toBe("reasoner")
+    expect(a.tier).toBe("oracle")
     expect(a.verification).toBe("qe")
     expect(a.reasonCode).toBe("mechanical-unbacked")
   })

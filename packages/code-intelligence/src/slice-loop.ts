@@ -322,6 +322,17 @@ export interface SliceLoopDeps {
   requestingTier?: EconTier
   /** Files the parent thread already has in scope (P6c): a slice whose predicted scope (`editScopeOf`) intersects it evaluates `sameFilesInScope: true`. Absent — or no probe — ⇒ false. */
   parentScope?: ReadonlySet<string>
+  /**
+   * Gap-closure §4.3 per-tier disable switch (`ECON_ORACLE`, resolved by the
+   * live caller via `resolveOracleTier`): when `false`, no slice may dispatch
+   * to the oracle — the ladder's ceiling caps at the conductor and any slice
+   * that would have targeted the oracle (an initial floor or a climb)
+   * downgrades to conductor instead, surfaced via `onProvenance`
+   * (`rungReason: "oracle-disabled"`) and settling `unverified` when the
+   * conductor also can't resolve it — loud, never a silent drop. Absent or
+   * `true` ⇒ today's behavior, unchanged.
+   */
+  oracleEnabled?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -413,30 +424,35 @@ export interface SliceLoopResult {
 const TIER_ORDER: EconTier[] = ["conductor", "executor", "reasoner", "oracle"]
 
 /**
- * The tier a rejected slice escalates to — ONE hop up the capability ladder
- * executor → conductor → reasoner → oracle (user rule 2026-07-04: a failed
- * executor slice is rescued by the conductor first, ~10× cheaper than jumping
- * straight to the oracle). The oracle is the top of this ladder (the frontier
- * hatch OL-7.10 is a separate, flagged concern), so an oracle reject cannot
- * escalate and returns the same tier.
- *
- * @sem domain=routing role=allocator
- */
-/**
  * Ladder position per tier — used to enforce a slice's escalation ceiling
  * (recon caps at conductor), and by the P11b delegate gate's down-only rule
  * (a delegate must resolve strictly below its caller's rung). Distinct from
  * allocation.ts's TIER_RANK (a price order, conductor cheapest): this is the
- * CAPABILITY ladder the escalation path climbs.
+ * CAPABILITY ladder the escalation path climbs. `reasoner` keeps a rank (it
+ * is still a valid `EconTier`, judge-only) but `escalateTier` never lands on
+ * it — see below.
  */
 export const LADDER_RANK: Record<EconTier, number> = { executor: 0, conductor: 1, reasoner: 2, oracle: 3 }
 
+/**
+ * The tier a rejected slice escalates to — ONE hop up the capability ladder.
+ * A failed executor slice is rescued by the conductor first (user rule
+ * 2026-07-04, ~10× cheaper than jumping straight to the oracle). Above the
+ * conductor the ladder collapses to a single hop straight to the oracle
+ * (gap-closure §4.3, 2026-07-19): the reasoner is judge-only now, never a
+ * generator, so it no longer sits as an intermediate SOLVE rung between the
+ * conductor and the oracle. The oracle is the top of this ladder (the
+ * frontier hatch OL-7.10 is a separate, flagged concern), so an oracle
+ * reject cannot escalate and returns the same tier.
+ *
+ * @sem domain=routing role=allocator
+ */
 export function escalateTier(tier: EconTier): EconTier {
   switch (tier) {
     case "executor":
       return "conductor"
     case "conductor":
-      return "reasoner"
+      return "oracle"
     case "reasoner":
       return "oracle"
     case "oracle":
@@ -1123,7 +1139,22 @@ async function runSlice(
   })
   const firstVerdict = evaluate(buildEvalContext(slice, deps, { attempts: 0 }, { signalDelta: false }, sameFilesInScope))
   deps.onEvaluation?.({ sliceId: slice.id, tier: firstVerdict.tier, venue: firstVerdict.venue, reasons: firstVerdict.reasons })
-  const allocation: SliceAllocation = { tier: firstVerdict.tier, verification: base.verification, reason: firstVerdict.reasons.join("; ") }
+  // Gap-closure §4.3 oracle switch: a floor/hint that landed on the oracle
+  // downgrades to the conductor when the switch is off — surfaced via
+  // onProvenance (loud), never a silent drop; a still-unresolvable slice
+  // settles "unverified" through the existing ladder-exhaustion path below.
+  const oracleEnabled = deps.oracleEnabled !== false
+  const oracleGatedAtFloor = !oracleEnabled && firstVerdict.tier === "oracle"
+  if (oracleGatedAtFloor) {
+    deps.onProvenance?.({ sliceId: slice.id, fromTier: "oracle", toTier: "conductor", rungReason: "oracle-disabled" })
+  }
+  const allocation: SliceAllocation = {
+    tier: oracleGatedAtFloor ? "conductor" : firstVerdict.tier,
+    verification: base.verification,
+    reason: oracleGatedAtFloor
+      ? `${firstVerdict.reasons.join("; ")}; oracle disabled (ECON_ORACLE=off) → capped at conductor`
+      : firstVerdict.reasons.join("; "),
+  }
 
   let currentHash = await trackBeforeAttempt(slice, deps)
   const cheapAttempt = await dispatchWithBudget(
@@ -1173,13 +1204,24 @@ async function runSlice(
     // though verification already passed; every other slice (unflagged, or
     // flagged-but-confident) accepts unchanged — the cost-thesis guard lives
     // in `posteriorEscalation` itself, this is just the one-shot dispatch.
+    // §4.3: allocateSlice now floors every hardness="hard"/ambiguity="ambiguous"
+    // slice straight at the oracle, so `escalateTier(allocation.tier)` is a
+    // same-tier no-op for every prior-flagged slice today — the hop below is
+    // structurally unreachable via the target-tier check alone until a rung
+    // above the oracle exists. The `oracleEnabled` check stays regardless: it
+    // is the same "never target a disabled oracle" contract as the floor/climb
+    // guards above, for the day a future rung reopens this path.
     const priorFlagged = slice.ambiguity === "ambiguous" || slice.hardness === "hard"
     if (priorFlagged && !isReadOnlySlice(slice.sliceType) && maxAttempts >= 2) {
       const posteriorSignal =
         cheap.uncertainty ??
         (deps.confidenceGenerate ? signalFromConfidence(await deps.confidenceGenerate(slice.id)) : undefined)
       const posteriorTargetTier = escalateTier(allocation.tier)
-      if (posteriorTargetTier !== allocation.tier && posteriorEscalation(posteriorSignal, slice)) {
+      if (
+        posteriorTargetTier !== allocation.tier &&
+        (oracleEnabled || posteriorTargetTier !== "oracle") &&
+        posteriorEscalation(posteriorSignal, slice)
+      ) {
         deps.onProvenance?.({
           sliceId: slice.id,
           fromTier: allocation.tier,
@@ -1254,8 +1296,10 @@ async function runSlice(
   // Ladder ceiling: recon is read-only investigation — it never deserves an
   // oracle-priced rescue; verify has no special ceiling of its own (maxClimbs
   // above is what actually stops it at 0 climbs). This stays as the tier-side
-  // backstop for a caller-overridden maxClimbs/maxAttempts.
-  const ceiling: EconTier = slice.sliceType === "recon" ? "conductor" : "oracle"
+  // backstop for a caller-overridden maxClimbs/maxAttempts. §4.3 oracle switch:
+  // when disabled the climb ceiling caps at the conductor too, same as the
+  // floor clamp above — the ladder never reaches a disabled oracle either way.
+  const ceiling: EconTier = slice.sliceType === "recon" || !oracleEnabled ? "conductor" : "oracle"
   const readOnly = isReadOnlySlice(slice.sliceType)
   const critical = isCritical(slice)
 

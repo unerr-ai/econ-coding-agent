@@ -63,7 +63,7 @@ describe("evaluate — rule 2: decision-shaped ambiguity blocks the round-down",
   const strongVerify = { hasVerifyCommands: true, testStrength: "testable" as const }
 
   it("triage.shape=diagnosis-vague blocks round-down despite strong verify + containment", () => {
-    const base = allocateSlice(mechanicalUnbacked) // reasoner
+    const base = allocateSlice(mechanicalUnbacked) // oracle (§4.3)
     const v = evaluate(
       ctx({
         ...mechanicalUnbacked,
@@ -81,7 +81,7 @@ describe("evaluate — rule 2: decision-shaped ambiguity blocks the round-down",
     const v = evaluate(
       ctx({ sliceType: "design", verifyStrength: strongVerify, containmentAvailable: true }),
     )
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
     expect(v.reasons.some((r) => r.startsWith("round-down:"))).toBe(false)
   })
 })
@@ -94,16 +94,18 @@ describe("evaluate — rule 3: mechanical round-down (verify strong AND containm
   const mechanicalUnbacked = { sliceType: "mechanical" as const, coupling: "low" as const, testStrength: "untestable" as const }
   const strongVerify = { hasVerifyCommands: true, testStrength: "testable" as const }
 
-  it("rounds down one tier (reasoner -> executor) when both conditions hold", () => {
-    expect(allocateSlice(mechanicalUnbacked).tier).toBe("reasoner") // sanity-check the base cell
+  it("rounds down one tier (oracle -> executor, skipping the judge-only reasoner rung) when both conditions hold", () => {
+    expect(allocateSlice(mechanicalUnbacked).tier).toBe("oracle") // sanity-check the base cell (§4.3)
     const v = evaluate(ctx({ ...mechanicalUnbacked, verifyStrength: strongVerify, containmentAvailable: true }))
+    // lowerTier skips reasoner (§4.3 — a round-down can't land a generator
+    // there either), so the round-down still bottoms out at executor.
     expect(v.tier).toBe("executor")
     expect(v.reasons.some((r) => r.startsWith("round-down: mechanical + strong verify + containment available"))).toBe(true)
   })
 
   it("blocks the round-down when containmentAvailable is false", () => {
     const v = evaluate(ctx({ ...mechanicalUnbacked, verifyStrength: strongVerify, containmentAvailable: false }))
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
     expect(v.reasons.some((r) => r.includes("containment unavailable"))).toBe(true)
   })
 
@@ -111,7 +113,7 @@ describe("evaluate — rule 3: mechanical round-down (verify strong AND containm
     const v = evaluate(
       ctx({ ...mechanicalUnbacked, verifyStrength: { hasVerifyCommands: false }, containmentAvailable: true }),
     )
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
     expect(v.reasons.some((r) => r.includes("verify strength not strong enough"))).toBe(true)
   })
 
@@ -123,7 +125,7 @@ describe("evaluate — rule 3: mechanical round-down (verify strong AND containm
         containmentAvailable: true,
       }),
     )
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
   })
 
   it("never applies to a non-mechanical sliceType", () => {
@@ -132,12 +134,12 @@ describe("evaluate — rule 3: mechanical round-down (verify strong AND containm
         sliceType: "recon",
         coupling: "high",
         testStrength: "untestable",
-        hardness: "hard", // lifts the base to reasoner so a (wrongly) applied round-down would be visible
+        hardness: "hard", // lifts the base to oracle (§4.3) so a (wrongly) applied round-down would be visible
         verifyStrength: strongVerify,
         containmentAvailable: true,
       }),
     )
-    expect(v.tier).toBe("reasoner") // non-mechanical → round-down skipped, the difficulty-floor base stands
+    expect(v.tier).toBe("oracle") // non-mechanical → round-down skipped, the difficulty-floor base stands
   })
 })
 
@@ -175,7 +177,7 @@ describe("evaluate — rule 4: venue affinity", () => {
       ctx({
         coupling: "high",
         testStrength: "untestable",
-        hardness: "hard", // difficulty floor -> reasoner base, differs from the executor requester
+        hardness: "hard", // difficulty floor -> oracle base (§4.3), differs from the executor requester
         venue: { requestingTier: "executor", sameFilesInScope: true, readOnlyParallel: false },
       }),
     )
@@ -230,11 +232,11 @@ describe("evaluate — rule 5: per-turn hysteresis", () => {
       ctx({
         coupling: "high",
         testStrength: "untestable",
-        hardness: "hard", // difficulty floor -> reasoner base (distinct from lastTier=executor)
+        hardness: "hard", // difficulty floor -> oracle base (§4.3, distinct from lastTier=executor)
         hysteresis: { lastTier: "executor", signalDelta: true },
       }),
     )
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
   })
 
   it("is a no-op when there's no lastTier to hold", () => {
@@ -242,11 +244,11 @@ describe("evaluate — rule 5: per-turn hysteresis", () => {
       ctx({
         coupling: "high",
         testStrength: "untestable",
-        hardness: "hard", // difficulty floor -> reasoner base; hysteresis with no lastTier leaves it
+        hardness: "hard", // difficulty floor -> oracle base (§4.3); hysteresis with no lastTier leaves it
         hysteresis: { signalDelta: false },
       }),
     )
-    expect(v.tier).toBe("reasoner")
+    expect(v.tier).toBe("oracle")
   })
 })
 

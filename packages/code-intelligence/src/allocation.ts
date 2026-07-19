@@ -2,16 +2,20 @@
  * Per-slice tier + verifier allocation (OL-7.2) on TWO orthogonal axes
  * (consequence ⟂ difficulty — corpus R5, extended from arming to routing):
  *  - the GENERATOR tier follows DIFFICULTY (the arming judge's hardness/ambiguity,
- *    plus design and unbacked-authoring) — a hard or ambiguous slice floors at the
- *    reasoner, and ambiguity overrides the testable clamp because a sound check
+ *    plus design and unbacked-authoring) — a hard or ambiguous slice floors above
+ *    the executor, and ambiguity overrides the testable clamp because a sound check
  *    proves the code RUNS, never that it solved the RIGHT problem (green-but-wrong);
  *  - the VERIFIER rung follows CONSEQUENCE (coupling / risk / blast-radius) — a
  *    tightly-coupled or high-risk slice earns the cross-model judge, regardless of
  *    which tier authored it.
  * Coupling/risk therefore NEVER escalate the author (a rename across 50 files is
  * cheap to do, costly to get wrong — that asymmetry belongs to the verifier); a
- * testable slice stays on the cheap executor unless DIFFICULTY lifts it. Pure: no
- * I/O — tiers resolve to concrete models downstream through model-registry
+ * testable slice stays on the cheap executor unless DIFFICULTY lifts it. Gap-closure
+ * §4.3 (2026-07-19): every difficulty floor that used to land the generator on the
+ * reasoner (design, unbacked-mechanical, hard/ambiguous, a "reasoner" need hint) now
+ * redirects straight to the oracle — the reasoner is judge-only, never a generator,
+ * so the solve ladder collapses to one hop above the conductor, no maybe-rung. Pure:
+ * no I/O — tiers resolve to concrete models downstream through model-registry
  * (tierModelRef), so nothing here hard-codes a model id.
  *
  * @sem domain=routing role=allocator
@@ -36,7 +40,8 @@ export type TestStrength = "testable" | "untestable"
 
 /**
  * Task difficulty (mirrors the arming judge's `hardness`) — a GENERATOR-tier
- * signal, orthogonal to coupling/consequence. `hard` floors the author at the reasoner.
+ * signal, orthogonal to coupling/consequence. `hard` floors the author at the oracle
+ * (the reasoner is judge-only, §4.3 — it never solves).
  *
  * @sem domain=routing role=type
  */
@@ -109,12 +114,14 @@ export interface SliceAllocationInput {
    * True when this slice's edit is backed by an upstream design slice's concrete
    * patch (the design-emits-the-patch contract): the slice transcribes, it does
    * not invent. An unbacked mechanical edit with no sound check is authored code
-   * with no spec and no safety net — it allocates to the reasoner, not the executor.
+   * with no spec and no safety net — it allocates to the oracle, not the executor
+   * (§4.3 — the reasoner never solves).
    */
   specBacked?: boolean
   /**
    * Task difficulty from the arming judge — a GENERATOR-tier lever (never the
-   * verifier). `hard` floors the author at the reasoner. Absent → no difficulty signal.
+   * verifier). `hard` floors the author at the oracle (§4.3 — the reasoner is
+   * judge-only). Absent → no difficulty signal.
    */
   hardness?: SliceHardness
   /**
@@ -183,10 +190,18 @@ function higherTier(a: EconTier, b: EconTier): EconTier {
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b
 }
 
-/** The tier one step cheaper than `tier`, or `tier` itself if already the floor. */
+/**
+ * The tier one step cheaper than `tier`, or `tier` itself if already the
+ * floor. §4.3: mirrors `escalateTier`'s up-direction skip — a round-down
+ * never lands on the judge-only reasoner rung either (evaluate()'s only
+ * caller could otherwise round an oracle-floored slice down onto it), so a
+ * step that would land there continues one more step to the executor.
+ */
 export function lowerTier(tier: EconTier): EconTier {
   const rank = TIER_RANK[tier]
-  return rank === 0 ? tier : TIER_BY_RANK[rank - 1]
+  if (rank === 0) return tier
+  const down = TIER_BY_RANK[rank - 1]
+  return down === "reasoner" ? "executor" : down
 }
 
 /**
@@ -196,8 +211,11 @@ export function lowerTier(tier: EconTier): EconTier {
  * a testable slice stays on the executor unless ambiguity/hardness lifts it (the
  * sound net can't catch a misinterpretation). `need` is the conductor's hint and
  * can raise the tier but not past the testable clamp — unless difficulty already
- * broke it. Returns a machine-readable `reasonCode` alongside the prose `reason`
- * trace so callers can log which factor decided the tier.
+ * broke it. Every generator path that would land on the reasoner (design,
+ * unbacked-mechanical, the difficulty floor, or a "reasoner" need hint) redirects
+ * to the oracle instead (§4.3 — the reasoner is judge-only, the solve ladder is
+ * one hop above the conductor). Returns a machine-readable `reasonCode` alongside
+ * the prose `reason` trace so callers can log which factor decided the tier.
  *
  * @sem domain=routing role=allocator
  */
@@ -236,18 +254,20 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
   let reasonCode: AllocationReasonCode
   if (sliceType === "design") {
     // SM5: design is insight-heavy — it exceeds the executor by construction and
-    // coupling never demotes it.
-    tier = "reasoner"
+    // coupling never demotes it. §4.3: the reasoner is judge-only now, so the
+    // insight-heavy floor lands straight on the oracle — one hop, no maybe-rung.
+    tier = "oracle"
     reasonCode = "design-insight"
-    notes.push("design slice → reasoner (insight-heavy)")
+    notes.push("design slice → oracle (insight-heavy; reasoner is judge-only)")
   } else if (!testable && sliceType === "mechanical" && input.specBacked !== true) {
     // An UNBACKED mechanical edit with no sound check: authoring code with neither a
     // design patch to transcribe nor a check to catch it — a capability (difficulty)
-    // need, not a consequence one. The reasoner authors it (spec-backed edits stay
-    // executor: transcription + QE is safe and cheap).
-    tier = "reasoner"
+    // need, not a consequence one. §4.3: the oracle authors it directly (spec-backed
+    // edits stay executor: transcription + QE is safe and cheap; the reasoner never
+    // solves).
+    tier = "oracle"
     reasonCode = "mechanical-unbacked"
-    notes.push("untestable mechanical without a design patch → reasoner authors the edit")
+    notes.push("untestable mechanical without a design patch → oracle authors the edit")
   } else {
     // Every remaining cell — INCLUDING high-coupling·untestable — starts on the cheap
     // executor. Coupling is CONSEQUENCE: it already raised the verifier to `judge`
@@ -272,14 +292,17 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
   //     an ambiguous spec is the one failure a green suite cannot catch
   //     (confident-wrong). `hard` needs reasoning depth the executor lacks.
   if (input.hardness === "hard" || input.ambiguity === "ambiguous") {
-    const floored = higherTier(tier, "reasoner")
+    // §4.3: the difficulty floor lands on the oracle directly — the reasoner is
+    // judge-only now, no longer an intermediate solve rung between the executor
+    // and the oracle.
+    const floored = higherTier(tier, "oracle")
     if (floored !== tier) {
       tier = floored
       reasonCode = "difficulty-floor"
       notes.push(
         input.ambiguity === "ambiguous"
-          ? "ambiguous spec → reasoner floor (a sound check can't catch a misinterpretation)"
-          : "hard task → reasoner floor (reasoning depth beyond the executor)",
+          ? "ambiguous spec → oracle floor (a sound check can't catch a misinterpretation)"
+          : "hard task → oracle floor (reasoning depth beyond the executor)",
       )
     }
   }
@@ -293,9 +316,16 @@ export function allocateSlice(input: SliceAllocationInput): SliceAllocation {
     if (testable && sliceType !== "design" && reasonCode !== "difficulty-floor") {
       notes.push(`need="${input.need}" ignored: testable slice is clamped to executor (sound-net invariant)`)
     } else {
-      tier = needTier
+      // §4.3: a "reasoner" need hint is honored as a request for more than the
+      // matrix floor, redirected to the one solve rung above conductor (oracle)
+      // — the reasoner is judge-only and never generates.
+      tier = needTier === "reasoner" ? "oracle" : needTier
       reasonCode = "need-hint"
-      notes.push(`need="${input.need}" raised the tier`)
+      notes.push(
+        needTier === "reasoner"
+          ? `need="${input.need}" raised the tier (reasoner is judge-only → oracle)`
+          : `need="${input.need}" raised the tier`,
+      )
     }
   }
 

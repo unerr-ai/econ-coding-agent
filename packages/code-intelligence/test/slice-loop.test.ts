@@ -539,18 +539,18 @@ describe("runSliceLoop — escalation brief carries the prior attempt's context"
 })
 
 // ---------------------------------------------------------------------------
-// Design slice → reasoner direct
+// Design slice → oracle direct (§4.3: the reasoner is judge-only)
 // ---------------------------------------------------------------------------
 
-describe("runSliceLoop — design slice routes to the reasoner directly", () => {
-  it("dispatches a design slice on the reasoner (no cheap-first hop for the irreducible-reasoning type)", async () => {
+describe("runSliceLoop — design slice routes to the oracle directly", () => {
+  it("dispatches a design slice on the oracle (no cheap-first hop for the irreducible-reasoning type)", async () => {
     const { dispatch, calls } = recordingDispatch()
     const slice: LoopSlice = { id: "design", prompt: "design the token-refresh interface", sliceType: "design" }
     // QE sampler agrees with the cheap output so the untestable design slice is accepted.
     const result = await runSliceLoop([slice], { dispatch, qeGenerate: async () => "cheap:design" })
 
-    expect(calls[0].tier).toBe("reasoner")
-    expect(result.outcomes[0].allocation.tier).toBe("reasoner")
+    expect(calls[0].tier).toBe("oracle")
+    expect(result.outcomes[0].allocation.tier).toBe("oracle")
     expect(result.outcomes[0].state).toBe("accepted")
   })
 })
@@ -694,9 +694,9 @@ describe("planWaves", () => {
 })
 
 describe("escalateTier", () => {
-  it("climbs one hop up the capability ladder and caps at the oracle", () => {
+  it("climbs one hop up the capability ladder and caps at the oracle — §4.3 collapses conductor straight to oracle, skipping the judge-only reasoner rung", () => {
     expect(escalateTier("executor")).toBe("conductor")
-    expect(escalateTier("conductor")).toBe("reasoner")
+    expect(escalateTier("conductor")).toBe("oracle")
     expect(escalateTier("reasoner")).toBe("oracle")
     expect(escalateTier("oracle")).toBe("oracle")
   })
@@ -1349,16 +1349,26 @@ describe("runSliceLoop — FSM table (sliceTransition drives squeeze/climb/settl
 // ---------------------------------------------------------------------------
 // Task #48 — posterior-uncertainty gate: a green sound-rung verdict on a
 // prior-flagged (ambiguous/hard) slice still earns ONE generator escalation
-// when the posterior signal reads high. Unflagged or confident slices accept
-// on green unchanged — the cost thesis never inverts.
+// when the posterior signal reads high AND a higher tier exists to escalate
+// to. Unflagged or confident slices accept on green unchanged — the cost
+// thesis never inverts. §4.3 (2026-07-19): allocateSlice now floors every
+// hardness="hard"/ambiguity="ambiguous" slice straight at the oracle — the
+// ladder's ceiling (allocation.ts's difficulty floor) — so
+// escalateTier(allocation.tier) is a same-tier no-op and the gate's own
+// `posteriorTargetTier !== allocation.tier` guard blocks the extra hop
+// structurally for every prior-flagged slice today. `posteriorEscalation`
+// itself (posterior-uncertainty.ts) is unchanged and still correct — it
+// simply has no rung left above the oracle to reach. The tests below assert
+// that observed, unchanged-accept behavior.
 // ---------------------------------------------------------------------------
 
 describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
-  // hardness:"hard" floors allocateSlice's generator tier at "reasoner"
-  // (allocation.ts's difficulty floor); no `snapshot` dep is injected so the
-  // mechanical round-down (evaluator.ts step 3) stays blocked (containment
-  // unavailable) and the tier holds at "reasoner" — escalateTier("reasoner")
-  // is "oracle", giving a clean, deterministic one-hop climb to assert on.
+  // hardness:"hard" floors allocateSlice's generator tier at "oracle" (§4.3
+  // — allocation.ts's difficulty floor lands every hard/ambiguous slice on
+  // the ladder's top rung directly). escalateTier("oracle") is "oracle", so
+  // the posterior-review hop's own target-tier guard never opens for this
+  // slice — it always accepts on a green cheap verdict, same as an
+  // unflagged one (see the tests below).
   const flaggedSlice: LoopSlice = {
     id: "flagged",
     prompt: "p",
@@ -1369,7 +1379,7 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     hardness: "hard",
   }
 
-  it("green + prior-flagged + high uncertainty (confidenceGenerate fallback) ⇒ exactly one extra generator escalation", async () => {
+  it("green + prior-flagged + high uncertainty ⇒ accepts unchanged post-§4.3 (already at the oracle ceiling, nothing higher to review at)", async () => {
     const { dispatch, calls } = recordingDispatch({
       onCheap: () => ({ text: "cheap patch", trajectory: { events: [] } }),
       onEscalated: (req) => ({ text: `reviewed:${req.tier}`, trajectory: { events: [] } }),
@@ -1377,23 +1387,23 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     const provenance: Array<{ fromTier: string; toTier: string; rungReason: string }> = []
     const result = await runSliceLoop([flaggedSlice], {
       dispatch,
-      runCommand: passRunner, // both the cheap attempt and the review re-verify green
-      confidenceGenerate: async () => 0.1, // low self-confidence → high uncertainty
+      runCommand: passRunner,
+      confidenceGenerate: async () => 0.1, // low self-confidence → high uncertainty; still a no-op post-§4.3
       onProvenance: (e) => provenance.push(e),
     })
 
     const outcome = result.outcomes[0]
-    expect(calls.map((c) => c.tier)).toEqual(["reasoner", "oracle"])
-    expect(calls.map((c) => c.escalated)).toEqual([false, true])
-    expect(outcome.attempts).toBe(2)
-    expect(outcome.state).toBe("escalated")
-    expect(outcome.output).toBe("reviewed:oracle")
-    const loud = provenance.find((p) => p.rungReason === "posterior-uncertain-review")
-    expect(loud).toBeDefined()
-    expect(loud).toMatchObject({ fromTier: "reasoner", toTier: "oracle" })
+    // §4.3: hardness="hard" floors allocateSlice's tier at "oracle" directly —
+    // escalateTier("oracle") === "oracle", so the posterior-review hop's own
+    // target-tier guard never opens; the cheap oracle attempt stands as-is.
+    expect(calls.map((c) => c.tier)).toEqual(["oracle"])
+    expect(outcome.attempts).toBe(1)
+    expect(outcome.state).toBe("accepted")
+    expect(outcome.output).toBe("cheap patch")
+    expect(provenance.some((p) => p.rungReason === "posterior-uncertain-review")).toBe(false)
   })
 
-  it("prefers a dispatch-supplied result.uncertainty over the confidenceGenerate fallback", async () => {
+  it("prefers a dispatch-supplied result.uncertainty over the confidenceGenerate fallback (still never called, even though the escalation itself is now a no-op post-§4.3)", async () => {
     const { dispatch, calls } = recordingDispatch({
       onCheap: () => ({
         text: "cheap patch",
@@ -1408,14 +1418,17 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
       runCommand: passRunner,
       confidenceGenerate: async () => {
         confidenceGenerateCalls += 1
-        return 0.99 // would NOT escalate if consulted — proves the fallback never ran
+        return 0.99
       },
     })
 
+    // §4.3: the escalation hop itself never opens (already at the oracle
+    // ceiling), so this only proves the dispatch-supplied uncertainty is
+    // still preferred over the fallback when the gate DOES read a signal.
     expect(confidenceGenerateCalls).toBe(0)
-    expect(calls.length).toBe(2)
-    expect(result.outcomes[0].attempts).toBe(2)
-    expect(result.outcomes[0].state).toBe("escalated")
+    expect(calls.length).toBe(1)
+    expect(result.outcomes[0].attempts).toBe(1)
+    expect(result.outcomes[0].state).toBe("accepted")
   })
 
   it("green + unflagged ⇒ accepts unchanged, even with a high-uncertainty confidenceGenerate", async () => {
@@ -1463,7 +1476,7 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     expect(outcome.state).toBe("accepted")
   })
 
-  it("falls back to the cheap accepted output when the escalation review itself fails re-verification", async () => {
+  it("§4.3: the review-then-fallback path itself is now unreachable for a hard/ambiguous slice — there's no higher tier for the review hop to fail at", async () => {
     let runs = 0
     const cheapPassesReviewFails = async (): Promise<CommandResult> => {
       runs += 1
@@ -1480,10 +1493,11 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     })
 
     const outcome = result.outcomes[0]
-    // Second dispatch DID happen (the one-shot review), but its re-verification
-    // rejected — never force-replace a proven-green result with one that failed.
-    expect(calls.length).toBe(2)
-    expect(outcome.attempts).toBe(2)
+    // No second dispatch: flaggedSlice already allocates at the oracle
+    // ceiling (§4.3), so the review hop's target-tier guard never opens —
+    // the cheap (and only) attempt's green verdict stands.
+    expect(calls.length).toBe(1)
+    expect(outcome.attempts).toBe(1)
     expect(outcome.state).toBe("accepted")
     expect(outcome.output).toBe("cheap patch")
   })
@@ -1507,6 +1521,73 @@ describe("runSliceLoop — posterior-uncertainty gate (task #48)", () => {
     expect(calls.length).toBe(1)
     expect(result.outcomes[0].attempts).toBe(1)
     expect(result.outcomes[0].state).toBe("accepted")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Gap-closure §4.3 — the oracle disable switch (SliceLoopDeps.oracleEnabled,
+// production reads ECON_ORACLE via resolveOracleTier). Degrade = conductor-only;
+// an unresolved slice settles loudly (onProvenance rungReason="oracle-disabled"
+// on the floor clamp), never a silent drop.
+// ---------------------------------------------------------------------------
+
+describe("runSliceLoop — gap-closure §4.3 oracle-off switch", () => {
+  it("downgrades an oracle-floored slice's initial dispatch to conductor when disabled, surfaced loudly via onProvenance", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const slice: LoopSlice = { id: "design", prompt: "design the token-refresh interface", sliceType: "design" }
+    const provenance: Array<{ sliceId: string; fromTier: string; toTier: string; rungReason: string }> = []
+    const result = await runSliceLoop([slice], { dispatch, oracleEnabled: false, onProvenance: (e) => provenance.push(e) })
+
+    expect(calls[0].tier).toBe("conductor")
+    expect(result.outcomes[0].allocation.tier).toBe("conductor")
+    // No sound spec / QE sampler injected ⇒ accepted-unverified (OL-9.5d) —
+    // loud (state "unverified"), never a silent drop.
+    expect(result.outcomes[0].state).toBe("unverified")
+    expect(
+      provenance.some((p) => p.rungReason === "oracle-disabled" && p.fromTier === "oracle" && p.toTier === "conductor"),
+    ).toBe(true)
+  })
+
+  it("leaves an oracle-floored slice unaffected when the switch is on (default, absent)", async () => {
+    const { dispatch, calls } = recordingDispatch()
+    const slice: LoopSlice = { id: "design", prompt: "design", sliceType: "design" }
+    const result = await runSliceLoop([slice], { dispatch, qeGenerate: async () => "cheap:design" })
+
+    expect(calls[0].tier).toBe("oracle")
+    expect(result.outcomes[0].state).toBe("accepted")
+  })
+
+  it("also blocks the posterior-uncertainty review hop from targeting a disabled oracle — a prior-flagged slice downgraded to conductor stays there", async () => {
+    const { dispatch, calls } = recordingDispatch({
+      onCheap: () => ({ text: "cheap patch", trajectory: { events: [] } }),
+      onEscalated: (req) => ({ text: `reviewed:${req.tier}`, trajectory: { events: [] } }),
+    })
+    const flaggedSlice: LoopSlice = {
+      id: "flagged",
+      prompt: "p",
+      sliceType: "mechanical",
+      coupling: "low",
+      testStrength: "testable",
+      verifyCommands: [{ kind: "typecheck", command: "tsc" }],
+      hardness: "hard",
+    }
+    const provenance: Array<{ rungReason: string }> = []
+    const result = await runSliceLoop([flaggedSlice], {
+      dispatch,
+      oracleEnabled: false,
+      runCommand: passRunner,
+      confidenceGenerate: async () => 0.1, // high uncertainty — would normally earn a review hop
+      onProvenance: (e) => provenance.push(e),
+    })
+
+    // allocation.tier downgrades oracle → conductor (oracle-disabled), but
+    // escalateTier("conductor") is "oracle" — without the oracleEnabled guard
+    // on the review hop's own target-tier check, this would sneak a second
+    // dispatch through to the disabled oracle. It must not.
+    expect(calls.map((c) => c.tier)).toEqual(["conductor"])
+    expect(result.outcomes[0].attempts).toBe(1)
+    expect(result.outcomes[0].state).toBe("accepted")
+    expect(provenance.some((p) => p.rungReason === "posterior-uncertain-review")).toBe(false)
   })
 })
 
