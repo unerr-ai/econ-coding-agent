@@ -6,13 +6,15 @@
 into one reference and removes the duplication between them (model catalog, footprint ladder,
 cost-per-1M table, aspirational-name caveat) by stating each fact once and cross-referencing it.
 
-> **Overview.** econ runs a small *team* of open-weight models, one per role: a cheap **Assistant**
-> (gpt-oss-20b) for high-volume chores, a capable everyday **Engineer** (Qwen3.7 Plus) that plans
-> and drives most turns, and a rarely-called **Expert** (GLM 5.2) for the hardest reasoning. The
-> evidence for these picks is the validated model catalog, KV-cache/context economics, and
-> fine-tuning research in Part I; the wiring, pricing, and self-host plan that turns that evidence
-> into a running system is Part II. **Honesty rule throughout: we *count* savings and *test-gate*
-> model picks from real usage — we don't assert or promise them.**
+> **Overview (2026-07-19).** econ runs a small team of models: **Conductor** (minimax-m3, everyday
+> planning agent), **Executor** (gpt-oss-120b, mechanical work, 1% spend), **Reasoner** (deepseek-v4-pro,
+> cross-family verifier—never solves), **Oracle** (z-ai/glm-5.2, hard-tail solver—pending frontier swap).
+> The registry (model-registry.ts) binds tiers to models; swapping a model is one line. Escalation is
+> deterministic and bounded: conductor → oracle only. The evidence for these picks is the validated
+> model catalog (Part I), live-500 forensics, and cost-per-tier accounting; the wiring and per-benchmark
+> binding profiles are in Part II and [gap-closure-plan.md §4](./gap-closure-plan.md#4-model-strategy--tiers-judges-and-the-reasoneroracle-question).
+> **Honesty rule throughout: we *count* savings from real usage and *test-gate* model picks — we don't
+> assert or promise them.**
 
 ---
 
@@ -172,42 +174,45 @@ Training recipe: [ProLong (arxiv 2410.02660)](https://arxiv.org/html/2410.02660v
 
 ### 1. The decision (what we are building with)
 
-| Role (plain name) | Model | What it does | Why it won |
+| Tier (slot name) | Model | What it does | Notes |
 |---|---|---|---|
-| **Assistant** (cheap, high-volume chores) | **gpt-oss-20b** (OpenAI, open-weight) | Opens files, runs commands, makes small edits — the simple repetitive work | Cheapest, reliable at following instructions, US-made, and uniquely fast on a plain CPU (see §6) |
-| **Engineer** (the everyday workhorse) | **Qwen3.7 Plus** (Alibaba) | Plans the job, decides each step, does most of the real work, holds the working context | Genuinely capable + very cheap + a well-rounded thinker (better at *planning* than code-only models) |
-| **Expert** (rare, hardest problems) | **GLM 5.2** (Z.ai) | Called only for the genuinely hard reasoning the engineer can't crack | Highest score of any open model on the fairest real-world coding test today |
+| **Conductor** (the everyday workhorse) | **minimax/minimax-m3** (MiniMax, open-weight MoE) | Plans the job, decides each step, does most of the real work; drives every turn. Default agent tier for everyday coding. | Reasoning-tuned, efficient MoE architecture (456B / 45.9B active); native 1M context; ~$0.06 cached-input rate on our gateway. |
+| **Executor** (cheap, mechanical slices) | **openai/gpt-oss-120b** (OpenAI, open-weight MoE) | Opens files, runs commands, makes small edits — the mechanical work that doesn't need planning. | 120B MoE (~5B active); reliable instruction-following; only 1% of overall spend on live runs. |
+| **Reasoner** (cross-model judge, not a solve rung) | **deepseek/deepseek-v4-pro** (DeepSeek, open-weight MoE) | Verifies finished work for hub-design, repro-fidelity, and cross-model judgment — **never solves turns**. Cross-family from oracle (independence invariant). | Distinct from oracle (de-correlated verifier); gates the hard tail; native 1M context; reasoning-enabled. [See gap-closure-plan.md §4.3](./gap-closure-plan.md#43-one-solver--one-judge--not-two-solve-rungs-answers-the-reasoneroracle-question) for the solve-rung collapse to conductor→oracle. |
+| **Oracle** (rare, hard-tail solver) | **z-ai/glm-5.2** (Z.ai, closed) | Called only on the hard tail when conductor can't convert — 47% of spend on live Verified runs, with decision pending frontier swap [§4.4](./gap-closure-plan.md#44-the-oracle-swap-the-one-model-change-the-data-demands). | Reasoning-enabled; held open for per-benchmark binding profiles (Opus 4.8 for Verified, Grok-4.x A/B for Terminal-Bench — see gap-closure-plan.md §4.4). |
+| **Judge** (optional, OFF-able) | **ECON_VERIFIER_JUDGE** → defaults to reasoner tier | Settable via config; OFF disables all LLM judgement (gates + deterministic-only verification). | `ECON_VERIFIER_JUDGE=off` ∨ `ECON_VERIFIER_JUDGE=reasoner` ∨ another tier. Never solves; only verifies on narrow verdicts. |
 
-*(Recall the Part I warning: "GLM 5.2" and "Qwen3.7 Plus" are the aspirational vendor-tier names
-used in planning; the currently-verifiable equivalents are GLM-4.5 and Qwen3-Coder. The self-host
-picks below use the real, catalog-confirmed names.)*
+**Self-host backups (phase 2).** We reserve these as alternative bindings for the sovereign air-gapped path and tight-resource environments:
 
-**Backups we will keep wired in the test harness:**
+- Executor → **gpt-oss-20b** (tighter VRAM, slower)
+- Conductor (self-host, see phase-2 ladder) → **gpt-oss-120b** on 1×H100 · **Qwen3-Coder-30B-A3B** on 1×L40S · **GLM-4.5-Air** (coding alt)
+- Oracle (air-gapped sovereign path only) → **Qwen3-480B** or **GLM-4.5** (open-weight equivalents)
 
-- Assistant → **Nemotron Nano 9B V2** (NVIDIA) or **Phi-4-mini** (smallest, for tight-RAM machines)
-- Engineer (self-host, see §4 ladder) → **gpt-oss-120b** on 1×H100 (recommended sweet spot — MoE
-  ~5B active) · **Qwen3-Coder-30B-A3B-Instruct** on 1×L40S (cheapest) · **GLM-4.5-Air** (coding alt)
-- Expert → **DeepSeek V4-Pro** (nearly as strong, very permissive licence for self-hosting —
-  though per Part I, "DeepSeek V4" itself is on the unverified list; the catalog-verified relative
-  is DeepSeek-V3)
-
-### Roles → tiers → models
+### Tier slots → current models
 
 ```
-   ROLE                TIER SLOT          CHOSEN MODEL
- ┌───────────┐        ┌───────────┐      ┌──────────────────────┐
- │ Assistant │ ─────▶ │ executor  │ ───▶ │ gpt-oss-20b           │
- └───────────┘        └───────────┘      └──────────────────────┘
- ┌───────────┐        ┌───────────┐      ┌──────────────────────┐
- │ Engineer  │ ─────▶ │ conductor │ ───▶ │ Qwen3.7 Plus          │
- └───────────┘        └───────────┘      └──────────────────────┘
-                       ┌───────────┐      ┌──────────────────────┐
-      (none)   ─────▶ │ reasoner  │ ───▶ │ GLM 5.2 (merged with │
-                       └───────────┘      │ oracle — see below)  │
- ┌───────────┐        ┌───────────┐      └──────────────────────┘
- │ Expert    │ ─────▶ │ oracle    │ ───▶ ┌──────────────────────┐
- └───────────┘        └───────────┘      │ GLM 5.2               │
-                                          └──────────────────────┘
+   TIER SLOT           CURRENT MODEL                  ROLE
+ ┌───────────┐        ┌────────────────────┐      ┌────────────────────────┐
+ │ conductor │ ───────┤ minimax/minimax-m3 │───── │ everyday planning + ops │
+ └───────────┘        └────────────────────┘      └────────────────────────┘
+ ┌───────────┐        ┌────────────────────┐      ┌────────────────────────┐
+ │ executor  │ ───────┤ openai/gpt-oss-120b│───── │ mechanical slice work  │
+ └───────────┘        └────────────────────┘      └────────────────────────┘
+ ┌───────────┐        ┌────────────────────┐      ┌────────────────────────┐
+ │ reasoner  │ ───────┤ deepseek-v4-pro    │───── │ verification & judgment│
+ └───────────┘        └────────────────────┘      │ (not solve rungs)      │
+                                                   └────────────────────────┘
+ ┌───────────┐        ┌────────────────────┐      ┌────────────────────────┐
+ │ oracle    │ ───────┤ z-ai/glm-5.2 *     │───── │ hard-tail solver       │
+ └───────────┘        └────────────────────┘      │ (pending frontier swap)│
+                                                   └────────────────────────┘
+ ┌───────────┐        ┌────────────────────┐      ┌────────────────────────┐
+ │ judge     │ ───────┤ ECON_VERIFIER_JUDGE│───── │ verdict scaffolding    │
+ └───────────┘        └────────────────────┘      │ (defaults to reasoner) │
+                           (* config)              └────────────────────────┘
+
+ Escalation ladder (deterministic, 247cf53b3):
+   conductor ──> oracle  (signal-gated, one hop, 12-step compiled brief cap)
 ```
 
 ### 2. Cost per 1 million tokens
@@ -216,69 +221,73 @@ picks below use the real, catalog-confirmed names.)*
 **input** (text you send in), **input-cached** (text the model already saw recently — far
 cheaper), and **output** (text it writes back, always the most expensive).
 
-| Role | Model | Input | Input (cached) | Output |
+| Tier | Model | Input | Input (cached) | Output |
 |---|---|---|---|---|
-| Assistant | **gpt-oss-20b** | $0.07 | $0.04 | $0.30 |
-| Engineer | **Qwen3.7 Plus** | $0.40 | $0.08 | $1.60 |
-| Expert | **GLM 5.2** | $1.40 | $0.14 | $4.40 |
+| Conductor | **minimax-m3** | ~$0.36 | ~$0.06 | ~$1.45 |
+| Executor | **gpt-oss-120b** | ~$0.15 | ~$0.09 | ~$0.60 |
+| Reasoner | **deepseek-v4-pro** | ~$1.74 | ~$0.15 | ~$5.22 |
+| Oracle | **glm-5.2** | ~$1.40 | ~$0.14 | ~$4.40 |
+| Judge | *same as reasoner (by default)* | — | — | — |
 
-*(Prices are hosted pay-as-you-go rates, June 2026. Self-hosting in India later replaces these
-with the cost of electricity + hardware — usually cheaper still, and the whole point of the
-product.)*
+*(Prices are hosted rates via Fireworks/OpenRouter, July 2026. Self-hosting in India phase-2 replaces these
+with the cost of electricity + hardware — usually cheaper still. Live blended cost (live-500, Verified head):
+conductor 52% / oracle 47% / executor 1% of spend; mean $0.36–$0.46 per instance; oracle 37% of its spend
+sits on unresolved instances.)*
 
-**What the team actually costs to run.** Cost is *tokens × price*, so the bill depends on how the
-work is split across the three. In a typical job the cheap engineer carries the bulk of the words,
-the assistant's share is almost free, and the expensive expert is touched rarely:
+**What the team costs to run.** The work splits across five tier slots in the live harness, but only three 
+carry solve work: conductor drives ~90% of instances solo (no escalation), oracle handles the hard 15–20% tail.
+Executor adds minor overhead. Reasoner and judge are pure verification — no turn-starting. Cost depends on
+escalation rate: mini-10 (9/10 conductor-only) blends to **~$0.20–0.28 / 1M**; Verified head (18/40 escalated,
+oracle-heavy) blends to **~$0.40–0.55 / 1M**. 
 
-| Tier | Rough share of all tokens | Effective price/1M | Contribution |
-|---|---|---|---|
-| Engineer (carries the context) | ~65% | ~$0.30 (mostly cached input) | ~$0.20 |
-| Assistant (tiny prompts) | ~25% | ~$0.15 | ~$0.04 |
-| Expert (small, output-heavy) | ~10% | ~$3.00 | ~$0.30 |
-| **Blended total** | | | **~$0.55 / 1M tokens** |
-
-Against a top frontier model used for *everything* (blended **~$10–15 / 1M**), that is roughly a
-**10–20× reduction** — and it grows once the cheap tiers are self-hosted. The single biggest lever
-is **how often the expert is called**: every expert call is the dominant line item, so the
-router's job is to call it rarely and only when it pays off.
+**One-lever economy.** The single biggest cost driver is oracle escalation rate. The router's job is to
+escalate rarely and only when deterministic gates (repro, regression, risk thresholds) open the path — never
+on advisory signals.
 
 > **Honesty rule (carried from the architecture).** We *count* savings from real usage; we don't
 > *promise* them. The blended number above is an estimate from representative token shares — the
 > end-of-turn receipt reports the real figure per job.
 
-### 3. From roles to tiers — how econ actually wires this
+### 3. From tiers to models — the live wiring
 
-**In plain terms.** The three roles above are *jobs*. econ's code routes work to four *tier
-slots* — `executor`, `conductor`, `reasoner`, `oracle`. Three of them are the three roles; the
-fourth (`reasoner`) is an optional "think harder" rung between the everyday Engineer and the rare
-Expert. For now we point that rung at the **same model as the Expert**, so we run exactly **three
-distinct models**, not four. We keep the extra slot so a cheaper thinking model can slide into it
-later without re-plumbing anything.
+**In code.** econ routes work to five *tier slots* with distinct roles: `conductor` (everyday),
+`executor` (cheap slices), `reasoner` (verifier, never solves), `oracle` (hard tail), `judge`
+(optional verdict). The registry (`model-registry.ts`, `ECON_TIER_BINDING`) is the single source
+of truth binding each tier to a concrete model — swapping a model is one line.
 
-**Under the hood.**
-
-Tier → model (every model is reached via OpenRouter, which routes to an upstream — incl.
-Fireworks — automatically):
+**Tier → model binding (live registry, 2026-07-19):**
 
 ```
-role        tier slot   model (OpenRouter slug)         notes
-─────────   ─────────   ─────────────────────────────   ─────────────────────────────────
-Assistant   executor    openrouter/openai/gpt-oss-20b   also small_model (housekeeping)
-Engineer    conductor   openrouter/qwen/qwen3.7-plus    default agent — drives every turn
-(none)      reasoner    openrouter/z-ai/glm-5.2         merged → same model as oracle
-Expert      oracle      openrouter/z-ai/glm-5.2         rare: high-risk turns / hard steps
+tier          model (litellm provider slug)              role
+─────────     ──────────────────────────────────────────   ─────────────────────────────
+conductor     deepseek/deepseek-v4-flash  OR  minimax/minimax-m3   default agent—every turn
+executor      openai/gpt-oss-120b                           mechanical slices (1% spend)
+reasoner      deepseek/deepseek-v4-pro                      verification layer—no solves
+oracle        z-ai/glm-5.2  (pending→Opus/Grok swap)       hard-tail solver only
+judge         ECON_VERIFIER_JUDGE (→reasoner default)      verdict scaffolding; OFF-able
 ```
 
-Escalation ladder (risk-escalation router, S3.2/S3.7):
+**Escalation (deterministic gate, 247cf53b3):**
 
 ```
-normal turn ......... conductor  (Qwen3.7 Plus)
-risk > 70 ........... oracle     (GLM 5.2)
-hardStep = true ..... reasoner   (GLM 5.2)  →  oracle on retry (also GLM 5.2)
+normal instance ................... conductor (minimax-m3)
+signal-gated escalation (rare) ..... oracle (glm-5.2, or bound frontier model)
+  (triggers: `probe_gate_exhausted`, `repro_unresolved`, 2× hub-bounce, deterministic risk)
+  
+judge verdict ..................... reasoner (cross-family from oracle)
+  (seam: hub-design-judge, repro-fidelity-judge, cross-model verifier)
 ```
 
-Because `reasoner` and `oracle` resolve to the same model, a hard step pays Expert rates
-immediately. That is acceptable for now: `hardStep` is not yet wired into the live loop, and a
+**Slot-merge precedent:** reasoner and oracle currently bind different models (de-correlated, per
+§4.3). If a future cheaper thinking model exists, the reasoner slot re-binds without re-plumbing,
+because it's a slot not a hard-coded string.
+
+Per-benchmark oracle binding (in-build, gap-closure-plan.md §4.4): oracle defaults to glm-5.2 (live
+evidence-backed, open-weight path); SWE-bench Verified/Pro pending Opus 4.8 swap (cost-neutral with
+caching, better tail reach); Terminal-Bench A/B Grok-4.x vs GPT-5.5 on the fail-replay set.
+
+**Judge disable switch:** Set `ECON_VERIFIER_JUDGE=off` to run deterministic gates only (no LLM verdicts)
+—s not yet wired into the live loop, and a
 genuinely hard step deserves the strongest model anyway. The merge is therefore behaviourally a
 no-op today — it just keeps every tier resolving to a real model (a dropped tier would fall back
 to the *cheap* conductor, which is wrong for a hard step).
@@ -296,77 +305,69 @@ upstream, which includes Fireworks. To *force* Fireworks specifically, add provi
 change **one model id** in the two files above (and the matching `region.test.ts` assertion) — no
 type, router, or tier-count changes.
 
-### 4. The middle layer, hosted vs self-host (the conductor tier)
+### 4. Tier architecture — executor, conductor, oracle (hosted today, self-host phase 2)
 
-**The point most people miss.** The conductor is the *middle layer* between the cheap Assistant
-(gpt-oss-20b) and the rare Expert (GLM). Today it runs on a **hosted API** (a "Qwen-Plus"-class
-endpoint via OpenRouter). That is fine for Phase 0 — but per Part I, **"Qwen-Plus" is a closed,
-API-only tier and can never be self-hosted.** So the moment we self-host in India (Phase 1,
-[TOKEN_ECONOMICS.md §10](../strategy/economics.md)), the middle layer swaps to a **real
-open model** — and it does **not** have to fit one L40S.
+**Live wiring (hosted).** The conductor (minimax-m3, everyday planning) runs on **hosted API** via
+our Fireworks/LiteLLM gateway today (phase 1). The executor (gpt-oss-120b, mechanical work) and
+oracle (glm-5.2, hard-tail solver) also run hosted. Phase 2 (India self-host) swaps conductor
+and executor to real open-weight models on our own machines — executor picks from the ladder below.
 
-**Don't cap the middle tier at an L40S.** The right frame is a *footprint ladder*: pick the box
-that buys the quality the middle layer needs, because — per Part I's serving-cost fact —
-**serving cost tracks a MoE's *active* params, not its total size.** A 100B+ MoE with low active
-count serves nearly as cheaply per token as a 30B while being materially stronger — so "bigger
-box" ≠ "much more expensive per token." Rungs, cheapest first:
+**Executor self-host ladder (phase 2).** When self-hosting, pick the box that fits the executor's
+capacity need. Per Part I's serving-cost fact: **cost tracks active params, not total size.**
+A 100B+ MoE with low active count serves nearly as cheaply as a 30B while being materially
+stronger. Rungs, cheapest first:
 
-| Rung | Box | Self-host middle-tier pick | Type | Why this rung |
+| Rung | Box | Executor tier pick (phase 2) | Type | Active/serving cost |
 |---|---|---|---|---|
-| **A — floor** | 1×L40S 48 GB | **Qwen3-Coder-30B-A3B-Instruct** | MoE, 3.3B active | Coder-tuned; serves at ~3B *speed* (≈ gpt-oss-20b cost). Cheapest viable middle. |
-| | | **Qwen2.5-Coder-32B** / **Qwen3-32B** (dense fallbacks) | Dense 32B | Predictable latency / stronger planner; tighter context |
-| **B — sweet spot** ✅ | 1×H100 80 GB | **gpt-oss-120b** | MoE, ~5.1B active | Same family as the executor (shared tooling, Apache, US-origin hedge); ~5B active = serves almost as cheap as a 30B but a real quality jump. **Recommended once we allow 1×H100.** |
-| | | **GLM-4.5-Air** | MoE, ~12B active (~106B total) | Coding-specialist alternative on the same box; smaller sibling of the GLM oracle → consistent behaviour |
-| **C — upper-middle** | 2×H100 | **Qwen3-235B-A22B** / dense **Qwen2.5-72B**, **Llama-3.3-70B** | MoE 22B active / dense 70B | Closest to oracle quality while staying off the 8×H100 tier; use only if B leaves a real gap |
+| **A — floor** | 1×L40S 48 GB | **Qwen3-Coder-30B-A3B-Instruct** | MoE, 3.3B active | Coder-tuned; fastest (~3B *speed*); cheapest $/token. Fallback for tight resources. |
+| | | **Qwen2.5-Coder-32B** (dense fallback) | Dense 32B | Predictable latency; shorter context; strong planner. |
+| **B — recommended** ✅ | 1×H100 80 GB | **gpt-oss-120b** | MoE, ~5.1B active | **Live phase-1 executor.** ~5B active = serves almost as cheap as 30B, real quality step up. Same family, shared tooling (Apache, US-origin hedge). Recommended phase-2 pick. |
+| | | **GLM-4.5-Air** | MoE, ~12B active (106B total) | Coding-specialist alternative; smaller oracle-family sibling → consistent tuning. |
+| **C — upper** | 2×H100 | **Qwen3-235B-A22B** / dense **Qwen2.5-72B** | MoE 22B active / dense 70B | Closest to oracle quality without hitting 8×H100; use only if B shows a gap. |
 
-(Footprint figures for these picks are the same as the Part I catalog — restated here only as the
-ladder's box-selection frame, not duplicated in full.)
+Rung B (gpt-oss-120b) is the live phase-1 pick and recommended phase-2 pick. Keep Rung A as a
+tight-resource fallback. Don't use Rung C unless tests show B can't carry the workload — the
+oracle tier (8×H100-scale Sonnet-class: GLM-480B, DeepSeek-V3, Qwen3-Coder-480B) handles
+rare hard problems, not everyday work.
 
-**Recommendation with the L40S cap lifted: gpt-oss-120b on 1×H100 (rung B).** Its ~5B active means
-throughput — and therefore $/1M — stays close to the 30B floor, so we buy a genuine step up in
-capability at little marginal serving cost, and it shares the gpt-oss executor's tooling/licence.
-Keep **Qwen3-Coder-30B-A3B** (rung A) as the low-cost variant for credit-lean months, and reach
-for **rung C** only if the test gate shows B can't carry the everyday load.
+### 5. Why a layered team of models, not one model
 
-Note the ceiling is unchanged: the open models that reach *Sonnet-class* coding (GLM large-MoE,
-DeepSeek-V3-class, Qwen3-Coder-480B, Kimi K2) are 8×H100-scale — that is the **Expert/oracle**
-tier, not the middle layer. Sonnet-class quality is bought only on the rare oracle call; the
-middle layer just has to be a strong, cheap everyday coder. Final pick still runs through the §8
-test gate.
+The single biggest cost sink in today's coding tools: paying Claude Opus (or the top frontier model)
+to open files and fix typos — like paying a senior engineer to do data entry. econ's savings come
+from one move: **route each task to the cheapest model that can do it well.**
 
-### 5. Why a team of models, not one
+The architecture splits work by *decision load*, not by "easy" vs "hard" — because different jobs
+reward different strengths:
 
-Paying the single best model to open files and fix typos is like paying a senior engineer to do
-data entry — it's where today's coding tools quietly burn most of their money. econ's whole
-saving comes from one move: **give each task to the cheapest model that can do it well.**
+| Tier | The job | What it needs | What it does NOT need |
+|---|---|---|---|
+| **Executor** (1% spend) | Mechanical code transforms, opens files, runs commands | Speed, reliability at following exact instructions, low cost | Deep reasoning — routine chores |
+| **Conductor** (52% spend) | Planning, deciding each step, holding working context across turns | Solid all-round judgement; planning skill; readable output; affordable | To be the smartest model — everyday work, not rare hard cases |
+| **Reasoner/Judge** (verification only) | Cross-model verification of finished work; catching self-preference bias | Different model family from solver; structured judgment; reliability | To solve turns — judges verify narrow verdicts only |
+| **Oracle** (47% spend, hard tail) | Highest-tier reasoning on the genuinely hard instances that conductor can't convert | Top-tier capability on the rare problems worth the spend | Speed or cheapness — it's used rarely and only when signals justify it |
 
-So the real question was never "which one model is best." It was "who is best for each of the
-three jobs?" — and the answer is three different models, because each job rewards a different
-strength.
+A key, non-obvious point that shaped the picks: the conductor's job is **thinking and deciding**,
+not just typing code. A well-rounded generalist that happens to excel at code beats a narrow
+code-only specialist, because it understands the problem holistically (see §5.1).
 
-| The job | What it really needs | What it does NOT need |
-|---|---|---|
-| **Assistant** | Speed, low cost, reliably following exact instructions | Deep cleverness — it's doing simple chores |
-| **Engineer** | Solid all-round judgement; ability to plan and keep track of a big task; affordable | To be the smartest model on Earth |
-| **Expert** | Top-tier reasoning on genuinely hard problems | To be cheap or fast — it's used rarely |
+**Executor — gpt-oss-120b (live: via hosted gateway; phase 2: self-host rung B).** 120B MoE
+(~5.1B active), strong at tool-using, reliable instruction-follower; US-origin (Apache license);
+shares executor ecosystem with the 20b backup. Context: 131K.
 
-A key, non-obvious point that shaped the picks: the engineer's job is **thinking and deciding**,
-not just typing code. A well-rounded model that "happens to be good at code" is a *better*
-engineer than a narrow code-only model, because it understands the problem better (see §5.1).
+**Conductor — minimax/minimax-m3 (live: hosted via Fireworks; phase 2: self-host rung TBD).** Reasoning-tuned
+MoE (456B total / 45.9B active), native 1M context. Drives every turn; cached-input rate ~$0.06 is
+the leverage that makes prefix-caching economics work — on live-500 runs it carried 52% of spend
+at only 1.63 blended $/Mtok.
 
-**Assistant — gpt-oss-20b.** Cheapest serious option, made in the US, very good at following
-instructions exactly, runs on an ordinary CPU (only ~3.6B of it works per word — see §6), reads up
-to ~131,000 tokens at once.
+**Reasoner — deepseek/deepseek-v4-pro (live: hosted; cross-family from oracle by design).** Hybrid
+reasoning model; 1M context; never escalates turns, only verifies finished work via deterministic
+judges (hub-design, repro-fidelity, cross-model verifier). De-correlated from oracle (per §4.3).
 
-**Engineer — Qwen3.7 Plus.** Capable at real coding work at a fraction of top-model cost, reads up
-to ~1 million tokens at once, a well-rounded thinker (matches the planning-and-deciding role), and
-its cached-input price is 5× cheaper than fresh input ($0.08 vs $0.40) — and because it drives turn
-after turn, most of its re-read context bills at that cheap cached rate.
-
-**Expert — GLM 5.2.** On SWE-bench Pro it scores the highest of any open model — **62.1** — ahead
-of GPT-5.5 and just behind Claude Opus 4.8. Excellent at long, hard reasoning and tool use — the
-only things worth calling the expert for. Called rarely, so its higher price barely moves the
-total bill while lifting the quality ceiling a lot.
+**Oracle — z-ai/glm-5.2 (open-weight, live; pending → Opus 4.8 for Verified, Grok-4.x A/B for TB).**
+Called only when deterministic escalation signals fire (risk thresholds, unresolved repro, probe
+exhausted). On live-500 Verified head: 47% of spend, 45% of instances. 37% of oracle spend sat on
+unresolved instances (gap-closure-plan.md §4.1); the oracle-swap decision (§4.4) addresses tail
+conversion.
 
 #### 5.1 "Are these models trained for coding?" — the generalist vs specialist point
 
@@ -379,27 +380,31 @@ total bill while lifting the quality ceiling a lot.
 - So we use **general models for the engineer and expert** (thinking roles), and keep the
   **code-only specialists for the assistant's mechanical code transforms** (typing roles).
 
-### 6. Running the assistant on a plain CPU (no graphics card)
+### 6. CPU-first serving — MoE architecture as leverage
 
-We specifically wanted the cheap assistant to run on a CPU. The key fact that decides this:
+When self-hosting phase 2, executor candidates trade off VRAM (total params held resident) vs
+throughput (active params per token). The key fact:
 
-> **On a CPU, speed depends on how much of the model is read *per word* — and the bottleneck is
-> memory speed, not the number of cores.**
+> **On a CPU, speed depends on how much of the model is read *per word* — bottleneck is memory
+> bandwidth, not core count.** A large MoE reads only active params per word, so a big-MoE with
+> low active count can run as fast as a small dense model while being substantially stronger.
 
-gpt-oss-20b is "20 billion" in total, but **only ~3.6 billion actually work on each word** (a
-"mixture of experts" — only a few specialists show up per task; see the Part I catalog). A normal
-model uses *all* its size every word. So per word:
+Example: gpt-oss-20b is "20 billion" total but **only ~3.6 billion actually work on each word**
+(mixture-of-experts architecture; see Part I catalog). A dense model uses *all* its size per word.
+So per-word compute for executor candidates:
 
-| Model | Works per word | Memory to hold it | Relative CPU speed | Capability |
+| Model | Works/word | Total VRAM | CPU throughput | Capability |
 |---|---|---|---|---|
-| Phi-4-mini | 3.8B (all) | ~3 GB | Fast | Lowest |
-| **gpt-oss-20b** | **3.6B of 21B** | **~16 GB** | **Fast (≈ Phi-4-mini)** | **Highest of these** |
+| Phi-4-mini | 3.8B (all) | ~3 GB | Fast | Lower |
+| **gpt-oss-20b** | **3.6B of 21B** | **~16 GB** | **Fast (≈ Phi)** | **Strong** |
+| **gpt-oss-120b** | **~5.1B of 120B** | **~63 GB (MXFP4)** | **~5% slower** | **Much stronger** |
 | Nemotron 9B | 9B (all) | ~7 GB | ~2× slower | Middle |
 | Qwen 14B | 14B (all) | ~9 GB | ~3–4× slower | High but slow |
 
-**Conclusion: gpt-oss-20b is the best CPU performer** — it runs at a small model's *speed* while
-delivering a big model's *quality*. Its only cost is needing ~16 GB of RAM sitting ready, which is
-the cheap resource to add.
+**Conclusion:** MoE executors (gpt-oss-20b / 120b, Qwen3-Coder-30B, DeepSeek-family) run at a small
+model's *speed* while delivering substantially stronger *capability*. The tradeoff is needing the
+total VRAM for the weights. This is *leverage* — on phase 2 self-host with a 1×H100, the executor
+(rung B: gpt-oss-120b) gains quality while staying competitive in $/token vs smaller alternatives.
 
 **How to set up the CPU optimally** (where to spend a hardware budget):
 1. **Buy memory *bandwidth*, not cores.** A server chip (8–12 memory channels) is **4–6× faster**
