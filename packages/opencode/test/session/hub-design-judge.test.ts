@@ -161,13 +161,14 @@ describe("runHubDesignJudge", () => {
     expect(result.rawHead?.length).toBe(200)
   })
 
-  test("a thrown completion degrades to DEGRADED_HUB_DESIGN with no rawHead", async () => {
+  test("a thrown completion degrades to DEGRADED_HUB_DESIGN with rawHead carrying the thrown error", async () => {
     const complete: HubDesignComplete = async () => {
       throw new Error("provider unavailable")
     }
     const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites, complete })
     expect(result.verdict).toEqual(DEGRADED_HUB_DESIGN)
-    expect(result.rawHead).toBeUndefined()
+    expect(result.rawHead).toStartWith("threw: ")
+    expect(result.rawHead).toContain("provider unavailable")
   })
 
   test("the completion request carries the issue text, bounced files, and definition sites", async () => {

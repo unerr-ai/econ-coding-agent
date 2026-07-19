@@ -212,8 +212,10 @@ export function parseHubDesignResponse(raw: string): HubDesignVerdict | null {
  * Run the hub-design judge: ONE forced-JSON completion deciding the
  * root-most fix site for a hub-shopping turn — no retry, this fires at
  * most once per turn (the caller enforces that). A thrown `complete`
- * degrades to `DEGRADED_HUB_DESIGN` with no `rawHead` (there is no
- * completion text to sample); a parse failure, a verdict whose `file` is
+ * degrades to `DEGRADED_HUB_DESIGN` WITH `rawHead` set to the thrown
+ * error's string form, prefixed `"threw: "` and capped at 180 characters
+ * (there is no completion text to sample, but the thrown error itself is
+ * evidence of why); a parse failure, a verdict whose `file` is
  * not even path-like (no separator or dot — e.g. a hedged "unknown"), OR a
  * well-formed verdict whose `file` names none of the candidate
  * `definitionSites` (checked via `pathsRefer`, when the list is non-empty)
@@ -253,8 +255,8 @@ export async function runHubDesignJudge(
         witnesses,
       }),
     })
-  } catch {
-    return { verdict: DEGRADED_HUB_DESIGN }
+  } catch (err) {
+    return { verdict: DEGRADED_HUB_DESIGN, rawHead: "threw: " + String(err).slice(0, 180) }
   }
   const verdict = parseHubDesignResponse(raw)
   if (!verdict) return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }

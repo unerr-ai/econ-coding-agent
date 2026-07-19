@@ -978,6 +978,10 @@ export const layer = Layer.effect(
       }
     })
 
+    // O-J2: hang bound for the hub-design judge's completion — sized for a full
+    // reasoner-tier reasoning pass (minutes, not the 12s turn-read extraction cap).
+    const HUB_DESIGN_JUDGE_TIMEOUT_MS = 180_000
+
     /**
      * Wave 7 — the hub-design judge's ONE dispatch: a tool-free,
      * temperature-0, forced-JSON completion on the reasoner tier (a
@@ -995,7 +999,16 @@ export const layer = Layer.effect(
      * last-balanced-JSON scan lands on the model's actual final answer
      * rather than a stray brace inside its reasoning tail. `rawHead`
      * threads through so a degrade still carries evidence of what the judge
-     * said.
+     * said. O-J2: two live replays still logged `judge-degraded` — one a
+     * `rawHead` of truncated reasoning prose (the 2500-token budget cut the
+     * response before the JSON), one `rawHead=undefined` (the completion
+     * threw with an unbounded wait and no timeout). Raised further to 4096
+     * (parity with the repro-fidelity dispatch on the same tier, which
+     * reliably reaches its verdict at that budget) and bounded with a
+     * judge-scale abort timeout — the reasoner tier spends most of its
+     * budget reasoning before the JSON, so the 12s turn-read cap would
+     * abort near-every call; this bound exists only to turn a true hang
+     * into a degrade instead of blocking the turn.
      *
      * @sem domain=routing role=hub-design-judge
      */
@@ -1041,8 +1054,9 @@ export const layer = Layer.effect(
           model: language,
           system,
           prompt: user,
-          maxOutputTokens: 2500,
+          maxOutputTokens: 4096,
           temperature: 0,
+          abortSignal: AbortSignal.timeout(HUB_DESIGN_JUDGE_TIMEOUT_MS),
           providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
         })
         return [out.reasoningText ?? "", out.text ?? ""].filter(Boolean).join("\n")
