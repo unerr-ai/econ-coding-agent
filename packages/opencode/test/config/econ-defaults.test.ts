@@ -126,7 +126,11 @@ describe("econDefaultConfig vs opencode.json (drift guard — one source of trut
   // Model.cost.cache at load. cache_write is asserted as 0 (Fireworks bills no separate
   // cache-write price), NOT ECON_COST_MATRIX's cacheWrite field (a BYOK-path accounting stand-in).
   it("each provider model's cost matches ECON_COST_MATRIX in ConfigV1's flat shape (cache_write pinned to 0 per the serverless rate card)", () => {
+    // gap-closure-plan §4.4: ECON_COST_MATRIX also carries the direct-to-Anthropic frontier-patch
+    // oracle profile (claude-opus-4-8, providerID "anthropic"), which econDefaultConfig() does not
+    // mirror into provider.litellm.models by design — scope this loop to litellm-provider keys.
     for (const [key, rate] of Object.entries(ECON_COST_MATRIX)) {
+      if (ECON_MODELS[key]?.providerID !== "litellm") continue
       const entry = (defaults.provider!.litellm.models as any)[key]
       expect(entry, `provider model "${key}" must be declared`).toBeDefined()
       expect(entry.cost).toEqual({
@@ -150,7 +154,10 @@ describe("econDefaultConfig vs opencode.json (drift guard — one source of trut
       JSON.parse(JSON.stringify(econDefaultConfig())),
       "econ-defaults.test",
     ) as any
+    // gap-closure-plan §4.4: scope to litellm-provider keys for the same reason as above — the
+    // frontier-patch oracle profile isn't part of this config layer's litellm provider block.
     for (const [key, rate] of Object.entries(ECON_COST_MATRIX)) {
+      if (ECON_MODELS[key]?.providerID !== "litellm") continue
       const cost = decoded.provider?.litellm?.models?.[key]?.cost
       expect(cost, `decoded provider model "${key}" must keep its cost block`).toBeDefined()
       expect(cost.cache_read, `decoded "${key}" cache_read must survive the schema pass`).toBe(rate.cachedInput)

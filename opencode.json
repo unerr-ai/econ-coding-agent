@@ -216,6 +216,23 @@
         "minimax/minimax-m3": { "name": "MiniMax M3 (econ conductor — experiment)", "limit": { "context": 524288, "output": 64000 }, "options": { "reasoningEffort": "high", "parallel_tool_calls": true } },
         "moonshotai/kimi-k2p7-code": { "name": "Kimi K2.7 Code (catalog)", "limit": { "context": 262144, "output": 32768 }, "options": { "parallel_tool_calls": true } }
       }
+    },
+
+    // gap-closure-plan §4.4 frontier-patch oracle profile (2026-07-19) — direct-to-Anthropic,
+    // NOT the litellm gateway. Reason: OpenCode's applyCaching gate (provider/transform.ts:433-445)
+    // skips any model whose api.npm is "@ai-sdk/gateway" — every litellm tier hits that skip, so
+    // cache_control never fires there. providerID "anthropic" + npm "@ai-sdk/anthropic" passes the
+    // gate and applyCaching fires natively; cache accounting is unaffected (ai-sdk.ts's usage()
+    // reads both cached_tokens and cache_read_input_tokens regardless of transport). Catalog-only:
+    // no agent/tier below binds this model. ECON_TIER_BINDING.oracle stays z-ai/glm-5.2 — the swap
+    // is gated behind the A/B (model-registry.ts ECON_ORACLE_PROFILES["frontier-patch"]).
+    "anthropic": {
+      "name": "Anthropic (econ oracle — frontier-patch profile)",
+      "npm": "@ai-sdk/anthropic",
+      "env": ["ANTHROPIC_API_KEY"],
+      "models": {
+        "claude-opus-4-8": { "name": "Claude Opus 4.8 (econ oracle — frontier-patch profile)", "limit": { "context": 200000, "output": 32000 } }
+      }
     }
   }
 

@@ -5,12 +5,13 @@
  * catalog), plus exercises the lookup API surface.
  */
 
-import { describe, it, expect } from "bun:test"
+import { afterEach, describe, it, expect } from "bun:test"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import {
   ECON_MODELS,
   ECON_TIER_BINDING,
+  ECON_ORACLE_PROFILES,
   modelProfile,
   tierProfile,
   tierModelRef,
@@ -20,6 +21,7 @@ import {
   resolveJudgeTier,
   resolveFrontierHatch,
   resolveTierModelRef,
+  resolveOracleProfile,
   sessionAffinityFor,
 } from "../src/model-registry.ts"
 import { DEFAULT_REGION_CONFIG } from "../src/region.ts"
@@ -60,10 +62,16 @@ function loadOpencodeJson(): any {
 
 describe("ECON_MODELS vs opencode.json (drift guard)", () => {
   const config = loadOpencodeJson()
-  const models = config.provider.litellm.models
 
+  // gap-closure-plan §4.4: not every ECON_MODELS entry rides the litellm gateway any more —
+  // claude-opus-4-8 is bound direct-to-Anthropic (providerID "anthropic") so it resolves against
+  // opencode.json's provider.anthropic.models instead. Look up the bucket per-entry's providerID
+  // rather than hardcoding provider.litellm.models.
   for (const [key, profile] of Object.entries(ECON_MODELS)) {
-    it(`${key} capability fields match opencode.json`, () => {
+    const models = config.provider[profile.providerID]?.models
+
+    it(`${key} capability fields match opencode.json (provider.${profile.providerID})`, () => {
+      expect(models, `opencode.json must declare provider.${profile.providerID}.models`).toBeDefined()
       const entry = models[profile.modelID]
       expect(entry).toBeDefined()
       expect(profile.contextWindow).toBe(entry.limit.context)
@@ -71,11 +79,11 @@ describe("ECON_MODELS vs opencode.json (drift guard)", () => {
       expect(profile.reasoning).toBe(entry.reasoning === true)
     })
 
-    // OL-9.6i: opencode.json intentionally carries NO `cost` key for a litellm model — cost has a
-    // single literal source (ECON_COST_MATRIX, econ-cost.ts) and reaches the effective config via
-    // econ-defaults.ts's derived `cost` block, deep-merged on top of the project config at runtime
-    // (config.ts's econ-defaults merge layer + provider.ts's per-field cost fallback). This guards
-    // against the four hardcoded `cost` blocks (OL-9.6h) creeping back into opencode.json.
+    // OL-9.6i: opencode.json intentionally carries NO `cost` key for an econ-managed model — cost
+    // has a single literal source (ECON_COST_MATRIX, econ-cost.ts) and reaches the effective config
+    // via econ-defaults.ts's derived `cost` block, deep-merged on top of the project config at
+    // runtime (config.ts's econ-defaults merge layer + provider.ts's per-field cost fallback). This
+    // guards against the four hardcoded `cost` blocks (OL-9.6h) creeping back into opencode.json.
     it(`${key} carries no cost key in opencode.json (single literal source is econ-cost.ts)`, () => {
       const entry = models[profile.modelID]
       expect(entry.cost).toBeUndefined()
@@ -109,6 +117,85 @@ describe("referential integrity", () => {
   }
 })
 
+describe("provider.anthropic (gap-closure-plan §4.4 — direct-to-Anthropic frontier-patch oracle)", () => {
+  const config = loadOpencodeJson()
+
+  it("declares npm @ai-sdk/anthropic and env ANTHROPIC_API_KEY", () => {
+    expect(config.provider.anthropic).toBeDefined()
+    expect(config.provider.anthropic.npm).toBe("@ai-sdk/anthropic")
+    expect(config.provider.anthropic.env).toEqual(["ANTHROPIC_API_KEY"])
+  })
+
+  it("claude-opus-4-8 satisfies OpenCode's applyCaching gate (transform.ts:433-445): providerID anthropic, npm not @ai-sdk/gateway", () => {
+    expect(ECON_MODELS["claude-opus-4-8"]!.providerID).toBe("anthropic")
+    expect(config.provider.anthropic.npm).not.toBe("@ai-sdk/gateway")
+  })
+
+  it("is not routed to any live tier (ECON_TIER_BINDING is untouched by this mechanism)", () => {
+    expect(Object.values(ECON_TIER_BINDING)).not.toContain("claude-opus-4-8")
+  })
+})
+
+describe("ECON_ORACLE_PROFILES / resolveOracleProfile (gap-closure-plan §4.4)", () => {
+  it("default and sovereign both resolve to today's live oracle binding, byte-identical", () => {
+    expect(resolveOracleProfile(undefined)).toEqual({ profile: "default", modelKey: ECON_TIER_BINDING.oracle })
+    expect(resolveOracleProfile("default")).toEqual({ profile: "default", modelKey: ECON_TIER_BINDING.oracle })
+    expect(resolveOracleProfile("sovereign")).toEqual({ profile: "sovereign", modelKey: ECON_TIER_BINDING.oracle })
+  })
+
+  it("frontier-patch resolves to a manifest entry bound direct-to-Anthropic, not the live default", () => {
+    const resolved = resolveOracleProfile("frontier-patch")
+    expect(resolved.profile).toBe("frontier-patch")
+    expect(resolved.modelKey).not.toBe(ECON_TIER_BINDING.oracle)
+    expect(ECON_MODELS[resolved.modelKey]).toBeDefined()
+    expect(ECON_MODELS[resolved.modelKey]!.providerID).toBe("anthropic")
+  })
+
+  it("an unrecognized value falls back to default rather than routing to a phantom profile", () => {
+    expect(resolveOracleProfile("bogus")).toEqual({ profile: "default", modelKey: ECON_TIER_BINDING.oracle })
+    expect(resolveOracleProfile("")).toEqual({ profile: "default", modelKey: ECON_TIER_BINDING.oracle })
+  })
+
+  it("every profile resolves to a manifest entry with defined cost (referential integrity, derived from the map)", () => {
+    for (const [profile, modelKey] of Object.entries(ECON_ORACLE_PROFILES)) {
+      expect(ECON_MODELS[modelKey], `profile "${profile}" -> "${modelKey}" must be in ECON_MODELS`).toBeDefined()
+      expect(ECON_MODELS[modelKey]!.cost, `profile "${profile}" model must have cost defined`).toBeDefined()
+    }
+  })
+})
+
+describe("tierProfile honors ECON_ORACLE_PROFILE (the §4.4 live wiring)", () => {
+  const restore = process.env["ECON_ORACLE_PROFILE"]
+  afterEach(() => {
+    if (restore === undefined) delete process.env["ECON_ORACLE_PROFILE"]
+    else process.env["ECON_ORACLE_PROFILE"] = restore
+  })
+
+  it("unset ⇒ byte-identical to the live binding; only the oracle tier consults the profile", () => {
+    delete process.env["ECON_ORACLE_PROFILE"]
+    for (const tier of Object.keys(ECON_TIER_BINDING) as EconTier[]) {
+      const expected = ECON_MODELS[ECON_TIER_BINDING[tier]]!
+      expect(tierProfile(tier).modelID).toBe(expected.modelID)
+      expect(tierProfile(tier).providerID).toBe(expected.providerID)
+    }
+  })
+
+  it("a profile rebinds ONLY the oracle tier for the run", () => {
+    process.env["ECON_ORACLE_PROFILE"] = "frontier-patch"
+    const expectedKey = ECON_ORACLE_PROFILES["frontier-patch"]!
+    expect(tierProfile("oracle").modelID).toBe(ECON_MODELS[expectedKey]!.modelID)
+    expect(tierProfile("oracle").providerID).toBe(ECON_MODELS[expectedKey]!.providerID)
+    for (const tier of (Object.keys(ECON_TIER_BINDING) as EconTier[]).filter((t) => t !== "oracle")) {
+      expect(tierProfile(tier).modelID).toBe(ECON_MODELS[ECON_TIER_BINDING[tier]]!.modelID)
+    }
+  })
+
+  it("an unrecognized profile falls back to the live default binding", () => {
+    process.env["ECON_ORACLE_PROFILE"] = "bogus"
+    expect(tierProfile("oracle").modelID).toBe(ECON_MODELS[ECON_TIER_BINDING.oracle]!.modelID)
+  })
+})
+
 describe("infra/litellm/config.yaml vs ECON_MODELS (drift guard — OL-8.B2)", () => {
   // 2026-07-19: the gateway infra (incl. config.yaml) moved out of this repo into the sibling
   // unerr-benchmarks checkout. Repo root is three levels up from packages/code-intelligence/test/
@@ -139,8 +226,14 @@ describe("infra/litellm/config.yaml vs ECON_MODELS (drift guard — OL-8.B2)", (
   const modelNames = [...configText.matchAll(/^\s*-\s*model_name:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
   const upstreamModels = [...configText.matchAll(/^\s*model:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
 
-  it("gateway model_name set matches ECON_MODELS keys exactly (catches a gateway-side rename/addition)", () => {
-    expect(new Set(modelNames)).toEqual(new Set(Object.keys(ECON_MODELS)))
+  it("gateway model_name set matches ECON_MODELS' litellm-provider keys exactly (catches a gateway-side rename/addition)", () => {
+    // gap-closure-plan §4.4: claude-opus-4-8 (providerID "anthropic") deliberately bypasses this
+    // gateway — direct-to-Anthropic, so it never appears in config.yaml. Filter to litellm-provider
+    // keys before comparing sets.
+    const litellmKeys = Object.entries(ECON_MODELS)
+      .filter(([, profile]) => profile.providerID === "litellm")
+      .map(([key]) => key)
+    expect(new Set(modelNames)).toEqual(new Set(litellmKeys))
   })
 
   for (const model of upstreamModels) {

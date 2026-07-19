@@ -151,6 +151,19 @@ export const ECON_MODELS: Record<string, EconModelProfile> = {
     notes:
       "CATALOG — available in the gateway/registry, NOT bound to any tier (added 2026-07-08). Kimi K2.7 Code (Moonshot AI), ~1T-param MoE agentic coding model with function calling, 256K context (262_144); served via the econ LiteLLM gateway on Fireworks (accounts/fireworks/models/kimi-k2p7-code) at the priority service tier. maxOutput 32_768 from the provider payload. reasoning:false = the reasoning channel is OFF at the config level (K2.7 Code emits reasoning tokens natively — ~30% fewer than K2.6); enable it via options.reasoningEffort if/when a tier binds this model. cacheAccounting:\"stream\" and sessionAffinity:true are defaults, UNPROBED for this model. Costs $0.95/$4.00 per M in/out, $0.19/M cached (ECON_COST_MATRIX).",
   },
+  "claude-opus-4-8": {
+    providerID: "anthropic",
+    modelID: "claude-opus-4-8",
+    name: "Claude Opus 4.8",
+    contextWindow: 200_000,
+    maxOutput: 32_000,
+    reasoning: false,
+    cacheAccounting: "stream",
+    sessionAffinity: false,
+    cost: ECON_COST_MATRIX["claude-opus-4-8"]!,
+    notes:
+      "CATALOG — gap-closure-plan §4.4 frontier-patch oracle profile (added 2026-07-19), NOT the live oracle default (ECON_TIER_BINDING.oracle stays z-ai/glm-5.2; this entry is only reachable via ECON_ORACLE_PROFILES[\"frontier-patch\"], gated behind the swap A/B). providerID is \"anthropic\" (NOT \"litellm\") deliberately: OpenCode's applyCaching gate (packages/opencode/src/provider/transform.ts:433-445) skips any model whose api.npm is \"@ai-sdk/gateway\", and every litellm tier hits that skip — the direct pathway is the chosen fix (cache_control resolution, gap-closure-plan §4.4), so this model bypasses the litellm gateway entirely and never appears in infra/litellm/config.yaml. cacheAccounting:\"stream\" because the AI SDK's anthropic package normalizes cache-read usage into inputTokenDetails.cacheReadTokens on both the streamed and non-streamed path (session/llm/ai-sdk.ts usage()), same as every other tier post-W8. sessionAffinity:false — the x-session-affinity header is litellm-gateway-specific (request.ts only sends it when providerID===\"litellm\"), so the field is inert here; false documents that rather than implying an untested default. reasoning:false — no options.reasoningEffort/thinking budget is wired yet (deferred to the live A/B, not part of this mechanism ship). Requires ANTHROPIC_API_KEY (opencode.json provider.anthropic.env). Costs $5/$25 per M in/out, cache read 0.1x ($0.5), cache write 1.25x ($6.25) — ECON_COST_MATRIX.",
+  },
 }
 
 /**
@@ -210,14 +223,18 @@ export function sessionAffinityFor(key: string): boolean {
 }
 
 /**
- * Resolve a tier to its bound model's full capability profile. Throws if a tier
- * is bound to a model missing from the manifest — a misconfiguration that must
- * fail loud, not route to a phantom model.
+ * Resolve a tier to its bound model's full capability profile. The oracle tier
+ * alone resolves through the §4.4 profile surface (ECON_ORACLE_PROFILE; unset ⇒
+ * "default" ⇒ byte-identical to ECON_TIER_BINDING.oracle) so a benchmark
+ * campaign can rebind the oracle without touching code. Throws if the resolved
+ * key is missing from the manifest — a misconfiguration that must fail loud,
+ * not route to a phantom model.
  *
  * @sem domain=routing role=query
  */
 export function tierProfile(tier: EconTier): TierProfile {
-  const key = ECON_TIER_BINDING[tier]
+  const key =
+    tier === "oracle" ? resolveOracleProfile(process.env["ECON_ORACLE_PROFILE"]).modelKey : ECON_TIER_BINDING[tier]
   const model = ECON_MODELS[key]
   if (!model) {
     throw new Error(`econ tier "${tier}" is bound to unknown model "${key}" — add it to ECON_MODELS`)
@@ -342,6 +359,71 @@ export function resolveJudgeTier(envValue: string | undefined): JudgeTierConfig 
 }
 
 // ---------------------------------------------------------------------------
+// Gap-closure §4.3 — per-tier disable switches (the ECON_VERIFIER_JUDGE
+// config-surface pattern, extended to the oracle and the judge tier)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolved state of the oracle switch. Unlike `VerifierTierConfig`/
+ * `FrontierHatchConfig` this DOES gate a live `ECON_TIER_BINDING` member —
+ * when disabled, the oracle registry slot stays bound (re-binding stays a
+ * one-line change, no re-plumbing — the models.md reversibility principle)
+ * but no slice may dispatch to it: the solve ladder's ceiling caps at the
+ * conductor and an unresolved slice settles loudly via the existing
+ * `unverified`/`onProvenance` path, never a silent drop.
+ *
+ * @sem domain=routing role=type
+ */
+export interface OracleTierConfig {
+  enabled: boolean
+}
+
+/**
+ * Resolve the oracle switch from `ECON_ORACLE`. ON by default, mirroring
+ * `resolveJudgeTier`'s off-by-exception shape. `ECON_ORACLE=off` disables
+ * the oracle as a solve tier (degrade: conductor-only, unresolved work
+ * surfaced loudly); any other value — including unset — leaves it available.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveOracleTier(envValue: string | undefined): OracleTierConfig {
+  return { enabled: envValue !== "off" }
+}
+
+/**
+ * Resolved state of the judge-tier switch: a master kill switch across every
+ * reasoner judge duty (the cross-model verifier `ECON_VERIFIER_JUDGE` already
+ * gates, plus hub-design and repro-fidelity) — narrower than disabling those
+ * individually, this is the "everything judge-side is off" degrade named in
+ * gap-closure §4.3. When disabled the ladder falls through to its existing
+ * deterministic-only path (`runVerifierLadder`'s sound → qe → accept-
+ * unverified chain, unchanged) — no new fallback logic, just the absence of
+ * the judge rung.
+ *
+ * @sem domain=routing role=type
+ */
+export interface JudgeTierSwitch {
+  enabled: boolean
+}
+
+/**
+ * Resolve the judge-tier master switch from `ECON_JUDGE_TIER`. ON by
+ * default. `ECON_JUDGE_TIER=off` disables every judge-tier duty at once
+ * (degrade: deterministic gates only); any other value — including unset —
+ * leaves judging available. Distinct from `resolveJudgeTier`
+ * (`ECON_VERIFIER_JUDGE`), which only ever gated the cross-model verifier
+ * rung inside the slice-verification ladder — this is the wider switch the
+ * plan asks for, covering hub-design and repro-fidelity too. Consumers that
+ * live in `session/prompt.ts` read this directly; nothing here re-plumbs
+ * their call sites.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveJudgeTierSwitch(envValue: string | undefined): JudgeTierSwitch {
+  return { enabled: envValue !== "off" }
+}
+
+// ---------------------------------------------------------------------------
 // OL-7.10 — frontier escape-hatch for the residual
 // ---------------------------------------------------------------------------
 
@@ -389,4 +471,57 @@ export function resolveTierModelRef(
   if (hatch.mode === "human") return undefined
   if (hatch.mode === "api") return frontierModelId
   return tierModelRef(tier)
+}
+
+// ---------------------------------------------------------------------------
+// gap-closure-plan §4.4 — per-surface oracle binding profiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Named oracle-binding profiles (gap-closure-plan §4.4): which ECON_MODELS key
+ * backs the oracle tier for a given run surface. "default" and "sovereign" (the
+ * all-open-weight in-region lane) both resolve to today's live oracle;
+ * "frontier-patch" is the SWE-bench Verified/Pro/Live arm, bound to the
+ * direct-to-Anthropic Opus entry. This is the manifest ECON_ORACLE_PROFILE
+ * selects over — like ECON_TIER_BINDING, a swap is a one-line change here, not
+ * a code change at any call site.
+ *
+ * @sem domain=routing role=config
+ */
+export const ECON_ORACLE_PROFILES: Record<string, string> = {
+  // "default" follows the live binding referentially (one home per fact);
+  // "sovereign" stays a literal pin — it must remain the open-weight model
+  // even after a future default swap to a frontier oracle.
+  default: ECON_TIER_BINDING.oracle,
+  "frontier-patch": "claude-opus-4-8",
+  sovereign: "z-ai/glm-5.2",
+}
+
+/**
+ * Resolved state of the gap-closure-plan §4.4 oracle-profile selection: the
+ * profile name that resolved (falling back to "default" on an unrecognized
+ * value) and the ECON_MODELS key it points at.
+ *
+ * @sem domain=routing role=type
+ */
+export interface OracleProfileConfig {
+  profile: string
+  modelKey: string
+}
+
+/**
+ * Resolve the oracle-binding profile from `ECON_ORACLE_PROFILE` — the ONE
+ * sanctioned selection surface for the gap-closure-plan §4.4 oracle swap (no
+ * ad-hoc env reads elsewhere). Mirrors resolveJudgeTier's shape: unset or an
+ * unrecognized value falls back to "default" (today's live binding,
+ * byte-identical — ECON_TIER_BINDING.oracle is untouched by this mechanism)
+ * rather than silently routing to a phantom profile. `tierProfile("oracle")` is
+ * the one live consumer — setting ECON_ORACLE_PROFILE rebinds the oracle for a
+ * run; the default-binding swap itself waits on the A/B.
+ *
+ * @sem domain=routing role=config
+ */
+export function resolveOracleProfile(envValue: string | undefined): OracleProfileConfig {
+  const profile = envValue && envValue in ECON_ORACLE_PROFILES ? envValue : "default"
+  return { profile, modelKey: ECON_ORACLE_PROFILES[profile]! }
 }

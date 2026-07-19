@@ -59,6 +59,12 @@ export const ECON_COST_MATRIX: Record<string, EconModelRate> = {
   // cache-write billed at the input rate on our BYOK path today
   "minimax/minimax-m3": { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
   "moonshotai/kimi-k2p7-code": { input: 0.95, cachedInput: 0.19, cacheWrite: 0.95, output: 4.0 },
+  // gap-closure-plan §4.4 frontier-patch oracle profile (2026-07-19) — direct-to-Anthropic, NOT
+  // the litellm gateway, so it never appears in infra/litellm/config.yaml. $5/$25 per M in/out;
+  // cache read at 0.1x ($0.5), cache write at 1.25x ($6.25) per Anthropic's ephemeral 5-min TTL
+  // rate card. Catalog-only until ECON_ORACLE_PROFILE selects "frontier-patch" (model-registry.ts
+  // ECON_ORACLE_PROFILES) — the live oracle default stays z-ai/glm-5.2.
+  "claude-opus-4-8": { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 },
 }
 
 const LABELS: Record<string, string> = {
@@ -68,6 +74,7 @@ const LABELS: Record<string, string> = {
   "openai/gpt-oss-120b": "gpt-oss-120b (executor)",
   "minimax/minimax-m3": "MiniMax M3 (catalog)",
   "moonshotai/kimi-k2p7-code": "Kimi K2.7 Code (catalog)",
+  "claude-opus-4-8": "Claude Opus 4.8 (oracle — frontier-patch profile)",
 }
 
 const LITELLM_PREFIX = "litellm/"
