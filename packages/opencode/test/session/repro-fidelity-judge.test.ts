@@ -27,6 +27,12 @@
  * flag) — not practical to unit test in isolation here; its two exported
  * building blocks (`hasAssertionTeeth`, `applyAssertionTeethGap`) are
  * covered directly below instead.
+ *
+ * H1 (gap-closure-plan §2.7) adds coverage for the claim-evidence kernel
+ * instances: `checkWitnessCoverage` (the 14369 strict-subset shape),
+ * `checkRoundtripWitness`/`detectMissingRoundtripAssert`/`applyRoundtripGap`
+ * (the 14365/14598 one-sided-fix shapes), and `checkTestSetCoverage` (the
+ * F2P full-set shape).
  */
 
 import { describe, test, expect } from "bun:test"
@@ -41,6 +47,11 @@ import {
   RENDERED_ASSERT_GAP,
   missingRequiredLiterals,
   applyRequiredLiteralsGap,
+  checkWitnessCoverage,
+  checkRoundtripWitness,
+  detectMissingRoundtripAssert,
+  applyRoundtripGap,
+  checkTestSetCoverage,
   detectStringifiedMirrorAssert,
   applyStringifiedMirrorGap,
   STRINGIFIED_MIRROR_GAP,
@@ -766,5 +777,107 @@ assert widget_attrs['maxlength'] == expected, (
     expect(result).toBeDefined()
     expect(result).toBe(detectStringifiedMirrorAssert(reproContent))
     expect(result).toBe("assert widget_attrs['maxlength'] == expected, (")
+  })
+})
+
+describe("checkWitnessCoverage — H1 tooth 1 (gap-closure-plan §2.7)", () => {
+  test("the 14369 shape: a repro asserting 2 of 3 issue-stated witnesses is a strict subset, never covered", () => {
+    const reproContent = "assert case_a == 1\nassert case_b == 2\n"
+    const verdict = checkWitnessCoverage(reproContent, ["case_a", "case_b", "case_c"])
+    expect(verdict.covered).toBe(false)
+    expect(verdict.missing).toEqual(["case_c"])
+    expect(verdict.verifiedScope).toContain("2/3 witnesses verified")
+  })
+
+  test("every witness present is fully covered", () => {
+    const reproContent = "assert case_a == 1\nassert case_b == 2\n"
+    const verdict = checkWitnessCoverage(reproContent, ["case_a", "case_b"])
+    expect(verdict.covered).toBe(true)
+    expect(verdict.missing).toEqual([])
+  })
+
+  test("undefined/empty requiredLiterals is trivially covered", () => {
+    expect(checkWitnessCoverage("anything", undefined).covered).toBe(true)
+    expect(checkWitnessCoverage("anything", []).covered).toBe(true)
+  })
+
+  test("missingRequiredLiterals stays a thin wrapper over the kernel verdict's missing list", () => {
+    const reproContent = "assert case_a == 1\n"
+    expect(missingRequiredLiterals(reproContent, ["case_a", "case_b"])).toEqual(
+      checkWitnessCoverage(reproContent, ["case_a", "case_b"]).missing,
+    )
+  })
+})
+
+describe("checkRoundtripWitness / detectMissingRoundtripAssert / applyRoundtripGap — H1 tooth 2", () => {
+  test("14365 shape: a parse-only repro never calling the synthesized format/serialize counterpart is uncovered", () => {
+    const reproContent = "actual = parse_date('2024-01-01')\nassert actual == expected\n"
+    const gap = detectMissingRoundtripAssert(reproContent, "format_date")
+    expect(gap).toBeDefined()
+    expect(gap).toContain("format_date")
+    const verdict = checkRoundtripWitness(reproContent, "format_date")
+    expect(verdict.covered).toBe(false)
+    expect(verdict.missing).toEqual(["roundtrip:format_date"])
+  })
+
+  test("14598 shape: a repro exercising unescape() is covered once the roundtrip call is present", () => {
+    const reproContent = "escaped = escape_html(raw)\nroundtripped = unescape_html(escaped)\nassert roundtripped == raw\n"
+    expect(detectMissingRoundtripAssert(reproContent, "unescape_html")).toBeUndefined()
+    expect(checkRoundtripWitness(reproContent, "unescape_html").covered).toBe(true)
+  })
+
+  test("no counterpart synthesized this turn (undefined) always passes", () => {
+    expect(detectMissingRoundtripAssert("anything", undefined)).toBeUndefined()
+    expect(checkRoundtripWitness("anything", undefined).covered).toBe(true)
+  })
+
+  test("applyRoundtripGap forces a gap naming the unexercised counterpart, even when the judge said faithful", () => {
+    const faithfulVerdict = { faithful: true, gaps: [] }
+    const merged = applyRoundtripGap(faithfulVerdict, "assert actual == expected", "write_config")
+    expect(merged.faithful).toBe(false)
+    expect(merged.gaps).toHaveLength(1)
+    expect(merged.gaps[0]).toContain("write_config")
+  })
+
+  test("applyRoundtripGap is a no-op (same reference returned) once the counterpart is exercised", () => {
+    const verdict = { faithful: true, gaps: [] }
+    const merged = applyRoundtripGap(verdict, "write_config(payload)", "write_config")
+    expect(merged).toBe(verdict)
+  })
+
+  test("14182 shape: a param-never-threaded repro that reads but never writes it back is uncovered", () => {
+    const reproContent = "value = read_param(cfg, 'x')\nassert value == 1\n"
+    expect(checkRoundtripWitness(reproContent, "write_param").covered).toBe(false)
+  })
+})
+
+describe("checkTestSetCoverage — H1 tooth 3 (deterministic full-F2P harvest)", () => {
+  test("the harvest requires the WHOLE F2P set, not the first result", () => {
+    const results = new Map<string, "pass" | "fail" | "unverified">([
+      ["test_a", "pass"],
+      ["test_b", "unverified"],
+    ])
+    const verdict = checkTestSetCoverage(["test_a", "test_b", "test_c"], results)
+    expect(verdict.covered).toBe(false)
+    expect(verdict.missing).toEqual(["test_b", "test_c"])
+  })
+
+  test("every F2P id passing is fully covered", () => {
+    const results = new Map<string, "pass" | "fail" | "unverified">([
+      ["test_a", "pass"],
+      ["test_b", "pass"],
+    ])
+    const verdict = checkTestSetCoverage(["test_a", "test_b"], results)
+    expect(verdict.covered).toBe(true)
+  })
+
+  test("a failing F2P id blocks coverage even when every other id passed", () => {
+    const results = new Map<string, "pass" | "fail" | "unverified">([
+      ["test_a", "pass"],
+      ["test_b", "fail"],
+    ])
+    const verdict = checkTestSetCoverage(["test_a", "test_b"], results)
+    expect(verdict.covered).toBe(false)
+    expect(verdict.failing).toEqual(["test_b"])
   })
 })

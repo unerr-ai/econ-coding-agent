@@ -23,7 +23,15 @@
  * throw-safe empty-map degrade, disk-existence filtering, Django command formation) plus
  * discoverNeighborTests' graphCandidates merge (ranked after twins/before fuzzy, capped,
  * novelty-deduped, round-robin unchanged) — and F21's harvestTurnInterpreter (green/test-shaped/
- * python-headed detection, piped/env-prefixed/laundered-mixed rejection, latest-run-wins).
+ * python-headed detection, piped/env-prefixed/laundered-mixed rejection, latest-run-wins) —
+ * and H2/H8 (gap-closure-plan.md §2, round 3): detectsModuleLevelSideEffect/
+ * isHighP2PBreadthEdit's four side-effect shapes (astropy-13236's module-level DeprecationWarning,
+ * astropy-8872's base-class edit, a default-arg change, a class decorator) vs. an indented/
+ * unrelated/brand-new-file non-trigger, widenForModuleSideEffect's package-test-dir widening
+ * capped at 5, findSiblingTestCommand's H2.2 fail-loud fallback (found/none), and
+ * runDifferentialBaseline's H8 pre-edit revert-run-restore (astropy-8707's baseline subtraction
+ * per test-id, combined with the kernel's checkClaimCoverage for the false-fire guard: a
+ * pre-existing red is excused, a genuinely new one is not).
  */
 
 import { describe, it, expect, afterEach } from "bun:test"
@@ -40,9 +48,15 @@ import {
   selectRegressionPinCandidate,
   collectGraphNeighborCandidates,
   harvestTurnInterpreter,
+  detectsModuleLevelSideEffect,
+  isHighP2PBreadthEdit,
+  widenForModuleSideEffect,
+  findSiblingTestCommand,
+  runDifferentialBaseline,
 } from "../../src/session/regression-neighbors"
 import type { NeighborGraphPort } from "../../src/session/regression-neighbors"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "../../src/session/seen-red"
+import { checkClaimCoverage, type Claim, type Evidence } from "@opencode-ai/code-intelligence"
 
 const dirs: string[] = []
 
@@ -966,5 +980,232 @@ describe("seen-red.ts exports the regexes harvestTurnInterpreter depends on", ()
     expect(TEST_SHAPED_COMMAND_RE).toBeInstanceOf(RegExp)
     expect(LAUNDERED_FAILURE_SIGNATURE_RE).toBeInstanceOf(RegExp)
     expect(INTERPRETER_TOKEN_RE).toBeInstanceOf(RegExp)
+  })
+})
+
+describe("detectsModuleLevelSideEffect — H2.1 import-time side-effect heuristic", () => {
+  it("astropy-13236 shape: a module-level warnings.warn(...) added at column 0 trips it", () => {
+    const oldContent = "import warnings\n\ndef helper():\n    return 1\n"
+    const newContent = 'import warnings\n\nwarnings.warn("old API", DeprecationWarning)\n\ndef helper():\n    return 1\n'
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(true)
+  })
+
+  it("the same warnings.warn(...) call INDENTED inside a function does not trip it", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = 'def helper():\n    warnings.warn("inside", DeprecationWarning)\n    return 1\n'
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(false)
+  })
+
+  it("a decorator directly above a module-level class trips it", () => {
+    const oldContent = "class Foo:\n    pass\n"
+    const newContent = "@total_ordering\nclass Foo:\n    pass\n"
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(true)
+  })
+
+  it("a decorator above a def (not a class) does not trip it", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = "@cache\ndef helper():\n    return 1\n"
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(false)
+  })
+
+  it("a bare module-level call (registry mutation) trips it", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = "def helper():\n    return 1\n\nregister_default_converter()\n"
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(true)
+  })
+
+  it("a body-only edit unrelated to module scope does not trip it", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = "def helper():\n    return 2\n"
+    expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(false)
+  })
+
+  it("a brand-new file (no oldContent) never trips it", () => {
+    expect(detectsModuleLevelSideEffect("", "warnings.warn('x')\n")).toBe(false)
+  })
+})
+
+describe("isHighP2PBreadthEdit — H2.4 high-P2P-breadth classification", () => {
+  it("astropy-8872 shape: a class base-list edit trips it", () => {
+    const oldContent = "class Quantity:\n    pass\n"
+    const newContent = "class Quantity(np.ndarray):\n    pass\n"
+    expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
+  })
+
+  it("a function default-argument change trips it", () => {
+    const oldContent = "def convert(value, dtype=None):\n    return value\n"
+    const newContent = "def convert(value, dtype=float):\n    return value\n"
+    expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
+  })
+
+  it("subsumes detectsModuleLevelSideEffect's own shapes (13236)", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = 'warnings.warn("old", DeprecationWarning)\n\ndef helper():\n    return 1\n'
+    expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
+  })
+
+  it("an unrelated body-only edit does not trip it", () => {
+    const oldContent = "def helper():\n    return 1\n"
+    const newContent = "def helper():\n    return 2\n"
+    expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(false)
+  })
+})
+
+describe("widenForModuleSideEffect — H2.1/H2.4 widening, capped at 5", () => {
+  it("includes every test_*.py under the touched file's top-level package tests/ dir, capped", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "mypkg", "tests"), { recursive: true })
+    for (const name of ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"]) {
+      writeFileSync(join(cwd, "mypkg", "tests", `${name}.py`), "")
+    }
+    writeFileSync(join(cwd, "mypkg", "core.py"), "")
+
+    const result = widenForModuleSideEffect("mypkg/core.py", cwd)
+
+    expect(result.length).toBeLessThanOrEqual(5)
+    expect(result.length).toBeGreaterThan(0)
+    expect(result.every((c) => c.kind === "test")).toBe(true)
+    expect(result.every((c) => /mypkg\/tests\/test_\w+\.py/.test(c.command))).toBe(true)
+  })
+
+  it("uses the Django runtests.py app-level command for a Django repo", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "django", "db", "models"), { recursive: true })
+    writeFileSync(join(cwd, "django", "db", "models", "deletion.py"), "")
+
+    const result = widenForModuleSideEffect("django/db/models/deletion.py", cwd)
+
+    expect(result.some((c) => c.command === "python tests/runtests.py django --parallel 1")).toBe(true)
+  })
+})
+
+describe("findSiblingTestCommand — H2.2 fail-loud fallback", () => {
+  it("finds test_<stem>.py in the same directory as the touched Python file", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "widget.py"), "")
+    writeFileSync(join(cwd, "pkg", "test_widget.py"), "")
+
+    const result = findSiblingTestCommand("pkg/widget.py", cwd)
+
+    expect(result).toEqual({ kind: "test", command: "python -m pytest pkg/test_widget.py -x -q" })
+  })
+
+  it("returns null when no sibling test file exists — the caller surfaces unverifiable regression surface", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "widget.py"), "")
+
+    expect(findSiblingTestCommand("pkg/widget.py", cwd)).toBeNull()
+  })
+})
+
+describe("runDifferentialBaseline — H8 differential regression baseline", () => {
+  it("astropy-8707 shape: reverts touched files to HEAD, runs neighbors once, restores current content", async () => {
+    const headContent = new Map([["astropy/_np_utils.pyx", "# old: uses np.int\n"]])
+    const currentContent = new Map([["astropy/_np_utils.pyx", "# new: uses np.int_\n"]])
+    const writes: { filePath: string; content: string }[] = []
+    const neighbors = [{ kind: "test" as const, command: "python -m pytest astropy/tests/test_np_utils.py -x -q" }]
+
+    const baseline = await runDifferentialBaseline({
+      touchedSourceFiles: ["astropy/_np_utils.pyx"],
+      neighbors,
+      runner: async () => ({ exitCode: 1, stdout: "", stderr: "AttributeError: module 'numpy' has no attribute 'int'" }),
+      readHeadContent: async (f) => headContent.get(f) ?? null,
+      readCurrentContent: async (f) => currentContent.get(f)!,
+      writeContent: async (f, c) => {
+        writes.push({ filePath: f, content: c })
+      },
+    })
+
+    expect([...baseline]).toEqual(["python -m pytest astropy/tests/test_np_utils.py -x -q"])
+    // Reverted to HEAD first (for the run), then restored to current content — in that order.
+    expect(writes).toEqual([
+      { filePath: "astropy/_np_utils.pyx", content: "# old: uses np.int\n" },
+      { filePath: "astropy/_np_utils.pyx", content: "# new: uses np.int_\n" },
+    ])
+  })
+
+  it("leaves a brand-new file (no HEAD blob) untouched", async () => {
+    const writes: { filePath: string; content: string }[] = []
+    const neighbors = [{ kind: "test" as const, command: "python -m pytest a.py -x -q" }]
+
+    await runDifferentialBaseline({
+      touchedSourceFiles: ["new_file.py"],
+      neighbors,
+      runner: async () => ({ exitCode: 0, stdout: "1 passed", stderr: "" }),
+      readHeadContent: async () => null,
+      readCurrentContent: async () => "should never be read",
+      writeContent: async (f, c) => {
+        writes.push({ filePath: f, content: c })
+      },
+    })
+
+    expect(writes).toEqual([])
+  })
+
+  it("restores content in a finally even if the runner throws", async () => {
+    const writes: { filePath: string; content: string }[] = []
+    const neighbors = [{ kind: "test" as const, command: "python -m pytest a.py -x -q" }]
+
+    await expect(
+      runDifferentialBaseline({
+        touchedSourceFiles: ["a.py"],
+        neighbors,
+        runner: async () => {
+          throw new Error("boom")
+        },
+        readHeadContent: async () => "old\n",
+        readCurrentContent: async () => "new\n",
+        writeContent: async (f, c) => {
+          writes.push({ filePath: f, content: c })
+        },
+      }),
+    ).rejects.toThrow("boom")
+
+    expect(writes).toEqual([
+      { filePath: "a.py", content: "old\n" },
+      { filePath: "a.py", content: "new\n" },
+    ])
+  })
+
+  it("false-fire guard: combined with checkClaimCoverage, a pre-existing red is excused but a genuinely new one still denies (per test-id, not per-file)", async () => {
+    const neighbors = [
+      { kind: "test" as const, command: "python -m pytest astropy/tests/test_np_utils.py::test_np_int -x -q" },
+      { kind: "test" as const, command: "python -m pytest astropy/tests/test_np_utils.py::test_real_regression -x -q" },
+    ]
+    // Pre-edit (baseline) run: only test_np_int fails (the arena's own broken np.int import).
+    const baseline = await runDifferentialBaseline({
+      touchedSourceFiles: ["astropy/_np_utils.pyx"],
+      neighbors,
+      runner: async (cmd) => ({
+        exitCode: cmd.command.includes("test_np_int") ? 1 : 0,
+        stdout: "",
+        stderr: cmd.command.includes("test_np_int") ? "AttributeError: module 'numpy' has no attribute 'int'" : "",
+      }),
+      readHeadContent: async () => "old\n",
+      readCurrentContent: async () => "new\n",
+      writeContent: async () => {},
+    })
+    expect([...baseline]).toEqual(["python -m pytest astropy/tests/test_np_utils.py::test_np_int -x -q"])
+
+    // Post-edit run: BOTH fail now — test_np_int is the same pre-existing env
+    // red, test_real_regression is a genuinely new, model-induced red.
+    const claim: Claim = { kind: "no_regressions", scope: { kind: "tests", items: neighbors.map((n) => n.command) } }
+    const evidence: Evidence = {
+      scope: claim.scope,
+      items: [
+        { id: neighbors[0]!.command, verdict: "fail" },
+        { id: neighbors[1]!.command, verdict: "fail" },
+      ],
+      baseline: [...baseline],
+    }
+    const verdict = checkClaimCoverage(claim, evidence)
+
+    expect(verdict.covered).toBe(false)
+    expect(verdict.preExisting).toEqual([neighbors[0]!.command])
+    expect(verdict.failing).toEqual([neighbors[1]!.command])
   })
 })

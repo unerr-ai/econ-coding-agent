@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import path from "path"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -25,6 +25,7 @@ import {
   ensureGraphReadyBounded,
   issueSymbolDefinitionSites,
   GRAPH_READY_BUDGET_MS,
+  getGraph,
 } from "../tool/graph-tools"
 import { ProviderTransform } from "@/provider/transform"
 import {
@@ -104,10 +105,14 @@ import {
   applyRequiredLiteralsGap,
   applyStringifiedMirrorGap,
   applyNumericStringConflictGap,
+  applyRoundtripGap,
   detectTypeUnfaithfulRepro,
+  detectMissingRoundtripAssert,
+  missingRequiredLiterals,
   hasAssertionTeeth,
   type ReproFidelityComplete,
 } from "./repro-fidelity-judge"
+import { synthesizeRoundtripWitness } from "./roundtrip-witness"
 import { runHubDesignJudge, DEGRADED_HUB_DESIGN, type HubDesignComplete } from "./hub-design-judge"
 import { triagePreamble, TEST_EDIT_GATE_RULE, timeBudgetLine } from "./prompts/preambles"
 import {
@@ -139,7 +144,11 @@ import {
   resolveJudgeTier,
   isReadOnlySlice,
   runRegressionGate,
+  checkClaimCoverage,
   type RmClient,
+  type Claim,
+  type Evidence,
+  type VerifyCommand,
 } from "@opencode-ai/code-intelligence"
 import {
   discoverNeighborTests,
@@ -151,6 +160,10 @@ import {
   selectRegressionPinCandidate,
   collectGraphNeighborCandidates,
   harvestTurnInterpreter,
+  isHighP2PBreadthEdit,
+  widenForModuleSideEffect,
+  findSiblingTestCommand,
+  runDifferentialBaseline,
 } from "./regression-neighbors"
 import {
   runConductorOrchestration,
@@ -368,10 +381,28 @@ export const PIN_GREEN_FINISH_STEPS = 3
 // COMMAND_TOOLS set for the same two tool ids).
 const PIN_PROBE_COMMAND_TOOLS = new Set(["shell", "bash"])
 
-// F11 — total wall-clock budget for the turn-end regression gate's neighbor
-// commands (discoverNeighborTests caps at 3); divided evenly across however
-// many neighbors were actually discovered so the whole gate always fits.
-const REGRESSION_GATE_TOTAL_BUDGET_MS = 240_000
+// F11 — total wall-clock budget for ONE run of the turn-end regression
+// gate's neighbor commands (discoverNeighborTests caps at 3, H2.1/H2.4
+// widening caps at +5 more); divided evenly across however many neighbors
+// were actually selected so the run always fits. H2.3 — reprice execution
+// by wall-clock, not by cleverness of selection: ~120s per run, so H8's
+// baseline run + the post-edit run together still land inside the old
+// single-run envelope.
+const REGRESSION_GATE_TOTAL_BUDGET_MS = 120_000
+
+// H2.1/H2.4/H8 — a touched file's committed HEAD content, sourced via `git
+// show` through the same injected shell runner the rest of the regression
+// gate uses (never a direct child_process call). Feeds the side-effect/
+// high-breadth diff checks and H8's baseline revert. `null` for a brand-new
+// file (no HEAD blob) or any git error — never a throw.
+async function readRegressionGateHeadContent(filePath: string): Promise<string | null> {
+  const rel = path.isAbsolute(filePath) ? path.relative(process.cwd(), filePath) : filePath
+  const result = await makeShellCommandRunner({ cwd: process.cwd(), timeoutMs: 5000 })({
+    kind: "guard",
+    command: `git show HEAD:${rel}`,
+  })
+  return result.exitCode === 0 ? result.stdout : null
+}
 
 // F20 — bounded wait for the in-process graph index before the graph-derived
 // neighbor pass; on timeout/miss the gate runs on filename rungs alone.
@@ -1899,10 +1930,13 @@ export const layer = Layer.effect(
         const MAX_PROBE_GATE_RETRIES = 3
         // RF-8 — finish-time type-fidelity re-check state: probe-green may not
         // conclude over a pinned repro whose CURRENT on-disk content carries a
-        // type-unfaithful shape (stringified mirror / quoted-numeral conflict).
-        // The 11790 re-fire proved the pin-time judge runs once on the FIRST
-        // pin, and a nudge-prompted rewrite into if/failures style evades every
-        // assert-anchored detector while keeping the misconception. One bounded
+        // type-unfaithful shape (stringified mirror / quoted-numeral conflict),
+        // no longer covers every issue-stated witness (H1 tooth 1, the 14369
+        // strict-subset shape), or never exercises a synthesized roundtrip
+        // counterpart (H1 tooth 2). The 11790 re-fire proved the pin-time judge
+        // runs once on the FIRST pin, and a nudge-prompted rewrite into
+        // if/failures style — or a later narrowing of the witness set — evades
+        // every pin-time detector while keeping the misconception. One bounded
         // deny, then loud pass-through — never a wedge.
         let fidelityFinishDenied = false
         // Round-G — a promoted pin reaching green arms the deferral consumer at
@@ -1963,6 +1997,15 @@ export const layer = Layer.effect(
         // same turn. undefined = not yet probed; null = probed, none found
         // (the gate is skipped for the rest of the turn in that case).
         let turnDiscoveredInterpreter: string | null | undefined = undefined
+        // H8 — the regression lane's pre-edit (HEAD) baseline for this
+        // turn's neighbor set, cached so `runDifferentialBaseline` (it
+        // reverts/restores touched files and shells out) runs at most once
+        // per turn — same once-per-turn discipline as
+        // turnDiscoveredInterpreter above. undefined = not yet computed.
+        let turnRegressionBaseline: ReadonlySet<string> | undefined = undefined
+        // H8 — pre-existing (baseline) reds are reported to the model once,
+        // loudly, then never re-flagged on a later arrival within the turn.
+        let turnBaselineRedsReported = false
         // The turn's OPENING user message id, captured once at step 0 before
         // any synthetic nudge (stuck/grind/batch/probe-gate/S2/S3) can shift
         // `lastUser` forward — the stable anchor S3 scans "this turn's"
@@ -2014,6 +2057,12 @@ export const layer = Layer.effect(
         // F9a — repro-fidelity judge fires at most once per turn, right at
         // the pin-from-red site below.
         let reproFidelityJudgedThisTurn = false
+        // H1 tooth 2 (gap-closure-plan §2.7) — the roundtrip counterpart
+        // synthesized for this turn's focus entity (undefined until the
+        // pin-time dispatch below resolves it, or when none exists). The
+        // RF-8 finish-time re-check reuses this SAME value rather than
+        // re-querying the graph.
+        let turnRoundtripCounterpart: string | undefined
         // F15c — toothless-pin-refusal nudge: fires at most once per turn,
         // shared by both pin sites (mirrors reproFidelityJudgedThisTurn
         // above); after the first refusal only the `turn_probe_toothless_skip`
@@ -2029,7 +2078,13 @@ export const layer = Layer.effect(
          * via `applyAssertionTeethGap` when the script has no assertion
          * teeth regardless of the judge's verdict, and emits exactly one
          * `repro_fidelity_*` marker plus the existing gap-nudge message.
-         * Fires at most once per turn — `reproFidelityJudgedThisTurn`
+         * H1 tooth 2 (gap-closure-plan §2.7): also resolves the issue's
+         * named symbol to its graph definition site and synthesizes a
+         * roundtrip counterpart (`roundtrip-witness.ts`), forcing an extra
+         * gap via `applyRoundtripGap` when one exists but the repro never
+         * exercises it — the resolved counterpart is cached in
+         * `turnRoundtripCounterpart` for the RF-8 finish-time re-check to
+         * reuse. Fires at most once per turn — `reproFidelityJudgedThisTurn`
          * guards re-entry from either call site. The caller `continue`s the
          * step loop when this returns `{ gap: true }`, exactly like the
          * original inline site did.
@@ -2070,16 +2125,33 @@ export const layer = Layer.effect(
           const requiredLiterals = getIssueExpectations(sessionID)
             .filter((l) => l.kind === "expected")
             .map((l) => l.value)
-          const verdict = applyNumericStringConflictGap(
-            applyStringifiedMirrorGap(
-              applyRequiredLiteralsGap(
-                applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+          // H1 tooth 2 (gap-closure-plan §2.7) — roundtrip witness
+          // synthesis: resolve the issue's named symbol(s) to their
+          // defining site, then ask the graph for a same-file read/write
+          // sibling. issueSymbolDefinitionSites memoizes per symbol
+          // (graph-tools.ts's WeakMap), so a repeat dispatch this turn
+          // costs nothing extra.
+          const roundtripSites = yield* Effect.promise(() => issueSymbolDefinitionSites(issueText))
+          const roundtripSite = roundtripSites[0]
+          turnRoundtripCounterpart = roundtripSite
+            ? yield* Effect.promise(() =>
+                synthesizeRoundtripWitness(getGraph(), roundtripSite.symbol, roundtripSite.file),
+              )
+            : undefined
+          const verdict = applyRoundtripGap(
+            applyNumericStringConflictGap(
+              applyStringifiedMirrorGap(
+                applyRequiredLiteralsGap(
+                  applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
+                  reproContent,
+                  requiredLiterals,
+                ),
                 reproContent,
-                requiredLiterals,
               ),
               reproContent,
             ),
             reproContent,
+            turnRoundtripCounterpart,
           )
           const degradedReason = verdict === fidelityOutcome.verdict ? fidelityOutcome.degradedReason : undefined
           if (degradedReason) {
@@ -3570,8 +3642,33 @@ export const layer = Layer.effect(
                 const finishScriptPath = extractScriptPath(turnPinnedProbe.probe.command)
                 const finishReproContent =
                   finishScriptPath === undefined ? undefined : readPinnedReproFile(process.cwd(), finishScriptPath)
+                // H1 tooth 1 (gap-closure-plan §2.7) — the finish-time
+                // re-check re-runs the ALL-witness check too, not just
+                // type-fidelity: the pin-time coverage gate (F14b) fires at
+                // most ONCE, so a repro rewritten AFTER pin time down to a
+                // strict subset (the 14369 "settled on 2/3 cases" shape)
+                // would otherwise reach GREEN unnoticed. Re-check the
+                // CURRENT on-disk content against the SAME witness list
+                // (issue-derived literals + the pin-time roundtrip
+                // counterpart, if any) rather than a first-witness-only
+                // spot check.
+                const finishRequiredLiterals = getIssueExpectations(sessionID)
+                  .filter((l) => l.kind === "expected")
+                  .map((l) => l.value)
+                const finishWitnessMissing =
+                  finishReproContent === undefined
+                    ? []
+                    : missingRequiredLiterals(finishReproContent, finishRequiredLiterals)
+                const finishWitnessGap =
+                  finishWitnessMissing.length > 0
+                    ? `repro no longer covers every issue-stated witness — missing: ${finishWitnessMissing.join(", ")}`
+                    : finishReproContent === undefined
+                      ? undefined
+                      : detectMissingRoundtripAssert(finishReproContent, turnRoundtripCounterpart)
                 const finishTypeGap =
-                  finishReproContent === undefined ? undefined : detectTypeUnfaithfulRepro(finishReproContent)
+                  finishReproContent === undefined
+                    ? undefined
+                    : (detectTypeUnfaithfulRepro(finishReproContent) ?? finishWitnessGap)
                 if (finishTypeGap !== undefined && !fidelityFinishDenied) {
                   fidelityFinishDenied = true
                   yield* publishSignalFx({
@@ -4148,7 +4245,74 @@ export const layer = Layer.effect(
                   cwd: process.cwd(),
                   graphCandidates,
                 })
-                if (neighbors.length > 0) {
+
+                // H2.1/H2.4 — import-time side-effect + high-P2P-breadth
+                // widening (gap-closure-plan.md §2 H2, round 3): the
+                // filename/graph rungs above key off entity/filename
+                // proximity, blind to an import-time blast radius
+                // (astropy-13236: a module-level DeprecationWarning, 644 P2P
+                // broken, zero graph neighbors) and to a default-arg/
+                // base-class edit's caller-wide reach (astropy-8872: an
+                // 80-test P2P break behind a 3-file green subset). Widening
+                // BEFORE the run — rather than promoting a narrow green
+                // subset after the fact — means a risky edit class always
+                // gets the wider check, and the green log below always
+                // states its real verified scope.
+                const highBreadthFiles: string[] = []
+                for (const file of landedSourceEditFiles) {
+                  const head = yield* Effect.promise(() => readRegressionGateHeadContent(file))
+                  if (head === null) continue
+                  let current: string | undefined
+                  try {
+                    current = readFileSync(file, "utf8")
+                  } catch {
+                    continue
+                  }
+                  if (isHighP2PBreadthEdit(head, current)) highBreadthFiles.push(file)
+                }
+                let widenedNeighbors: VerifyCommand[] = neighbors
+                if (highBreadthFiles.length > 0) {
+                  const seen = new Set(widenedNeighbors.map((n) => n.command))
+                  for (const file of highBreadthFiles) {
+                    for (const candidate of widenForModuleSideEffect(file, process.cwd())) {
+                      if (seen.has(candidate.command)) continue
+                      seen.add(candidate.command)
+                      widenedNeighbors = [...widenedNeighbors, candidate]
+                    }
+                  }
+                  yield* Effect.logInfo("turn_regression_widened", {
+                    "session.id": sessionID,
+                    files: highBreadthFiles.length,
+                    neighbors: widenedNeighbors.length,
+                  })
+                }
+
+                // H2.2 — fail-loud on zero selection: a non-trivial code
+                // edit whose regression lane selects zero tests is a
+                // CONVERTING signal, never silence — fall back to a sibling
+                // test file, or surface the gap into the finish summary.
+                if (widenedNeighbors.length === 0) {
+                  const sibling = landedSourceEditFiles[0]
+                    ? findSiblingTestCommand(landedSourceEditFiles[0], process.cwd())
+                    : null
+                  if (sibling) {
+                    widenedNeighbors = [sibling]
+                  } else {
+                    yield* publishSignalFx({
+                      name: "unverifiable_regression_surface",
+                      sessionID,
+                      severity: "tail",
+                      decision: "surface",
+                      evidence: { files: landedSourceEditFiles.length },
+                    })
+                    yield* Effect.logWarning("turn_regression_unverifiable", {
+                      "session.id": sessionID,
+                      files: landedSourceEditFiles,
+                    })
+                  }
+                }
+
+                if (widenedNeighbors.length > 0) {
                   // F14a — discover an interpreter that can actually import
                   // the touched package BEFORE running the neighbor
                   // commands: a containerized project image's PATH `python`
@@ -4207,10 +4371,40 @@ export const layer = Layer.effect(
                   }
                   if (turnDiscoveredInterpreter !== null) {
                     const rewrittenCommands = rewriteInterpreter(
-                      neighbors.map((n) => n.command),
+                      widenedNeighbors.map((n) => n.command),
                       turnDiscoveredInterpreter,
                     )
-                    const rewrittenNeighbors = neighbors.map((n, i) => ({ ...n, command: rewrittenCommands[i] }))
+                    const rewrittenNeighbors = widenedNeighbors.map((n, i) => ({ ...n, command: rewrittenCommands[i] }))
+                    // H8 — differential regression baseline: run the
+                    // neighbor set ONCE against pre-edit (HEAD) content
+                    // before comparing against the post-edit run, so a
+                    // pre-existing environment red (astropy-8707's broken
+                    // `np.int`) never gets chased as model-induced. Cached
+                    // per turn — the first selection's baseline stands for
+                    // the whole turn, mirroring turnDiscoveredInterpreter's
+                    // own once-per-turn cache.
+                    if (turnRegressionBaseline === undefined) {
+                      turnRegressionBaseline = yield* Effect.promise(() =>
+                        runDifferentialBaseline({
+                          touchedSourceFiles: landedSourceEditFiles,
+                          neighbors: rewrittenNeighbors,
+                          runner: makeShellCommandRunner({
+                            timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length),
+                          }),
+                          readHeadContent: readRegressionGateHeadContent,
+                          readCurrentContent: async (f) => readFileSync(f, "utf8"),
+                          writeContent: async (f, c) => {
+                            writeFileSync(f, c, "utf8")
+                          },
+                        }),
+                      )
+                      if (turnRegressionBaseline.size > 0) {
+                        yield* Effect.logInfo("turn_regression_baseline", {
+                          "session.id": sessionID,
+                          preExisting: [...turnRegressionBaseline],
+                        })
+                      }
+                    }
                     const regression = yield* Effect.promise(() =>
                       runRegressionGate({
                         neighbors: rewrittenNeighbors,
@@ -4219,18 +4413,58 @@ export const layer = Layer.effect(
                         }),
                       }),
                     )
-                    if (regression.regressed) {
+                    // H8 — route the post-edit result through the shared
+                    // claim–evidence kernel (code-intelligence/
+                    // claim-evidence.ts) instead of raw regressed/failures:
+                    // `baseline` subtracts pre-existing reds per test-id
+                    // (never per-file), so a genuinely model-induced red in
+                    // the SAME file as a pre-existing one still denies.
+                    const regressionClaim: Claim = {
+                      kind: "no_regressions",
+                      scope: { kind: "tests", items: rewrittenNeighbors.map((n) => n.command) },
+                    }
+                    const regressionEvidence: Evidence = {
+                      scope: regressionClaim.scope,
+                      items: rewrittenNeighbors.map((n) => {
+                        const failure = regression.failures.find((f) => f.command.command === n.command)
+                        return {
+                          id: n.command,
+                          verdict: failure ? ("fail" as const) : ("pass" as const),
+                          detail: failure
+                            ? (failure.stderr.trim() || failure.stdout.trim() || "").split("\n").slice(-15).join("\n")
+                            : undefined,
+                        }
+                      }),
+                      baseline: [...turnRegressionBaseline],
+                    }
+                    const regressionVerdict = checkClaimCoverage(regressionClaim, regressionEvidence)
+                    // H8 — pre-existing reds are reported once, loudly, as
+                    // environment facts and excluded from deny decisions —
+                    // never silently absorbed, never re-flagged every turn.
+                    if (regressionVerdict.preExisting.length > 0 && !turnBaselineRedsReported) {
+                      turnBaselineRedsReported = true
+                      yield* Effect.logWarning("turn_regression_baseline_excused", {
+                        "session.id": sessionID,
+                        preExisting: regressionVerdict.preExisting,
+                      })
+                    }
+                    if (!regressionVerdict.covered) {
                       // F13a — env-red vs assertion-red was previously
                       // indistinguishable from the bare command name alone;
                       // each failure's exit code + a ~15-line output tail
                       // rides the marker and the reject nudge so the model
                       // (and a live triage reading the log) can see WHY the
-                      // neighbor failed.
-                      const failingNeighbors = regression.failures.map((f) => ({
-                        command: f.command.command,
-                        exitCode: f.exitCode,
-                        outputTail: (f.stderr.trim() || f.stdout.trim() || "").split("\n").slice(-15).join("\n"),
-                      }))
+                      // neighbor failed. H8 — only genuinely new reds
+                      // (`regressionVerdict.failing`) reach this branch;
+                      // baseline-excused ids never do.
+                      const failingNeighbors = regressionVerdict.failing.map((command) => {
+                        const failure = regression.failures.find((f) => f.command.command === command)!
+                        return {
+                          command,
+                          exitCode: failure.exitCode,
+                          outputTail: (failure.stderr.trim() || failure.stdout.trim() || "").split("\n").slice(-15).join("\n"),
+                        }
+                      })
                       if (!turnRegressionGateNudged) {
                         turnRegressionGateNudged = true
                         // F16 — promote an honest assertion-red neighbor
@@ -4321,8 +4555,14 @@ export const layer = Layer.effect(
                         failing: failingNeighbors,
                       })
                     } else {
+                      // H2.4 — every green verdict states its verified scope
+                      // (never an implied "no regressions"); a
+                      // high-P2P-breadth edit already ran the widened set
+                      // above, so this is never a narrow subset promoted
+                      // past its own reach.
                       yield* Effect.logInfo("turn_regression_green", {
                         "session.id": sessionID,
+                        verifiedScope: regressionVerdict.verifiedScope,
                         neighbors: rewrittenNeighbors.map((n) => n.command),
                       })
                     }

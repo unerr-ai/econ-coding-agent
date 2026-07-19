@@ -24,6 +24,7 @@ export type EconSignalName =
   | "probe_rerun_dedupe" // Round-H: same command produced identical output for the 3rd+ time — no new information
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
+  | "unverifiable_regression_surface" // H2.2: a non-trivial code edit's regression lane selected zero tests and no sibling test file exists — surfaced, never silent
   | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail
   | "repro_unresolved" // S2 deadline abstention
   | "repro_drift" // drift detector (kind in evidence)

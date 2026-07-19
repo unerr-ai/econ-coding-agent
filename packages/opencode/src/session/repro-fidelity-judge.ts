@@ -45,10 +45,33 @@
  * check alone, without needing `detectNumericStringConflict`'s broader
  * digit-co-occurrence heuristic.
  *
+ * H1 (gap-closure-plan §2.7) reframes literal coverage as the first
+ * instance of the shared claim-evidence kernel: `checkWitnessCoverage`
+ * builds the turn's witness `ClaimScope` and asks `checkClaimCoverage`
+ * (`code-intelligence/claim-evidence.ts`) whether the repro's evidence
+ * covers it — `missingRequiredLiterals`/`applyRequiredLiteralsGap` now
+ * delegate to it instead of re-filtering inline. `checkRoundtripWitness` /
+ * `detectMissingRoundtripAssert` / `applyRoundtripGap` add a sixth tooth of
+ * the same shape: when `roundtrip-witness.ts`'s graph-sibling synthesis
+ * finds a read/write counterpart for the turn's focus entity, the repro
+ * must exercise it or the gate forces a gap (converts 14365/14598/14182's
+ * one-sided fixes). `checkTestSetCoverage` extends the same kernel to a
+ * harness-visible failing-test-id scope (H1 tooth 3, the full-F2P harvest)
+ * — this module only builds that coverage verdict; wiring a live id source
+ * into a finish gate is a separate seam.
+ *
  * @sem domain=routing role=repro-judge
  */
 import { extractJsonObject } from "../util/json-extract"
 import { REPRO_FIDELITY_SYSTEM_PROMPT } from "./prompts/judges"
+import {
+  checkClaimCoverage,
+  type Claim,
+  type ClaimScope,
+  type Evidence,
+  type EvidenceItem,
+  type CoverageVerdict,
+} from "../../../code-intelligence/src/claim-evidence"
 
 /** Hard cap on gaps per verdict — enforced on parse, not just requested in the prompt. */
 export const REPRO_FIDELITY_MAX_GAPS = 3
@@ -308,10 +331,34 @@ export function applyRenderedAssertGap(verdict: ReproFidelityVerdict, reproConte
 }
 
 /**
+ * H1 (gap-closure-plan §2.7) — the turn's witness `ClaimScope` built from
+ * the §6 issue-derived expected literals: each literal is a named
+ * obligation, so a repro asserting only some of them is a strict subset,
+ * never promotion-worthy (the 14369 "settled on 2/3 cases" shape). Routes
+ * through the shared `checkClaimCoverage` kernel rather than an inline
+ * filter — a plain substring-presence check supplies each literal's
+ * evidence.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function checkWitnessCoverage(
+  reproContent: string,
+  requiredLiterals: readonly string[] | undefined,
+): CoverageVerdict {
+  const scope: ClaimScope = { kind: "witnesses", items: requiredLiterals ? [...requiredLiterals] : [] }
+  const claim: Claim = { kind: "fixed", scope }
+  const items: EvidenceItem[] = scope.items
+    .filter((literal) => reproContent.includes(literal))
+    .map((id) => ({ id, verdict: "pass" as const }))
+  const evidence: Evidence = { scope, items }
+  return checkClaimCoverage(claim, evidence)
+}
+
+/**
  * RF-4 — the §6 issue-derived expected literals absent from the pinned
- * repro's content (plain substring check, case-sensitive) — `undefined`/
- * empty `requiredLiterals` yields no misses. The caller passes these in
- * once the issue-expectations extractor (§6) is wired up.
+ * repro's content. H1 (gap-closure-plan §2.7): now a thin wrapper over
+ * `checkWitnessCoverage`'s kernel-routed verdict instead of an inline
+ * filter — `undefined`/empty `requiredLiterals` still yields no misses.
  *
  * @sem domain=routing role=repro-judge
  */
@@ -319,8 +366,7 @@ export function missingRequiredLiterals(
   reproContent: string,
   requiredLiterals: readonly string[] | undefined,
 ): readonly string[] {
-  if (!requiredLiterals || requiredLiterals.length === 0) return []
-  return requiredLiterals.filter((literal) => !reproContent.includes(literal))
+  return checkWitnessCoverage(reproContent, requiredLiterals).missing
 }
 
 /**
@@ -347,6 +393,96 @@ export function applyRequiredLiteralsGap(
       REPRO_FIDELITY_MAX_GAPS,
     ),
   }
+}
+
+const roundtripWitnessId = (counterpart: string): string => `roundtrip:${counterpart}`
+
+/**
+ * H1 tooth 2 (gap-closure-plan §2.7) — true when the pinned repro's content
+ * never calls the synthesized roundtrip counterpart (`roundtrip-witness.ts`
+ * finds it as a same-file read/write sibling of the turn's focus entity): a
+ * one-sided fix that only touches the parse/read/load/escape half never
+ * gets caught by any other tooth (astropy-14365 parse-only, 14598 inverted
+ * unescape, 14182 param-never-threaded). A plain call-site presence check —
+ * shape-independent, same discipline as `hasAssertionTeeth`. `undefined`
+ * counterpart (no sibling found this turn) always passes.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function detectMissingRoundtripAssert(
+  reproContent: string,
+  counterpart: string | undefined,
+): string | undefined {
+  if (!counterpart) return undefined
+  const shortName = counterpart.includes(".") ? counterpart.split(".").pop()! : counterpart
+  const callRe = new RegExp(`\\b${shortName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\(`)
+  if (callRe.test(reproContent)) return undefined
+  return (
+    `the reproduction never exercises the roundtrip counterpart \`${shortName}\` — assert the roundtrip ` +
+    `(parse -> write -> parse == original, or read/write, load/dump, escape/unescape) so a one-sided fix cannot pass`
+  )
+}
+
+/**
+ * H1 tooth 2 — the roundtrip witness as its own single-item `ClaimScope`,
+ * routed through the same `checkClaimCoverage` kernel as the literal
+ * witnesses above (consistency, not necessity — every H1 tooth answers its
+ * coverage question the same way). No counterpart synthesized this turn ⇒
+ * an empty scope, trivially covered.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function checkRoundtripWitness(reproContent: string, counterpart: string | undefined): CoverageVerdict {
+  const scope: ClaimScope = { kind: "witnesses", items: counterpart ? [roundtripWitnessId(counterpart)] : [] }
+  const claim: Claim = { kind: "fixed", scope }
+  const items: EvidenceItem[] =
+    counterpart && detectMissingRoundtripAssert(reproContent, counterpart) === undefined
+      ? [{ id: roundtripWitnessId(counterpart), verdict: "pass" }]
+      : []
+  return checkClaimCoverage(claim, { scope, items })
+}
+
+/**
+ * H1 tooth 2 — force a fidelity gap when `detectMissingRoundtripAssert`
+ * finds the synthesized counterpart unexercised, regardless of the LLM
+ * judge's verdict: a no-op (same reference returned) on an `undefined`
+ * counterpart or a repro that already calls it.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function applyRoundtripGap(
+  verdict: ReproFidelityVerdict,
+  reproContent: string,
+  counterpart: string | undefined,
+): ReproFidelityVerdict {
+  const gap = detectMissingRoundtripAssert(reproContent, counterpart)
+  if (!gap) return verdict
+  return { faithful: false, gaps: [...verdict.gaps, gap].slice(0, REPRO_FIDELITY_MAX_GAPS) }
+}
+
+/**
+ * H1 tooth 3 (gap-closure-plan §2.7) — the deterministic full-F2P harvest:
+ * when the task carries a harness-visible set of failing test ids (a
+ * benchmark's FAIL_TO_PASS list, or every red test id the turn's own runs
+ * produced — `seen-red.ts`'s `findUnresolvedSeenRed` already surfaces the
+ * latter as a bounded set, not a first-match), the finish claim's scope is
+ * that FULL SET. Pure: the caller supplies the id list plus each id's
+ * observed verdict; this only judges coverage through the shared kernel —
+ * wiring a live id source into a finish gate is a separate seam this
+ * function does not own.
+ *
+ * @sem domain=routing role=repro-judge
+ */
+export function checkTestSetCoverage(
+  testIds: readonly string[],
+  results: ReadonlyMap<string, EvidenceItem["verdict"]>,
+): CoverageVerdict {
+  const scope: ClaimScope = { kind: "tests", items: [...testIds] }
+  const claim: Claim = { kind: "no_regressions", scope }
+  const items: EvidenceItem[] = testIds
+    .filter((id) => results.has(id))
+    .map((id) => ({ id, verdict: results.get(id)! }))
+  return checkClaimCoverage(claim, { scope, items })
 }
 
 /** Locates a single `assertEqual`/`assertNotEqual(` call — the gate for both the assertion-line check and the arg extractor below. */

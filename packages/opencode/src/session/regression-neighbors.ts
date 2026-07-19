@@ -66,12 +66,25 @@
  * gate skipped, one regression shipped). Observed-green evidence outranks a
  * synthetic probe.
  *
+ * H2 (gap-closure-plan §2, round 3) — every rung above keys off entity/
+ * filename proximity, which is blind to an import-time blast radius
+ * (`isHighP2PBreadthEdit`/`detectsModuleLevelSideEffect`: a module-level
+ * statement, a default-arg change, or a base-class edit reaches "every
+ * importer", not a reverse-call edge — astropy-13236/8872) and to a
+ * zero-selection turn (`findSiblingTestCommand` — the gate's last-resort
+ * fallback before it surfaces "unverifiable regression surface" instead of
+ * staying silent). H8 — `runDifferentialBaseline` runs the selected set once
+ * against pre-edit (HEAD) content so the gate consumer can tell an
+ * environment-red (astropy-8707) from a model-induced one; the subtraction
+ * itself is the shared claim–evidence kernel's job (`checkClaimCoverage`,
+ * `code-intelligence/claim-evidence.ts`), not this module's.
+ *
  * @sem domain=routing role=neighbor-discovery
  */
 import { existsSync, readdirSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, extname, join, relative, basename as pathBasename } from "node:path"
-import type { VerifyCommand, CommandRunner } from "@opencode-ai/code-intelligence"
+import { runRegressionGate, type VerifyCommand, type CommandRunner } from "@opencode-ai/code-intelligence"
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "./seen-red"
 import type { SeenRedExecution } from "./seen-red"
@@ -389,6 +402,171 @@ export function discoverNeighborTests(opts: {
   return commands
 }
 
+// ---------------------------------------------------------------------------
+// H2.1/H2.4 — import-time side-effect heuristic + high-P2P-breadth
+// classification (gap-closure-plan.md §2 H2, round 3)
+// ---------------------------------------------------------------------------
+
+/** One new/changed source line in `newContent`, paired with the line right after it (undefined at EOF) — the lookahead a class-decorator check needs to confirm a decorator sits directly above a `class` line, not a `def`. A simple line-set diff against `oldContent` (not an LCS/patience diff) — good enough to flag added/changed statements without a full parser. */
+function newSourceLines(oldContent: string, newContent: string): { line: string; next: string | undefined }[] {
+  const oldSet = new Set(oldContent.split("\n"))
+  const lines = newContent.split("\n")
+  const changed: { line: string; next: string | undefined }[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (!oldSet.has(line)) changed.push({ line, next: lines[i + 1] })
+  }
+  return changed
+}
+
+const MODULE_CLASS_DECORATOR_RE = /^@\w/
+const MODULE_WARNING_RE = /\bwarnings?\.(?:warn|deprecat\w*)\(|(?:^|[^\w.])warn\(/
+const MODULE_MUTATION_RE =
+  /^[A-Za-z_][\w.]*(?:\[[^\]]*\])?\s*(?:\+=|-=|\*=|\/=|\|=|&=)|^[A-Za-z_][\w.]*\.(?:register|append|update|setdefault|add|extend)\(|^os\.environ\[/
+const MODULE_DEFINITION_KEYWORD_RE =
+  /^(?:def\b|class\b|import\b|from\b|if\b|elif\b|else\b|try\b|except\b|finally\b|with\b|for\b|while\b|return\b)/
+const MODULE_BARE_CALL_RE = /^[A-Za-z_][\w.]*\([^()]*\)\s*$/
+
+/** True when `entry.line` is an unindented (module-scope) statement carrying an import-time side effect: a decorator directly above a module-level `class`, warning emission, global/registry/env mutation, or a bare call statement (neither an assignment nor a def/class/import/control-flow line). Never matches an indented line (function/class body) or a comment/blank line. */
+function isModuleLevelSideEffectLine(entry: { line: string; next: string | undefined }): boolean {
+  const { line, next } = entry
+  if (/^\s/.test(line)) return false
+  const trimmed = line.trimEnd()
+  if (trimmed === "" || trimmed.startsWith("#")) return false
+  if (MODULE_CLASS_DECORATOR_RE.test(trimmed)) return next !== undefined && /^class\s+\w/.test(next)
+  if (MODULE_WARNING_RE.test(trimmed)) return true
+  if (MODULE_MUTATION_RE.test(trimmed)) return true
+  if (MODULE_BARE_CALL_RE.test(trimmed) && !MODULE_DEFINITION_KEYWORD_RE.test(trimmed)) return true
+  return false
+}
+
+/**
+ * H2.1 — import-time side-effect heuristic (deterministic text check): true
+ * when the edit adds or changes a module-level executable statement absent
+ * from `oldContent` — a warning emission, global/registry/env mutation, a
+ * bare module-level call, or a decorator applied directly to a module-level
+ * class. This blast radius is "everyone who imports the module", invisible
+ * to the F20 call-graph walk (astropy-13236: a bare module-level
+ * `warnings.warn(DeprecationWarning)` broke 644 P2P tests behind zero graph
+ * neighbors — the gate silently passed). `oldContent` empty/absent (a
+ * brand-new file) never trips this — there is no prior silent behavior to
+ * break.
+ *
+ * @sem domain=routing role=side-effect-detection
+ */
+export function detectsModuleLevelSideEffect(oldContent: string, newContent: string): boolean {
+  if (!oldContent) return false
+  return newSourceLines(oldContent, newContent).some(isModuleLevelSideEffectLine)
+}
+
+// H2.4 — the two other high-P2P-breadth shapes beyond a module-level side
+// effect: a default-argument change (dtype/default-behavior — changes every
+// caller relying on the default, not just ones the graph walks) and a
+// class's base-list edit (astropy-8872: a base-class change broke 80 P2P
+// tests behind a 3-file green neighbor subset).
+const DEFAULT_ARG_DEF_RE = /^\s*(?:async\s+)?def\s+\w+\([^)]*=/
+const BASE_CLASS_DEF_RE = /^class\s+\w+\([^)]+\)\s*:/
+
+/**
+ * H2.4 — high-P2P-breadth classification: true when the edit's shape is one
+ * whose blast radius the graph/filename neighbor rungs systematically
+ * under-reach — a module-level side effect (`detectsModuleLevelSideEffect`),
+ * a function/method default-argument change, or a class base-list edit. The
+ * gate consumer widens selection BEFORE running for this class rather than
+ * promoting a narrow green subset to "no regressions" after the fact
+ * (8872's 3-file green subset shipped 80 broken P2P tests) — every green
+ * verdict still states its real verified scope regardless.
+ *
+ * @sem domain=routing role=side-effect-detection
+ */
+export function isHighP2PBreadthEdit(oldContent: string, newContent: string): boolean {
+  if (!oldContent) return false
+  return newSourceLines(oldContent, newContent).some(
+    (entry) => isModuleLevelSideEffectLine(entry) || DEFAULT_ARG_DEF_RE.test(entry.line) || BASE_CLASS_DEF_RE.test(entry.line),
+  )
+}
+
+/** Cap on H2.1/H2.4 widened neighbor commands — a high-P2P-breadth edit's blast radius is "the whole package", but the gate's wall-clock budget (H2.3) still bounds how much of it gets run. */
+const SIDE_EFFECT_WIDEN_CAP = 5
+
+/**
+ * H2.1/H2.4 widening: when `isHighP2PBreadthEdit` fires for `sourceFile`,
+ * the normal filename/graph neighbor rungs (which key off entity/filename
+ * proximity) are not enough — this widens selection to the touched module's
+ * own full test file (its usual filename-rung candidates) plus every other
+ * test file under its top-level package's test directory, capped at
+ * `SIDE_EFFECT_WIDEN_CAP`.
+ *
+ * @sem domain=routing role=neighbor-discovery
+ */
+export function widenForModuleSideEffect(sourceFile: string, cwd: string): VerifyCommand[] {
+  const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
+  const commands: string[] = []
+  const seen = new Set<string>()
+  const push = (command: string) => {
+    if (seen.has(command) || commands.length >= SIDE_EFFECT_WIDEN_CAP) return
+    seen.add(command)
+    commands.push(command)
+  }
+
+  for (const command of collectFileNeighborCandidates(sourceFile, cwd, isDjangoRepo, discoverTestTreeRoots(cwd))) {
+    push(command)
+  }
+
+  const pkg = deriveTopLevelPackage(sourceFile, cwd)
+  if (pkg) {
+    if (isDjangoRepo) {
+      push(`python tests/runtests.py ${pkg} --parallel 1`)
+    } else {
+      const pkgTestDir = join(cwd, pkg, "tests")
+      let entries: Dirent[]
+      try {
+        entries = readdirSync(pkgTestDir, { withFileTypes: true })
+      } catch {
+        entries = []
+      }
+      for (const entry of entries) {
+        if (commands.length >= SIDE_EFFECT_WIDEN_CAP) break
+        if (entry.isFile() && /^test_.*\.py$/.test(entry.name)) {
+          push(`python -m pytest ${relative(cwd, join(pkgTestDir, entry.name))} -x -q`)
+        }
+      }
+    }
+  }
+
+  return commands.map((command) => ({ kind: "test" as const, command }))
+}
+
+/**
+ * H2.2 — fail-loud fallback: the touched file's own sibling test file (same
+ * directory, conventional naming — `test_<stem>.py`/`<stem>_test.py` for
+ * Python, `<stem>.test.<ext>`/`<stem>.spec.<ext>` otherwise). Tried only
+ * when every rung above (filename, graph, H2.1/H2.4 widened) selected
+ * nothing — a non-trivial edit whose regression lane picks zero tests is a
+ * converting signal, never silence; the caller surfaces "unverifiable
+ * regression surface" when this also returns `null`.
+ *
+ * @sem domain=routing role=neighbor-discovery
+ */
+export function findSiblingTestCommand(file: string, cwd: string): VerifyCommand | null {
+  const relFile = relativizeToCwd(file, cwd)
+  const dir = dirname(relFile)
+  const ext = extname(relFile)
+  const stem = pathBasename(relFile, ext)
+  if (!stem) return null
+  const tryNames = (names: readonly string[], commandFor: (rel: string) => string): VerifyCommand | null => {
+    for (const name of names) {
+      const relCandidate = dir === "." ? name : join(dir, name)
+      if (existsSync(join(cwd, relCandidate))) return { kind: "test", command: commandFor(relCandidate) }
+    }
+    return null
+  }
+  if (ext === ".py") {
+    return tryNames([`test_${stem}.py`, `${stem}_test.py`], (rel) => `python -m pytest ${rel} -x -q`)
+  }
+  return tryNames([`${stem}.test${ext}`, `${stem}.spec${ext}`], (rel) => `bun test ${rel}`)
+}
+
 /** Minimal reverse-call query surface F20 needs — structurally satisfied by BunSqliteGraph; unit tests inject a fake. */
 export interface NeighborGraphPort {
   getEntitiesInFile(filePath: string): Promise<{ name: string; filePath: string; kind: string }[]>
@@ -699,4 +877,49 @@ export function rewriteInterpreterCommand(command: string, interpreter: string |
     .split(/(&&|;)/)
     .map((part) => (part === "&&" || part === ";" ? part : rewriteSegmentHead(part, interpreter)))
     .join("")
+}
+
+// ---------------------------------------------------------------------------
+// H8 — differential regression baseline (env-red ≠ model-red)
+// ---------------------------------------------------------------------------
+
+/**
+ * H8 — differential regression baseline: runs `neighbors` against the
+ * touched files' pre-edit (HEAD) content, then restores the current
+ * (post-edit) content — so the gate consumer can tell "was already red
+ * before your change" (an environment fact, astropy-8707's broken `np.int`
+ * import) from "your change broke it". Returns the command strings that
+ * failed pre-edit; the caller feeds this straight into `Evidence.baseline`
+ * (`code-intelligence/claim-evidence.ts`) — the subtraction itself happens
+ * in the kernel's `checkClaimCoverage`, not here. A touched file with no
+ * HEAD blob (a brand-new file) or whose current content already equals HEAD
+ * is left untouched — nothing to revert. Restoration runs in `finally` so a
+ * runner throw never strands a touched file on its pre-edit content.
+ *
+ * @sem domain=routing role=differential-baseline
+ */
+export async function runDifferentialBaseline(opts: {
+  touchedSourceFiles: readonly string[]
+  neighbors: readonly VerifyCommand[]
+  runner: CommandRunner
+  readHeadContent: (filePath: string) => Promise<string | null>
+  readCurrentContent: (filePath: string) => Promise<string>
+  writeContent: (filePath: string, content: string) => Promise<void>
+}): Promise<ReadonlySet<string>> {
+  if (opts.neighbors.length === 0) return new Set()
+  const restores: { filePath: string; content: string }[] = []
+  try {
+    for (const filePath of opts.touchedSourceFiles) {
+      const head = await opts.readHeadContent(filePath)
+      if (head === null) continue
+      const current = await opts.readCurrentContent(filePath)
+      if (current === head) continue
+      restores.push({ filePath, content: current })
+      await opts.writeContent(filePath, head)
+    }
+    const { failures } = await runRegressionGate({ neighbors: opts.neighbors, runner: opts.runner })
+    return new Set(failures.map((f) => f.command.command))
+  } finally {
+    for (const { filePath, content } of restores) await opts.writeContent(filePath, content)
+  }
 }
