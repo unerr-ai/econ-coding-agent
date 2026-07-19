@@ -5043,15 +5043,15 @@ export const layer = Layer.effect(
                   (s) => s.name === "hub_bounce" || s.name === "hub_bounce_repeat",
                 )
                 const hubBounceRepeatSignal = hubBounceSignals.find((s) => s.name === "hub_bounce_repeat")
-                if (
-                  shouldArmHubBounceDeferral({
-                    isChildSession: !!session.parentID,
-                    bugShaped,
-                    landedSourceEdits,
-                    hubBounceRepeat: hubBounceRepeatSignal !== undefined,
-                    deferralAvailable: deferralAvailable(sessionID),
-                  })
-                ) {
+                const hubBounceRepeatPresent = hubBounceRepeatSignal !== undefined
+                const h9Inputs = {
+                  isChildSession: !!session.parentID,
+                  bugShaped,
+                  landedSourceEdits,
+                  hubBounceRepeat: hubBounceRepeatPresent,
+                  deferralAvailable: deferralAvailable(sessionID),
+                }
+                if (shouldArmHubBounceDeferral(h9Inputs)) {
                   const bouncedFiles = [
                     ...new Set(hubBounceSignals.map((s) => String(s.evidence.file ?? "")).filter(Boolean)),
                   ]
@@ -5072,6 +5072,19 @@ export const layer = Layer.effect(
                     statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                   })
                   continue
+                } else if (hubBounceRepeatPresent) {
+                  // A live `hub_bounce_repeat` fact was on the bus at this
+                  // arrival yet the AND-gate declined — a django-11265-shaped
+                  // silent no-fire (all five inputs read true at turn-summary
+                  // time, but `deferral_armed` never published). Bounded by
+                  // the signal's own presence so this never fires on the
+                  // (expected) common case of no bounce this turn; names
+                  // every input so the log line alone identifies which one
+                  // was false without re-instrumenting.
+                  yield* Effect.logInfo("h9_hub_bounce_arm_declined", {
+                    "session.id": sessionID,
+                    ...h9Inputs,
+                  })
                 }
               }
             }

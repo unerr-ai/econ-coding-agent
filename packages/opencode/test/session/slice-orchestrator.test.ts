@@ -1994,6 +1994,11 @@ describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixe
     expect(isReproScratchPath("reproducibility/utils.py")).toBe(false)
     expect(isReproScratchPath("django/db/models/deletion.py")).toBe(false)
   })
+  it("matches a leading-underscore scratch FILE at root, no directory segment (django-11265 replay: _repro_field_error.py)", () => {
+    expect(isReproScratchPath("_repro_field_error.py")).toBe(true)
+    expect(isReproScratchPath("~/econ-swe-arena/arena-django__django-11265/_repro_field_error.py")).toBe(true)
+    expect(isReproScratchPath("_reproduce_crash.sh")).toBe(true)
+  })
 })
 
 describe("reproSpecificity via deriveTurnProbe (S1 — authored repro scripts qualify as pins)", () => {

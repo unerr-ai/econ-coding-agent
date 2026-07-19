@@ -788,11 +788,23 @@ const REPRO_SCRIPT_RE = /(?:^|[\s/])((?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs
 // `/`, so `reports/` and `reproducibility/` (no underscore break) don't
 // false-positive.
 const REPRO_DIR_RE = /(?:^|\/)_?(?:repro|reproduce)(?:_[\w.-]*)?\//i
+// tracker #30 follow-up (django-11265 replay) — `_repro_field_error.py` (a
+// leading-underscore scratch FILE, no directory segment) matched neither
+// REPRO_SCRIPT_RE (its `(?:^|[\s/])` boundary doesn't allow an underscore
+// right before "repro"/"reproduce") nor REPRO_DIR_RE (requires a trailing
+// `/`): it stayed counted as a landed source edit long after being deleted,
+// polluting patch-sanity's evidence and the regression gate's candidate
+// files. Same "optional leading underscore" allowance as REPRO_DIR_RE, but
+// for a FILE — deliberately NOT folded into REPRO_SCRIPT_RE itself since
+// that regex's capture group is load-bearing for F10's
+// canonicalScriptProbeCommand.
+const REPRO_SCRIPT_UNDERSCORE_RE = /(?:^|[\s/])_(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
 
 /**
  * Whether a file path is an agent-authored scratch reproduction artifact
- * rather than product source — a repro-named FILE (REPRO_SCRIPT_RE) or any
- * path with a repro-named DIRECTORY segment (REPRO_DIR_RE, e.g. a scaffolded
+ * rather than product source — a repro-named FILE (REPRO_SCRIPT_RE, or its
+ * leading-underscore variant REPRO_SCRIPT_UNDERSCORE_RE) or any path with a
+ * repro-named DIRECTORY segment (REPRO_DIR_RE, e.g. a scaffolded
  * `_repro_app/models.py`). Writing one must not count as "a source fix
  * landed" anywhere done-time evidence is weighed (S3's zero-source-edit bar,
  * S8's converge-now counter), or a repro-only turn looks fixed.
@@ -800,7 +812,7 @@ const REPRO_DIR_RE = /(?:^|\/)_?(?:repro|reproduce)(?:_[\w.-]*)?\//i
  * @sem domain=routing role=repro-specificity
  */
 export function isReproScratchPath(filePath: string): boolean {
-  return REPRO_SCRIPT_RE.test(filePath) || REPRO_DIR_RE.test(filePath)
+  return REPRO_SCRIPT_RE.test(filePath) || REPRO_DIR_RE.test(filePath) || REPRO_SCRIPT_UNDERSCORE_RE.test(filePath)
 }
 
 /**

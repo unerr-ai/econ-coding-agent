@@ -25,7 +25,8 @@ import { Image } from "../../src/image/image"
 
 import { Question } from "../../src/question"
 import { SessionTodo } from "@opencode-ai/core/session/todo"
-import { REPRO_SLICE_CONTENT } from "../../src/session/prompts/seeds"
+import { DEFERRAL_SLICE_PREFIX, REPRO_SLICE_CONTENT } from "../../src/session/prompts/seeds"
+import { publishSignal, signalsFor } from "../../src/session/signal-bus"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
@@ -2288,6 +2289,105 @@ it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with
 
     expect(nudgeTexts).toHaveLength(0)
   }),
+)
+
+// H9 — hub_bounce_repeat arms the deferral escalation on an otherwise-clean
+// bug-shaped finish (tracker #30, django-11265 replay)
+
+it.instance(
+  "H9 gate: hub_bounce_repeat arms the deferral escalation on a bug-shaped root turn's clean finish",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const todos = yield* SessionTodo.Service
+      const session = yield* sessions.create({
+        title: "django-11265 replay",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      // The repro seed's own escape hatch (cancelled with a reason) keeps
+      // the S3 unverified-finish gate from ever rejecting — it must not
+      // spend the one-shot deferral budget itself, or H9's own arm attempt
+      // would find deferralAvailable already false for an unrelated reason.
+      yield* todos.update({
+        sessionID: session.id,
+        todos: [{ content: REPRO_SLICE_CONTENT, status: "cancelled", priority: "high" }],
+      })
+
+      // One real (non-bash) landed source edit supplies both landedSourceEdits
+      // and, via resolveBugShapedFallback's null-verdict turn-evidence
+      // requirement (this harness disables triage), bugShaped.
+      yield* llm.tool("write", {
+        filePath: path.resolve(dir, "django/db/models/sql/query.py"),
+        content: "def build_filter():\n  return None\n",
+      })
+      // Absorbs wave-10's single unverified-finish reject (landed edit, zero
+      // real test executions) before H9's own arrival.
+      yield* llm.text("fix applied")
+      // This arrival falls through every prior gate clean (S3 short-circuits
+      // on the cancelled repro, F11 selects zero regression neighbors) and
+      // reaches H9, which arms the one-shot deferral and continues.
+      yield* llm.text("still fine")
+      // Absorbs the deferral nudge's own round trip — the final loud finish.
+      yield* llm.text("done")
+
+      const fiber = yield* prompt
+        .prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [{ type: "text", text: "There is a bug in query.py — the ORM builds an incorrect join filter." }],
+        })
+        .pipe(Effect.forkChild)
+
+      // Turn-open (which resets the session's signal bus — round F,
+      // prompt.ts) runs before the first scripted LLM request is even
+      // dispatched, so publishing must happen AFTER it, not before —
+      // waiting for the write tool's request to register as a hit puts us
+      // squarely mid-turn, exactly where tool/edit.ts / tool/write.ts
+      // publish a real hub-edit bounce. Mirrors their evidence shape: a
+      // first evidence-bearing bounce (hub_bounce) then a second,
+      // evidence-bearing repeat (hub_bounce_repeat) — the django-11265
+      // replay shape (bounce at step 48/49, every deterministic check
+      // green, the fix landed on/near the hub anyway).
+      yield* llm.wait(1)
+      publishSignal({
+        name: "hub_bounce",
+        sessionID: session.id,
+        severity: "info",
+        decision: "convert",
+        evidence: { file: "django/db/models/sql/query.py", importers: 12 },
+      })
+      publishSignal({
+        name: "hub_bounce_repeat",
+        sessionID: session.id,
+        severity: "tail",
+        decision: "convert",
+        evidence: { file: "django/db/models/sql/query.py", definingSites: 2 },
+      })
+
+      // H9's own arm decision is what's under test — not the downstream
+      // deferral-slice dispatch (a separate, heavier orchestration path).
+      // Poll for the signal instead of awaiting the whole turn to finish.
+      yield* pollWithTimeout(
+        Effect.sync(() =>
+          signalsFor(session.id).some((s) => s.name === "deferral_armed") ? (true as const) : undefined,
+        ),
+        "H9 never published deferral_armed",
+        "15 seconds",
+      )
+
+      const armed = signalsFor(session.id).filter((s) => s.name === "deferral_armed")
+      expect(armed).toHaveLength(1)
+      expect(armed[0]?.evidence.consumed).toBe("hub_bounce_repeat")
+
+      const finalTodos = yield* todos.get(session.id)
+      expect(finalTodos.some((t) => t.content.startsWith(DEFERRAL_SLICE_PREFIX))).toBe(true)
+
+      yield* Fiber.interrupt(fiber)
+    }),
+  20_000,
 )
 
 // Agent variant
