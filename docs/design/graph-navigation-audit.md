@@ -7,7 +7,10 @@ BunSqliteGraph methods × every call site), docs intent sweep, and synthesis vs 
 
 > **See also:** [variance report Part IX (F20/F21)](../testing/HARNESS_AND_VARIANCE_REPORT.md) (F20
 > graph-derived regression neighbors; F21 turn-harvested interpreter, landed 2026-07-18,
-> 68c41aca3), [path-to-85.md §4](./path-to-85.md) (adapter layer + graph doctrine), [models.md](./models.md)
+> 68c41aca3), [gap-closure-plan.md H2](./gap-closure-plan.md) (2026-07-19: regression reach
+> round 3 — import-time side-effect edits defeat F20's entity-graph walk; live specimen
+> astropy-13236, 644 P2P broken with zero `turn_regression` signals),
+> [path-to-85.md §4](./path-to-85.md) (adapter layer + graph doctrine), [models.md](./models.md)
 > (tier capabilities), [ECON_ARCHITECTURE.md](../architecture/ECON_ARCHITECTURE.md) (the context
 > engine and edit-time gate).
 

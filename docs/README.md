@@ -47,6 +47,10 @@ exact OpenCode seams it touches, and its status. Index + integration-zone model 
 seam table: [features/README.md](./features/README.md).
 
 ### `design/` — deeper design notes
+- [gap-closure-plan.md](./design/gap-closure-plan.md) — the 2026-07-19 live-500 forensics →
+  implementation plan: witness-breadth/regression-reach/sanity-floor/TB waves (H1–H7), the
+  tier + judge model strategy (one solver + one judge, oracle swap), and the parameterized
+  cost model.
 - [graph-navigation-audit.md](./design/graph-navigation-audit.md) — signals completeness audit
   (recon, edit, finish phases); gap inventory × SOTA reference; ranked Wave G implementation roadmap.
 - [adaptive-compute.md](./design/adaptive-compute.md) — the "compute dial": divide cost on the

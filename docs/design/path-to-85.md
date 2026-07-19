@@ -11,7 +11,10 @@ conversion first, signal-gated redundancy on the hard tail only, blanket N-draws
 
 Companions: [HARNESS_AND_VARIANCE_REPORT.md](../testing/HARNESS_AND_VARIANCE_REPORT.md)
 (what fails today and why), [native-loop-gap.md](./native-loop-gap.md) (the thin-pipe
-baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log).
+baseline), [STRICT_CYCLE.md](../testing/STRICT_CYCLE.md) (the iteration log),
+[gap-closure-plan.md](./gap-closure-plan.md) (2026-07-19: the live-500 forensics
+implementation wave — witness breadth, regression reach round 3, patch sanity floor, TB
+end-state gate — plus the tier/judge model strategy and cost model that extend §3/§4 here).
 
 ---
 
