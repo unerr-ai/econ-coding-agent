@@ -45,16 +45,32 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 
 ---
 
-> **Build status (2026-07-19, wave 1 shipped):** kernel (claim-evidence contract) + H1 +
-> H2 + H8 + H3 + H4 (engine gate/teeth + infra deadline/telemetry; SWE path deliberately
-> excluded — see the H4 scope note) + H7 + §4.3 ladder collapse/switches + H9 triggers +
-> §4.4 profiles/direct-Anthropic path are ALL implemented and committed
-> (`4ef0c3079`…`feat(gates): H3…` lineage; unerr-benchmarks `a19c3b4`). Open follow-ups:
-> F2P tooth-3 wiring, diff-aware judge inputs at call sites, ECON_JUDGE_TIER=off live
-> wiring, signal-audit scan-scope widening, and a PRE-EXISTING prompt.test.ts loop-harness
-> failure (bisect-proven to predate the wave). Validation: 3-specimen hard replay
-> (14369/13236/11265) in flight; mini-10 ×3 band + full-500 gate still ahead — no score
-> claims until those run (§5.4).
+> **Build status (2026-07-19, wave 1 shipped + follow-ups + replay-validated):** kernel
+> (claim-evidence contract) + H1 + H2 + H8 + H3 + H4 (engine gate/teeth + infra
+> deadline/telemetry; SWE path deliberately excluded — see the H4 scope note) + H7 + §4.3
+> ladder collapse/switches + H9 triggers + §4.4 profiles/direct-Anthropic path are ALL
+> implemented and committed (`4ef0c3079`…`89db05be4` lineage; unerr-benchmarks `a19c3b4`).
+> Follow-ups SHIPPED in `89db05be4`: H1 tooth-3 (finish claim = the agent's OWN
+> observed-red test-id set via `checkTestSetCoverage`; never a benchmark F2P list),
+> diff-aware judge inputs live at all call sites (`readTurnDiffHunks`, 200-line cap),
+> ECON_JUDGE_TIER=off consumed at all three judge dispatch sites (once-loud
+> `judge_tier_off`).
+>
+> **3-specimen hard replay (single runs — facts, not rates):** 13236 (H2) **CONVERTED** —
+> fleet FAIL → real-graded RESOLVED (F2P 2/2, P2P 0 fail at gold, $0.16/40t;
+> `unverifiable_regression_surface` fired; receipt = conductor+oracle only, §4.3 collapse
+> live). 11265 (H9) still fails: `hub_bounce_repeat` fired at the predicted moment and was
+> consumed — but read-only as scoped, run stayed all-conductor and repeated the
+> symptom-layer fix; the read-only→decision flip is the evidence-backed next step. 14369
+> (H1) fails UPSTREAM of witnesses: repro never pinned (`repro_drift`×3 →
+> `repro_unresolved`), finish gate refused 5× (honest 0-byte patch), $1.01/188t —
+> the expensive-fail class again; cost lever = abstention on `repro_unresolved` headless.
+>
+> Remaining open: signal-audit scan-scope widening; prompt.test.ts loop-harness failures —
+> root-caused to `e756be7df` (2026-07-13, root-turn arming on EVERY turn → orchestration
+> dispatches consume scripted replies before the main round; harness-contract drift, not a
+> product defect — fix = dispatch-aware test harness, not a product change). mini-10 ×3
+> band + full-500 gate still ahead — no score claims until those run (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
 
