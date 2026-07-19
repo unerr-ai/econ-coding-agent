@@ -146,9 +146,25 @@ Companions: [path-to-85.md](./path-to-85.md) (strategy + tier ladder this plan e
 > attributing any behavior to code, `grep -c "<marker string from the commit>"` the
 > binary. `bun run build` in `packages/opencode` refreshes dist.
 >
-> Remaining open: H9 arm still unexercised live (needs a turn with no earlier arm);
-> O-J3 judge-verdict validation; mini-10 ×3 band + full-500 gate still ahead — no score
-> claims until those run (§5.4).
+> **O-J3 VALIDATED by direct gateway probe** (3 calls, ~30s, pennies — a replay was not
+> needed to settle it). Header latency on the reasoner tier: **507ms streaming vs
+> 17,866ms non-streaming** on the same prompt — and replay #5 observed a non-streaming
+> draw blow past 45s, so the old path was a coin flip against the watchdog while
+> streaming clears it by ~90×. Feeding a real gateway response through the SHIPPED
+> `parseHubDesignResponse` yields a live verdict:
+> `{"file":"django/db/models/sql/query.py","entity":"split_exclude","change":"Modify
+> split_exclude to include the filtered relation's ON clause conditions in the subquery's
+> join clause."}` — i.e. the judge names the TRUE root-most site. Note what that implies
+> about the converted run: the passing patch landed in `django/db/models/query.py`
+> (`QuerySet._filter_or_exclude`), a special-case interception of `exclude(...__isnull=)`
+> that satisfies F2P+P2P but is NOT the root-cause layer. The gate designed to catch
+> exactly that had been silently inert for 5/5 replays. Its value is now evidenced, not
+> assumed.
+>
+> Remaining open: H9 arm still unexercised live (needs a turn with no earlier arm); the
+> hub-design verdict's effect on agent behavior is validated at the judge, not yet
+> end-to-end in a run; mini-10 ×3 band + full-500 gate still ahead — no score claims
+> until those run (§5.4).
 
 ## 1. Gap inventory (evidence-ranked)
 
