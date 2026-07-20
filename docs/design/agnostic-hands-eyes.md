@@ -437,9 +437,24 @@ resolution is the whole split:**
 
 | Ecosystem | Import resolution | Measured on |
 |---|---|---|
-| Python | 76.8% (django, 3036 files; 90.7% of all edges) — 39% on `requests` | `resolvePythonImport`, wave-5 |
-| TypeScript / JavaScript | ~84% relative-only; external npm stays null (econ's own source: 84.4% of all edges) | `resolveRelativeImport` |
-| Go, Java, Rust, C, C++ | **null — no resolver rules exist** | — |
+| Python | **80.2%** (django/arena-11885, 11298 import edges); **39.0%** on `requests` | `resolvePythonImport`, wave-5 |
+| TypeScript | **37.2%** imports (10001/26891), 49.5% of all edges — **disputed, see below** | `resolveRelativeImport` |
+| JavaScript | **0%** (0/57) | `resolveRelativeImport` |
+| Go, Java, Rust, C, C++ | **zero import edges extracted at all** — no *extractor*, not merely no resolver | — |
+
+> **Two corrections to earlier figures in this doc (2026-07-20, live re-measurement).**
+> **(a)** An earlier pass reported 76.8% for django and **84.4% of all edges for econ's own
+> TypeScript**. Re-measurement with a reproducible script gives django 80.2% (close — repo
+> drift) but TypeScript **37.2% / 49.5%**, a ~31pp disagreement. The TS figure is therefore
+> **DISPUTED and must not be used as an acceptance bar**. G1's no-regression gate is pinned to
+> *the same script, before vs after* — self-consistent by construction and immune to which
+> historical number was right. Resolving the disagreement (likely an indexing-scope difference)
+> is part of G4a's close-out.
+> **(b)** More consequential: the five "zero-resolution" languages have **no import edges in
+> the graph whatsoever**. That is an *extraction* gap upstream of the *resolution* gap, so
+> wave G needs extraction patterns before resolution rows can do anything — and the headroom
+> is the full import graph, not a fraction of it. This strengthens rather than weakens §7.1's
+> conclusion: those repos are even blinder to risk routing than "unresolved imports" implied.
 
 **The finding that decided P6 is not about navigation at all.** `computeRisk` weights fan-in
 35%, blast radius 35%, centrality 20%. On an ecosystem with no import resolution those three
