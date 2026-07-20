@@ -61,6 +61,15 @@ export interface CommandResult {
   exitCode: number
   stdout: string
   stderr: string
+  /**
+   * Report-native case count + skip count when the caller has already
+   * parsed a structured test report (JUnit XML / go test -json / jest
+   * `--json` / TAP — docs/design/agnostic-hands-eyes.md §2.2) for this
+   * command. When present, `runSoundCheck` prefers these over the
+   * summary-line regexes below. Optional: every existing runner double
+   * that omits it keeps today's regex-only behavior byte-identical.
+   */
+  report?: { caseCount: number; skipped: number }
 }
 
 /** Injected command executor — tests pass a double, the live wiring shells out. */
@@ -111,7 +120,10 @@ function findSkipSignature(output: string): string | undefined {
  * next rung rather than treat this as a trustworthy green. A passing command
  * whose output carries a skip signature is flagged "pass-with-skips" rather
  * than failed, and a case count is extracted from every output so the ladder
- * can compare successive attempts (dropped-case integrity).
+ * can compare successive attempts (dropped-case integrity). When a result
+ * carries a report-native `report` (§2.2's structured-observation layer),
+ * its case/skip counts are preferred over the summary-line regexes below —
+ * the regexes stay as the fallback for every runner double that doesn't set it.
  *
  * @sem domain=routing role=sound-verify
  */
@@ -126,13 +138,17 @@ export async function runSoundCheck(spec: VerifySpec, runner: CommandRunner): Pr
   for (const command of spec.commands) {
     const result = await runner(command)
     const output = `${result.stdout}\n${result.stderr}`
-    const count = extractCaseCount(output)
+    const count = result.report ? result.report.caseCount : extractCaseCount(output)
     if (count !== undefined) caseCount = (caseCount ?? 0) + count
     if (result.exitCode !== 0) {
       failures.push({ ...result, command })
       continue
     }
-    const skip = findSkipSignature(output)
+    const skip = result.report
+      ? result.report.skipped > 0
+        ? `${result.report.skipped} skipped (report-native)`
+        : undefined
+      : findSkipSignature(output)
     if (skip) {
       flags.push({
         kind: "pass-with-skips",

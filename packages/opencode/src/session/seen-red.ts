@@ -5,15 +5,22 @@
  * shape (a pinned probe, zero landed source edits, a neighbor regression)
  * but none of them replay the turn's own transcript — the gap that let
  * django-11790 ship a patch after a mid-turn pytest run failed and was
- * never re-verified. Pure transcript scan: no Effect, no I/O, no commands
- * run — the caller extracts the plain execution array from message parts
- * and injects the nudge/log.
+ * never re-verified. Transcript scan: no Effect, no commands run — the
+ * caller extracts the plain execution array from message parts and injects
+ * the nudge/log. Test-shaped classification and red detection also consult
+ * the repo's profile (docs/design/agnostic-hands-eyes.md §2.2) and any
+ * attached structured test report (`reportContent`), so a non-Python
+ * ecosystem's runner/suite commands and exit-0-laundered reds are caught
+ * without new regexes; the profile lookup is memoized per repo root, so it
+ * costs real FS/git I/O at most once per process.
  *
  * @sem domain=routing role=gate
  */
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 import { looksLikeTestExecution, normalizeResult } from "./turn-supervisor"
 import { detectOracleInversion, type IssueExpectation } from "./issue-expectations"
+import { getRepoProfileSync, type EcosystemProfile } from "../code-intelligence/repo-profile"
+import { detectAndParseTestReport } from "../code-intelligence/test-report"
 
 /** One bash execution from the turn's transcript, in chronological order. */
 export interface SeenRedExecution {
@@ -28,6 +35,14 @@ export interface SeenRedExecution {
    * provenance yet should not be silently excluded from that rung).
    */
   sawEditBefore?: boolean
+  /**
+   * Raw structured test-report content (JUnit XML / go test -json / jest
+   * `--json` / TAP) for this execution, when the caller already has it —
+   * e.g. a `--junitxml=<path>` file read alongside the command's stdout.
+   * Optional: every existing caller that omits it keeps today's
+   * regex-only classification and red detection byte-identical.
+   */
+  reportContent?: string
 }
 
 /** An unresolved red execution surfaced to the model, with a short evidence tail. */
@@ -108,9 +123,64 @@ function extractTestTargetTokens(command: string): string[] {
   return [...targets]
 }
 
-function isRedTestExecution(exec: SeenRedExecution): boolean {
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
+  return new RegExp(`^${escaped}$`, "i")
+}
+
+/** Does `command` reference a file token matching one of the profile's test-file glob patterns (`test_*.py`, `*_test.go`, …)? */
+function matchesProfileTestFilePattern(command: string, patterns: readonly string[]): boolean {
+  if (patterns.length === 0) return false
+  return command
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((raw) => raw.replace(/^['"]|['"]$/g, ""))
+    .map((token) => token.split("/").pop() ?? token)
+    .some((base) => patterns.some((pattern) => globToRegExp(pattern).test(base)))
+}
+
+/** Does `command` reference one of the profile's test-dir conventions (`tests/`, `__tests__/`, `src/test/java/`, …)? */
+function matchesProfileTestDir(command: string, dirs: readonly string[]): boolean {
+  return dirs.some((dir) => dir.length > 0 && command.includes(`${dir}/`))
+}
+
+/**
+ * Profile-driven OR-extension of TEST_SHAPED_COMMAND_RE (docs/design/
+ * agnostic-hands-eyes.md §2.2): a command is also test-shaped when it
+ * invokes one of the repo profile's runner/suite/single-test tokens,
+ * touches a path matching its test-dir/file conventions, or is its repro
+ * run command — the same three shapes the regex hardcodes for pytest/
+ * Django, generalized to every ecosystem the profile derives.
+ */
+function isProfileTestShapedCommand(command: string, cwd: string): boolean {
+  const profile = getRepoProfileSync(cwd)
+  for (const eco of profile.ecosystems as readonly EcosystemProfile[]) {
+    if (eco.repro.run && command.includes(eco.repro.run)) return true
+    if ("unknown" in eco.tests) continue
+    const { runner, suite, single, conventions } = eco.tests
+    if (runner && command.includes(runner)) return true
+    if (suite && command.includes(suite)) return true
+    const singlePrefix = single.split("{testId}")[0]?.trim()
+    if (singlePrefix && command.includes(singlePrefix)) return true
+    if (matchesProfileTestDir(command, conventions.dirs)) return true
+    if (matchesProfileTestFilePattern(command, conventions.filePatterns)) return true
+  }
+  return false
+}
+
+function isRedTestExecution(exec: SeenRedExecution, cwd: string = process.cwd()): boolean {
   if (exec.exitCode === undefined) return false
-  if (!TEST_SHAPED_COMMAND_RE.test(exec.command)) return false
+  const testShaped = TEST_SHAPED_COMMAND_RE.test(exec.command) || isProfileTestShapedCommand(exec.command, cwd)
+  if (!testShaped) return false
+  // Structured output first (§2.2): a parsed report with >0 fail/error
+  // entries is red BY CONSTRUCTION, independent of exit code or the
+  // summary-line regexes below — this is what makes exit-0 laundering
+  // structural instead of requiring a pipe/tail heuristic per format.
+  const report = exec.reportContent ? detectAndParseTestReport(exec.reportContent) : undefined
+  if (report && report.totals.fail + report.totals.error > 0) {
+    if (MISSING_FILE_RE.test(exec.output) || MODULE_MISSING_RE.test(exec.output)) return false
+    return true
+  }
   if (!TEST_FAILURE_SIGNATURE_RE.test(exec.output)) return false
   // Env-red (a missing file/module) is a broken environment, not an
   // unverified fix — the same discipline `selectRegressionPinCandidate`
@@ -150,20 +220,23 @@ function outputTail(output: string): string {
  * (an exit-laundered re-run that failed again must never clear), or by
  * `clearedByProbe` (the M4 gate's own re-run, which happens outside the
  * transcript entirely since it shells out directly rather than going through
- * an assistant tool call). Pure: no Effect, no I/O, no commands run. Empty
- * array when nothing is unresolved; at most the LAST 3 otherwise — the most
- * recent evidence, bounded so a repeated-red turn can't flood the nudge.
+ * an assistant tool call). No Effect, no commands run (test-shaped
+ * classification may consult the repo's cached profile — see this module's
+ * doc comment). Empty array when nothing is unresolved; at most the LAST 3
+ * otherwise — the most recent evidence, bounded so a repeated-red turn
+ * can't flood the nudge.
  *
  * @sem domain=routing role=gate
  */
 export function findUnresolvedSeenRed(
   executions: readonly SeenRedExecution[],
   clearedByProbe?: string,
+  cwd: string = process.cwd(),
 ): UnresolvedSeenRed[] {
   const unresolved: UnresolvedSeenRed[] = []
   for (let i = 0; i < executions.length; i++) {
     const exec = executions[i]!
-    if (!isRedTestExecution(exec)) continue
+    if (!isRedTestExecution(exec, cwd)) continue
     const targets = extractTestTargetTokens(exec.command)
     if (clearedByProbe && clears(targets, exec.command, clearedByProbe)) continue
     const clearedLater = executions
@@ -189,16 +262,28 @@ export function findUnresolvedSeenRed(
  * bounded to the last 3 and does not drop an id a later execution cleared —
  * the caller (prompt.ts's turn-scoped accumulator) needs the full set ever
  * seen red this turn; `observedTestVerdicts` below supplies each id's
- * LATEST verdict for the actual coverage check.
+ * LATEST verdict for the actual coverage check. When an execution carries a
+ * structured test report (`reportContent`), that report's own fail/error
+ * entry ids are unioned in too — report-native ids alongside the
+ * pytest/Django command-token extraction, never replacing it.
  *
  * @sem domain=routing role=gate
  */
-export function collectObservedRedTestIds(executions: readonly SeenRedExecution[]): string[] {
+export function collectObservedRedTestIds(
+  executions: readonly SeenRedExecution[],
+  cwd: string = process.cwd(),
+): string[] {
   const ids = new Set<string>()
   for (const exec of executions) {
-    if (!isRedTestExecution(exec)) continue
+    if (!isRedTestExecution(exec, cwd)) continue
     const targets = extractTestTargetTokens(exec.command)
     for (const id of targets.length > 0 ? targets : [exec.command]) ids.add(id)
+    const report = exec.reportContent ? detectAndParseTestReport(exec.reportContent) : undefined
+    if (report) {
+      for (const entry of report.entries) {
+        if (entry.status === "fail" || entry.status === "error") ids.add(entry.id)
+      }
+    }
   }
   return [...ids]
 }
@@ -212,18 +297,30 @@ export function collectObservedRedTestIds(executions: readonly SeenRedExecution[
  * (`exitCode === 0` and no laundered-failure signature — the same green
  * `clears()` already recognizes as a legitimate clearing re-run) records
  * "pass". Any other shape (undefined exit, ambiguous output) leaves a prior
- * entry untouched rather than guessing.
+ * entry untouched rather than guessing. A structured test report
+ * (`reportContent`), when present, also sets each of its entries' verdict
+ * directly from the report's own pass/fail/error status.
  *
  * @sem domain=routing role=gate
  */
-export function observedTestVerdicts(executions: readonly SeenRedExecution[]): Map<string, "pass" | "fail"> {
+export function observedTestVerdicts(
+  executions: readonly SeenRedExecution[],
+  cwd: string = process.cwd(),
+): Map<string, "pass" | "fail"> {
   const verdicts = new Map<string, "pass" | "fail">()
   for (const exec of executions) {
-    const red = isRedTestExecution(exec)
+    const red = isRedTestExecution(exec, cwd)
     const cleanGreen = exec.exitCode === 0 && !LAUNDERED_FAILURE_SIGNATURE_RE.test(exec.output)
     if (!red && !cleanGreen) continue
     const targets = extractTestTargetTokens(exec.command)
     for (const id of targets.length > 0 ? targets : [exec.command]) verdicts.set(id, red ? "fail" : "pass")
+    const report = exec.reportContent ? detectAndParseTestReport(exec.reportContent) : undefined
+    if (report) {
+      for (const entry of report.entries) {
+        if (entry.status === "fail" || entry.status === "error") verdicts.set(entry.id, "fail")
+        else if (entry.status === "pass") verdicts.set(entry.id, "pass")
+      }
+    }
   }
   return verdicts
 }
