@@ -388,11 +388,69 @@ verification style, keeping the "graph routes risk, not localization" doctrine i
 | **P3 — Regression neighbors → table** | conventions-table twin discovery; delete the Django code branch into a row; H8/H2 ride along | ~1 d | 13236/7606/8872 replays stay converted; Django twin parity fixtures |
 | **P4 — Prompt compilation** | seeds/nudges templated from profile; `repro_issue.<ext>`; slice-orchestrator patterns profile-driven | ~1 d | seed token-size audit (≤ today's); repro-drift replay on one non-Python fixture |
 | **P5 — Web-search sense** | unrecognized-trace + dependency-rooted triggers, normalized **version-pinned** query builder (§3.1), version-mismatch flag on results, signal-gated | ~0.5–1 d | trigger-rate audit on mini-10 (must be ~0 there — arenas disable it); live-repo probe on a dependency-bug specimen incl. a version-drift case |
-| **P6 — Graph/LSP parity** | per-language edge-coverage measurement; `coupling=unknown` route; LSP diagnostics as optional post-edit red | ~1–2 d | edge-coverage report per language published in the doc; degraded-route unit tests |
+| **P6 — Graph coverage parity** | per-language edge-coverage measurement; `coupling=unknown` route. **LSP declined — see §7.1** | ~1 d | edge-coverage report per language published in the doc; degraded-route unit tests |
 | **Gate** | SWE-bench Multilingual probe (300 tasks) + mini-10 ×3 band + TB smoke + cost band | — | expectation: **frontier-relative** (frontier itself drops to 43–47% multilingual), not Python parity; no score/cost claims before this runs |
 
 Total: **~7–9.5 days**, agent-built. Sequencing note: P0→P1 are the spine (everything else
 parameterizes on the profile); P3/P4/P5 are parallelizable after P0; P6 is independent.
+
+### 7.1 P6 decision — LSP declined; P6 is measurement + `coupling=unknown` only (2026-07-20)
+
+P6 was scheduled with "LSP diagnostics as optional post-edit red" as a third deliverable.
+Two measurement tracks were run before building it — an inventory of what our graph already
+provides per language, and an evidence review on LSP-for-agents. **Verdict: no LSP.** P6
+ships its first two deliverables only.
+
+**Track A — what the graph already provides.** 13 languages parse (regex extractor with an
+optional tree-sitter WASM fallback); two edge kinds, `import` and `call`. Call edges are
+100% resolved-or-dropped everywhere (an unresolved call is never stored). **Import
+resolution is the whole split:**
+
+| Ecosystem | Import resolution | Measured on |
+|---|---|---|
+| Python | 76.8% (django, 3036 files; 90.7% of all edges) — 39% on `requests` | `resolvePythonImport`, wave-5 |
+| TypeScript / JavaScript | ~84% relative-only; external npm stays null (econ's own source: 84.4% of all edges) | `resolveRelativeImport` |
+| Go, Java, Rust, C, C++ | **null — no resolver rules exist** | — |
+
+**The finding that decided P6 is not about navigation at all.** `computeRisk` weights fan-in
+35%, blast radius 35%, centrality 20%. On an ecosystem with no import resolution those three
+inputs are all 0, so the risk score is low *by construction* — and indistinguishable from a
+genuinely safe edit. The router reads "staying cheap is justified"; the hub gate reads "not a
+hub." `stats()` returns only `{files, entities, edges}` — no per-language breakdown, no
+resolved ratio, no telemetry — so nothing detects this. That is a silent false-negative on
+every compiled-language repo, and it violates the §2.7 no-advisory invariant: a signal that
+neither converts, defers, nor surfaces.
+
+**Track B — LSP evidence.** **No published ablation isolates LSP with model and harness held
+constant.** Adoption is therefore an operational judgement, and the operational facts run
+against us:
+
+1. **It fails exactly where we need it.** `jdtls` requires a successful build or
+   `compile_commands.json`; `clangd` the same, failing silently without it; `rust-analyzer`
+   emits no per-file diagnostics until a project-wide index completes. Our arenas frequently
+   cannot even install dependencies — so LSP returns nothing precisely on Java/C++/Rust, the
+   ecosystems whose edges are weakest.
+2. **The cost shape is wrong for us.** ~10s cold start per language, 200MB–1GB resident.
+   Arena and CI runs kill daemons between tasks, so the warm-daemon amortization that
+   justifies LSP in an IDE never happens — every run pays cold start. Against the <$0.10
+   bare-run floor this is the same class of regression §5 exists to prevent.
+3. **Our own base disagrees.** Upstream OpenCode ships LSP and documents that it "is not
+   always a net positive… can get out of sync, use significant memory… and slow down agent
+   workflows."
+4. **Its dominant real use is already occupied.** Across the agents that ship it, LSP is used
+   for post-edit diagnostics far more than pre-edit navigation — and P2's `buildCheck` rung
+   already holds that seam with a stateless CLI typecheck (`tsc --noEmit` / `cargo check` /
+   `go build ./...`), the documented "80% of the value for 10% of the effort" pattern.
+
+**The decisive point:** LSP would not fix the Track-A finding. Coupling blindness is a
+*measurement* gap, not a symbol-resolution gap. Adopting LSP first would deliver plausible
+symbol navigation while risk routing stayed blind — hiding today's visible zero-coupling
+behind a correct-looking surface, which is strictly worse than the current failure mode.
+
+**Revisit trigger (falsifiable, so this decision can be overturned by evidence):** a
+non-Python instance class where the `coupling=unknown` route measurably over-escalates —
+i.e. the degraded route fires often enough to cost more than the mis-routing it prevents.
+That is a cost/quality band, not a preference, and it is only measurable after P6a/P6b ship.
 
 ---
 
@@ -404,8 +462,11 @@ parameterizes on the profile); P3/P4/P5 are parallelizable after P0; P6 is indep
 - **Per-turn LLM discovery** (the mini-swe-agent move) — repeated token cost and
   model-capability-dependent; we cache the validated answer instead. The thin pipe stays
   the yardstick (E1), not the design.
-- **Always-on LSP for every repo** — memory/startup cost with no measured win outside the
-  weak-edge ecosystems; lazy + profile-gated only.
+- **LSP in any form, always-on or lazy** — declined outright 2026-07-20 after the two-track
+  measurement in §7.1: no published ablation isolates its effect; it fails on the very
+  ecosystems it would serve (build-dependent servers in arenas that cannot install deps);
+  its cold-start/memory shape is wrong for short-lived runs; and it would not fix the
+  coupling-measurement gap that motivated P6 in the first place.
 - **Graph-guided localization** — doctrine unchanged.
 - **Blanket web search per turn** — triggers are deterministic and tail-shaped; arenas
   keep it disabled.
