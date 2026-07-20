@@ -25,7 +25,7 @@ import { Image } from "../../src/image/image"
 
 import { Question } from "../../src/question"
 import { SessionTodo } from "@opencode-ai/core/session/todo"
-import { DEFERRAL_SLICE_PREFIX, REPRO_SLICE_CONTENT } from "../../src/session/prompts/seeds"
+import { DEFERRAL_SLICE_PREFIX, reproSliceContent } from "../../src/session/prompts/seeds"
 import { publishSignal, signalsFor } from "../../src/session/signal-bus"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Session } from "@/session/session"
@@ -2257,12 +2257,12 @@ it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with
     const todos = yield* SessionTodo.Service
     const session = yield* sessions.create({ title: "Bug report" })
 
-    // The repro seed's own escape hatch (seeds.ts REPRO_SLICE_CONTENT point
+    // The repro seed's own escape hatch (seeds.ts REPRO_SLICE_TEXT point
     // 6): after 2 distinct failed approaches, marking the todo cancelled
     // with a one-line reason is a legitimate exit, not silence.
     yield* todos.update({
       sessionID: session.id,
-      todos: [{ content: REPRO_SLICE_CONTENT, status: "cancelled", priority: "high" }],
+      todos: [{ content: reproSliceContent(), status: "cancelled", priority: "high" }],
     })
 
     yield* llm.text("could not reproduce after two attempts, fixed defensively")
@@ -2313,7 +2313,7 @@ it.instance(
       // would find deferralAvailable already false for an unrelated reason.
       yield* todos.update({
         sessionID: session.id,
-        todos: [{ content: REPRO_SLICE_CONTENT, status: "cancelled", priority: "high" }],
+        todos: [{ content: reproSliceContent(), status: "cancelled", priority: "high" }],
       })
 
       // One real (non-bash) landed source edit supplies both landedSourceEdits

@@ -18,11 +18,11 @@ export const PYTHON_REPRO_VEHICLE: ReproVehicle = { ext: "py", run: "python repr
 
 /**
  * Fills a repro-prose template's Python-shaped tokens (`python repro_issue.py`,
- * bare `repro_issue.py`, `python -c`) with the given vehicle's — a no-op for
- * `PYTHON_REPRO_VEHICLE`, which is why every default-arg call below stays
- * byte-identical to the pre-P4 text. Longest-token-first so a `repro_issue.py`
- * inside an already-substituted `<run> repro_issue.py` phrase isn't
- * double-replaced.
+ * bare `repro_issue.py`, `python -c`, a ```` ```python ```` fenced-example
+ * language tag) with the given vehicle's — a no-op for `PYTHON_REPRO_VEHICLE`,
+ * which is why every default-arg call below stays byte-identical to the
+ * pre-P4 text. Longest-token-first so a `repro_issue.py` inside an
+ * already-substituted `<run> repro_issue.py` phrase isn't double-replaced.
  */
 export function compileReproVehicle(text: string, vehicle: ReproVehicle): string {
   const interpreter = vehicle.run.split(" ")[0] ?? vehicle.run
@@ -30,6 +30,7 @@ export function compileReproVehicle(text: string, vehicle: ReproVehicle): string
     .replaceAll("python repro_issue.py", vehicle.run)
     .replaceAll("repro_issue.py", `repro_issue.${vehicle.ext}`)
     .replaceAll("python -c", `${interpreter} -c`)
+    .replaceAll("```python", "```" + interpreter)
 }
 
 /**
@@ -261,7 +262,7 @@ export function toothlessReproNudgeText(script: string): string {
  * `attempt` 1 keeps the original ask-for-a-repro wording plus any S4
  * unresolved-block fold-in; attempt 2+ escalates to the explicit either/or
  * contract from the repro seed's own escape hatch (seeds.ts
- * REPRO_SLICE_CONTENT point 6) — build and run the repro, or mark the repro
+ * REPRO_SLICE_TEXT point 6) — build and run the repro, or mark the repro
  * todo cancelled with a one-line reason — so a still-silent model can no
  * longer plausibly claim it didn't know cancellation was a legitimate exit.
  */

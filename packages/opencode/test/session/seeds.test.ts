@@ -7,7 +7,6 @@ import { describe, it, expect } from "bun:test"
 import { createHash } from "node:crypto"
 import {
   LOCALIZATION_SLICE_CONTENT,
-  REPRO_SLICE_CONTENT,
   GRIND_DESIGN_SLICE_CONTENT,
   reproSliceContent,
   DEFERRAL_SLICE_PREFIX,
@@ -35,15 +34,15 @@ describe("seeds.ts — §11 seed priors", () => {
     )
   })
 
-  it("REPRO_SLICE_CONTENT carries the %r/repr formatting-expectation sentence", () => {
-    expect(REPRO_SLICE_CONTENT).toContain(
+  it("reproSliceContent() carries the %r/repr formatting-expectation sentence", () => {
+    expect(reproSliceContent()).toContain(
       "Prefer %r/repr-shaped formatting expectations exactly as the issue states them — never normalize quote style in expected strings.",
     )
   })
 
-  it("REPRO_SLICE_CONTENT carries the (11) witness-breadth point (plain-sibling assert)", () => {
-    expect(REPRO_SLICE_CONTENT).toContain("(11)")
-    expect(REPRO_SLICE_CONTENT).toContain("PLAIN sibling")
+  it("reproSliceContent() carries the (11) witness-breadth point (plain-sibling assert)", () => {
+    expect(reproSliceContent()).toContain("(11)")
+    expect(reproSliceContent()).toContain("PLAIN sibling")
   })
 })
 
@@ -116,7 +115,7 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
 })
 
 // P4 (docs/design/agnostic-hands-eyes.md §4.6/§5) — byte-parity + token-size
-// audit for the profile-compiled repro seed. REPRO_SLICE_CONTENT/
+// audit for the profile-compiled repro seed. reproSliceContent()/
 // GRIND_DESIGN_SLICE_CONTENT are large (thousands of chars); asserting a
 // SHA-256 digest instead of embedding the whole blob a second time still
 // proves byte-for-byte identity against the pre-P4 text without the
@@ -125,18 +124,34 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex")
 
 describe("P4 byte-parity — python/default profile snapshots", () => {
-  it("REPRO_SLICE_CONTENT is byte-identical to the pre-P4 text (SHA-256 digest)", () => {
-    expect(REPRO_SLICE_CONTENT.length).toBe(6167)
-    expect(sha256(REPRO_SLICE_CONTENT)).toBe("593b71119ac24e56ca0ed90d7f26b70c7f32838f4f51f061c1c5e2f34efd2e01")
-  })
-
-  it("reproSliceContent() (no vehicle) equals REPRO_SLICE_CONTENT exactly", () => {
-    expect(reproSliceContent()).toBe(REPRO_SLICE_CONTENT)
+  it("reproSliceContent() (no vehicle) is byte-identical to the pre-P4 text (SHA-256 digest)", () => {
+    expect(reproSliceContent().length).toBe(6167)
+    expect(sha256(reproSliceContent())).toBe("593b71119ac24e56ca0ed90d7f26b70c7f32838f4f51f061c1c5e2f34efd2e01")
   })
 
   it("GRIND_DESIGN_SLICE_CONTENT is untouched by P4 (no Python repro tokens to compile) — byte-identical (SHA-256 digest)", () => {
     expect(GRIND_DESIGN_SLICE_CONTENT.length).toBe(852)
     expect(sha256(GRIND_DESIGN_SLICE_CONTENT)).toBe("79abba93722c66a300ba1d117e9f8b87c9ee80c62aa4ba531b4772476da1e9cf")
+  })
+})
+
+// V3 — the leaked-constant fix: every real consumer now calls
+// reproSliceContent(vehicle) with the SESSION's actual repro vehicle
+// (buildTriageTodoSkeleton -> reproPrepassTodo in slice-orchestrator.ts;
+// see slice-orchestrator.test.ts for the plant-site coverage). This is the
+// content-compiler seam itself: a non-python vehicle must produce prose
+// naming ITS OWN repro filename/run command with zero leaked Python tokens —
+// the exact leak a bare `reproSliceContent()` (python default) would have
+// shipped on a non-python V3 validation target.
+describe("V3 — non-python vehicle carries zero Python tokens", () => {
+  const goVehicle: ReproVehicle = { ext: "go", run: "go run repro_issue.go" }
+
+  it("names repro_issue.go and its run command, with no 'python'/'.py' anywhere", () => {
+    const content = reproSliceContent(goVehicle)
+    expect(content).toContain("repro_issue.go")
+    expect(content).toContain("go run repro_issue.go")
+    expect(content.toLowerCase()).not.toContain("python")
+    expect(content).not.toContain(".py")
   })
 })
 

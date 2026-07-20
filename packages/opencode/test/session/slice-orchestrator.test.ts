@@ -41,7 +41,7 @@ import {
   autoTypeTodos,
   reconcileSettledSlices,
   LOCALIZATION_PREPASS_TODO,
-  REPRO_PREPASS_TODO,
+  reproPrepassTodo,
   promptAuthorizesTestEdits,
   diagnosisDeniesTestEdits,
   PLAN_PREPASS_TODO,
@@ -87,13 +87,13 @@ import {
   type AboveConductorSliceBriefInput,
 } from "../../src/session/slice-orchestrator"
 import { triagePreamble } from "../../src/session/prompts/preambles"
-import { batchMomentumNudgeText } from "../../src/session/prompts/nudges"
+import { batchMomentumNudgeText, type ReproVehicle } from "../../src/session/prompts/nudges"
 import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
   GRIND_DESIGN_SLICE_CONTENT,
-  REPRO_SLICE_CONTENT,
+  reproSliceContent,
 } from "../../src/session/prompts/seeds"
 import type { TriageGoal, TriageVerdict } from "../../src/session/turn-triage"
 import type { ArmingDecision } from "../../src/session/arming-judge"
@@ -1022,7 +1022,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     }
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: true, hardness: "moderate" })
     expect(todos).toHaveLength(3)
-    expect(todos[1]!.content).toBe(REPRO_SLICE_CONTENT)
+    expect(todos[1]!.content).toBe(reproSliceContent())
     expect(todos[2]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
     expect(todos[1]!.parentID).toBe(0)
     expect(todos[2]!.parentID).toBe(0)
@@ -1036,7 +1036,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     }
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: false, armReproduction: true, hardness: "moderate" })
     expect(todos).toHaveLength(2)
-    expect(todos[1]!.content).toBe(REPRO_SLICE_CONTENT)
+    expect(todos[1]!.content).toBe(reproSliceContent())
     expect(todos.some((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toBe(false)
   })
 
@@ -1049,7 +1049,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: false, hardness: "moderate" })
     expect(todos).toHaveLength(2)
     expect(todos[1]!.content).toBe(LOCALIZATION_SLICE_CONTENT)
-    expect(todos.some((t) => t.content === REPRO_SLICE_CONTENT)).toBe(false)
+    expect(todos.some((t) => t.content === reproSliceContent())).toBe(false)
   })
 
   it("S2 — two diagnosis goals needing both seeds still dedup by content: ONE repro + ONE localization, both parented to the first", () => {
@@ -1063,7 +1063,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     }
     const todos = buildTriageTodoSkeleton(verdict, { armLocalization: true, armReproduction: true, hardness: "hard" })
     expect(todos).toHaveLength(4) // 2 root goals + 1 repro + 1 localization
-    expect(todos.filter((t) => t.content === REPRO_SLICE_CONTENT)).toHaveLength(1)
+    expect(todos.filter((t) => t.content === reproSliceContent())).toHaveLength(1)
     expect(todos.filter((t) => t.content === LOCALIZATION_SLICE_CONTENT)).toHaveLength(1)
     expect(todos.filter((t) => t.parentID === 0)).toHaveLength(2)
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
@@ -1332,62 +1332,74 @@ describe("LOCALIZATION_PREPASS_TODO (the one diagnosis frame-seed constant)", ()
   })
 })
 
-describe("REPRO_PREPASS_TODO (S2 — the repro-authoring pre-pass constant)", () => {
+describe("reproPrepassTodo() (S2 — the repro-authoring pre-pass seed)", () => {
   it("is deliberately UNTYPED so it never dispatches as a child slice — it runs inline on the conductor", () => {
-    expect(REPRO_PREPASS_TODO).toMatchObject({ content: REPRO_SLICE_CONTENT, status: "pending", priority: "high" })
-    expect("sliceType" in REPRO_PREPASS_TODO).toBe(false)
-    expect("need" in REPRO_PREPASS_TODO).toBe(false)
+    expect(reproPrepassTodo()).toMatchObject({ content: reproSliceContent(), status: "pending", priority: "high" })
+    expect("sliceType" in reproPrepassTodo()).toBe(false)
+    expect("need" in reproPrepassTodo()).toBe(false)
     // Untyped ⇒ hasPendingTypedSlices never sees it as a dispatchable DAG node.
-    expect(hasPendingTypedSlices([{ ...REPRO_PREPASS_TODO }])).toBe(false)
+    expect(hasPendingTypedSlices([{ ...reproPrepassTodo() }])).toBe(false)
+  })
+
+  // V3 — the plant site itself must honor a non-default vehicle (the leak
+  // this fixes: the old `REPRO_PREPASS_TODO` constant froze the python
+  // default at module load, ignoring the session's actual ecosystem).
+  it("compiles its content from the given vehicle, not a frozen python default", () => {
+    const goVehicle: ReproVehicle = { ext: "go", run: "go run repro_issue.go" }
+    const goTodo = reproPrepassTodo(goVehicle)
+    expect(goTodo.content).toBe(reproSliceContent(goVehicle))
+    expect(goTodo.content).not.toBe(reproSliceContent())
+    expect(goTodo.content).toContain("repro_issue.go")
+    expect(goTodo.content.toLowerCase()).not.toContain("python")
   })
 
   it("the content demands executed, right-reason red evidence and forbids git-adding the scratch script", () => {
-    expect(REPRO_SLICE_CONTENT).toMatch(/RUN it/i)
-    expect(REPRO_SLICE_CONTENT).toMatch(/EXPECTED behavior/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/FOR THE ISSUE'S REASON/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never `git add`/i)
-    expect(REPRO_SLICE_CONTENT).not.toBe(LOCALIZATION_SLICE_CONTENT)
+    expect(reproSliceContent()).toMatch(/RUN it/i)
+    expect(reproSliceContent()).toMatch(/EXPECTED behavior/)
+    expect(reproSliceContent()).toMatch(/FOR THE ISSUE'S REASON/)
+    expect(reproSliceContent()).toMatch(/never `git add`/i)
+    expect(reproSliceContent()).not.toBe(LOCALIZATION_SLICE_CONTENT)
   })
 
   // S8 (django-11790 strict run #3): the repro died on `ImportError: cannot
   // import name 'CustomEmailField'` — it imported from a tests module and
   // was placed inside tests/auth_tests/.
   it("the template places the repro at the repo ROOT and forbids importing from a tests module", () => {
-    expect(REPRO_SLICE_CONTENT).toMatch(/repo ROOT \(never inside tests\/\)/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/importing ONLY from the installed package/i)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never from tests\.\* or a test module/i)
+    expect(reproSliceContent()).toMatch(/repo ROOT \(never inside tests\/\)/)
+    expect(reproSliceContent()).toMatch(/importing ONLY from the installed package/i)
+    expect(reproSliceContent()).toMatch(/never from tests\.\* or a test module/i)
   })
 
   // F8 — exit-masking-proof probe pinning: models were running the repro as
   // `... | tail -30` or `...; echo "exit=$?"`, which always exits 0 and
   // silently defeats the red-check re-execution regardless of the real result.
   it("demands the repro run BARE (no tail/echo/git-stash masking) and every named symptom asserted", () => {
-    expect(REPRO_SLICE_CONTENT).toMatch(/Run it BARE/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/exactly `python repro_issue\.py`/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never `\| tail`/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never `; echo "exit=\$\?"`/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never wrapped in `git stash`/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/assert EVERY one of them/)
+    expect(reproSliceContent()).toMatch(/Run it BARE/)
+    expect(reproSliceContent()).toMatch(/exactly `python repro_issue\.py`/)
+    expect(reproSliceContent()).toMatch(/never `\| tail`/)
+    expect(reproSliceContent()).toMatch(/never `; echo "exit=\$\?"`/)
+    expect(reproSliceContent()).toMatch(/never wrapped in `git stash`/)
+    expect(reproSliceContent()).toMatch(/assert EVERY one of them/)
     // H1 all-witness single-run contract (gap-closure §2): one execution,
     // per-witness reporting — replaced the older "one assert per symptom" line.
-    expect(REPRO_SLICE_CONTENT).toMatch(/as ONE execution/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/witness\[0\]: PASS/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/never a silently narrowed subset/)
+    expect(reproSliceContent()).toMatch(/as ONE execution/)
+    expect(reproSliceContent()).toMatch(/witness\[0\]: PASS/)
+    expect(reproSliceContent()).toMatch(/never a silently narrowed subset/)
   })
 
   // django-11964: the issue text literally quoted `str(self.my_str_value)` but
   // the repro asserted a downstream model-field effect instead of that exact
   // expression — half-verified fix.
   it("demands asserting the issue's own literal quoted expression, not a downstream effect of it", () => {
-    expect(REPRO_SLICE_CONTENT).toMatch(/assert THAT EXACT expression called on the exact object it names/)
-    expect(REPRO_SLICE_CONTENT).toMatch(/not a downstream\/derived effect of it/)
+    expect(reproSliceContent()).toMatch(/assert THAT EXACT expression called on the exact object it names/)
+    expect(reproSliceContent()).toMatch(/not a downstream\/derived effect of it/)
   })
 
   // F14c — a repro for date-relative behavior could not go red because the
   // behavior only diverges under a mocked clock; control ambient inputs
   // (clock, timezone, locale, randomness) inside the repro itself.
   it("demands controlling ambient-environment inputs inside the repro so it fails deterministically today", () => {
-    expect(REPRO_SLICE_CONTENT).toMatch(/ambient environment/i)
+    expect(reproSliceContent()).toMatch(/ambient environment/i)
   })
 })
 

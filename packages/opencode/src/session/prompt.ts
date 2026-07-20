@@ -113,6 +113,7 @@ import {
 import { hasDeniedPatchSanity, markPatchSanityDenied } from "./patch-sanity-store"
 import { hasDeniedF2pClaim, markF2pClaimDenied } from "./f2p-claim-store"
 import { hasNotedJudgeTierOff, markJudgeTierOffNoted } from "./judge-tier-store"
+import { setReproVehicle, getReproVehicle } from "./repro-vehicle-store"
 import {
   headlessReentryCount,
   incrementHeadlessReentryCount,
@@ -146,7 +147,7 @@ import {
   GRIND_DESIGN_SLICE_CONTENT,
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
-  REPRO_SLICE_CONTENT,
+  reproSliceContent,
   buildDeferralSliceContent,
   type DeferralBrief,
 } from "./prompts/seeds"
@@ -2739,7 +2740,7 @@ export const layer = Layer.effect(
                 // file) landing AFTER this abstention had already fired, so
                 // gating the nudge on !reproHandoffDone meant it never ran.
                 const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
-                const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
+                const reproTodo = currentTodos.find((t) => t.content === reproSliceContent(getReproVehicle(sessionID)))
                 const reproSettled =
                   reproTodo !== undefined && reproTodo.status !== "pending" && reproTodo.status !== "in_progress"
                 // A conductor todowrite rewrite can DROP the (untyped, so
@@ -4631,7 +4632,7 @@ export const layer = Layer.effect(
                 // re-ran it green).
                 if (!turnPinnedProbe || (!landedSourceEdits && !pinInheritedFromStore)) {
                   // ESCAPE — the repro seed's own contract (seeds.ts
-                  // REPRO_SLICE_CONTENT point 6) lets the model cancel the
+                  // REPRO_SLICE_TEXT point 6) lets the model cancel the
                   // repro after 2 distinct failed approaches by marking the
                   // todo cancelled with a one-line reason. That is a
                   // legitimate, reasoned exit, not the silence django-11848
@@ -4639,7 +4640,7 @@ export const layer = Layer.effect(
                   // the loud, turn-ending branch whenever the todo store
                   // actually records one, regardless of attempt count.
                   const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
-                  const reproTodo = currentTodos.find((t) => t.content === REPRO_SLICE_CONTENT)
+                  const reproTodo = currentTodos.find((t) => t.content === reproSliceContent(getReproVehicle(sessionID)))
                   const reproCancelled = reproTodo?.status === "cancelled"
                   if (reproCancelled) {
                     yield* Effect.logWarning("turn_completed_unverified", {
@@ -5783,12 +5784,22 @@ export const layer = Layer.effect(
 
                 const existingTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 if (existingTodos.length === 0) {
+                  // V3 — the repro seed's ecosystem-shaped prose is compiled
+                  // from the session's ACTUAL repo, same derivation as the
+                  // repro-drift/converge nudges below (`getRepoProfileSync`),
+                  // and cached per-session so every later identity comparison
+                  // against a planted repro todo (SM4 block above, finish
+                  // gate below) recompiles the identical string.
+                  const reproVehicle = getRepoProfileSync(ctx.directory).ecosystems[0]?.repro ?? PYTHON_REPRO_VEHICLE
+                  setReproVehicle(sessionID, reproVehicle)
                   const skeleton = buildTriageTodoSkeleton(verdict, arming, {
                     hasPinnedProbe: turnPinnedProbe !== undefined,
+                    reproVehicle,
                   })
                   // S2 — did the skeleton seed the repro pre-pass? Gates the
                   // mid-turn hand-off/abstention logic in the SM4 block above.
-                  reproSeededThisTurn = skeleton.some((t) => t.content === REPRO_SLICE_CONTENT)
+                  const reproSeedContent = reproSliceContent(reproVehicle)
+                  reproSeededThisTurn = skeleton.some((t) => t.content === reproSeedContent)
                   // Owner-decision trace: which goals seeded a reasoner pre-pass
                   // (the diagnosis writer) and the shapes that drove it — the
                   // stage-1 routing decision, logged with mechanism:"orchestrator"
@@ -5796,7 +5807,7 @@ export const layer = Layer.effect(
                   // cast as RECOVERY by the SM backstop (stuck_escalate below).
                   const seeds = skeleton
                     .map((t) =>
-                      t.content === REPRO_SLICE_CONTENT
+                      t.content === reproSeedContent
                         ? "repro"
                         : t.content === LOCALIZATION_SLICE_CONTENT
                           ? "localization"
@@ -6750,6 +6761,21 @@ export const layer = Layer.effect(
                         mode: info.mode,
                         candidatePlanValid: info.candidatePlanValid,
                         resolveAttempts: info.resolveAttempts,
+                      }),
+                    )
+                  },
+                  // Round F carve-out follow-through: the deferral seed's
+                  // dispatch record — pairs with `deferral_armed` (planted at
+                  // armDeferral) so the signal bus shows the seed actually ran,
+                  // not just that it was planted. Same publishSignalFx shape.
+                  onDeferralDispatch: () => {
+                    bridge.fork(
+                      publishSignalFx({
+                        name: "deferral_dispatched",
+                        sessionID,
+                        severity: "tail",
+                        decision: "defer",
+                        evidence: { seed: "deferral" },
                       }),
                     )
                   },

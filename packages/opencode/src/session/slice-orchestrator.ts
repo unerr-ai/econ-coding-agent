@@ -23,8 +23,9 @@ import {
   LOCALIZATION_SLICE_CONTENT,
   PLAN_SLICE_CONTENT,
   REDECOMPOSITION_SLICE_CONTENT,
-  REPRO_SLICE_CONTENT,
+  reproSliceContent,
 } from "./prompts/seeds"
+import type { ReproVehicle } from "./prompts/nudges"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
 import { signalsFor } from "./signal-bus"
 import {
@@ -1325,12 +1326,16 @@ export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
  * block is what actually pins it). Plants FIRST, before localization:
  * `buildTriageTodoSkeleton` withholds the localization seed while this one is
  * needed, and the mid-turn hand-off (prompt.ts SM4 block) plants localization
- * once the repro pins or the abstention deadline passes.
+ * once the repro pins or the abstention deadline passes. Function, not a
+ * constant — `content` is `reproSliceContent(vehicle)` (V3): a bare default
+ * would lock every non-python repo into python repro prose.
  */
-export const REPRO_PREPASS_TODO: InjectedSliceTodo = {
-  content: REPRO_SLICE_CONTENT,
-  status: "pending",
-  priority: "high",
+export function reproPrepassTodo(vehicle?: ReproVehicle): InjectedSliceTodo {
+  return {
+    content: reproSliceContent(vehicle),
+    status: "pending",
+    priority: "high",
+  }
 }
 
 /**
@@ -1611,14 +1616,18 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * `armReproduction`. (Formerly either/or — repro suppressed localization
  * entirely on a diagnosis-vague-with-repro-need turn, so its root-most-layer/
  * typed-equality/existing-idiom fix discipline never reached the turn; the
- * django-11964 iter-3 and 11848 iter-2 regressions.)
+ * django-11964 iter-3 and 11848 iter-2 regressions.) `opts.reproVehicle`
+ * (default `PYTHON_REPRO_VEHICLE` via `reproPrepassTodo`) profile-compiles
+ * the repro seed's content for the session's actual ecosystem (V3) — the
+ * caller passes the same vehicle it derived for the turn's repro nudges so
+ * dedup-by-content and every mid-turn identity comparison stay consistent.
  *
  * @sem domain=routing role=router
  */
 export function buildTriageTodoSkeleton(
   verdict: TriageVerdict,
   arming: ArmingDecision,
-  opts?: { hasPinnedProbe?: boolean },
+  opts?: { hasPinnedProbe?: boolean; reproVehicle?: ReproVehicle },
 ): TriageTodoRow[] {
   const order = orderTriageGoals(verdict.goals)
   const positionOf = new Map<number, number>()
@@ -1634,7 +1643,10 @@ export function buildTriageTodoSkeleton(
     const goal = verdict.goals[origIdx]!
     const isDiagnosis = goal.shape === "diagnosis-vague" || goal.shape === "diagnosis-grounded"
     const seeds = isDiagnosis
-      ? [...(needsRepro ? [REPRO_PREPASS_TODO] : []), ...(arming.armLocalization ? [LOCALIZATION_PREPASS_TODO] : [])]
+      ? [
+          ...(needsRepro ? [reproPrepassTodo(opts?.reproVehicle)] : []),
+          ...(arming.armLocalization ? [LOCALIZATION_PREPASS_TODO] : []),
+        ]
       : (goal.needsPlan ?? false)
         ? [PLAN_PREPASS_TODO]
         : []
@@ -2359,6 +2371,8 @@ export interface ConductorOrchestrationDeps {
   }) => void
   /** Item 3 — cascade-inline-latch telemetry sink: fires with `phase: "set"` when an engaged cascade settles with >=1 unverified/blocked slice and zero verified completions, and again with `phase: "consumed"` on the call that holds inline and injects the corrective todo. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the `cascade_inline_latch` log line). A no-op when absent. */
   onCascadeInlineLatch?: (info: { sessionID: string; deadSlice: string; phase: "set" | "consumed" }) => void
+  /** Round F carve-out follow-through — telemetry sink: fires exactly once per engagement, the moment the planted deferral slice (content starts with `DEFERRAL_SLICE_PREFIX`) is actually dispatched to a child session. The armed slice is a no-op record until this fires; pairs with `deferral_armed` (planted) to close the loop the defect report named. Same callback-to-caller pattern as `onResolutionGate` (this file has no Effect dependency; the caller emits the `deferral_dispatched` signal). A no-op when absent. */
+  onDeferralDispatch?: () => void
 }
 
 /** What the hook reports back to the turn: whether it took over, and whether it fell back on error. */
@@ -2398,7 +2412,7 @@ export function clearCascadeInlineLatch(sessionID: string): void {
   cascadeLatchBySession.delete(sessionID)
 }
 
-/** The untyped corrective todo the latch injects once — deliberately no `sliceType` (mirrors `REPRO_PREPASS_TODO`) so it never re-enters the typed-DAG orchestration path and instead runs INLINE on the conductor, in the same session that already has the warm context. */
+/** The untyped corrective todo the latch injects once — deliberately no `sliceType` (mirrors `reproPrepassTodo`'s shape) so it never re-enters the typed-DAG orchestration path and instead runs INLINE on the conductor, in the same session that already has the warm context. */
 function cascadeInlineLatchCorrectiveTodo(deadSlice: string): InjectedSliceTodo {
   return {
     content: `[cascade-inline] The previous decomposition attempt did not verify — slice "${deadSlice}" timed out or was blocked and nothing else in that cascade settled verified. Do NOT re-decompose this again: you already have the warm context from that attempt. Finish "${deadSlice}"'s work yourself, inline, now.`,
@@ -2432,7 +2446,11 @@ function cascadeInlineLatchCorrectiveTodo(deadSlice: string): InjectedSliceTodo 
  * first — `decompose-now` falls straight into the path above unchanged;
  * `resolve-first`/`ask-user` both return `{engaged:false}` without touching a
  * todo status, so this function's own crash-safety net is untouched by the
- * gate.
+ * gate. A pending harness-planted escalation seed (the finish-gate deferral
+ * seed or the grind valve's design seed) always wins that gate's `mode` —
+ * `resolutionDecision`'s top-precedence branch — because it is gate-mandated
+ * dispatch, not conductor-authored decomposition; `onDeferralDispatch` fires
+ * once, later, when that deferral slice actually reaches a child dispatch.
  *
  * @sem domain=routing role=orchestrator
  */
@@ -2483,6 +2501,20 @@ export async function runConductorOrchestration(
   }
 
   try {
+    // Round F carve-out, generalized: a harness-planted escalation slice —
+    // the finish-gate deferral seed (`armDeferral`) or the grind valve's
+    // design seed (`GRIND_DESIGN_SLICE_CONTENT`) — sitting pending in the
+    // todo list is a gate-mandated dispatch carrying its own executed
+    // evidence, never conductor-authored decomposition. Computed once, up
+    // front, so the resolution gate below (which must not veto it —
+    // resolutionDecision's new top-precedence branch) sees the same signal
+    // the degraded escape hatch further down already keys off.
+    const escalationSeedPending = todos.some(
+      (t) =>
+        (t.content === GRIND_DESIGN_SLICE_CONTENT || t.content.startsWith(DEFERRAL_SLICE_PREFIX)) &&
+        t.status === "pending",
+    )
+
     // #53/#54 resolution gate (Option A, structural) — a flagged
     // (ambiguous/hard) turn resolves its approach before committing to cheap
     // slicing, gated by validatePlan's STRUCTURAL-ONLY check. Requires
@@ -2538,6 +2570,10 @@ export async function runConductorOrchestration(
           // stripped-down candidatePlan above).
           diagnosisLocationOrFixKnown: deps.arming?.diagnosisLocationOrFixKnown,
           writerSliceCount: todos.filter((t) => t.sliceType === "mechanical" || t.sliceType === "design").length,
+          // Round F carve-out, generalized — see the `escalationSeedPending`
+          // computation above: a pending deferral/grind seed always wins,
+          // even over the armed-turn veto (1b).
+          escalationSeedPending,
         }).mode
         deps.onResolutionGate?.({ flagged, mode, candidatePlanValid, resolveAttempts })
         if (mode === "resolve-first") {
@@ -2630,6 +2666,13 @@ export async function runConductorOrchestration(
       return k >= 0 ? typedIndices[k] : undefined
     }
 
+    // Round F carve-out follow-through: fire `onDeferralDispatch` the first
+    // (and only the first) time the planted deferral slice actually
+    // dispatches this engagement — the DAG always carries at most one
+    // (armDeferral dedupes by prefix before appending), but a slice can
+    // re-enter `wrappedDispatch` on the ladder's escalated retry, so the
+    // guard is a local flag, not a content re-check alone.
+    let deferralDispatched = false
     const wrappedDispatch: ConductorSliceDispatch = (req) => {
       if (!req.escalated) {
         const idx = todoIndexOf(req.sliceId)
@@ -2637,6 +2680,10 @@ export async function runConductorOrchestration(
           marked.add(idx)
           void setStatus(idx, "in_progress")
         }
+      }
+      if (!deferralDispatched && req.sliceId.startsWith(DEFERRAL_SLICE_PREFIX)) {
+        deferralDispatched = true
+        deps.onDeferralDispatch?.()
       }
       return deps.dispatch(req)
     }

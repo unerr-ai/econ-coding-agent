@@ -80,10 +80,12 @@ const SIGNAL_NAMES: string[] = [
 ]
 
 // Tier-2 reserved: consumer-record-only signal names in signal-bus.ts
-// (declared for a not-yet-built publish path, per their "consumer record"
-// type comments). No publisher exists for these by design — flag their
-// absence as noise, not a wiring gap.
-const RESERVED_TIER2_SIGNAL_NAMES = new Set(["deferral_armed", "deferral_dispatched", "surface_asked"])
+// declared for a not-yet-built publish path, per their "consumer record"
+// type comments. `deferral_armed` (armDeferral, prompt.ts) and
+// `deferral_dispatched` (onDeferralDispatch wiring, prompt.ts) both now HAVE
+// publishers — removed from this set so the audit stays truthful about which
+// signals are genuinely unwired. Only `surface_asked` has no publisher yet.
+const RESERVED_TIER2_SIGNAL_NAMES = new Set(["surface_asked"])
 
 const GATE_FILES = [
   "turn-supervisor.ts",

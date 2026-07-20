@@ -55,6 +55,8 @@ export interface ResolutionInput {
   diagnosisLocationOrFixKnown?: boolean
   /** Direct-first valve width gate: the candidate plan's writer (editing) slice count. Absent, or above the valve's cap, disqualifies it — the valve only ever narrows an existing `decompose-now`, never widens it. */
   writerSliceCount?: number
+  /** A harness-planted escalation slice — the finish-gate deferral seed or the grind valve's design seed — is pending in the todo list. These are gate-mandated escalations carrying executed evidence, never conductor-authored decomposition, so they take top precedence over every armed-turn policy below. */
+  escalationSeedPending?: boolean
 }
 
 /**
@@ -81,15 +83,35 @@ export const MAX_RESOLVE_ATTEMPTS = 2
  * The prior-uncertainty resolution-phase decision table (task #53): for a
  * flagged (ambiguous/hard) task, decide whether to decompose now, resolve the
  * approach first, ask the user, or continue inline — in strict precedence order
- * so exactly one branch ever fires. A narrow direct-first valve nests inside
- * the valid-plan branch: when the location/fix is already known, the turn is
- * unarmed, this is the first pass, hardness isn't "hard", and the plan is
- * narrow, it returns continue-inline instead of decompose-now for one cheap
+ * so exactly one branch ever fires. A harness-mandated escalation seed
+ * (`escalationSeedPending`) takes TOP precedence over every branch below,
+ * including the armed-turn veto (1b): 1b's 11885 calibration measured
+ * conductor-authored decomposition going 0/4 on an armed turn, not a
+ * gate-mandated escalation carrying its own executed evidence — applying 1b's
+ * veto to a harness-planted deferral/grind seed would be a category error, not
+ * a policy the calibration actually covers. A narrow direct-first valve nests
+ * inside the valid-plan branch: when the location/fix is already known, the
+ * turn is unarmed, this is the first pass, hardness isn't "hard", and the plan
+ * is narrow, it returns continue-inline instead of decompose-now for one cheap
  * verified swing. Pure: no I/O.
  *
  * @sem domain=routing role=controller
  */
 export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
+  // 0. Harness-mandated escalation seed pending — highest precedence, before
+  //    "not flagged" and before the armed-turn veto (1b). The finish-gate
+  //    deferral seed and the grind valve's design seed are gate-mandated
+  //    escalations carrying executed evidence, never conductor-authored
+  //    decomposition — 1b's "armed turn never decomposes" policy was
+  //    calibrated against the latter, so letting it veto the former would be a
+  //    category error, not a real disagreement in the data.
+  if (input.escalationSeedPending === true) {
+    return {
+      mode: "decompose-now",
+      reason: "harness escalation seed pending — gate-mandated dispatch, precedes armed-inline policy",
+    }
+  }
+
   const flagged = input.ambiguity === "ambiguous" || input.hardness === "hard"
 
   // 1. Not flagged — no approach uncertainty to resolve; decompose straight away.

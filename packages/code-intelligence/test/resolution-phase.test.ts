@@ -141,6 +141,72 @@ describe("resolutionDecision — branch 1b: armed turn never decomposes", () => 
 })
 
 // ---------------------------------------------------------------------------
+// Branch 0 — harness escalation seed pending: TOP precedence, beats branch
+// 1b's armed-turn veto. The finish-gate deferral seed and the grind valve's
+// design seed are gate-mandated escalations carrying executed evidence,
+// never conductor-authored decomposition — 1b's 11885 calibration does not
+// apply to them.
+// ---------------------------------------------------------------------------
+
+describe("resolutionDecision — escalation-seed precedence (branch 0, beats branch 1b)", () => {
+  it("beats branch 1b at resolveAttempts=1 (armed, would otherwise be continue-inline) — decompose-now", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        armLocalization: true,
+        resolveAttempts: 1,
+        escalationSeedPending: true,
+      }),
+    )
+    expect(result.mode).toBe("decompose-now")
+    expect(result.reason).toBe("harness escalation seed pending — gate-mandated dispatch, precedes armed-inline policy")
+  })
+
+  it("beats branch 1b at MAX_RESOLVE_ATTEMPTS", () => {
+    const result = resolutionDecision(
+      baseInput({
+        hardness: "hard",
+        armLocalization: true,
+        resolveAttempts: MAX_RESOLVE_ATTEMPTS,
+        escalationSeedPending: true,
+      }),
+    )
+    expect(result.mode).toBe("decompose-now")
+  })
+
+  it("beats the first-pass resolve-first — armed, resolveAttempts=0, escalationSeedPending fires decompose-now, NOT resolve-first (a deferral must never be answered by planting a localization seed)", () => {
+    const result = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        armLocalization: true,
+        resolveAttempts: 0,
+        escalationSeedPending: true,
+      }),
+    )
+    expect(result.mode).toBe("decompose-now")
+    expect(result.mode).not.toBe("resolve-first")
+  })
+
+  it("absent/false leaves every existing branch byte-identical — spot-check: armed resolveAttempts=1 still continue-inline", () => {
+    const withoutFlag = resolutionDecision(
+      baseInput({ ambiguity: "ambiguous", armLocalization: true, resolveAttempts: 1 }),
+    )
+    expect(withoutFlag.mode).toBe("continue-inline")
+    expect(withoutFlag.reason).toBe("armed turn localized — continue inline, grind valve is the only escalation")
+
+    const explicitFalse = resolutionDecision(
+      baseInput({
+        ambiguity: "ambiguous",
+        armLocalization: true,
+        resolveAttempts: 1,
+        escalationSeedPending: false,
+      }),
+    )
+    expect(explicitFalse.mode).toBe("continue-inline")
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Branch 2 — short-circuit: flagged but a valid candidate plan already exists
 // ---------------------------------------------------------------------------
 

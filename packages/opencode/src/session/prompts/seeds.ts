@@ -40,15 +40,15 @@ export const PLAN_SLICE_CONTENT =
  * S2 — content of the repro-authoring pre-pass: manufacture executed-red
  * evidence BEFORE any fix pre-pass runs (repro-first sequencing — a repro
  * authored after the fix can only ever run green). Untyped/inline by design
- * (see REPRO_PREPASS_TODO in slice-orchestrator.ts) so the ROOT conductor
+ * (see `reproPrepassTodo` in slice-orchestrator.ts) so the ROOT conductor
  * observes the red run itself via the existing probe-from-red pin — a
  * dispatched child's red would be invisible to the root. DELIBERATELY
  * distinct from the seeds above so dedup-by-content keeps each kind
  * plantable alongside the others. Profile-compiled via `reproSliceContent`
- * (docs/design/agnostic-hands-eyes.md §4.6) — this exported constant is the
- * `PYTHON_REPRO_VEHICLE` fill, kept as a plain string (not a function) so
- * every existing identity comparison (`t.content === REPRO_SLICE_CONTENT`)
- * and `REPRO_PREPASS_TODO` keep working unchanged.
+ * (docs/design/agnostic-hands-eyes.md §4.6) — every plant site and every
+ * identity comparison (`t.content === reproSliceContent(vehicle)`) calls the
+ * function with the session's active repro vehicle, never a bare default, so
+ * a non-python repo's seed and its comparisons stay in the same ecosystem.
  *
  * @sem domain=prompting role=repro-seed
  */
@@ -59,16 +59,18 @@ const REPRO_SLICE_TEXT =
  * Profile-compiled repro-seed content (docs/design/agnostic-hands-eyes.md
  * §4.6/§5) — fills `REPRO_SLICE_TEXT`'s Python-shaped tokens
  * (`repro_issue.py`, `python repro_issue.py`, `python -c`) from `vehicle`;
- * the default (`PYTHON_REPRO_VEHICLE`) reproduces `REPRO_SLICE_CONTENT`
- * byte-for-byte. Names exactly one ecosystem per call — never a catalog.
+ * the default (`PYTHON_REPRO_VEHICLE`) reproduces the pre-P4 hardcoded
+ * Python prose byte-for-byte. Names exactly one ecosystem per call — never a
+ * catalog. Deliberately NOT cached in a module-level constant — every plant
+ * site and identity-comparison site calls this with the session's own
+ * `reproVehicle` (`repro-vehicle-store.ts`) so a non-python repo never sees
+ * python prose (V3).
  *
  * @sem domain=prompting role=repro-seed
  */
 export function reproSliceContent(vehicle: ReproVehicle = PYTHON_REPRO_VEHICLE): string {
   return compileReproVehicle(REPRO_SLICE_TEXT, vehicle)
 }
-
-export const REPRO_SLICE_CONTENT = reproSliceContent()
 
 /**
  * L4.2 — content of the design pre-pass the GRIND VALVE (turn-supervisor.ts
