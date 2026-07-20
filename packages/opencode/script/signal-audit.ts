@@ -54,6 +54,7 @@ const SIGNAL_NAMES: string[] = [
   "unverified_finish",
   "patch_sanity_unverified",
   "regression_red",
+  "build_check_red",
   "unverifiable_regression_surface",
   "deliverable_checklist",
   "promoted_pin_green",

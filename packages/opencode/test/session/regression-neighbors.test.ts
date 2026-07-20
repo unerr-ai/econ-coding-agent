@@ -42,7 +42,11 @@ import {
   discoverNeighborTests,
   discoverProjectInterpreter,
   discoverProjectToolchain,
+  resolveActiveEcosystem,
+  resolveToolchainEcosystem,
   runBuildCheckRung,
+  runStructuredTestCommand,
+  makeStructuredNeighborRunner,
   projectInterpreterCandidateCount,
   rewriteInterpreter,
   rewriteInterpreterCommand,
@@ -59,7 +63,7 @@ import {
 import type { NeighborGraphPort } from "../../src/session/regression-neighbors"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "../../src/session/seen-red"
 import { checkClaimCoverage, type Claim, type Evidence } from "@opencode-ai/code-intelligence"
-import { ECOSYSTEM_CONVENTIONS } from "../../src/code-intelligence/repo-profile"
+import { ECOSYSTEM_CONVENTIONS, type EcosystemProfile } from "../../src/code-intelligence/repo-profile"
 
 const dirs: string[] = []
 
@@ -1442,5 +1446,186 @@ describe("runBuildCheckRung — P2b build-first rung (agnostic-hands-eyes.md §2
 
     expect(calls).toBe(0)
     expect(result).toEqual({ ran: false, passed: true })
+  })
+})
+
+describe("resolveActiveEcosystem / resolveToolchainEcosystem — P3 production call site (prompt.ts's toolchain probe)", () => {
+  it("resolves the javascript ecosystem for a JS repo, agreeing with discoverNeighborTests' own resolution", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj" }))
+    mkdirSync(join(cwd, "__tests__"), { recursive: true })
+
+    const eco = resolveActiveEcosystem(cwd, ["src/foo.js"])
+    expect(eco?.language).toBe("javascript")
+    expect(resolveToolchainEcosystem(cwd, ["src/foo.js"])).toBe("javascript")
+  })
+
+  it("resolves the python row when the repo is python-shaped", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")
+
+    const eco = resolveActiveEcosystem(cwd, ["pkg/mod.py"])
+    expect(eco?.language).toBe("python")
+    expect(resolveToolchainEcosystem(cwd, ["pkg/mod.py"])).toBe("python")
+  })
+
+  it("falls back to python — today's only probed ecosystem — when nothing resolves at all", () => {
+    const cwd = makeFixture()
+    expect(resolveToolchainEcosystem(cwd, ["scratch.txt"])).toBe("python")
+  })
+})
+
+describe("runStructuredTestCommand / makeStructuredNeighborRunner — P1 structured-report capture (agnostic-hands-eyes.md §2.2)", () => {
+  const pytestEco: EcosystemProfile = {
+    language: "python",
+    root: ".",
+    toolchain: { probeLadder: [] },
+    versions: { deps: {} },
+    tests: {
+      runner: "pytest",
+      suite: "pytest",
+      single: "pytest {testId}",
+      structured: { flag: "--junitxml=<path>", format: "junitxml" },
+      conventions: { dirs: ["tests"], filePatterns: ["test_*.py"], twinRule: "" },
+      source: "convention",
+      needsSynthesis: false,
+      validated: false,
+    },
+    repro: { ext: "py", run: "python repro_issue.py" },
+  }
+  const jestEco: EcosystemProfile = {
+    language: "javascript",
+    root: ".",
+    toolchain: { probeLadder: [] },
+    versions: { deps: {} },
+    tests: {
+      runner: "jest",
+      suite: "npx jest",
+      single: "npx jest {testId}",
+      structured: { flag: "--json", format: "json" },
+      conventions: { dirs: ["__tests__"], filePatterns: ["*.test.js"], twinRule: "" },
+      source: "convention",
+      needsSynthesis: false,
+      validated: false,
+    },
+    repro: { ext: "js", run: "node repro_issue.js" },
+  }
+  const djangoEco: EcosystemProfile = { ...pytestEco, tests: { ...pytestEco.tests, runner: "django-test" } }
+
+  function extractTempPath(command: string): string {
+    const match = command.match(/--junitxml=(\S+)/)
+    if (!match) throw new Error(`no --junitxml in ${command}`)
+    return match[1]!
+  }
+
+  afterEach(() => {
+    // runStructuredTestCommand cleans up its own temp files on the happy
+    // path; this only mops up a test double that never wrote one.
+  })
+
+  it("appends the <path>-templated flag, reads the temp artifact OUTSIDE the repo, and populates CommandResult.report", async () => {
+    let calls = 0
+    const { result, reportContent } = await runStructuredTestCommand(
+      { kind: "test", command: "pytest tests/test_foo.py -x -q" },
+      pytestEco,
+      async (command) => {
+        calls++
+        const path = extractTempPath(command.command)
+        expect(path.startsWith("/tmp") || path.includes(require("node:os").tmpdir())).toBe(true)
+        expect(path.startsWith(process.cwd())).toBe(false)
+        writeFileSync(
+          path,
+          '<testsuite tests="1" failures="1"><testcase classname="test_foo" name="test_x"><failure message="assert 1 == 2">AssertionError</failure></testcase></testsuite>',
+        )
+        return { exitCode: 1, stdout: "", stderr: "" }
+      },
+    )
+
+    expect(calls).toBe(1)
+    expect(result.report).toEqual({ caseCount: 1, skipped: 0 })
+    expect(reportContent).toContain("test_foo")
+  })
+
+  it("falls back to re-running the UNFLAGGED command, byte-identical, when the installed runner never produces the artifact (Django's runtests.py doesn't understand --junitxml)", async () => {
+    const calls: string[] = []
+    const unflaggedResult = { exitCode: 1, stdout: "FAILED (failures=1)", stderr: "" }
+    const { result, reportContent } = await runStructuredTestCommand(
+      { kind: "test", command: "python tests/runtests.py delete --parallel 1" },
+      djangoEco,
+      async (command) => {
+        calls.push(command.command)
+        if (command.command.includes("--junitxml=")) {
+          // simulates argparse rejecting the unknown flag — no artifact written
+          return { exitCode: 2, stdout: "", stderr: "error: unrecognized arguments: --junitxml=..." }
+        }
+        return unflaggedResult
+      },
+    )
+
+    expect(calls.length).toBe(2)
+    expect(calls[0]).toContain("--junitxml=")
+    expect(calls[0]).toStartWith("python tests/runtests.py delete --parallel 1 ")
+    expect(calls[1]).toBe("python tests/runtests.py delete --parallel 1")
+    expect(result).toEqual(unflaggedResult)
+    expect(reportContent).toBeUndefined()
+  })
+
+  it("a bare (non-<path>) structured flag reads the report straight from stdout (jest --json)", async () => {
+    const jestJson = JSON.stringify({
+      testResults: [
+        { name: "foo.test.js", assertionResults: [{ fullName: "foo works", status: "passed" }] },
+      ],
+    })
+    let calls = 0
+    const { result, reportContent } = await runStructuredTestCommand(
+      { kind: "test", command: "npx jest __tests__/foo.test.js" },
+      jestEco,
+      async (command) => {
+        calls++
+        expect(command.command).toBe("npx jest __tests__/foo.test.js --json")
+        return { exitCode: 0, stdout: jestJson, stderr: "" }
+      },
+    )
+
+    expect(calls).toBe(1)
+    expect(result.report).toEqual({ caseCount: 1, skipped: 0 })
+    expect(reportContent).toBe(jestJson)
+  })
+
+  it("runs a non-test command (kind !== \"test\") unmodified — never appends the flag", async () => {
+    let calls = 0
+    const { result, reportContent } = await runStructuredTestCommand(
+      { kind: "guard", command: "git show HEAD:foo.py" },
+      pytestEco,
+      async (command) => {
+        calls++
+        expect(command.command).toBe("git show HEAD:foo.py")
+        return { exitCode: 0, stdout: "x = 1", stderr: "" }
+      },
+    )
+    expect(calls).toBe(1)
+    expect(result).toEqual({ exitCode: 0, stdout: "x = 1", stderr: "" })
+    expect(reportContent).toBeUndefined()
+  })
+
+  it("makeStructuredNeighborRunner wires the capture into a CommandRunner and populates the reportContentByCommand side channel keyed by the ORIGINAL command", async () => {
+    const reportContentByCommand = new Map<string, string>()
+    const runner = makeStructuredNeighborRunner(
+      async (command) => {
+        if (command.command.includes("--junitxml=")) {
+          const path = extractTempPath(command.command)
+          writeFileSync(path, '<testsuite tests="1"><testcase classname="t" name="ok"/></testsuite>')
+          return { exitCode: 0, stdout: "", stderr: "" }
+        }
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+      pytestEco,
+      reportContentByCommand,
+    )
+
+    const result = await runner({ kind: "test", command: "pytest tests/test_ok.py -x -q" })
+    expect(result.exitCode).toBe(0)
+    expect(result.report).toEqual({ caseCount: 1, skipped: 0 })
+    expect(reportContentByCommand.get("pytest tests/test_ok.py -x -q")).toContain("testsuite")
   })
 })

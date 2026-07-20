@@ -110,15 +110,21 @@
  *
  * @sem domain=routing role=neighbor-discovery
  */
-import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs"
-import { homedir } from "node:os"
+import { existsSync, readFileSync, readdirSync, unlinkSync, type Dirent } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { dirname, extname, join, relative, basename as pathBasename } from "node:path"
-import { runRegressionGate, type VerifyCommand, type CommandRunner } from "@opencode-ai/code-intelligence"
+import {
+  runRegressionGate,
+  type VerifyCommand,
+  type CommandRunner,
+  type CommandResult,
+} from "@opencode-ai/code-intelligence"
 import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "./seen-red"
 import type { SeenRedExecution } from "./seen-red"
 import { isTestLikePath } from "../tool/graph-tools"
 import { ECOSYSTEM_CONVENTIONS, getRepoProfileSync, type EcosystemProfile } from "../code-intelligence/repo-profile"
+import { detectAndParseTestReport } from "../code-intelligence/test-report"
 
 const MAX_NEIGHBOR_COMMANDS = 3
 /** Bound on the recursive descent under `<cwd>/tests/` for the pytest-style fallback. */
@@ -1076,6 +1082,47 @@ function buildEcosystemCandidates(cwd: string, ecosystem: Exclude<ToolchainEcosy
 }
 
 /**
+ * P3 — resolves the single `EcosystemProfile` governing `touchedSourceFiles`:
+ * `selectNonPythonEcosystem`'s own resolution (F19/F20's non-python neighbor
+ * discovery already keys off this) when the repo isn't Django/python-shaped,
+ * else the profile's python row when one exists. `undefined` only when the
+ * profile resolves neither — a python/unknown repo with no ecosystem
+ * evidence at all, unchanged from today's behavior. The one lookup the
+ * regression lane's toolchain probe (`resolveToolchainEcosystem` below) and
+ * structured-report capture (`runStructuredTestCommand`) both key off, so
+ * they always agree with `discoverNeighborTests`'s own resolution.
+ *
+ * @sem domain=routing role=toolchain-discovery
+ */
+export function resolveActiveEcosystem(
+  cwd: string,
+  touchedSourceFiles: readonly string[],
+): EcosystemProfile | undefined {
+  const nonPythonEco = selectNonPythonEcosystem(cwd, touchedSourceFiles)
+  if (nonPythonEco) return nonPythonEco
+  return getRepoProfileSync(cwd).ecosystems.find((eco) => eco.language === "python")
+}
+
+/**
+ * P3 — the `resolveActiveEcosystem` above, narrowed to the toolchains
+ * `discoverProjectToolchain` actually probes (`ECOSYSTEM_TOOL_BIN`'s keys).
+ * Falls back to `"python"` — today's only probed ecosystem — both when
+ * nothing resolves and when the resolved ecosystem has no toolchain row yet
+ * (ruby/php: `ECOSYSTEM_CONVENTIONS` rows exist for twin discovery but
+ * `discoverProjectToolchain` has no probe ladder for them), so a plain
+ * python/unknown repo is byte-identical to before this function existed.
+ *
+ * @sem domain=routing role=toolchain-discovery
+ */
+export function resolveToolchainEcosystem(cwd: string, touchedSourceFiles: readonly string[]): ToolchainEcosystem {
+  const eco = resolveActiveEcosystem(cwd, touchedSourceFiles)
+  if (eco && Object.prototype.hasOwnProperty.call(ECOSYSTEM_TOOL_BIN, eco.language)) {
+    return eco.language as ToolchainEcosystem
+  }
+  return "python"
+}
+
+/**
  * P2a — per-ecosystem toolchain probe ladder, generalizing F14a's
  * python-only `discoverProjectInterpreter`: `python` routes straight through
  * to it (byte-identical, `topLevelPackage` required); every other ecosystem
@@ -1262,5 +1309,102 @@ export async function runDifferentialBaseline(opts: {
     return new Set(failures.map((f) => f.command.command))
   } finally {
     for (const { filePath, content } of restores) await opts.writeContent(filePath, content)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P1 — structured-report capture for HARNESS-controlled test commands
+// (docs/design/agnostic-hands-eyes.md §2.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs one HARNESS-controlled test command with the active ecosystem's
+ * `tests.structured.flag` appended when available: a `<path>`-templated
+ * flag (pytest/Django/php's `--junitxml=<path>`) writes its report to a temp
+ * path OUTSIDE the repo (`node:os` `tmpdir()`, read then deleted); a bare
+ * flag (jest/vitest/go/cargo/rspec) prints its report straight to stdout.
+ * §3.1's version risk means the installed runner may not understand the
+ * flag at all (Django's `runtests.py` never does — it shares pytest's row
+ * but is argparse-based, not pytest) — when the artifact/stdout doesn't
+ * parse as any supported format, this falls back to RE-RUNNING the
+ * unflagged command and hands back THAT result untouched, never the
+ * flagged attempt's (possibly flag-induced) exit code. Python/pytest stays
+ * functionally identical either way: the flag never changes which tests run
+ * or their exit code, only whether a report gets parsed. A non-"test"
+ * command, or an ecosystem with no (or an empty) structured flag —
+ * maven/gradle's JUnit XML lands in a fixed directory, not behind a flag,
+ * a later phase's job — runs through unmodified.
+ *
+ * @sem domain=routing role=structured-report-capture
+ */
+export async function runStructuredTestCommand(
+  command: VerifyCommand,
+  ecosystem: EcosystemProfile | undefined,
+  runner: CommandRunner,
+): Promise<{ result: CommandResult; reportContent?: string }> {
+  if (command.kind !== "test" || !ecosystem || "unknown" in ecosystem.tests) {
+    return { result: await runner(command) }
+  }
+  const { flag } = ecosystem.tests.structured
+  if (!flag) return { result: await runner(command) }
+
+  const usesPath = flag.includes("<path>")
+  const tempPath = usesPath
+    ? join(tmpdir(), `unerr-report-${Date.now()}-${Math.random().toString(36).slice(2)}.out`)
+    : undefined
+  const flaggedCommand = `${command.command} ${usesPath ? flag.replace("<path>", tempPath!) : flag}`
+  const flaggedResult = await runner({ ...command, command: flaggedCommand })
+
+  let reportContent: string | undefined
+  if (usesPath && tempPath) {
+    try {
+      if (existsSync(tempPath)) reportContent = readFileSync(tempPath, "utf8")
+    } catch {
+      reportContent = undefined
+    } finally {
+      try {
+        if (existsSync(tempPath)) unlinkSync(tempPath)
+      } catch {
+        // best-effort cleanup only — a stray temp file is never fatal
+      }
+    }
+  } else {
+    reportContent = flaggedResult.stdout
+  }
+
+  const report = reportContent ? detectAndParseTestReport(reportContent) : undefined
+  if (!report) {
+    // The flag wasn't understood (or produced nothing parseable) — proceed
+    // exactly as today: the unflagged command's own result, never the
+    // flagged attempt's.
+    return { result: await runner(command) }
+  }
+  return {
+    result: { ...flaggedResult, report: { caseCount: report.totals.total, skipped: report.totals.skip } },
+    reportContent,
+  }
+}
+
+/**
+ * Wraps a `CommandRunner` so every command it runs goes through
+ * `runStructuredTestCommand` for `ecosystem` — the drop-in the regression
+ * lane's neighbor/baseline runs pass to `runRegressionGate`/
+ * `runDifferentialBaseline` instead of a bare `makeShellCommandRunner`
+ * double. `reportContentByCommand`, when supplied, is populated as a side
+ * channel (command string → raw report content) so the caller can build
+ * report-native failure detail after the gate returns, without threading a
+ * new field through `CommandResult`/`SoundFailure`.
+ *
+ * @sem domain=routing role=structured-report-capture
+ */
+export function makeStructuredNeighborRunner(
+  runner: CommandRunner,
+  ecosystem: EcosystemProfile | undefined,
+  reportContentByCommand?: Map<string, string>,
+): CommandRunner {
+  return async (command: VerifyCommand): Promise<CommandResult> => {
+    const { result, reportContent } = await runStructuredTestCommand(command, ecosystem, runner)
+    if (reportContent !== undefined) reportContentByCommand?.set(command.command, reportContent)
+    return result
   }
 }

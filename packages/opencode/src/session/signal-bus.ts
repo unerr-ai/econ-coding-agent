@@ -27,6 +27,7 @@ export type EconSignalName =
   | "f2p_claim_unverified" // H1 tooth 3: finish claim covers only a strict subset of the turn's own observed red test ids (2nd arrival = tail surface)
   | "judge_tier_off" // gap-closure §4.3 (#27): ECON_JUDGE_TIER=off skipped a judge dispatch — surfaced once per session
   | "regression_red" // F11 neighbor regressed (unresolved re-arrival = tail)
+  | "build_check_red" // P2b build-first rung (regression-neighbors.ts): a compiled-target buildCheck failed BEFORE any neighbor test ran — a deterministic compile block, distinct from a test red (inert on python — no buildCheck row)
   | "unverifiable_regression_surface" // H2.2: a non-trivial code edit's regression lane selected zero tests and no sibling test file exists — surfaced, never silent
   | "deliverable_checklist" // H4.1: end-state finish gate — ops-shaped turn's deliverable checklist (1st denial converts; a pass-through with gaps still open surfaces verifiedScope, never a silent allow)
   | "promoted_pin_green" // F16-promoted pin ran GREEN at finish — the regressed-then-appeased signature (11815 retreat) — hard tail

@@ -91,6 +91,7 @@ import {
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
 import { getRepoProfileSync } from "../code-intelligence/repo-profile"
+import { detectAndParseTestReport } from "../code-intelligence/test-report"
 import {
   findUnresolvedSeenRed,
   partitionSeenRedByInversion,
@@ -178,6 +179,11 @@ import {
 import {
   discoverNeighborTests,
   discoverProjectInterpreter,
+  discoverProjectToolchain,
+  resolveActiveEcosystem,
+  resolveToolchainEcosystem,
+  runBuildCheckRung,
+  makeStructuredNeighborRunner,
   rewriteInterpreter,
   rewriteInterpreterCommand,
   projectInterpreterCandidateCount,
@@ -2125,6 +2131,11 @@ export const layer = Layer.effect(
         // the old S3 once-nudge discipline exactly: ONE reject-with-continue cycle
         // naming the neighbor test(s) that turned red, then a loud break.
         let turnRegressionGateNudged = false
+        // P2b — the build-first rung's own bounded retry, same discipline as
+        // turnRegressionGateNudged: ONE reject-with-continue cycle naming the
+        // compile error, then a second still-red arrival logs loudly and lets
+        // the turn proceed (still without running neighbor tests).
+        let turnBuildCheckGateNudged = false
         // F18 — the seen-red gate's own bounded retry, same discipline: ONE
         // reject-with-continue cycle naming the still-unresolved red
         // command(s), then a loud break. `turnPinnedProbeRanGreen` is a
@@ -4776,6 +4787,57 @@ export const layer = Layer.effect(
                   })
                 }
 
+                // P2b — build-first discipline (agnostic-hands-eyes.md §2.4):
+                // the resolved ecosystem's buildCheck (compiled targets only
+                // — python's row carries none, so this is always inert
+                // there) runs once BEFORE any neighbor test command. A
+                // compile-time red is a DETERMINISTIC BLOCK, never conflated
+                // with a test result (the ts-repair lesson) — the neighbor
+                // test run below is skipped entirely (never narrowed) while
+                // this stands. Bounded reject-then-loud, same discipline as
+                // every sibling gate: one nudge naming the compile error,
+                // then a second still-red arrival logs loudly and lets the
+                // turn proceed (still without running neighbor tests).
+                const buildCheckResult = yield* Effect.promise(() =>
+                  runBuildCheckRung({ cwd: process.cwd(), runner: makeShellCommandRunner({ timeoutMs: 5000 }) }),
+                )
+                const buildCheckBlocked = buildCheckResult.signal === "build_check_red"
+                if (buildCheckBlocked) {
+                  yield* publishSignalFx({
+                    name: "build_check_red",
+                    sessionID,
+                    severity: "tail",
+                    decision: turnBuildCheckGateNudged ? "none-loud" : "convert",
+                    evidence: { command: buildCheckResult.command ?? "" },
+                  })
+                  yield* Effect.logWarning("turn_regression_build_check", {
+                    "session.id": sessionID,
+                    command: buildCheckResult.command,
+                    outputTail: buildCheckResult.outputTail,
+                  })
+                  if (!turnBuildCheckGateNudged) {
+                    turnBuildCheckGateNudged = true
+                    const buildCheckNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(buildCheckNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: buildCheckNudge.id,
+                      sessionID,
+                      type: "text",
+                      text: `Your change does not compile — the regression lane cannot verify any neighbor test until this is fixed:\n\`${buildCheckResult.command}\` (compile-time block, distinct from a test failure):\n${buildCheckResult.outputTail}\nFix the compile error before continuing.`,
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                }
+
                 // H2.2 — fail-loud on zero selection: a non-trivial code
                 // edit whose regression lane selects zero tests is a
                 // CONVERTING signal, never silence — fall back to a sibling
@@ -4801,7 +4863,7 @@ export const layer = Layer.effect(
                   }
                 }
 
-                if (widenedNeighbors.length > 0) {
+                if (widenedNeighbors.length > 0 && !buildCheckBlocked) {
                   // F14a — discover an interpreter that can actually import
                   // the touched package BEFORE running the neighbor
                   // commands: a containerized project image's PATH `python`
@@ -4829,8 +4891,21 @@ export const layer = Layer.effect(
                     }
                   }
                   if (turnDiscoveredInterpreter === undefined) {
-                    const topLevelPackage = deriveTopLevelPackage(landedSourceEditFiles[0], process.cwd())
-                    if (!topLevelPackage) {
+                    // P2a/P3 — the same profile resolution
+                    // discoverNeighborTests already used to pick these
+                    // neighbor commands, so the toolchain probe and the
+                    // commands it's about to run always agree on which
+                    // ecosystem the turn is in. python still requires a
+                    // derivable topLevelPackage (discoverProjectToolchain
+                    // routes it straight through to discoverProjectInterpreter,
+                    // byte-identical); every other ecosystem's ladder needs
+                    // none.
+                    const toolchainEcosystem = resolveToolchainEcosystem(process.cwd(), landedSourceEditFiles)
+                    const topLevelPackage =
+                      toolchainEcosystem === "python"
+                        ? deriveTopLevelPackage(landedSourceEditFiles[0], process.cwd())
+                        : undefined
+                    if (toolchainEcosystem === "python" && !topLevelPackage) {
                       // No usable package name (e.g. an empty edit path) —
                       // skip discovery rather than probe garbage, and cache
                       // the miss so this doesn't retry every neighbor check.
@@ -4843,8 +4918,9 @@ export const layer = Layer.effect(
                       turnDiscoveredInterpreter = null
                     } else {
                       turnDiscoveredInterpreter = yield* Effect.promise(() =>
-                        discoverProjectInterpreter({
+                        discoverProjectToolchain({
                           cwd: process.cwd(),
+                          ecosystem: toolchainEcosystem,
                           topLevelPackage,
                           runner: makeShellCommandRunner({ timeoutMs: 5000 }),
                         }),
@@ -4852,8 +4928,8 @@ export const layer = Layer.effect(
                       if (turnDiscoveredInterpreter === null) {
                         yield* Effect.logWarning("turn_regression_env", {
                           "session.id": sessionID,
-                          package: topLevelPackage,
-                          probed: projectInterpreterCandidateCount(process.cwd()),
+                          package: topLevelPackage ?? "",
+                          probed: toolchainEcosystem === "python" ? projectInterpreterCandidateCount(process.cwd()) : 0,
                         })
                       }
                     }
@@ -4864,6 +4940,18 @@ export const layer = Layer.effect(
                       turnDiscoveredInterpreter,
                     )
                     const rewrittenNeighbors = widenedNeighbors.map((n, i) => ({ ...n, command: rewrittenCommands[i] }))
+                    // P1 — structured-report capture (agnostic-hands-eyes.md
+                    // §2.2): the active ecosystem's structured-output flag
+                    // rides both the baseline and post-edit runs below, so a
+                    // laundered-red report-native detail is available for
+                    // whichever run actually fails; reportContentByCommand
+                    // is the side channel the failing-neighbor detail below
+                    // reads (never threaded through CommandResult's typed
+                    // shape).
+                    const activeEcosystem = resolveActiveEcosystem(process.cwd(), landedSourceEditFiles)
+                    const reportContentByCommand = new Map<string, string>()
+                    const neighborRunner = (timeoutMs: number) =>
+                      makeStructuredNeighborRunner(makeShellCommandRunner({ timeoutMs }), activeEcosystem, reportContentByCommand)
                     // H8 — differential regression baseline: run the
                     // neighbor set ONCE against pre-edit (HEAD) content
                     // before comparing against the post-edit run, so a
@@ -4877,9 +4965,7 @@ export const layer = Layer.effect(
                         runDifferentialBaseline({
                           touchedSourceFiles: landedSourceEditFiles,
                           neighbors: rewrittenNeighbors,
-                          runner: makeShellCommandRunner({
-                            timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length),
-                          }),
+                          runner: neighborRunner(Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length)),
                           readHeadContent: readRegressionGateHeadContent,
                           readCurrentContent: async (f) => readFileSync(f, "utf8"),
                           writeContent: async (f, c) => {
@@ -4897,9 +4983,7 @@ export const layer = Layer.effect(
                     const regression = yield* Effect.promise(() =>
                       runRegressionGate({
                         neighbors: rewrittenNeighbors,
-                        runner: makeShellCommandRunner({
-                          timeoutMs: Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length),
-                        }),
+                        runner: neighborRunner(Math.floor(REGRESSION_GATE_TOTAL_BUDGET_MS / rewrittenNeighbors.length)),
                       }),
                     )
                     // H8 — route the post-edit result through the shared
@@ -4912,6 +4996,19 @@ export const layer = Layer.effect(
                       kind: "no_regressions",
                       scope: { kind: "tests", items: rewrittenNeighbors.map((n) => n.command) },
                     }
+                    // P1 — report-native detail: when the structured-report
+                    // capture parsed this failing command's artifact, its
+                    // first fail/error entry's message is the exact
+                    // assertion text — preferred over the raw stdout/stderr
+                    // tail (which can be truncated mid-frame by the 15-line
+                    // window below).
+                    const failureDetail = (command: string, failure: { stderr: string; stdout: string }): string => {
+                      const content = reportContentByCommand.get(command)
+                      const report = content ? detectAndParseTestReport(content) : undefined
+                      const entry = report?.entries.find((e) => e.status === "fail" || e.status === "error")
+                      if (entry?.message) return entry.message
+                      return (failure.stderr.trim() || failure.stdout.trim() || "").split("\n").slice(-15).join("\n")
+                    }
                     const regressionEvidence: Evidence = {
                       scope: regressionClaim.scope,
                       items: rewrittenNeighbors.map((n) => {
@@ -4919,9 +5016,7 @@ export const layer = Layer.effect(
                         return {
                           id: n.command,
                           verdict: failure ? ("fail" as const) : ("pass" as const),
-                          detail: failure
-                            ? (failure.stderr.trim() || failure.stdout.trim() || "").split("\n").slice(-15).join("\n")
-                            : undefined,
+                          detail: failure ? failureDetail(n.command, failure) : undefined,
                         }
                       }),
                       baseline: [...turnRegressionBaseline],
@@ -4951,7 +5046,7 @@ export const layer = Layer.effect(
                         return {
                           command,
                           exitCode: failure.exitCode,
-                          outputTail: (failure.stderr.trim() || failure.stdout.trim() || "").split("\n").slice(-15).join("\n"),
+                          outputTail: failureDetail(command, failure),
                         }
                       })
                       if (!turnRegressionGateNudged) {
