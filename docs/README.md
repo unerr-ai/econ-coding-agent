@@ -51,6 +51,10 @@ seam table: [features/README.md](./features/README.md).
   implementation plan: witness-breadth/regression-reach/sanity-floor/TB waves (H1–H7), the
   tier + judge model strategy (one solver + one judge, oracle swap), and the parameterized
   cost model.
+- [agnostic-hands-eyes.md](./design/agnostic-hands-eyes.md) — the H5 implementation design:
+  the language/framework/architecture-agnostic sensing layer (cached RepoProfile, parse
+  formats-not-frameworks observation, graph/LSP parity, web-search-as-a-sense), with the
+  cost law that framework knowledge is cached data, never per-run prompt tokens.
 - [graph-navigation-audit.md](./design/graph-navigation-audit.md) — signals completeness audit
   (recon, edit, finish phases); gap inventory × SOTA reference; ranked Wave G implementation roadmap.
 - [adaptive-compute.md](./design/adaptive-compute.md) — the "compute dial": divide cost on the
@@ -119,7 +123,10 @@ seam table: [features/README.md](./features/README.md).
 ### `strategy/` — the business case
 - [POSITIONING.md](./strategy/POSITIONING.md) — who econ is for, the wedge, and the
   one-product/three-triggers regional model; [COMPETITORS.md](./strategy/COMPETITORS.md) covers
-  the competitive field.
+  the competitive field — the India/Europe player map, the Mistral teardown, Sakana Fugu as an
+  adjacent validator, and §5 on the **Grok 4.5 price shock**: how deep the frontier undercut
+  actually goes, why it's cheap, whether it's subsidized, and which of econ's lanes it does and
+  doesn't touch.
 - [FUNDRAISING.md](./strategy/FUNDRAISING.md) — the fundraising narrative: the three-part
   story, comparable-raise evidence (is "cheaper AI" fundable), the two-kinds-of-learning
   defensibility claim (memory vs trained dispatcher, say/never-say), projected benchmark

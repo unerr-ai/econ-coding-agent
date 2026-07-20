@@ -398,11 +398,14 @@ hand-coding judgment stops entirely).
 
 ## 3. Scheduled next (not this wave)
 
-- **H5 — ecosystem-adapter layer** ([path-to-85 §4](./path-to-85.md#4-any-language-any-repo--the-ecosystem-adapter-layer-the-real-new-work)
-  is the design): runner adapters (test-command discovery + red/green parsing), twin
-  discovery, build-first discipline, per-language edge parity. This is the structural fix for
-  "every new surface costs a forensics cycle". ~3–5 days; schedule immediately after this
-  wave — it is the highest-leverage *non-reactive* item on the board.
+- **H5 — ecosystem-adapter layer** (implementation design:
+  [agnostic-hands-eyes.md](./agnostic-hands-eyes.md), 2026-07-20; strategy statement stays in
+  [path-to-85 §4](./path-to-85.md#4-any-language-any-repo--the-ecosystem-adapter-layer-the-real-new-work)):
+  cached RepoProfile discovery, formats-not-frameworks observation, twin-convention data
+  table, build-first discipline, per-language edge parity, web-search-as-a-sense. This is
+  the structural fix for "every new surface costs a forensics cycle". ~7–9.5 days per the
+  phased plan; schedule immediately after this wave — it is the highest-leverage
+  *non-reactive* item on the board.
 - **H6 — proactive coverage (three mechanisms, upgraded from "red-team harness")**:
   1. **Gate red-team**: mutate gold patches into plausible one-sided/wrong-layer/env-conflated
      fixes (the live failure shapes are the mutation catalog) and assert the gates catch

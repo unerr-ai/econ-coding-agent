@@ -275,6 +275,10 @@ rest, in cost order.
 
 ## 4. Any language, any repo — the ecosystem-adapter layer (the real new work)
 
+> **Implementation design (2026-07-20):** [agnostic-hands-eyes.md](./agnostic-hands-eyes.md)
+> now owns the full design (RepoProfile, formats-not-frameworks parsing, phased plan, cost
+> law); this section remains the strategy statement and multilingual yardstick.
+
 The multilingual evidence says the gap is **not model capability** (frontier drops the
 same ~20–32pp) — it is environment discipline + oracle parsing + localization quality.
 The component is a **decoupled adapter layer**: language/ecosystem knowledge lives in
