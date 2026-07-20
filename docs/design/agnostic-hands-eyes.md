@@ -1,12 +1,19 @@
 # Agnostic hands & eyes — a language/framework/architecture-agnostic sensing layer
 
-**Status:** PLAN (2026-07-20). This is the implementation design for **H5** (the
+**Status:** PARTIALLY SHIPPED (2026-07-20). **P0–P5 are built and committed**; **P6** is in
+implementation (LSP declined — §7.1); **wave G** (§7.2) is planned and sequenced behind the
+V1/V2 Python validation gate. Live validation is NOT yet clean: the first V1 arena run on
+django-11885 failed real-grading and exposed a P2 regression (a build check firing on a foreign
+ecosystem, fixed in `e6441988e`); the re-run is pending. Per the §6 validation bar, **no score
+or cost claim in this doc is established until that gate passes.** This is the implementation
+design for **H5** (the
 ecosystem-adapter layer, [gap-closure-plan.md §3](./gap-closure-plan.md#3-scheduled-next-not-this-wave)),
 grounded in a four-track research pass run 2026-07-20: (1) SOTA harness survey, (2) universal
 substrate facts (structured test output, LSP, tree-sitter, toolchain resolvers), (3) empirical
 research on how human developers work in unfamiliar repos, (4) an exhaustive inventory of every
-framework-coupled site in our engine, classified by per-run cost shape. Nothing here is claimed
-shipped; validation bars per [path-to-85.md §6](./path-to-85.md#6-measurement-plan-nothing-above-is-claimed-until-these-run).
+framework-coupled site in our engine, classified by per-run cost shape. "Shipped" above means
+*built, unit-tested and committed* — never *validated*; validation bars per
+[path-to-85.md §6](./path-to-85.md#6-measurement-plan-nothing-above-is-claimed-until-these-run).
 
 Companions: [path-to-85.md §4](./path-to-85.md#4-any-language-any-repo--the-ecosystem-adapter-layer-the-real-new-work)
 (the strategy sketch this doc supersedes as design), [gap-closure-plan.md](./gap-closure-plan.md)
@@ -507,14 +514,59 @@ Python validation gate, so the resolver refactor is measured against a known-goo
 | **G4a** | Baseline: per-language resolution floors on a real corpus, **plus** an internal-vs-external classification of unresolved specifiers (the real headroom) | read-only measurement |
 | **G1** | Generic import-resolution kernel — one algorithm, per-language data rows. Python/TS ratios must not drop (tier 2) | refactor, no behaviour change |
 | **G2** | Universal index-suffix fallback — resolves with zero language knowledge, records ambiguity rather than silent NULL (tier 1) | new generic mechanism |
-| **G3** | Rows for go/java/rust/c/cpp. **If this needs per-language code, G1/G2 were built wrong** | table entries |
+| **G1a** | **Generic import EXTRACTION** — one data-driven pass; the five zero-coverage languages emit no import edges *at all* today (see backstory) | prerequisite for G2/G3 |
+| **G3** | Resolution rows for go/java/rust/c/cpp. **If this needs per-language code, G1a/G1/G2 were built wrong** | table entries |
 | **G4b** | Coverage floors become an automated invariant, so this cannot silently rot again | standing check |
 | **G5** | Retire `coupling=unknown` where coverage now clears the floor; re-evaluate the §7.1 LSP trigger against the new numbers | close the loop |
 
-The ordering is deliberate: **G4a before G1** (a refactor without a measured floor cannot
-prove it didn't regress), and **G2 before G3** (measure what the zero-knowledge fallback buys
-on its own before writing any rows — it decides how many rows are actually needed, and a row
-written before that measurement is a row nobody proved we need).
+Three orderings are load-bearing, not stylistic:
+
+- **G4a before G1** — a refactor without a measured floor cannot prove it didn't regress.
+- **G1a before G2 and G3** — neither a suffix-match fallback nor a resolution row can do
+  anything without specifiers to operate on.
+- **G2 before G3** — measure what the zero-knowledge fallback buys *on its own* before
+  writing any rows. That number decides how many rows are actually needed, and a row written
+  before that measurement is a row nobody proved we need.
+
+#### Backstory — why this wave looks different from how it was first scoped
+
+Wave G was originally scoped as a **resolution** problem: our graph resolved Python (~77%) and
+relative JS/TS (~84%) imports but had no resolver rules for Go/Java/Rust/C/C++, so `computeRisk`
+scored those languages low by construction (§7.1). Two measurement passes then changed the
+shape of the work, and both corrections are worth recording because each came from *refusing to
+inherit an earlier number*.
+
+**1. The gap is extraction, not resolution.** Live re-measurement found the five languages
+produce **zero import edges** — there is no import *extractor* for them, sitting upstream of the
+resolver gap the wave was built around. This added **G1a** as the prerequisite everything else
+depends on, and it enlarges the headroom from "a fraction of unresolved specifiers" to the
+entire import graph. It also strengthens §7.1's LSP conclusion rather than weakening it: those
+repos are blinder than "unresolved imports" implied, and a language server would still not have
+surfaced the gap, because nothing was *measuring* it.
+
+**2. A published figure was wrong.** This doc previously stated ~84% TypeScript resolution.
+Re-measurement gives 37.2% imports / 49.5% of all edges — a ~31pp disagreement that remains
+unarbitrated. Rather than swap one unverified number for another, the figure is marked DISPUTED
+(§7.1) and **G1's acceptance bar is pinned to a before/after run of the same script**. An
+acceptance bar resting on a disputed number is worse than none: it would let a real regression
+pass while looking rigorous.
+
+**3. Two audit findings did not survive verification.** A violation audit reported that adding a
+language costs 8–11 files, listing `verifier.ts` (framework-specific test parsers) and
+`seeds.ts`/`nudges.ts` (per-language repro prose) among its worst offenders. Both describe the
+*pre-wave* codebase: P1 made `runSoundCheck` prefer structured `report` output with regexes as a
+documented fallback, and P4 made repro prose profile-compiled via `compileReproVehicle`. Adding
+a language needs neither. The standing lesson — the same one that produced the §5.1 reviewer's
+test — is that an inventory of "what's wrong" ages fast in an actively refactored tree and must
+be re-verified against source before it drives work.
+
+**Open item carried into G-wave (unresolved).** The audit did surface one real leak it
+under-described: `REPRO_SLICE_CONTENT` (`prompts/seeds.ts`) is a module-level constant computed
+with the `PYTHON_REPRO_VEHICLE` default, so any consumer reading the constant rather than
+calling `reproSliceContent(vehicle)` emits Python repro prose regardless of repo. Every
+`prompt.ts` nudge site passes its vehicle explicitly, so the blast radius looks narrow — **but
+this has not been confirmed**, and it is a direct V3 (non-Python) risk. Confirm the consumer set
+before V3 runs.
 
 ---
 
