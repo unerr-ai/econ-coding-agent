@@ -49,6 +49,7 @@ const SIGNAL_NAMES: string[] = [
   "seen_red_unresolved",
   "seen_red_oracle_inverted",
   "seen_red_env_blocked",
+  "error_search_triggered",
   "probe_env_blocked",
   "probe_rerun_dedupe",
   "unverified_finish",

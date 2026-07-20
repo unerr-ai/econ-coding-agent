@@ -90,8 +90,10 @@ import {
   deliverableFinishGateNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
-import { getRepoProfileSync } from "../code-intelligence/repo-profile"
+import { getRepoProfileSync, type EcosystemVersions } from "../code-intelligence/repo-profile"
 import { detectAndParseTestReport } from "../code-intelligence/test-report"
+import { normalizeTraceForSearch, classifyTraceRoot, shouldSearchForError, type SearchDecision } from "./error-search"
+import { truthy } from "@opencode-ai/core/flag/flag"
 import {
   findUnresolvedSeenRed,
   partitionSeenRedByInversion,
@@ -567,6 +569,48 @@ function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: stri
     found.push({ file: m[1]!, reason: (nl === -1 ? output : output.slice(0, nl)).trim() })
   }
   return found
+}
+
+/**
+ * P5 — error-search nudge decision (docs/design/agnostic-hands-eyes.md §3 +
+ * §3.1): assembles error-search.ts's pure trigger inputs from this turn's
+ * still-binding failing command (the same evidence the F18 seen-red gate
+ * below assembles) plus the repo's resolved dependency versions, then defers
+ * to `shouldSearchForError` for the fire/no-fire call. `websearchDisabled`
+ * short-circuits to `undefined` before anything else runs — the
+ * arena/benchmark strip-the-web discipline (OPENCODE_DISABLE_WEBSEARCH).
+ * `undefined` also covers the case where `failingOutput` carries no
+ * recognizable error/trace shape (never a false-positive query). Kept as a
+ * standalone, exported, pure function — separate from the wiring block that
+ * calls it — so the assembly is unit-testable without booting a session.
+ *
+ * @sem domain=intelligence role=gate
+ */
+export function decideErrorSearchNudge(input: {
+  readonly failingOutput: string
+  readonly reportContent: string | undefined
+  readonly repoRoot: string
+  readonly ecosystemVersions: EcosystemVersions | undefined
+  readonly reproAttempts: number
+  readonly alreadySearchedSignatures: ReadonlySet<string>
+  readonly websearchDisabled: boolean
+}): { readonly decision: SearchDecision; readonly signature: string } | undefined {
+  if (input.websearchDisabled) return undefined
+  const trace = normalizeTraceForSearch(input.failingOutput)
+  if (!trace) return undefined
+  const knownDeps = Object.keys(input.ecosystemVersions?.deps ?? {})
+  const traceOrigin = classifyTraceRoot(input.failingOutput, input.repoRoot, knownDeps)
+  const recognizedByProfile = Boolean(input.reportContent && detectAndParseTestReport(input.reportContent))
+  const decision = shouldSearchForError({
+    trace,
+    recognizedByProfile,
+    traceOrigin,
+    reproAttempts: input.reproAttempts,
+    alreadySearchedSignatures: input.alreadySearchedSignatures,
+    budgetRemaining: 1,
+    versions: input.ecosystemVersions,
+  })
+  return { decision, signature: trace.signature }
 }
 
 /** F9a — cap on the pinned repro file read for the fidelity judge: a runaway/huge scratch file must never blow the judge's prompt budget. */
@@ -2154,6 +2198,13 @@ export const layer = Layer.effect(
         // (environment-shaped) red is exempted from the confirm-GREEN
         // demand and owes a stated environment gap instead.
         let turnSeenRedEnvBlockedNoted = false
+        // P5 — the error-search nudge's own bounded retry: fires at most
+        // once per turn (mirrors turnSeenRedEnvBlockedNoted exactly), and
+        // never re-fires an already-searched trace signature within the
+        // turn — the "never re-search a signature" clause of
+        // shouldSearchForError (error-search.ts).
+        let turnErrorSearchNudged = false
+        const turnSearchedErrorSignatures = new Set<string>()
         let turnPinnedProbeRanGreen = false
         // F14a — the interpreter discovered for this turn's regression-gate
         // neighbor commands, cached so discovery (it shells out) runs at
@@ -4175,6 +4226,72 @@ export const layer = Layer.effect(
                   unresolvedSeenRed,
                   seenRedExecutions,
                 )
+                // P5 — error-search nudge (docs/design/agnostic-hands-eyes.md
+                // §3 + §3.1): the same still-binding failing command this
+                // block's own confirm-GREEN demand is about to name is fed
+                // through error-search.ts's deterministic version-aware
+                // triggers first — an unrecognized-by-our-own-parsers or
+                // dependency-rooted trace gets ONE nudge asking the model to
+                // run exactly ONE web search with a pre-built,
+                // version-pinned query, rather than the harness making a
+                // network call itself (the existing "ONE search EARLY"
+                // websearch doctrine, unchanged). Bounded to ONE per turn
+                // AND never the same trace signature twice — same one-shot
+                // latch discipline as every sibling gate here. Never fires
+                // when OPENCODE_DISABLE_WEBSEARCH is set — the arena/
+                // benchmark strip-the-web discipline (the model has no
+                // search tool to act on the nudge with).
+                if (bindingSeenRed.length > 0 && !turnErrorSearchNudged) {
+                  const errorSearchTarget = bindingSeenRed[0]!
+                  const errorSearchExecution = seenRedExecutions.find((exec) => exec.command === errorSearchTarget.command)
+                  const errorSearchProfile = getRepoProfileSync(process.cwd())
+                  const errorSearch = decideErrorSearchNudge({
+                    failingOutput: errorSearchExecution?.output ?? errorSearchTarget.outputTail,
+                    reportContent: errorSearchExecution?.reportContent,
+                    repoRoot: process.cwd(),
+                    ecosystemVersions: errorSearchProfile.ecosystems[0]?.versions,
+                    reproAttempts: reproObservedSteps,
+                    alreadySearchedSignatures: turnSearchedErrorSignatures,
+                    websearchDisabled: truthy("OPENCODE_DISABLE_WEBSEARCH"),
+                  })
+                  if (errorSearch?.decision.search) {
+                    turnErrorSearchNudged = true
+                    turnSearchedErrorSignatures.add(errorSearch.signature)
+                    yield* publishSignalFx({
+                      name: "error_search_triggered",
+                      sessionID,
+                      severity: "info",
+                      decision: "convert",
+                      evidence: { query: errorSearch.decision.query, reason: errorSearch.decision.reason },
+                    })
+                    yield* Effect.logInfo("turn_error_search_nudge", {
+                      "session.id": sessionID,
+                      query: errorSearch.decision.query,
+                      reason: errorSearch.decision.reason,
+                    })
+                    const errorSearchNudge: SessionV1.User = {
+                      id: MessageID.ascending(),
+                      sessionID,
+                      role: "user",
+                      time: { created: Date.now() },
+                      agent: lastUser.agent,
+                      model: lastUser.model,
+                    }
+                    yield* sessions.updateMessage(errorSearchNudge)
+                    yield* sessions.updatePart({
+                      id: PartID.ascending(),
+                      messageID: errorSearchNudge.id,
+                      sessionID,
+                      type: "text",
+                      text:
+                        `You hit an error our own tooling doesn't already explain (${errorSearch.decision.reason}). ` +
+                        `Run exactly ONE web search now with this exact query, then use what you find before continuing:\n` +
+                        errorSearch.decision.query,
+                      synthetic: true,
+                    } satisfies SessionV1.TextPart)
+                    continue
+                  }
+                }
                 if (envBlockedSeenRed.length > 0 && !turnSeenRedEnvBlockedNoted) {
                   turnSeenRedEnvBlockedNoted = true
                   yield* publishSignalFx({

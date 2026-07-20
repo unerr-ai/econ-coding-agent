@@ -20,6 +20,7 @@ export type EconSignalName =
   | "seen_red_unresolved" // F18 at finish (2nd arrival = tail)
   | "seen_red_oracle_inverted" // F18b: unresolved red is inversion-shaped — sanctioned, keep-general-fix nudge
   | "seen_red_env_blocked" // F18c: unresolved red is environment/baseline-shaped — sanctioned, state-the-gap nudge
+  | "error_search_triggered" // P5 (error-search.ts): still-binding red's trace is unrecognized-by-our-parsers, dependency-rooted, or repro-escalated — one-shot nudge naming ONE pre-built, version-pinned web search query
   | "probe_env_blocked" // F18c/M4: pinned probe's own red repeats an environment-shaped signature — pin release, hard tail
   | "probe_rerun_dedupe" // Round-H: same command produced identical output for the 3rd+ time — no new information
   | "unverified_finish" // S3 / wave-10 deny (exhausted = tail)
