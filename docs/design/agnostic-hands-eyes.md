@@ -356,6 +356,35 @@ it). Four standing rules, enforceable at review time:
    the mini-10, and adding an ecosystem adds ~0 prompt tokens (auditable in the receipt's
    per-tier drilldown — count seed tokens per turn before/after).
 
+### 5.1 The generic-first law (enforceable at review)
+
+**A new language or framework is a DATA ROW in an existing table. A new module, class, or
+`resolveXImport`-shaped function is a design failure** — permitted only with written
+justification, and recorded as debt when it is.
+
+Three tiers, in strict preference order. Always reach for the highest one that can do the job:
+
+1. **Universal mechanism using the repo as ground truth — zero language knowledge.** The
+   strongest form: derive the answer from what the repo itself contains rather than from
+   encoded language semantics. Resolve an import by suffix-matching the repo's own file
+   index; parse test results by *format* (JUnit XML, TAP, JSON) rather than by framework.
+   These work on a language nobody on the team has heard of.
+2. **One generic algorithm + per-language data rows.** When tier 1 lacks precision. The
+   algorithm is shared; the language contributes only constants (a separator, a marker
+   file, an ordered candidate list).
+3. **Language-specific code.** Debt. Justify it in writing or don't merge it.
+
+**Why this is a law and not a preference — it is the measured lesson of this wave.** The two
+import resolvers that looked like separate per-language implementations turned out to be the
+*same algorithm with different constants* (`.` vs `/`, `__init__.py` vs `index.ts`). The
+Django-specific branch P3 deleted collapsed into one table row. The ~$0.10 → ~$0.30 cost
+inflation came from per-framework prose accumulating in prompts. Every time this codebase has
+grown language-specific structure, the generic form was available and cheaper.
+
+**The reviewer's test:** *"What does adding Kotlin cost?"* If the answer is anything more than
+one table row — and ideally nothing at all, because tier 1 already covers it — the design is
+wrong. Ask it of any change that touches sensing, resolution, or observation.
+
 ---
 
 ## 6. Any repo *type*, not just any language
@@ -451,6 +480,26 @@ behind a correct-looking surface, which is strictly worse than the current failu
 non-Python instance class where the `coupling=unknown` route measurably over-escalates —
 i.e. the degraded route fires often enough to cost more than the mis-routing it prevents.
 That is a cost/quality band, not a preference, and it is only measurable after P6a/P6b ship.
+
+### 7.2 Wave G — close the coverage gap generically
+
+P6 makes coupling blindness *visible*; wave G makes it *go away*. Sequenced after the V1/V2
+Python validation gate, so the resolver refactor is measured against a known-good binary.
+
+| Phase | Work | Shape |
+|---|---|---|
+| **G0** | Record the §5.1 generic-first law; audit and inventory existing violations | doc + audit |
+| **G4a** | Baseline: per-language resolution floors on a real corpus, **plus** an internal-vs-external classification of unresolved specifiers (the real headroom) | read-only measurement |
+| **G1** | Generic import-resolution kernel — one algorithm, per-language data rows. Python/TS ratios must not drop (tier 2) | refactor, no behaviour change |
+| **G2** | Universal index-suffix fallback — resolves with zero language knowledge, records ambiguity rather than silent NULL (tier 1) | new generic mechanism |
+| **G3** | Rows for go/java/rust/c/cpp. **If this needs per-language code, G1/G2 were built wrong** | table entries |
+| **G4b** | Coverage floors become an automated invariant, so this cannot silently rot again | standing check |
+| **G5** | Retire `coupling=unknown` where coverage now clears the floor; re-evaluate the §7.1 LSP trigger against the new numbers | close the loop |
+
+The ordering is deliberate: **G4a before G1** (a refactor without a measured floor cannot
+prove it didn't regress), and **G2 before G3** (measure what the zero-knowledge fallback buys
+on its own before writing any rows — it decides how many rows are actually needed, and a row
+written before that measurement is a row nobody proved we need).
 
 ---
 
