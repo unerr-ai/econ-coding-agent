@@ -4916,7 +4916,11 @@ export const layer = Layer.effect(
                 // then a second still-red arrival logs loudly and lets the
                 // turn proceed (still without running neighbor tests).
                 const buildCheckResult = yield* Effect.promise(() =>
-                  runBuildCheckRung({ cwd: process.cwd(), runner: makeShellCommandRunner({ timeoutMs: 5000 }) }),
+                  runBuildCheckRung({
+                    cwd: process.cwd(),
+                    runner: makeShellCommandRunner({ timeoutMs: 5000 }),
+                    touchedSourceFiles: landedSourceEditFiles,
+                  }),
                 )
                 const buildCheckBlocked = buildCheckResult.signal === "build_check_red"
                 if (buildCheckBlocked) {

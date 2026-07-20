@@ -1475,6 +1475,70 @@ describe("resolveActiveEcosystem / resolveToolchainEcosystem — P3 production c
   })
 })
 
+describe("selectNonPythonEcosystem — django-11885: an ecosystem must OWN a touched file to be selected", () => {
+  it("the regression: a mixed python+javascript profile with only .py touched files falls back to python, and the build-check rung never fires", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj" }))
+
+    const eco = resolveActiveEcosystem(cwd, ["pkg/mod.py"])
+    expect(eco?.language).toBe("python")
+    expect(resolveToolchainEcosystem(cwd, ["pkg/mod.py"])).toBe("python")
+
+    let calls = 0
+    const result = await runBuildCheckRung({
+      cwd,
+      touchedSourceFiles: ["pkg/mod.py"],
+      runner: async () => {
+        calls++
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(calls).toBe(0)
+    expect(result).toEqual({ ran: false, passed: true })
+  })
+
+  it("the same mixed profile resolves the javascript ecosystem once a touched file is actually .js/.ts", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj" }))
+
+    const eco = resolveActiveEcosystem(cwd, ["static/admin/js/widget.ts"])
+    expect(eco?.language).toBe("javascript")
+  })
+
+  it("monorepo: a touched file under a candidate's own root selects that root's ecosystem, not the sibling candidate", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "frontend"), { recursive: true })
+    writeFileSync(join(cwd, "frontend", "package.json"), JSON.stringify({ name: "web" }))
+    mkdirSync(join(cwd, "service"), { recursive: true })
+    writeFileSync(join(cwd, "service", "go.mod"), "module example.com/service\n\ngo 1.21\n")
+
+    const eco = resolveActiveEcosystem(cwd, ["service/main.go"])
+    expect(eco?.language).toBe("go")
+    expect(eco?.root).toBe("service")
+  })
+
+  it("a pure single-ecosystem repo (no python row) still resolves its only candidate even with no touched files", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "go.mod"), "module example.com/proj\n\ngo 1.21\n")
+
+    const eco = resolveActiveEcosystem(cwd, [])
+    expect(eco?.language).toBe("go")
+  })
+
+  it("empty touched files in a mixed python+javascript profile falls back to python — nothing fires before the first edit", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj" }))
+
+    const eco = resolveActiveEcosystem(cwd, [])
+    expect(eco?.language).toBe("python")
+    expect(resolveToolchainEcosystem(cwd, [])).toBe("python")
+  })
+})
+
 describe("runStructuredTestCommand / makeStructuredNeighborRunner — P1 structured-report capture (agnostic-hands-eyes.md §2.2)", () => {
   const pytestEco: EcosystemProfile = {
     language: "python",

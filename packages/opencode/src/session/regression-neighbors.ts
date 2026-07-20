@@ -453,27 +453,76 @@ function collectNonPythonNeighborCandidates(cwd: string, eco: EcosystemProfile, 
   }
 }
 
+const JS_TS_LANGUAGES = new Set(["javascript", "typescript"])
+
+/** A `javascript` ecosystem row owns `.ts` files and vice versa (the row's own buildCheck already assumes both, e.g. `tsc`). */
+function ecosystemOwnsLanguage(ecoLanguage: string, fileLanguage: string): boolean {
+  if (ecoLanguage === fileLanguage) return true
+  return JS_TS_LANGUAGES.has(ecoLanguage) && JS_TS_LANGUAGES.has(fileLanguage)
+}
+
+/** Extension -> language, covering every language in `ECOSYSTEM_CONVENTIONS`. Unknown extension owns nothing. */
+function languageForExtension(rel: string): string | null {
+  switch (extname(rel).toLowerCase()) {
+    case ".py":
+      return "python"
+    case ".ts":
+    case ".tsx":
+      return "typescript"
+    case ".js":
+    case ".jsx":
+    case ".mjs":
+    case ".cjs":
+      return "javascript"
+    case ".go":
+      return "go"
+    case ".rs":
+      return "rust"
+    case ".java":
+      return "java"
+    case ".rb":
+      return "ruby"
+    case ".php":
+      return "php"
+    default:
+      return null
+  }
+}
+
 /**
  * P3 — the repo profile's ecosystem to drive table-driven twin discovery
  * when the repo is neither Django nor python-shaped (the caller only calls
  * this once `isDjangoRepo` is false): the resolved (non-`unknown`,
- * non-python) ecosystem whose root the touched files fall under, preferring
- * a root match over the profile's first entry when a monorepo resolves more
- * than one. `null` when the profile finds nothing but python/unknown — the
- * caller falls back to the legacy pytest-shaped rungs, today's default,
- * unchanged.
+ * non-python) ecosystem that OWNS at least one touched source file — its
+ * language matches the file's, and (for a non-`.` root) the file lives under
+ * that root. A root-scoped ownership match wins immediately; an
+ * ownership-only match (root `.`) is remembered and returned once no
+ * root-scoped match beats it. `null` when nothing is owned — unless the
+ * profile has no python row and exactly one candidate exists (a pure
+ * Go/Rust/Java/JS repo has nothing to confuse it with). The caller falls
+ * back to the legacy pytest-shaped rungs on `null`.
  */
 function selectNonPythonEcosystem(cwd: string, touchedSourceFiles: readonly string[]): EcosystemProfile | null {
   const profile = getRepoProfileSync(cwd)
   const candidates = profile.ecosystems.filter((eco) => eco.language !== "unknown" && eco.language !== "python" && "runner" in eco.tests)
   if (candidates.length === 0) return null
-  if (candidates.length === 1) return candidates[0]!
+
+  let rootlessMatch: EcosystemProfile | null = null
   for (const file of touchedSourceFiles) {
     const rel = relativizeToCwd(file, cwd)
-    const match = candidates.find((eco) => eco.root !== "." && rel.startsWith(`${eco.root}/`))
-    if (match) return match
+    const fileLanguage = languageForExtension(rel)
+    if (!fileLanguage) continue
+    for (const eco of candidates) {
+      if (!ecosystemOwnsLanguage(eco.language, fileLanguage)) continue
+      if (eco.root !== "." && rel.startsWith(`${eco.root}/`)) return eco
+      if (eco.root === "." && !rootlessMatch) rootlessMatch = eco
+    }
   }
-  return candidates[0]!
+  if (rootlessMatch) return rootlessMatch
+
+  const hasPython = profile.ecosystems.some((eco) => eco.language === "python")
+  if (!hasPython && candidates.length === 1) return candidates[0]!
+  return null
 }
 
 /**
@@ -1169,21 +1218,27 @@ export interface BuildCheckResult {
 }
 
 /**
- * P2b — build-first rung: runs the resolved ecosystem's `buildCheck`
- * (`tsc --noEmit` / `cargo check` / `go build ./...` / `mvn -q compile` —
- * compiled targets only; the python row carries no `buildCheck`, so this is
- * always a no-op there) once via the injected runner, BEFORE any neighbor
- * test command. A non-zero exit is a deterministic compile-time block,
- * reported as `signal: "build_check_red"` distinct from a test red — the
- * caller's regression lane must never promote a build failure to a test
- * result (the ts-repair lesson, agnostic-hands-eyes.md §2.4).
+ * P2b — build-first rung: resolves the active ecosystem via
+ * `resolveActiveEcosystem` (touched-file-scoped, so an incidental
+ * non-python manifest — e.g. Django's admin `package.json` — never hijacks
+ * a python edit) and runs its `buildCheck` (`tsc --noEmit` / `cargo check` /
+ * `go build ./...` / `mvn -q compile` — compiled targets only; python
+ * carries none, so this is a no-op there) once via the injected runner,
+ * BEFORE any neighbor test command. A non-zero exit is a deterministic
+ * compile-time block, reported as `signal: "build_check_red"` distinct from
+ * a test red — the caller's regression lane must never promote a build
+ * failure to a test result (the ts-repair lesson, agnostic-hands-eyes.md
+ * §2.4).
  *
  * @sem domain=routing role=build-check
  */
-export async function runBuildCheckRung(opts: { cwd: string; runner: CommandRunner }): Promise<BuildCheckResult> {
-  const { cwd, runner } = opts
-  const profile = getRepoProfileSync(cwd)
-  const buildCheck = profile.ecosystems.find((eco) => eco.buildCheck)?.buildCheck
+export async function runBuildCheckRung(opts: {
+  cwd: string
+  runner: CommandRunner
+  touchedSourceFiles?: readonly string[]
+}): Promise<BuildCheckResult> {
+  const { cwd, runner, touchedSourceFiles = [] } = opts
+  const buildCheck = resolveActiveEcosystem(cwd, touchedSourceFiles)?.buildCheck
   if (!buildCheck) return { ran: false, passed: true }
   const result = await runner({ kind: "typecheck", command: buildCheck })
   if (result.exitCode !== 0) {
