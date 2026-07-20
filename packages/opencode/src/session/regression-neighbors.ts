@@ -79,9 +79,38 @@
  * itself is the shared claim–evidence kernel's job (`checkClaimCoverage`,
  * `code-intelligence/claim-evidence.ts`), not this module's.
  *
+ * P3 (docs/design/agnostic-hands-eyes.md §4.2) — twin/breadth discovery is
+ * now table-driven: the Django/pytest passes above read their directory and
+ * filename conventions from `ECOSYSTEM_CONVENTIONS`'s `python-django`/
+ * `python-pytest` rows instead of inline literals (command strings stay
+ * byte-identical — Django's row `suiteCommand`/`singleTestTemplate` values
+ * round-trip exactly, pytest's neighbor command keeps its established
+ * `python -m pytest … -x -q` shape, which the row's generic single-test
+ * template doesn't carry). `selectNonPythonEcosystem` resolves the repo
+ * profile's non-python ecosystem (js/go/rust/java) when neither Django nor a
+ * bare python repo applies, and `collectNonPythonNeighborCandidates` forms
+ * runner-appropriate twin commands from that ecosystem's row data — one
+ * small adapter per runner shape (jest/vitest path substitution, go's
+ * same-package `_test.go`, rust's `tests/<stem>.rs` integration crate,
+ * java's `src/test/java` mirror path), never a hardcoded framework branch.
+ *
+ * P2 (docs/design/agnostic-hands-eyes.md §2.3) — `discoverProjectToolchain`
+ * generalizes F14a's python-only venv/conda/PATH ladder
+ * (`discoverProjectInterpreter`, unchanged, still the python rung) into a
+ * per-ecosystem probe: `mise which <tool>` when a mise binary is on PATH and
+ * a `.tool-versions`/`mise.toml` pin exists, else a minimal ecosystem ladder
+ * (node: `.nvmrc`-aware then PATH; go/rust/java: PATH). F21's
+ * `harvestTurnInterpreter` is unaffected and still tried first at the call
+ * site. `runBuildCheckRung` adds the build-first discipline: when the
+ * resolved ecosystem's row carries a `buildCheck` (compiled targets —
+ * python's row carries none, so this never fires for a Python repo), it
+ * runs once via the injected runner before any neighbor test command and
+ * reports a `build_check_red` signal on failure — a deterministic compile
+ * block, never conflated with a test red.
+ *
  * @sem domain=routing role=neighbor-discovery
  */
-import { existsSync, readdirSync, type Dirent } from "node:fs"
+import { existsSync, readFileSync, readdirSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, extname, join, relative, basename as pathBasename } from "node:path"
 import { runRegressionGate, type VerifyCommand, type CommandRunner } from "@opencode-ai/code-intelligence"
@@ -89,6 +118,7 @@ import { MISSING_FILE_RE, MODULE_MISSING_RE } from "./slice-orchestrator"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "./seen-red"
 import type { SeenRedExecution } from "./seen-red"
 import { isTestLikePath } from "../tool/graph-tools"
+import { ECOSYSTEM_CONVENTIONS, getRepoProfileSync, type EcosystemProfile } from "../code-intelligence/repo-profile"
 
 const MAX_NEIGHBOR_COMMANDS = 3
 /** Bound on the recursive descent under `<cwd>/tests/` for the pytest-style fallback. */
@@ -101,6 +131,18 @@ const GRAPH_NEIGHBOR_HOP1_FILE_CAP = 8
 const GRAPH_NEIGHBOR_CANDIDATES_PER_FILE = 4
 /** Graph candidates admitted per touched file into the merged rank — leaves ≥1 of `MAX_NEIGHBOR_COMMANDS` slots for same-file proximity on a single-file turn. */
 const GRAPH_NOVEL_NEIGHBOR_CAP = 2
+
+// P3 — the python/Django conventions rows, looked up once so the legacy
+// rungs below read their directory/filename literals from the table instead
+// of re-declaring them (djangoExactTwinCommands/pytestFileMatchesTopic
+// "become the row's behavior" per the design doc, without changing the
+// byte-identical command strings those rungs already produce).
+const PYTHON_DJANGO_ROW = ECOSYSTEM_CONVENTIONS.find((row) => row.id === "python-django")!
+const PYTHON_PYTEST_ROW = ECOSYSTEM_CONVENTIONS.find((row) => row.id === "python-pytest")!
+const DJANGO_TEST_DIR = PYTHON_DJANGO_ROW.testDirs[0]!
+const [DJANGO_TEST_FILE_PREFIX] = PYTHON_DJANGO_ROW.testFilePatterns.find((p) => p.startsWith("test_"))!.split("*")
+const [PYTEST_TEST_FILE_PREFIX] = PYTHON_PYTEST_ROW.testFilePatterns.find((p) => p.startsWith("test_"))!.split("*")
+const [, PYTEST_TEST_FILE_SUFFIX] = PYTHON_PYTEST_ROW.testFilePatterns.find((p) => p.endsWith("_test.py"))!.split("*")
 
 /** Strip extension, surrounding underscores, and a leading "test_" — the topic name shared between a source file and the test that covers it. */
 function neighborTopic(filePath: string): string {
@@ -130,7 +172,7 @@ function djangoDirMatchesTopic(topic: string, dirName: string): boolean {
 function djangoNeighborDirs(cwd: string, topic: string): string[] {
   let entries: string[]
   try {
-    entries = readdirSync(join(cwd, "tests"), { withFileTypes: true })
+    entries = readdirSync(join(cwd, DJANGO_TEST_DIR), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
   } catch {
@@ -139,10 +181,13 @@ function djangoNeighborDirs(cwd: string, topic: string): string[] {
   return entries.filter((dirName) => djangoDirMatchesTopic(topic, dirName))
 }
 
-/** pytest naming: `test_<topic>*.py` or `<topic>*_test.py`. */
+/** pytest naming (python-pytest row's `testFilePatterns`): `test_<topic>*.py` or `<topic>*_test.py`. */
 function pytestFileMatchesTopic(fileName: string, topic: string): boolean {
   if (!topic || !fileName.endsWith(".py")) return false
-  return fileName.startsWith(`test_${topic}`) || (fileName.startsWith(topic) && fileName.endsWith("_test.py"))
+  return (
+    fileName.startsWith(`${PYTEST_TEST_FILE_PREFIX}${topic}`) ||
+    (fileName.startsWith(topic) && fileName.endsWith(PYTEST_TEST_FILE_SUFFIX))
+  )
 }
 
 /** Bounded-depth directory walk collecting pytest-style matches; a missing/unreadable directory yields no matches, never a throw. */
@@ -216,7 +261,7 @@ const MAX_TEST_TREE_ROOTS = 40
  */
 function discoverTestTreeRoots(cwd: string): string[] {
   const roots: string[] = []
-  const testDirNames = ["tests", "test"]
+  const testDirNames = PYTHON_PYTEST_ROW.testDirs
   for (const name of testDirNames) {
     const candidate = join(cwd, name)
     if (existsSync(candidate)) roots.push(candidate)
@@ -263,17 +308,166 @@ function djangoExactTwinCommands(cwd: string, sourceFile: string): string[] {
   if (!stem) return []
   let entries: Dirent[]
   try {
-    entries = readdirSync(join(cwd, "tests"), { withFileTypes: true }).filter((entry) => entry.isDirectory())
+    entries = readdirSync(join(cwd, DJANGO_TEST_DIR), { withFileTypes: true }).filter((entry) => entry.isDirectory())
   } catch {
     return []
   }
   const commands: string[] = []
   for (const entry of entries) {
-    if (existsSync(join(cwd, "tests", entry.name, `test_${stem}.py`))) {
-      commands.push(`python tests/runtests.py ${entry.name}.test_${stem} --parallel 1`)
+    if (existsSync(join(cwd, DJANGO_TEST_DIR, entry.name, `${DJANGO_TEST_FILE_PREFIX}${stem}.py`))) {
+      commands.push(PYTHON_DJANGO_ROW.singleTestTemplate.replace("{testId}", `${entry.name}.${DJANGO_TEST_FILE_PREFIX}${stem} --parallel 1`))
     }
   }
   return commands
+}
+
+// ---------------------------------------------------------------------------
+// P3 (agnostic-hands-eyes.md §4.2) — table-driven twin discovery for a
+// non-python ecosystem resolved via the repo profile (js/go/rust/java): the
+// row's own testDirs/testFilePatterns/single-test template ARE the
+// behavior, one small per-runner command adapter each (the runner's own
+// invocation syntax — a file path vs. a package path vs. a class name —
+// isn't captured by one generic template, the same reason the pytest/Django
+// rungs above keep their own command shape).
+// ---------------------------------------------------------------------------
+
+/** Touched file's stem checked against a row's declared testDirs (ecosystem-root-relative) plus its own directory (co-located tests) for a filename matching one of `filePatterns` (single "*" substituted with the stem) — matched test file paths relative to `cwd`, nearest (same-directory) first. */
+function collectEcosystemFileMatches(
+  cwd: string,
+  ecoRoot: string,
+  sourceFile: string,
+  dirs: readonly string[],
+  filePatterns: readonly string[],
+): string[] {
+  const relSource = relativizeToCwd(sourceFile, cwd)
+  const stem = pathBasename(relSource, extname(relSource))
+  if (!stem) return []
+  const sourceDir = dirname(relSource)
+  const roots = [join(cwd, sourceDir), ...dirs.map((dir) => join(cwd, ecoRoot, dir))]
+  const seen = new Set<string>()
+  const matches: string[] = []
+  for (const root of roots) {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      if (!filePatterns.some((pattern) => pattern.replace("*", stem) === entry.name)) continue
+      const rel = relative(cwd, join(root, entry.name))
+      if (seen.has(rel)) continue
+      seen.add(rel)
+      matches.push(rel)
+    }
+  }
+  return matches
+}
+
+/** js/ts (jest/vitest row): the matched twin file's path substituted into the row's single-test template — e.g. `npx jest __tests__/foo.test.ts`, not a bare file-existence check. */
+function jsTwinCommands(cwd: string, eco: EcosystemProfile, sourceFile: string): string[] {
+  const tests = eco.tests
+  if (!("runner" in tests)) return []
+  return collectEcosystemFileMatches(cwd, eco.root, sourceFile, tests.conventions.dirs, tests.conventions.filePatterns).map((relTest) =>
+    tests.single.replace("{testId}", relTest),
+  )
+}
+
+/** go: same-package `<stem>_test.go` twin (`conventions.dirs` is empty — go tests live beside the source, never a separate tree) — a package-scoped `go test ./<pkgDir>`, since `-run` takes a test NAME, not a file path. */
+function goTwinCommands(cwd: string, eco: EcosystemProfile, sourceFile: string): string[] {
+  const tests = eco.tests
+  if (!("runner" in tests)) return []
+  const relSource = relativizeToCwd(sourceFile, cwd)
+  if (extname(relSource) !== ".go") return []
+  const stem = pathBasename(relSource, ".go")
+  if (!stem) return []
+  const pkgDir = dirname(relSource)
+  if (!existsSync(join(cwd, pkgDir, `${stem}_test.go`))) return []
+  return [`${tests.runner} ${pkgDir === "." ? "./..." : `./${pkgDir}`}`]
+}
+
+/** rust: `tests/<stem>.rs` integration-crate twin — `cargo test --test <stem>` via the row's single-test template. */
+function rustTwinCommands(cwd: string, eco: EcosystemProfile, sourceFile: string): string[] {
+  const tests = eco.tests
+  if (!("runner" in tests)) return []
+  const relSource = relativizeToCwd(sourceFile, cwd)
+  if (extname(relSource) !== ".rs") return []
+  const stem = pathBasename(relSource, ".rs")
+  if (!stem) return []
+  const commands: string[] = []
+  for (const dir of tests.conventions.dirs) {
+    if (existsSync(join(cwd, eco.root, dir, `${stem}.rs`))) {
+      commands.push(tests.single.replace("{testId}", `--test ${stem}`))
+    }
+  }
+  return commands
+}
+
+/** java: `src/test/java/<pkg>/<Stem>Test.java` mirror-path twin — the package subpath under `src/main/java` reproduced under the row's test dir, class name from `filePatterns`, command from the row's single-test template. */
+function javaTwinCommands(cwd: string, eco: EcosystemProfile, sourceFile: string): string[] {
+  const tests = eco.tests
+  if (!("runner" in tests)) return []
+  const relSource = relativizeToCwd(sourceFile, cwd)
+  if (extname(relSource) !== ".java") return []
+  const marker = "src/main/java/"
+  const markerIdx = relSource.indexOf(marker)
+  if (markerIdx === -1) return []
+  const stem = pathBasename(relSource, ".java")
+  const pkgPath = dirname(relSource.slice(markerIdx + marker.length))
+  const commands: string[] = []
+  const seen = new Set<string>()
+  for (const dir of tests.conventions.dirs) {
+    for (const pattern of tests.conventions.filePatterns) {
+      const fileName = pattern.replace("*", stem)
+      const className = fileName.replace(/\.java$/, "")
+      const candidate = join(cwd, eco.root, dir, pkgPath === "." ? "" : pkgPath, fileName)
+      if (!existsSync(candidate) || seen.has(className)) continue
+      seen.add(className)
+      commands.push(tests.single.replace("{testId}", className))
+    }
+  }
+  return commands
+}
+
+/** One row-driven twin pass for a non-python ecosystem, dispatched by language — the row's own data (dirs/patterns/templates) is the behavior, this is just the per-runner invocation-syntax adapter (see the section header above). */
+function collectNonPythonNeighborCandidates(cwd: string, eco: EcosystemProfile, sourceFile: string): string[] {
+  switch (eco.language) {
+    case "javascript":
+    case "typescript":
+      return jsTwinCommands(cwd, eco, sourceFile)
+    case "go":
+      return goTwinCommands(cwd, eco, sourceFile)
+    case "rust":
+      return rustTwinCommands(cwd, eco, sourceFile)
+    case "java":
+      return javaTwinCommands(cwd, eco, sourceFile)
+    default:
+      return []
+  }
+}
+
+/**
+ * P3 — the repo profile's ecosystem to drive table-driven twin discovery
+ * when the repo is neither Django nor python-shaped (the caller only calls
+ * this once `isDjangoRepo` is false): the resolved (non-`unknown`,
+ * non-python) ecosystem whose root the touched files fall under, preferring
+ * a root match over the profile's first entry when a monorepo resolves more
+ * than one. `null` when the profile finds nothing but python/unknown — the
+ * caller falls back to the legacy pytest-shaped rungs, today's default,
+ * unchanged.
+ */
+function selectNonPythonEcosystem(cwd: string, touchedSourceFiles: readonly string[]): EcosystemProfile | null {
+  const profile = getRepoProfileSync(cwd)
+  const candidates = profile.ecosystems.filter((eco) => eco.language !== "unknown" && eco.language !== "python" && "runner" in eco.tests)
+  if (candidates.length === 0) return null
+  if (candidates.length === 1) return candidates[0]!
+  for (const file of touchedSourceFiles) {
+    const rel = relativizeToCwd(file, cwd)
+    const match = candidates.find((eco) => eco.root !== "." && rel.startsWith(`${eco.root}/`))
+    if (match) return match
+  }
+  return candidates[0]!
 }
 
 /**
@@ -281,7 +475,10 @@ function djangoExactTwinCommands(cwd: string, sourceFile: string): string[] {
  * exact-twin (pass 0), same-file proximity (pass 1), then module-package
  * breadth (pass 2) — identical per-file logic and ordering to the old
  * file-major walk, just scoped to a single file and uncapped (the shared cap
- * is enforced by the caller's round-robin push, not here).
+ * is enforced by the caller's round-robin push, not here). P3 — when the
+ * caller resolves a non-python ecosystem (`nonPythonEco`), this instead
+ * returns that ecosystem's row-driven twin pass plus the same F20
+ * graph-novel merge; Django/python are unaffected.
  */
 function collectFileNeighborCandidates(
   sourceFile: string,
@@ -289,7 +486,15 @@ function collectFileNeighborCandidates(
   isDjangoRepo: boolean,
   testTreeRoots: readonly string[],
   graphCandidates: readonly string[] = [],
+  nonPythonEco: EcosystemProfile | null = null,
 ): string[] {
+  if (nonPythonEco) {
+    const twins = collectNonPythonNeighborCandidates(cwd, nonPythonEco, sourceFile)
+    const known = new Set(twins)
+    const graphNovel = graphCandidates.filter((c) => !known.has(c)).slice(0, GRAPH_NOVEL_NEIGHBOR_CAP)
+    return [...twins, ...graphNovel]
+  }
+
   // Pass 0 — Django exact-twin (F19), highest rank.
   const twins: string[] = []
   if (isDjangoRepo) {
@@ -367,6 +572,12 @@ function collectFileNeighborCandidates(
  * hits first, never a twin. Returns `[]` when nothing matches so the
  * caller's gate never runs on a guess.
  *
+ * P3 — for a repo whose profile resolves a non-python ecosystem (js/go/
+ * rust/java — `selectNonPythonEcosystem`), each file's candidate list
+ * instead comes from that ecosystem's row-driven twin pass
+ * (`collectNonPythonNeighborCandidates`) plus the same F20 graph-novel
+ * merge; Django and pytest repos are unaffected.
+ *
  * @sem domain=routing role=neighbor-discovery
  */
 export function discoverNeighborTests(opts: {
@@ -385,10 +596,20 @@ export function discoverNeighborTests(opts: {
   }
 
   const isDjangoRepo = existsSync(join(cwd, "tests", "runtests.py"))
-  const testTreeRoots = isDjangoRepo ? [] : discoverTestTreeRoots(cwd)
+  // P3 — table-driven discovery for a non-python ecosystem; python/Django
+  // stay on the legacy rungs below, unchanged (the byte-parity requirement).
+  const nonPythonEco = isDjangoRepo ? null : selectNonPythonEcosystem(cwd, touchedSourceFiles)
+  const testTreeRoots = isDjangoRepo || nonPythonEco ? [] : discoverTestTreeRoots(cwd)
 
   const perFileCandidates = touchedSourceFiles.map((sourceFile) =>
-    collectFileNeighborCandidates(sourceFile, cwd, isDjangoRepo, testTreeRoots, graphCandidates?.get(sourceFile) ?? []),
+    collectFileNeighborCandidates(
+      sourceFile,
+      cwd,
+      isDjangoRepo,
+      testTreeRoots,
+      graphCandidates?.get(sourceFile) ?? [],
+      nonPythonEco,
+    ),
   )
 
   const maxCandidates = perFileCandidates.reduce((max, list) => Math.max(max, list.length), 0)
@@ -802,6 +1023,126 @@ export async function discoverProjectInterpreter(opts: {
 /** How many candidates `discoverProjectInterpreter` would probe for `cwd` — used only to size the discovery-failure log's count without shelling out a second time. */
 export function projectInterpreterCandidateCount(cwd: string): number {
   return buildInterpreterCandidates(cwd).length
+}
+
+// ---------------------------------------------------------------------------
+// P2 (agnostic-hands-eyes.md §2.3) — per-ecosystem toolchain probe ladder +
+// build-first rung. `discoverProjectInterpreter` above stays byte-identical
+// (it IS the python row's ladder); this section only adds the generalized
+// path for the other ecosystems, additive alongside the python call sites
+// above.
+// ---------------------------------------------------------------------------
+
+export type ToolchainEcosystem = "python" | "javascript" | "typescript" | "go" | "rust" | "java"
+
+/** The toolchain binary `mise which <tool>` resolves per ecosystem — python has no entry here, `discoverProjectToolchain` routes it straight to `discoverProjectInterpreter` instead. */
+const ECOSYSTEM_TOOL_BIN: Readonly<Record<Exclude<ToolchainEcosystem, "python">, string>> = {
+  javascript: "node",
+  typescript: "node",
+  go: "go",
+  rust: "cargo",
+  java: "java",
+}
+
+/** `mise which <tool>` when a mise binary is on PATH and a `.tool-versions`/`mise.toml` pin exists at `cwd` — the pinned resolution a human running `mise` would get, tried before the ecosystem's own minimal ladder. `null` on any miss (no pin, no mise binary, or the probe fails), never a throw. */
+async function tryMiseResolve(cwd: string, tool: string, runner: CommandRunner): Promise<string | null> {
+  const hasPin = existsSync(join(cwd, ".tool-versions")) || existsSync(join(cwd, "mise.toml"))
+  if (!hasPin) return null
+  const miseCheck = await runner({ kind: "guard", command: "mise --version" })
+  if (miseCheck.exitCode !== 0) return null
+  const resolved = await runner({ kind: "guard", command: `mise which ${tool}` })
+  if (resolved.exitCode !== 0) return null
+  const path = resolved.stdout.trim().split(/\r?\n/)[0]
+  return path || null
+}
+
+/** node's minimal ladder: an `.nvmrc`-pinned install under `~/.nvm/versions/node/<v>/bin/node` (tried first when the pin file names a version), then the bare PATH `node` — no venv/conda concept outside python, so this is the whole ladder. */
+function nodeCandidates(cwd: string): string[] {
+  const nvmrcPath = join(cwd, ".nvmrc")
+  if (existsSync(nvmrcPath)) {
+    const version = readFileSync(nvmrcPath, "utf8").split(/\r?\n/)[0]?.trim()
+    if (version) {
+      const tagged = version.startsWith("v") ? version : `v${version}`
+      return [join(resolvedHomeDir(), ".nvm", "versions", "node", tagged, "bin", "node"), "node"]
+    }
+  }
+  return ["node"]
+}
+
+/** go/rust/java's minimal ladder: PATH only — their pin files (`go.mod toolchain`, `rust-toolchain.toml`, none for java) are already read for `versions.language` by `repo-profile.ts`; this ladder is just which BINARY to probe, and none of these ecosystems install multiple side-by-side toolchains reachable without a version manager (mise covers that case above). */
+function buildEcosystemCandidates(cwd: string, ecosystem: Exclude<ToolchainEcosystem, "python">): string[] {
+  if (ecosystem === "javascript" || ecosystem === "typescript") return nodeCandidates(cwd)
+  return [ECOSYSTEM_TOOL_BIN[ecosystem]]
+}
+
+/**
+ * P2a — per-ecosystem toolchain probe ladder, generalizing F14a's
+ * python-only `discoverProjectInterpreter`: `python` routes straight through
+ * to it (byte-identical, `topLevelPackage` required); every other ecosystem
+ * tries `mise which <tool>` first when mise + a pin file are present, then
+ * its own minimal ladder (node: `.nvmrc`-aware then PATH; go/rust/java:
+ * PATH), probing each candidate with `<candidate> --version` via the
+ * injected runner and returning the first that exits 0. F21's turn-harvest
+ * (`harvestTurnInterpreter`) is unrelated and still tried first by the
+ * caller before this rung runs at all.
+ *
+ * @sem domain=routing role=toolchain-discovery
+ */
+export async function discoverProjectToolchain(opts: {
+  cwd: string
+  ecosystem: ToolchainEcosystem
+  runner: CommandRunner
+  /** python only — `discoverProjectInterpreter`'s import-probe target. */
+  topLevelPackage?: string
+}): Promise<string | null> {
+  const { cwd, ecosystem, runner, topLevelPackage } = opts
+  if (ecosystem === "python") {
+    if (!topLevelPackage) return null
+    return discoverProjectInterpreter({ cwd, topLevelPackage, runner })
+  }
+
+  const mise = await tryMiseResolve(cwd, ECOSYSTEM_TOOL_BIN[ecosystem], runner)
+  if (mise) return mise
+
+  for (const candidate of buildEcosystemCandidates(cwd, ecosystem)) {
+    const result = await runner({ kind: "guard", command: `${candidate} --version` })
+    if (result.exitCode === 0) return candidate
+  }
+  return null
+}
+
+/** `runBuildCheckRung`'s outcome — `ran:false` means no compiled-target `buildCheck` applied (python's row carries none, so this is always the python outcome). */
+export interface BuildCheckResult {
+  readonly ran: boolean
+  readonly passed: boolean
+  readonly command?: string
+  /** Fires only on `ran && !passed` — the fail-loud signal name for the caller to publish on the same bus `turn_regression*` uses. */
+  readonly signal?: "build_check_red"
+  readonly outputTail?: string
+}
+
+/**
+ * P2b — build-first rung: runs the resolved ecosystem's `buildCheck`
+ * (`tsc --noEmit` / `cargo check` / `go build ./...` / `mvn -q compile` —
+ * compiled targets only; the python row carries no `buildCheck`, so this is
+ * always a no-op there) once via the injected runner, BEFORE any neighbor
+ * test command. A non-zero exit is a deterministic compile-time block,
+ * reported as `signal: "build_check_red"` distinct from a test red — the
+ * caller's regression lane must never promote a build failure to a test
+ * result (the ts-repair lesson, agnostic-hands-eyes.md §2.4).
+ *
+ * @sem domain=routing role=build-check
+ */
+export async function runBuildCheckRung(opts: { cwd: string; runner: CommandRunner }): Promise<BuildCheckResult> {
+  const { cwd, runner } = opts
+  const profile = getRepoProfileSync(cwd)
+  const buildCheck = profile.ecosystems.find((eco) => eco.buildCheck)?.buildCheck
+  if (!buildCheck) return { ran: false, passed: true }
+  const result = await runner({ kind: "typecheck", command: buildCheck })
+  if (result.exitCode !== 0) {
+    return { ran: true, passed: false, command: buildCheck, signal: "build_check_red", outputTail: result.stderr || result.stdout }
+  }
+  return { ran: true, passed: true, command: buildCheck }
 }
 
 // A green run the F21 harvest may trust: a runner summary proving at least

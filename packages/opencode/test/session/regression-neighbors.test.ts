@@ -41,6 +41,8 @@ import { join } from "node:path"
 import {
   discoverNeighborTests,
   discoverProjectInterpreter,
+  discoverProjectToolchain,
+  runBuildCheckRung,
   projectInterpreterCandidateCount,
   rewriteInterpreter,
   rewriteInterpreterCommand,
@@ -57,6 +59,7 @@ import {
 import type { NeighborGraphPort } from "../../src/session/regression-neighbors"
 import { TEST_SHAPED_COMMAND_RE, LAUNDERED_FAILURE_SIGNATURE_RE, INTERPRETER_TOKEN_RE } from "../../src/session/seen-red"
 import { checkClaimCoverage, type Claim, type Evidence } from "@opencode-ai/code-intelligence"
+import { ECOSYSTEM_CONVENTIONS } from "../../src/code-intelligence/repo-profile"
 
 const dirs: string[] = []
 
@@ -1207,5 +1210,237 @@ describe("runDifferentialBaseline — H8 differential regression baseline", () =
     expect(verdict.covered).toBe(false)
     expect(verdict.preExisting).toEqual([neighbors[0]!.command])
     expect(verdict.failing).toEqual([neighbors[1]!.command])
+  })
+})
+
+describe("discoverNeighborTests — P3 table-driven twin discovery (agnostic-hands-eyes.md §4.2)", () => {
+  it("django byte-parity: the exact-twin command is reproducible byte-for-byte from the python-django row's own singleTestTemplate", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "runtests.py"), "")
+    mkdirSync(join(cwd, "tests", "httpwrappers"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "httpwrappers", "test_http.py"), "")
+    mkdirSync(join(cwd, "django", "utils"), { recursive: true })
+    writeFileSync(join(cwd, "django", "utils", "http.py"), "")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["django/utils/http.py"], cwd })
+
+    const djangoRow = ECOSYSTEM_CONVENTIONS.find((r) => r.id === "python-django")!
+    const expected = djangoRow.singleTestTemplate.replace("{testId}", "httpwrappers.test_http --parallel 1")
+    expect(expected).toBe("python tests/runtests.py httpwrappers.test_http --parallel 1")
+    expect(result[0]).toEqual({ kind: "test", command: expected })
+  })
+
+  it("js: matches a __tests__/<stem>.test.ts twin via the javascript-jest row and forms `npx jest <path>`", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj", devDependencies: {} }))
+    mkdirSync(join(cwd, "src"), { recursive: true })
+    writeFileSync(join(cwd, "src", "foo.ts"), "")
+    mkdirSync(join(cwd, "__tests__"), { recursive: true })
+    writeFileSync(join(cwd, "__tests__", "foo.test.ts"), "")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["src/foo.ts"], cwd })
+
+    expect(result).toEqual([{ kind: "test", command: "npx jest __tests__/foo.test.ts" }])
+  })
+
+  it("go: matches a same-package <stem>_test.go twin and forms a package-scoped `go test ./<pkgDir>`", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "go.mod"), "module example.com/proj\n\ngo 1.21\n")
+    mkdirSync(join(cwd, "pkg"), { recursive: true })
+    writeFileSync(join(cwd, "pkg", "foo.go"), "package pkg\n")
+    writeFileSync(join(cwd, "pkg", "foo_test.go"), "package pkg\n")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["pkg/foo.go"], cwd })
+
+    expect(result).toEqual([{ kind: "test", command: "go test ./pkg" }])
+  })
+
+  it("rust: matches a tests/<stem>.rs integration twin and forms `cargo test --test <stem>`", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "Cargo.toml"), "[package]\nname = \"proj\"\n")
+    mkdirSync(join(cwd, "src"), { recursive: true })
+    writeFileSync(join(cwd, "src", "widget.rs"), "")
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "widget.rs"), "")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["src/widget.rs"], cwd })
+
+    expect(result).toEqual([{ kind: "test", command: "cargo test --test widget" }])
+  })
+
+  it("java: matches the src/test/java mirror-path twin (<Stem>Test.java) and forms `mvn test -Dtest=<ClassName>`", () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pom.xml"), "<project></project>")
+    mkdirSync(join(cwd, "src", "main", "java", "com", "example"), { recursive: true })
+    writeFileSync(join(cwd, "src", "main", "java", "com", "example", "Widget.java"), "")
+    mkdirSync(join(cwd, "src", "test", "java", "com", "example"), { recursive: true })
+    writeFileSync(join(cwd, "src", "test", "java", "com", "example", "WidgetTest.java"), "")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["src/main/java/com/example/Widget.java"], cwd })
+
+    expect(result).toEqual([{ kind: "test", command: "mvn test -Dtest=WidgetTest" }])
+  })
+
+  it("a plain python repo (no other ecosystem manifest) is unaffected — pytest fallback still applies", () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, "tests"), { recursive: true })
+    writeFileSync(join(cwd, "tests", "test_http.py"), "")
+    mkdirSync(join(cwd, "utils"), { recursive: true })
+    writeFileSync(join(cwd, "utils", "http.py"), "")
+
+    const result = discoverNeighborTests({ touchedSourceFiles: ["utils/http.py"], cwd })
+
+    expect(result).toEqual([{ kind: "test", command: "python -m pytest tests/test_http.py -x -q" }])
+  })
+})
+
+describe("discoverProjectToolchain — P2a per-ecosystem toolchain probe ladder (agnostic-hands-eyes.md §2.3)", () => {
+  const originalHome = process.env.HOME
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME
+    else process.env.HOME = originalHome
+  })
+
+  it("python routes straight through to discoverProjectInterpreter, unaffected by ecosystem generalization", async () => {
+    const cwd = makeFixture()
+    mkdirSync(join(cwd, ".venv", "bin"), { recursive: true })
+    writeFileSync(join(cwd, ".venv", "bin", "python"), "")
+
+    const result = await discoverProjectToolchain({
+      cwd,
+      ecosystem: "python",
+      topLevelPackage: "django",
+      runner: async (command) => ({ exitCode: command.command.includes(".venv") ? 0 : 1, stdout: "", stderr: "" }),
+    })
+
+    expect(result).toBe(join(cwd, ".venv", "bin", "python"))
+  })
+
+  it("prefers `mise which <tool>` when a mise binary is on PATH and a .tool-versions pin exists", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, ".tool-versions"), "nodejs 20.10.0\n")
+    const probed: string[] = []
+
+    const result = await discoverProjectToolchain({
+      cwd,
+      ecosystem: "javascript",
+      runner: async (command) => {
+        probed.push(command.command)
+        if (command.command === "mise --version") return { exitCode: 0, stdout: "2024.1.0", stderr: "" }
+        if (command.command === "mise which node") return { exitCode: 0, stdout: "/home/user/.local/share/mise/installs/node/20.10.0/bin/node\n", stderr: "" }
+        return { exitCode: 1, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(result).toBe("/home/user/.local/share/mise/installs/node/20.10.0/bin/node")
+    expect(probed).toEqual(["mise --version", "mise which node"])
+  })
+
+  it("mise-absent fallback: no pin file at all skips the mise rung and probes the ecosystem's own minimal ladder", async () => {
+    const cwd = makeFixture()
+    const probed: string[] = []
+
+    const result = await discoverProjectToolchain({
+      cwd,
+      ecosystem: "go",
+      runner: async (command) => {
+        probed.push(command.command)
+        return { exitCode: command.command === "go --version" ? 0 : 1, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(result).toBe("go")
+    expect(probed).toEqual(["go --version"])
+    expect(probed.some((c) => c.startsWith("mise"))).toBe(false)
+  })
+
+  it("mise-absent fallback: a pin file present but no mise binary on PATH still falls through to the ecosystem ladder", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "mise.toml"), "[tools]\nrust = \"1.75.0\"\n")
+
+    const result = await discoverProjectToolchain({
+      cwd,
+      ecosystem: "rust",
+      runner: async (command) => ({ exitCode: command.command === "cargo --version" ? 0 : 1, stdout: "", stderr: "" }),
+    })
+
+    expect(result).toBe("cargo")
+  })
+
+  it("node ladder is .nvmrc-aware: an .nvmrc-named version is probed before the bare PATH node", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, ".nvmrc"), "18.19.0\n")
+    process.env.HOME = cwd
+    const probed: string[] = []
+
+    const result = await discoverProjectToolchain({
+      cwd,
+      ecosystem: "javascript",
+      runner: async (command) => {
+        probed.push(command.command)
+        return { exitCode: 1, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(result).toBeNull()
+    expect(probed[0]).toContain(join(cwd, ".nvm", "versions", "node", "v18.19.0", "bin", "node"))
+    expect(probed[1]).toBe("node --version")
+  })
+})
+
+describe("runBuildCheckRung — P2b build-first rung (agnostic-hands-eyes.md §2.4)", () => {
+  it("runs the resolved ecosystem's buildCheck once and reports build_check_red on a nonzero exit", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "proj" }))
+    let calls = 0
+
+    const result = await runBuildCheckRung({
+      cwd,
+      runner: async (command) => {
+        calls++
+        expect(command.command).toBe("tsc --noEmit")
+        return { exitCode: 2, stdout: "", stderr: "src/foo.ts(3,5): error TS2322" }
+      },
+    })
+
+    expect(calls).toBe(1)
+    expect(result).toEqual({
+      ran: true,
+      passed: false,
+      command: "tsc --noEmit",
+      signal: "build_check_red",
+      outputTail: "src/foo.ts(3,5): error TS2322",
+    })
+  })
+
+  it("reports passed on a zero exit, still ran once", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "go.mod"), "module example.com/proj\n\ngo 1.21\n")
+
+    const result = await runBuildCheckRung({
+      cwd,
+      runner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    })
+
+    expect(result).toEqual({ ran: true, passed: true, command: "go build ./..." })
+  })
+
+  it("a python fixture never runs the rung — the python-pytest row carries no buildCheck", async () => {
+    const cwd = makeFixture()
+    writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")
+    let calls = 0
+
+    const result = await runBuildCheckRung({
+      cwd,
+      runner: async () => {
+        calls++
+        return { exitCode: 0, stdout: "", stderr: "" }
+      },
+    })
+
+    expect(calls).toBe(0)
+    expect(result).toEqual({ ran: false, passed: true })
   })
 })
