@@ -857,3 +857,29 @@ export function loadRepoProfile(cwd: string, opts: { force?: boolean } = {}): Re
   writeCache(cachePath, { fingerprint, profile })
   return profile
 }
+
+const PROFILE_MEMO = new Map<string, RepoProfile>()
+
+const EMPTY_PROFILE: RepoProfile = { version: 1, derivedFrom: { commitish: "", manifests: [] }, ecosystems: [] }
+
+/**
+ * Process-lifetime memo over loadRepoProfile for hot-path consumers (seen-red
+ * classification, verifier parsing, prompt compilation): one derivation per repo
+ * root per process, and a derivation failure degrades to an empty profile so a
+ * sense can fall back to its generic layer — it must never throw into a gate.
+ *
+ * @sem domain=intelligence role=discovery
+ */
+export function getRepoProfileSync(cwd: string): RepoProfile {
+  const repoRoot = path.resolve(cwd)
+  const memoized = PROFILE_MEMO.get(repoRoot)
+  if (memoized) return memoized
+  let profile: RepoProfile
+  try {
+    profile = loadRepoProfile(repoRoot)
+  } catch {
+    profile = EMPTY_PROFILE
+  }
+  PROFILE_MEMO.set(repoRoot, profile)
+  return profile
+}
