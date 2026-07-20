@@ -1,11 +1,15 @@
 # Agnostic hands & eyes — a language/framework/architecture-agnostic sensing layer
 
-**Status:** PARTIALLY SHIPPED (2026-07-20). **P0–P5 are built and committed**; **P6** is in
-implementation (LSP declined — §7.1); **wave G** (§7.2) is planned and sequenced behind the
-V1/V2 Python validation gate. Live validation is NOT yet clean: the first V1 arena run on
-django-11885 failed real-grading and exposed a P2 regression (a build check firing on a foreign
-ecosystem, fixed in `e6441988e`); the re-run is pending. Per the §6 validation bar, **no score
-or cost claim in this doc is established until that gate passes.** This is the implementation
+**Status:** PARTIALLY SHIPPED (2026-07-20). **P0–P6 and all of wave G (§7.2) are built and
+unit-tested** (P0–P5 committed; P6 + wave G awaiting the combined commit — results in §7.2).
+Live validation is NOT yet clean: the V1 arena run on django-11885 failed real-grading — an
+honest engine FAIL (a recurring over-combine solver attractor). Its forensics vindicated this
+doc's layer (the sensing stack pinned exactly the right verification vehicle, `delete.tests`,
+and saw the regression red three times) and located the failure upstream in orchestration
+policy: a P2 regression (build check firing on a foreign ecosystem, fixed `e6441988e`) and a
+resolution-gate veto of the armed deferral escalation (V1-FIX). V2 re-runs behind that fix.
+Per the §6 validation bar, **no score or cost claim in this doc is established until that
+gate passes.** This is the implementation
 design for **H5** (the
 ecosystem-adapter layer, [gap-closure-plan.md §3](./gap-closure-plan.md#3-scheduled-next-not-this-wave)),
 grounded in a four-track research pass run 2026-07-20: (1) SOTA harness survey, (2) universal
@@ -528,6 +532,25 @@ Three orderings are load-bearing, not stylistic:
   writing any rows. That number decides how many rows are actually needed, and a row written
   before that measurement is a row nobody proved we need.
 
+#### G4b — coverage floor invariant (implemented)
+
+Coverage rotted silently once already (§7.1's live re-measurement found the DISPUTED 84.4%
+TypeScript figure and the five zero-extraction languages nobody had noticed). G4b makes that
+structurally impossible to repeat, in two parts:
+
+1. **Hermetic rot detector.** `packages/code-intelligence/test/coverage-invariant.test.ts`
+   indexes a tiny vendored fixture corpus
+   (`packages/code-intelligence/test/fixture-coverage/{python,typescript,javascript}/`) whose
+   import/call counts are exact by construction, and asserts
+   `BunSqliteGraph.edgeCoverage()` against them with `toEqual` — not floors. Any
+   resolver/extractor change that shifts a count fails the suite with the language named, runs
+   under plain `bun test`, and touches no network or cloned repo. Extend it by adding a
+   mini-tree under `fixture-coverage/<lang>/` plus one row to its `CORPUS` table (§5.1
+   generic-first law).
+2. **Real-repo floor reference.** The standing post-G3 floors live in the wave-G results
+   table below (one home per fact); the hermetic fixture test above is the enforcement
+   mechanism — the results table is not itself checked by any test.
+
 #### Backstory — why this wave looks different from how it was first scoped
 
 Wave G was originally scoped as a **resolution** problem: our graph resolved Python (~77%) and
@@ -560,13 +583,61 @@ a language needs neither. The standing lesson — the same one that produced the
 test — is that an inventory of "what's wrong" ages fast in an actively refactored tree and must
 be re-verified against source before it drives work.
 
-**Open item carried into G-wave (unresolved).** The audit did surface one real leak it
-under-described: `REPRO_SLICE_CONTENT` (`prompts/seeds.ts`) is a module-level constant computed
-with the `PYTHON_REPRO_VEHICLE` default, so any consumer reading the constant rather than
-calling `reproSliceContent(vehicle)` emits Python repro prose regardless of repo. Every
-`prompt.ts` nudge site passes its vehicle explicitly, so the blast radius looks narrow — **but
-this has not been confirmed**, and it is a direct V3 (non-Python) risk. Confirm the consumer set
-before V3 runs.
+**Open item carried into G-wave — RESOLVED (V3-PREP, 2026-07-20).** The audit did surface one
+real leak it under-described: `REPRO_SLICE_CONTENT` (`prompts/seeds.ts`) was a module-level
+constant frozen with the `PYTHON_REPRO_VEHICLE` default, so any consumer reading the constant
+rather than calling `reproSliceContent(vehicle)` emitted Python repro prose regardless of repo.
+The constant is now **deleted**: every plant site and every identity comparison compiles the
+seed through `reproSliceContent(vehicle)` with the session's turn-open vehicle
+(`repro-vehicle-store.ts`), and the fenced-example language tag is substituted too (a second
+leak found during the fix). Enforcement is compile-time — a new consumer cannot read a constant
+that no longer exists.
+
+#### Wave G results (2026-07-20 — built and tested; live validation rides V2/V3)
+
+All eight phases landed same-day, in the load-bearing order above. The kernel additions that
+made G3 pure data are themselves generic: a `markers` relative style (Rust's
+`crate::`/`self::`/`super::`), an `implicit` relative style (C/C++ quoted includes resolve
+against the including file's directory first), three root strategies (`nearestDirNamed`,
+`nearestAncestorWithMarker`, `manifestPrefix` — Go's `go.mod` module-path strip, reusable by
+any manifest-rooted language), `directoryRepresentative` (Go imports name package directories,
+not files), and `fallbackEligible:false` (C/C++ angle includes are confirmed-external at
+extraction and never reach the suffix fallback). Zero `if (language === ...)` branches exist
+outside the data table. G2's universal suffix fallback gained two zero-language-knowledge
+precision guards after spot-checks caught real false positives (`import datetime` → django's
+own `datetime.py`; Go `flag` → a local `flag.go`): full-specifier verification for >3-token
+specifiers, and sibling-only trust for lone single-token matches.
+
+| Ecosystem | Repo | Import resolution (post-G3) | `couplingConfidence` (0.10 floor) |
+|---|---|---|---|
+| Python | django (arena-11885) | **80.3%** (9067 row + 9 fallback / 11299) | measured |
+| Python | requests | **39.6%** | measured |
+| TypeScript | econ-coding-agent | **37.2%** | measured |
+| Rust | tokio | **13.4%** (was 0) | **measured — newly cleared** |
+| C | libmpg123 | **18.8%** (was 0) | **measured — newly cleared** |
+| Go | urfave/cli | 9.9% (was 0) | unknown (a hair under the floor) |
+| C++ | nlohmann/json | 5.1% (was 0) | unknown |
+| Java | guava | ~0% row-resolved | unknown |
+
+Python moved 83.0→80.3 and TypeScript 38.2→37.2 across G3 **by design**: the precision guards
+reclassified single-token non-sibling fallback matches (stdlib/npm name collisions) from
+trusted edges to recorded ambiguity, while row resolution stayed bit-identical. For a risk
+signal, a false import edge is worse than a missing one.
+
+**G5 verdicts.** (a) *Retirement is automatic, not a code change:* `couplingConfidence` reads
+live `edgeCoverage()` ratios, so Rust and C flip to `measured` the moment a repo indexes —
+nothing to un-wire. Go/C++/Java keep the `coupling=unknown` surface line (cost: one inline
+warning, $0, never an escalation). (b) *The §7.1 LSP decline is reaffirmed:* the surviving
+gaps are structural facts a language server would not fix in our arenas — guava's parallel
+`android/` + JRE package trees are *true* ambiguity (verified by direct DB probe: identical
+full dotted paths exist in two modules; `jdtls` would additionally demand a build the arena
+cannot do), and Go's residual is a floor hair, not blindness. The §7.1 revisit trigger (a
+measured over-escalation band on the `coupling=unknown` route) remains the only path back.
+(c) *Accepted residuals, recorded rather than patched:* a same-directory stdlib/local-name
+collision survives the sibling guard (Go `flag` ×5, one TS `marked`) — fixing it needs either
+a per-language stdlib list (violates §5.1) or a row-level trust flag; declined at the current
+stakes. The DISPUTED §7.1 TypeScript figure stays unarbitrated; every wave-G gate was
+same-script before/after and never rested on it.
 
 ---
 

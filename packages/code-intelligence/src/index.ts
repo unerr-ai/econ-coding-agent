@@ -171,7 +171,7 @@ export interface CodeIntelligence {
 // ---------------------------------------------------------------------------
 // Re-exports for consumers
 // ---------------------------------------------------------------------------
-export { BunSqliteGraph, coverageLanguage, type EdgeCoverage } from "./bun-sqlite-graph.js"
+export { BunSqliteGraph, coverageLanguage, type EdgeCoverage, type ImportFallbackStats } from "./bun-sqlite-graph.js"
 export { makeReconTool, makeFileReadTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool } from "./tools.js"
 export type { GraphToolDef } from "./tools.js"
 

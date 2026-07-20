@@ -9,7 +9,7 @@
 import { Database } from "bun:sqlite"
 import { readdir, readFile, stat } from "node:fs/promises"
 import { existsSync } from "node:fs"
-import { join, relative, extname } from "node:path"
+import { join, relative, extname, dirname } from "node:path"
 import { createHash } from "node:crypto"
 import { extractEntities, extractEdges, detectLanguage, type ExtractedEntity } from "./ast-extractor.js"
 import type { CodeIntelligence, Entity, Reference, ReconBundle } from "./index.js"
@@ -51,7 +51,8 @@ const SCHEMA = /* sql */ `
     from_entity TEXT    NOT NULL DEFAULT '',
     to_entity   TEXT    NOT NULL,
     to_file     TEXT,
-    edge_kind   TEXT    NOT NULL DEFAULT 'import'
+    edge_kind   TEXT    NOT NULL DEFAULT 'import',
+    candidate_count INTEGER
   );
 
   CREATE INDEX IF NOT EXISTS idx_entities_name  ON entities(name);
@@ -274,6 +275,137 @@ export type EdgeCoverage = Record<
 >
 
 // ---------------------------------------------------------------------------
+// Universal import-suffix fallback (wave G, G2 — docs/design/agnostic-hands-
+// eyes.md §5.1 tier 1 + §7.2). Zero language knowledge: when a language's
+// resolver row can't resolve a specifier (or the language has no row at
+// all), resolve it against the repo's OWN file index instead — the
+// strongest §5.1 tier, since it derives the answer from what the repo
+// actually contains rather than encoded language semantics. Lives here
+// (not ast-extractor.ts) because it needs the FULL current file set, which
+// only exists once every file for this index() run is known — a per-file
+// extraction pass can't see files walked after it.
+// ---------------------------------------------------------------------------
+
+/** Every separator an already-extracted specifier's segments can be joined
+ *  by, across every language extractEdges() feeds this: "." (Python/Java
+ *  dotted paths — and incidentally a file extension), "/" and "\\"
+ *  (path-style specifiers), "::" (Rust, collapsed by the "+" since it's two
+ *  of the same char), "-" (kebab-case package names). One shared regex so
+ *  tokenizing never branches on which language produced the specifier. */
+const SPECIFIER_SEPARATOR = /[.\/\\:-]+/
+
+/** Split a specifier (or a file's extension-stripped stem) into its
+ *  non-empty segments using the one shared separator set above. */
+export function suffixTokens(value: string): string[] {
+  return value.split(SPECIFIER_SEPARATOR).filter(Boolean)
+}
+
+/** Strip a trailing file extension the same way `node:path`'s `extname`
+ *  would — the last "."-delimited run in the final path segment, if any —
+ *  so a specifier that never carries an extension (the common case:
+ *  Python/Go/Java/Rust module paths, most JS/TS bare specifiers) can still
+ *  suffix-match a file that has one. Extension-blind on the FILE side only;
+ *  a specifier is never extension-stripped (would corrupt a genuine dotted
+ *  segment, e.g. Python's "pkg.mod"), so a language whose own specifier
+ *  grammar embeds a real extension (C/C++ `#include "x.h"`) tokenizes its
+ *  own ".h" as a segment and simply won't suffix-match on it — a measured
+ *  property of that grammar, not a special case here. */
+function stripStemExtension(filePath: string): string {
+  return filePath.replace(/\.[^./\\]+$/, "")
+}
+
+/** Map from a joined trailing-segment suffix (1, 2, or 3 tokens, joined
+ *  with "/") to every indexed file whose extension-stripped path ends
+ *  there — built once per suffix-fallback pass, then probed per unresolved
+ *  edge. Each file contributes at most 3 entries (its own trailing 1/2/3
+ *  tokens), never a scan over every other file. */
+export function buildSuffixIndex(filePaths: string[]): Map<string, string[]> {
+  const index = new Map<string, string[]>()
+  for (const filePath of filePaths) {
+    const tokens = suffixTokens(stripStemExtension(filePath))
+    for (let n = 1; n <= 3; n++) {
+      if (tokens.length < n) break
+      const suffix = tokens.slice(-n).join("/")
+      const bucket = index.get(suffix)
+      if (bucket) bucket.push(filePath)
+      else index.set(suffix, [filePath])
+    }
+  }
+  return index
+}
+
+/** G3 guard (a): true when `filePath`'s own extension-stripped token
+ *  sequence ends with `specTokens` IN FULL — not just the 1/2/3-token
+ *  window `buildSuffixIndex` probes. Lets a specifier with MORE than 3
+ *  tokens survive a same-trailing-3-token collision with an unrelated file
+ *  (java's dotted package paths are the paradigm case: many files share a
+ *  short class-name suffix, but only one has the WHOLE package path). */
+function specifierIsFullSuffixOf(specTokens: string[], filePath: string): boolean {
+  const fileTokens = suffixTokens(stripStemExtension(filePath))
+  if (fileTokens.length < specTokens.length) return false
+  const tail = fileTokens.slice(-specTokens.length)
+  return tail.every((t, i) => t === specTokens[i])
+}
+
+/** Outcome of suffix-matching one specifier against `index` (from
+ *  `buildSuffixIndex`): `file` on exactly one match at the longest segment
+ *  length (3 down to 1, whichever the specifier has) that found anything;
+ *  `count` on multiple matches at that length — recorded as ambiguity,
+ *  never silently dropped, and never cascaded to a shorter length once a
+ *  length has any hits; `null` when no length from 3 down to 1 finds
+ *  anything (external dependency, correctly unresolved).
+ *
+ *  Two G3 precision guards apply before a result is returned, both zero
+ *  language-knowledge (token arrays + a directory-string compare only):
+ *  (a) full-specifier verification — when the specifier has MORE than 3
+ *  tokens (the probe window's cap), candidates are filtered to files whose
+ *  FULL token sequence matches the specifier's FULL token sequence, not
+ *  just the trailing 3 both happened to share;
+ *  (b) sibling guard — a LONE match for a single-token specifier is
+ *  trusted only when the matched file sits in the same directory as
+ *  `fromFile` (the importing file, optional — omitted callers just skip
+ *  this guard); otherwise it's recorded ambiguous instead of silently
+ *  resolved — kills the class of false positives where an unrelated
+ *  same-named file elsewhere in the repo (python `datetime`, go `flag`,
+ *  ...) wins by being the only lone suffix match. */
+export function resolveViaSuffixIndex(
+  specifier: string,
+  index: Map<string, string[]>,
+  fromFile?: string,
+): { file: string } | { count: number } | null {
+  const tokens = suffixTokens(specifier)
+  if (tokens.length === 0) return null
+  const maxLen = Math.min(3, tokens.length)
+  for (let n = maxLen; n >= 1; n--) {
+    const suffix = tokens.slice(-n).join("/")
+    const matches = index.get(suffix)
+    if (!matches || matches.length === 0) continue
+    let distinct = Array.from(new Set(matches))
+
+    if (tokens.length > 3) {
+      distinct = distinct.filter((filePath) => specifierIsFullSuffixOf(tokens, filePath))
+    }
+
+    if (distinct.length === 1) {
+      if (tokens.length === 1 && fromFile && dirname(distinct[0]!) !== dirname(fromFile)) {
+        return { count: distinct.length }
+      }
+      return { file: distinct[0]! }
+    }
+    return { count: distinct.length }
+  }
+  return null
+}
+
+/** Per-language breakdown of HOW an import edge's `to_file` got resolved —
+ *  kept separate from `EdgeCoverage` (whose row shape is a G4b
+ *  invariant-test contract and must not change) rather than widening it. */
+export type ImportFallbackStats = Record<
+  string,
+  { resolvedByRow: number; resolvedByFallback: number; ambiguous: number; externalUnmatched: number }
+>
+
+// ---------------------------------------------------------------------------
 // BunSqliteGraph
 // ---------------------------------------------------------------------------
 
@@ -298,6 +430,10 @@ export class BunSqliteGraph implements CodeIntelligence {
     // Migrations: add semantic columns to existing DBs (no-op if already present)
     try { this.db.exec("ALTER TABLE entities ADD COLUMN domain TEXT") } catch { /* already exists */ }
     try { this.db.exec("ALTER TABLE entities ADD COLUMN role TEXT") } catch { /* already exists */ }
+    // G2: ambiguity marker for the index-suffix import fallback — see
+    // resolveImportSuffixFallback(). Nullable, additive; no GRAPH_SCHEMA_VERSION
+    // bump needed (same self-healing ALTER pattern as domain/role above).
+    try { this.db.exec("ALTER TABLE edges ADD COLUMN candidate_count INTEGER") } catch { /* already exists */ }
     // FTS5 index over tokenized name/summary/signature/domain/role, keyed by
     // file_path/entity_name/entity_kind so a hit resolves back to an
     // entities row without a rowid-synced external-content table. Guarded —
@@ -330,7 +466,12 @@ export class BunSqliteGraph implements CodeIntelligence {
    * delete/insert cycle keeps the entities_fts full-text index (tokenized
    * name/summary/signature/domain/role) in sync. After the ghost-file purge, an
    * f:<path> note is flagged stale=1 if its file is now gone or stale=0 if
-   * it has reappeared — the row itself is kept for audit either way.
+   * it has reappeared — the row itself is kept for audit either way. After
+   * the walk's transaction commits, resolveImportSuffixFallback() (G2) makes
+   * one more pass over every not-yet-attempted unresolved import edge in the
+   * WHOLE graph (not just this run's files) and suffix-matches it against
+   * the full current file index — so it always sees a complete file set,
+   * which a per-file pass during the walk above could not.
    *
    * @sem domain=intelligence role=indexing
    */
@@ -355,7 +496,7 @@ export class BunSqliteGraph implements CodeIntelligence {
     )
     const deleteEdgesFromFile = this.db.prepare(`DELETE FROM edges WHERE from_file = ?`)
     const insertEdge = this.db.prepare(
-      `INSERT INTO edges (from_file, from_entity, to_entity, to_file, edge_kind) VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO edges (from_file, from_entity, to_entity, to_file, edge_kind, candidate_count) VALUES (?, ?, ?, ?, ?, ?)`
     )
     const getPrevHash = this.db.prepare(`SELECT content_hash FROM files WHERE path = ?`)
     const countEntitiesForFile = this.db.prepare(`SELECT COUNT(*) as n FROM entities WHERE file_path = ?`)
@@ -459,7 +600,11 @@ export class BunSqliteGraph implements CodeIntelligence {
 
         const edges = extractEdges(content, filePath, entities, this.root)
         for (const edge of edges) {
-          insertEdge.run(filePath, edge.fromEntity, edge.toEntity, edge.toFile ?? null, edge.kind)
+          // G3: an edge extractEdges already marked confirmed-external
+          // (C/C++ angle `#include <...>`) gets candidate_count=0 at
+          // insert time, so resolveImportSuffixFallback's `candidate_count
+          // IS NULL` sweep never re-guesses at it.
+          insertEdge.run(filePath, edge.fromEntity, edge.toEntity, edge.toFile ?? null, edge.kind, edge.external ? 0 : null)
           edgesTotal++
         }
       }
@@ -486,7 +631,101 @@ export class BunSqliteGraph implements CodeIntelligence {
       }
     })()
 
+    this.resolveImportSuffixFallback()
+
     return { files: filesIndexed, entities: entitiesTotal, edges: edgesTotal }
+  }
+
+  /**
+   * G2 post-pass (wave G, docs/design/agnostic-hands-eyes.md §5.1 tier 1):
+   * suffix-match every not-yet-attempted unresolved import edge
+   * (`to_file IS NULL AND candidate_count IS NULL`) against the FULL current
+   * `files` table — run after index()'s own transaction so it always sees
+   * every known file, not just this run's. Zero language knowledge: works
+   * off `to_entity` (the specifier extractEdges now stores in full, G3) and
+   * the file index alone — no row lookup, no per-language branch;
+   * `resolveViaSuffixIndex` applies its own two G3 precision guards
+   * (full-specifier verification, sibling guard — the latter needs each
+   * edge's `from_file`, fetched alongside `to_entity` below). Idempotent
+   * per edge: `candidate_count` is always non-null once attempted (0 =
+   * confirmed external/unmatched, 1 = EITHER fallback-resolved with
+   * `to_file` set OR a sibling-guard-rejected lone match with `to_file`
+   * still null, >=1 with `to_file` null = ambiguous, `to_file` stays
+   * null), so a later warm run never re-evaluates it — including if a new
+   * file later shows up that would have disambiguated it; a known limit,
+   * not attempted here.
+   *
+   * @sem domain=intelligence role=indexing
+   */
+  private resolveImportSuffixFallback(): void {
+    const files = this.db.prepare(`SELECT path FROM files`).all() as { path: string }[]
+    if (files.length === 0) return
+    const suffixIndex = buildSuffixIndex(files.map((f) => f.path))
+
+    const unresolved = this.db
+      .prepare(
+        `SELECT id, to_entity, from_file FROM edges WHERE edge_kind = 'import' AND to_file IS NULL AND candidate_count IS NULL`,
+      )
+      .all() as { id: number; to_entity: string; from_file: string }[]
+    if (unresolved.length === 0) return
+
+    const markResolved = this.db.prepare(`UPDATE edges SET to_file = ?, candidate_count = 1 WHERE id = ?`)
+    const markAmbiguous = this.db.prepare(`UPDATE edges SET candidate_count = ? WHERE id = ?`)
+    const markExternal = this.db.prepare(`UPDATE edges SET candidate_count = 0 WHERE id = ?`)
+
+    this.db.transaction(() => {
+      for (const edge of unresolved) {
+        const outcome = resolveViaSuffixIndex(edge.to_entity, suffixIndex, edge.from_file)
+        if (!outcome) markExternal.run(edge.id)
+        else if ("file" in outcome) markResolved.run(outcome.file, edge.id)
+        else markAmbiguous.run(outcome.count, edge.id)
+      }
+    })()
+  }
+
+  /**
+   * Per-language breakdown of HOW an import edge's `to_file` got resolved —
+   * row-based resolver vs the G2 suffix fallback vs left ambiguous vs a
+   * confirmed external/unmatched specifier. Distinguished purely by
+   * `candidate_count` (see resolveImportSuffixFallback); `ambiguous` uses
+   * `candidate_count >= 1 AND to_file IS NULL` (not `>= 2`) since G3's
+   * sibling guard can leave a single-token specifier's LONE match at
+   * `candidate_count = 1` with `to_file` still null (untrusted, not a
+   * resolution) — `to_file IS NOT NULL` already carves resolvedByFallback
+   * out of the same `= 1` value, so the two stay mutually exclusive. Kept
+   * separate from `edgeCoverage()`, whose row shape is a G4b invariant-test
+   * contract.
+   *
+   * @sem domain=intelligence role=analysis
+   */
+  importFallbackStats(): ImportFallbackStats {
+    const rows = this.db
+      .prepare(
+        `SELECT ${languageCaseSql("from_file")} as lang,
+                SUM(CASE WHEN to_file IS NOT NULL AND candidate_count IS NULL THEN 1 ELSE 0 END) as resolvedByRow,
+                SUM(CASE WHEN to_file IS NOT NULL AND candidate_count = 1 THEN 1 ELSE 0 END) as resolvedByFallback,
+                SUM(CASE WHEN to_file IS NULL AND candidate_count >= 1 THEN 1 ELSE 0 END) as ambiguous,
+                SUM(CASE WHEN to_file IS NULL AND candidate_count = 0 THEN 1 ELSE 0 END) as externalUnmatched
+         FROM edges WHERE edge_kind = 'import' GROUP BY lang`,
+      )
+      .all() as Array<{
+      lang: string
+      resolvedByRow: number
+      resolvedByFallback: number
+      ambiguous: number
+      externalUnmatched: number
+    }>
+
+    const stats: ImportFallbackStats = {}
+    for (const row of rows) {
+      stats[row.lang] = {
+        resolvedByRow: row.resolvedByRow ?? 0,
+        resolvedByFallback: row.resolvedByFallback ?? 0,
+        ambiguous: row.ambiguous ?? 0,
+        externalUnmatched: row.externalUnmatched ?? 0,
+      }
+    }
+    return stats
   }
 
   /**
@@ -507,7 +746,9 @@ export class BunSqliteGraph implements CodeIntelligence {
    * Per-language edge-coverage measurement (P6, docs/design/agnostic-hands-eyes.md
    * §7.1): for each language bucket present in the graph, the file count plus
    * import/call edge totals and how many imports actually resolved
-   * (edge_kind='import' AND to_file IS NOT NULL). Entirely SQL-aggregated —
+   * (edge_kind='import' AND to_file IS NOT NULL — this counts a G2
+   * suffix-fallback resolution the same as a row-based one; see
+   * importFallbackStats() to split the two apart). Entirely SQL-aggregated —
    * never loads edge or file rows into JS to classify them — so it stays
    * cheap on a large repo. A language with zero files and zero edges is
    * simply absent from the result, not zero-padded.
