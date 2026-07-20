@@ -2001,6 +2001,20 @@ describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixe
   })
 })
 
+describe("isReproScratchPath extraExt (P4 — agnostic-hands-eyes.md §4.6, profile-driven extension union)", () => {
+  it("does not match an extension outside the base set with no extraExt (pre-P4 behavior preserved)", () => {
+    expect(isReproScratchPath("repro_issue.go")).toBe(false)
+  })
+  it("matches the profile's repro ext when passed as extraExt", () => {
+    expect(isReproScratchPath("repro_issue.go", "go")).toBe(true)
+    expect(isReproScratchPath("_repro_issue.go", "go")).toBe(true)
+  })
+  it("an extraExt already in the base set is a no-op", () => {
+    expect(isReproScratchPath("repro_issue.py", "py")).toBe(true)
+    expect(isReproScratchPath("repro_issue.rs", "py")).toBe(false)
+  })
+})
+
 describe("reproSpecificity via deriveTurnProbe (S1 — authored repro scripts qualify as pins)", () => {
   it("an authored repro script (`repro_issue.py`) pins RED, carrying redEvidence", async () => {
     const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]

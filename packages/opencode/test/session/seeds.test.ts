@@ -4,13 +4,17 @@
  */
 
 import { describe, it, expect } from "bun:test"
+import { createHash } from "node:crypto"
 import {
   LOCALIZATION_SLICE_CONTENT,
   REPRO_SLICE_CONTENT,
+  GRIND_DESIGN_SLICE_CONTENT,
+  reproSliceContent,
   DEFERRAL_SLICE_PREFIX,
   buildDeferralSliceContent,
   type DeferralBrief,
 } from "../../src/session/prompts/seeds"
+import { type ReproVehicle } from "../../src/session/prompts/nudges"
 
 describe("seeds.ts — §11 seed priors", () => {
   it("LOCALIZATION_SLICE_CONTENT carries the typed-mirror-over-idiom-mirror precedence sentence", () => {
@@ -108,5 +112,47 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
   it("omits the STATED RULES section when there are no stated rules", () => {
     const content = buildDeferralSliceContent({ ...brief, statedRules: [] })
     expect(content).not.toContain("STATED RULES")
+  })
+})
+
+// P4 (docs/design/agnostic-hands-eyes.md §4.6/§5) — byte-parity + token-size
+// audit for the profile-compiled repro seed. REPRO_SLICE_CONTENT/
+// GRIND_DESIGN_SLICE_CONTENT are large (thousands of chars); asserting a
+// SHA-256 digest instead of embedding the whole blob a second time still
+// proves byte-for-byte identity against the pre-P4 text without the
+// transcription risk of retyping it — the golden hashes below were computed
+// from the pre-P4 constants before this refactor landed.
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex")
+
+describe("P4 byte-parity — python/default profile snapshots", () => {
+  it("REPRO_SLICE_CONTENT is byte-identical to the pre-P4 text (SHA-256 digest)", () => {
+    expect(REPRO_SLICE_CONTENT.length).toBe(6167)
+    expect(sha256(REPRO_SLICE_CONTENT)).toBe("593b71119ac24e56ca0ed90d7f26b70c7f32838f4f51f061c1c5e2f34efd2e01")
+  })
+
+  it("reproSliceContent() (no vehicle) equals REPRO_SLICE_CONTENT exactly", () => {
+    expect(reproSliceContent()).toBe(REPRO_SLICE_CONTENT)
+  })
+
+  it("GRIND_DESIGN_SLICE_CONTENT is untouched by P4 (no Python repro tokens to compile) — byte-identical (SHA-256 digest)", () => {
+    expect(GRIND_DESIGN_SLICE_CONTENT.length).toBe(852)
+    expect(sha256(GRIND_DESIGN_SLICE_CONTENT)).toBe("79abba93722c66a300ba1d117e9f8b87c9ee80c62aa4ba531b4772476da1e9cf")
+  })
+})
+
+// §4.6 token-size budget: a compiled seed must stay <= today's Python-only
+// size, and swapping ecosystems must not blow up prompt size (§5 cost law —
+// adding an ecosystem costs ~0 prompt tokens, not a growing catalog).
+describe("P4 token-size audit (§4.6 size budget)", () => {
+  it("the compiled python seed's length is <= today's snapshot length", () => {
+    expect(reproSliceContent().length).toBeLessThanOrEqual(6167)
+  })
+
+  it("a js-profile seed's length stays within +/-10% of the python one", () => {
+    const jsVehicle: ReproVehicle = { ext: "js", run: "node repro_issue.js" }
+    const pythonLen = reproSliceContent().length
+    const jsLen = reproSliceContent(jsVehicle).length
+    expect(jsLen).toBeGreaterThanOrEqual(pythonLen * 0.9)
+    expect(jsLen).toBeLessThanOrEqual(pythonLen * 1.1)
   })
 })

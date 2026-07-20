@@ -2,6 +2,35 @@
 import type { StuckSignal } from "../../../../code-intelligence/src/orchestration-fsm"
 import type { ReproDriftKind } from "../repro-drift"
 import type { FamilyConflictEvidence } from "../../tool/convention-divergence"
+import type { EcosystemProfile } from "../../code-intelligence/repo-profile"
+
+/**
+ * The profile-compiled repro vehicle (docs/design/agnostic-hands-eyes.md
+ * §4.6) — the repro filename extension + how to run it, resolved from
+ * `EcosystemProfile.repro`. Every repro-drift/converge nudge below fills its
+ * `repro_issue.<ext>`/run-command tokens from this instead of a hardcoded
+ * Python literal.
+ */
+export type ReproVehicle = EcosystemProfile["repro"]
+
+/** Fail-soft default — byte-identical to the pre-P4 hardcoded Python prose. */
+export const PYTHON_REPRO_VEHICLE: ReproVehicle = { ext: "py", run: "python repro_issue.py" }
+
+/**
+ * Fills a repro-prose template's Python-shaped tokens (`python repro_issue.py`,
+ * bare `repro_issue.py`, `python -c`) with the given vehicle's — a no-op for
+ * `PYTHON_REPRO_VEHICLE`, which is why every default-arg call below stays
+ * byte-identical to the pre-P4 text. Longest-token-first so a `repro_issue.py`
+ * inside an already-substituted `<run> repro_issue.py` phrase isn't
+ * double-replaced.
+ */
+export function compileReproVehicle(text: string, vehicle: ReproVehicle): string {
+  const interpreter = vehicle.run.split(" ")[0] ?? vehicle.run
+  return text
+    .replaceAll("python repro_issue.py", vehicle.run)
+    .replaceAll("repro_issue.py", `repro_issue.${vehicle.ext}`)
+    .replaceAll("python -c", `${interpreter} -c`)
+}
 
 /**
  * The rethink message injected when the supervisor flags a stuck loop. As a
@@ -109,16 +138,34 @@ export const ENVIRONMENT_SLOW_NUDGE =
  * than restating the seed's full instructions. The 4th kind,
  * `pinned-repro-deleted`, fires AFTER a pin lands (not during the pre-pass)
  * and takes an optional `context` naming the deleted file and the pinned
- * command the done-gate re-runs; the other three kinds ignore it.
+ * command the done-gate re-runs; the other three kinds ignore it. `vehicle`
+ * (default `PYTHON_REPRO_VEHICLE`) profile-compiles the first three kinds'
+ * repro-filename/run-command tokens; `pinned-repro-deleted` already names the
+ * concrete file/command via `context` and ignores it.
+ *
+ * @sem domain=prompting role=repro-nudge
  */
-export function reproDriftNudgeText(kind: ReproDriftKind, context?: { file: string; probeCommand: string }): string {
+export function reproDriftNudgeText(
+  kind: ReproDriftKind,
+  context?: { file: string; probeCommand: string },
+  vehicle: ReproVehicle = PYTHON_REPRO_VEHICLE,
+): string {
   switch (kind) {
     case "inline-repro":
-      return "You ran an inline `python -c`/heredoc command carrying an assertion instead of a file. An inline command cannot be pinned as this turn's verification contract — the turn-end gate has nothing to re-run. Write that exact assertion into a file named `repro_issue.py` at the repo root and run `python repro_issue.py` as its own single command."
+      return compileReproVehicle(
+        "You ran an inline `python -c`/heredoc command carrying an assertion instead of a file. An inline command cannot be pinned as this turn's verification contract — the turn-end gate has nothing to re-run. Write that exact assertion into a file named `repro_issue.py` at the repo root and run `python repro_issue.py` as its own single command.",
+        vehicle,
+      )
     case "suite-edit-denied":
-      return "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root (never inside the tests/ tree), importing ONLY from the installed package (never from a tests.* module — define minimal stand-in classes inline if you need one), asserting the issue's expected behavior and run it standalone as `python repro_issue.py`."
+      return compileReproVehicle(
+        "Your edit to the existing test suite was denied by the no-test-edit gate. Modifying the committed suite cannot substitute for a reproduction — creating NEW scratch files is allowed, changing the oracle is not. Write a NEW file, `repro_issue.py` at the repo root (never inside the tests/ tree), importing ONLY from the installed package (never from a tests.* module — define minimal stand-in classes inline if you need one), asserting the issue's expected behavior and run it standalone as `python repro_issue.py`.",
+        vehicle,
+      )
     case "unpinnable-red":
-      return "Your failing command was a whole-suite run or a multi-line/batched script. Neither can be pinned as this turn's reproduction — the gate needs one single, targeted command to re-run. Isolate the same failure into a single-command file, `repro_issue.py` at the repo root, and run it alone as `python repro_issue.py`."
+      return compileReproVehicle(
+        "Your failing command was a whole-suite run or a multi-line/batched script. Neither can be pinned as this turn's reproduction — the gate needs one single, targeted command to re-run. Isolate the same failure into a single-command file, `repro_issue.py` at the repo root, and run it alone as `python repro_issue.py`.",
+        vehicle,
+      )
     case "pinned-repro-deleted":
       return `You deleted \`${context?.file ?? "the pinned repro file"}\`, but it is this turn's pinned verification contract — the done-gate re-runs \`${context?.probeCommand ?? "the pinned command"}\` and a missing file counts as RED. Recreate the file exactly as it was and leave it in place until the turn ends; it is untracked and never enters the patch.`
   }
@@ -128,11 +175,19 @@ export function reproDriftNudgeText(kind: ReproDriftKind, context?: { file: stri
  * Tier-2 repro-drift escalation — fires once per turn when total drift
  * events reach the threshold with still no pin, restating the contract as
  * one stronger combined reminder instead of another per-kind nudge.
+ * Profile-compiled (`vehicle`, default `PYTHON_REPRO_VEHICLE`) like
+ * `reproDriftNudgeText`.
+ *
+ * @sem domain=prompting role=repro-nudge
  */
-export const REPRO_DRIFT_ESCALATION_NUDGE =
-  "You have drifted from the repro contract three times without pinning a reproduction — inline commands, a denied suite edit, or an unpinnable run, never a file. " +
-  "Write the exact assertion into `repro_issue.py` at the repo root and run it ALONE as `python repro_issue.py`, confirming it is RED before any fix. " +
-  "This is the last reminder on this turn."
+export function reproDriftEscalationNudgeText(vehicle: ReproVehicle = PYTHON_REPRO_VEHICLE): string {
+  return compileReproVehicle(
+    "You have drifted from the repro contract three times without pinning a reproduction — inline commands, a denied suite edit, or an unpinnable run, never a file. " +
+      "Write the exact assertion into `repro_issue.py` at the repo root and run it ALONE as `python repro_issue.py`, confirming it is RED before any fix. " +
+      "This is the last reminder on this turn.",
+    vehicle,
+  )
+}
 
 /**
  * S8 — converge-now nudge: prompt.ts's SM4 block injects this when a
@@ -141,10 +196,16 @@ export const REPRO_DRIFT_ESCALATION_NUDGE =
  * never converges (django-11790 strict run #3: 38 more minutes of tool calls
  * after a rejected finish, no second finish attempt). Names both concrete
  * exits — a single-file repro run, or an honest finish — rather than another
- * open-ended "keep verifying."
+ * open-ended "keep verifying." Profile-compiled (`vehicle`, default
+ * `PYTHON_REPRO_VEHICLE`) like `reproDriftNudgeText`.
+ *
+ * @sem domain=prompting role=repro-nudge
  */
-export function convergeNowNudgeText(steps: number): string {
-  return `Your source fix landed ${steps} steps ago and no reproduction has been pinned — continued broad verification is not converging. Do ONE of these now: (a) make a single-file repro run — \`repro_issue.py\` at the repo ROOT, one command, \`python repro_issue.py\` — confirming your fix (it must fail on the pre-fix code for the issue's reason); or (b) FINISH: give your final answer now, stating plainly what you verified and what you could not. Do not start any new investigation.`
+export function convergeNowNudgeText(steps: number, vehicle: ReproVehicle = PYTHON_REPRO_VEHICLE): string {
+  return compileReproVehicle(
+    `Your source fix landed ${steps} steps ago and no reproduction has been pinned — continued broad verification is not converging. Do ONE of these now: (a) make a single-file repro run — \`repro_issue.py\` at the repo ROOT, one command, \`python repro_issue.py\` — confirming your fix (it must fail on the pre-fix code for the issue's reason); or (b) FINISH: give your final answer now, stating plainly what you verified and what you could not. Do not start any new investigation.`,
+    vehicle,
+  )
 }
 
 /**

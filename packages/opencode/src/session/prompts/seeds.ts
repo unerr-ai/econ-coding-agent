@@ -1,5 +1,6 @@
 // Content strings of the engine-planted seed slices (the todo objects that
 // carry them stay in slice-orchestrator.ts).
+import { PYTHON_REPRO_VEHICLE, compileReproVehicle, type ReproVehicle } from "./nudges"
 
 /**
  * Content of the diagnosis pre-pass — a single WRITER slice that
@@ -43,10 +44,31 @@ export const PLAN_SLICE_CONTENT =
  * observes the red run itself via the existing probe-from-red pin — a
  * dispatched child's red would be invisible to the root. DELIBERATELY
  * distinct from the seeds above so dedup-by-content keeps each kind
- * plantable alongside the others.
+ * plantable alongside the others. Profile-compiled via `reproSliceContent`
+ * (docs/design/agnostic-hands-eyes.md §4.6) — this exported constant is the
+ * `PYTHON_REPRO_VEHICLE` fill, kept as a plain string (not a function) so
+ * every existing identity comparison (`t.content === REPRO_SLICE_CONTENT`)
+ * and `REPRO_PREPASS_TODO` keep working unchanged.
+ *
+ * @sem domain=prompting role=repro-seed
  */
-export const REPRO_SLICE_CONTENT =
+const REPRO_SLICE_TEXT =
   "Manufacture the evidence BEFORE any fix: this turn diagnoses a bug, and a described fix with no red repro proves nothing. (1) Prefer a targeted EXISTING test the issue names — run it as-is. If none is named, WRITE A FILE named `repro_issue.py` at the repo root (or the language-appropriate `repro_issue.*`) from the issue text, asserting the EXPECTED behavior so it exits non-zero on the current (unpatched) code and 0 once fixed — never an inline `python -c`/heredoc one-liner (an inline command cannot be pinned as the turn's verification contract; the file can), and run it as its OWN single command (`python repro_issue.py`), not buried inside a batched probe script. (2) Assert on the API-LEVEL values the issue names — the actual attribute/return/field values compared with `==` against the exact expected values derived from the code (e.g. the model field's real max_length), NOT on rendered/serialized output, which hides type differences like '255' vs 255 that graders check. Match the types the surrounding code uses. (3) RUN it and confirm it fails FOR THE ISSUE'S REASON — not an import error, a missing fixture, or an unrelated setup failure; a repro that is green on unpatched code proves nothing (fix the repro, not the code, until it genuinely reproduces). Keep it MINIMAL: the issue's own claim only, no extra edge-case inventions stricter than the issue. (4) Never `git add` the repro script — it is scratch evidence, not part of the patch — and never DELETE it either: leave it in place until the turn ends, since the done-gate re-runs it and it stays untracked, so it never enters the patch. (5) Run it BARE — exactly `python repro_issue.py`, never `| tail`, never `; echo \"exit=$?\"`, never wrapped in `git stash` — the harness reads the command's own exit code as the red/green contract. (6) If the issue names more than one wrong output/symptom — or the issue-derived expectation extractor surfaced more than one expected value — assert EVERY one of them in the SAME `repro_issue.py`, as ONE execution (never split witnesses across multiple scripts/runs): wrap each in its own try/except and print one line per witness, `witness[0]: PASS` or `witness[0]: FAIL: <reason>` (0-indexed), before re-raising the first failure — so the run's own output shows N/N passing, never a silently narrowed subset. If, after at most 2 distinct approaches, you genuinely cannot get a repro to fail for the right reason, STOP: mark this item cancelled with a one-line reason and proceed to the fix with explicit caution — do not keep burning budget on the repro alone. (7) When the issue text quotes an exact expression (e.g. `str(self.my_str_value)`), assert THAT EXACT expression called on the exact object it names, not a downstream/derived effect of it (e.g. re-reading a model field elsewhere) standing in as a proxy for it. (8) If the issue's behavior depends on the ambient environment (current date/time, timezone, locale, randomness, hostname), control that input inside the repro — mock or patch it through the module under test's own imports — so the assertion fails deterministically on the unpatched code today. When the RULE the issue states references the current time/date, patch the module-under-test's OWN clock import inside the repro — the way graders do (e.g. mock the module's `datetime`) — and assert the issue's stated boundary under that patched clock; a fix that reads the clock through any other import then stays red in-loop, exposing the bypass before finish. (9) Assert the most direct expression of the wrong behavior the issue names (the exact method, attribute, or return value), using typed equality against the value's natural source (e.g. == field.max_length, not == '254') — never presence, substring, or printed-output checks that a symptom-layer patch could satisfy. When the wrong behavior is a value mirrored into another structure (an attrs dict, headers, serialized params), assert THAT mirrored entry with the same typed equality (e.g. widget.attrs.get('maxlength') == field.max_length) — never the rendered output: string rendering erases exactly the int-vs-'254' difference the grader checks. Prefer %r/repr-shaped formatting expectations exactly as the issue states them — never normalize quote style in expected strings. (10) When the issue states a numeric threshold (\"more than X\", \"at least X\", \"up to X\"), assert AT the exact boundary and on BOTH sides of it — translate more-than vs at-least precisely, and control the clock/environment (e.g. mock the current time) when the boundary depends on it. (11) When the issue states the defect as the construct's GENERAL behavior but demonstrates it through one SPECIAL input class (a translated/lazy value, a subclass, a wrapped object, a value with special characters), assert the SAME contract on a minimal PLAIN sibling input too (one extra assert) — a patch that special-cases only the demonstrated class then stays red on the sibling, exposing the narrowing in-loop. Skip this when the issue's own words scope the defect to the special class alone. (12) When the fix touches one half of a read/write, parse/serialize, load/dump, escape/unescape, or format/parse pair whose OTHER half lives beside it in the same file/class, assert the ROUNDTRIP too (parse -> write -> parse == original) as an additional witness — a fix that only touches one half can look complete while silently breaking the other (astropy-14365 parse-only, 14598 inverted unescape, 14182 param-never-threaded). Template (adapt — keeps the red→green contract: assert the EXPECTED, post-fix behavior, so this exits non-zero via AssertionError on the current buggy code and 0 once fixed): a file `repro_issue.py` at the repo ROOT (never inside tests/), importing ONLY from the installed package (never from tests.* or a test module — define minimal stand-in classes inline instead) —\n```python\n# run with: python repro_issue.py\n# ...minimal setup reproducing the issue scenario...\nactual = <the API-level value the issue is about>\nexpected = <the exact expected value from the issue>\nassert actual == expected, f'BUG: {actual!r} != {expected!r}'\nprint('OK')\n```\nthen run `python repro_issue.py`."
+
+/**
+ * Profile-compiled repro-seed content (docs/design/agnostic-hands-eyes.md
+ * §4.6/§5) — fills `REPRO_SLICE_TEXT`'s Python-shaped tokens
+ * (`repro_issue.py`, `python repro_issue.py`, `python -c`) from `vehicle`;
+ * the default (`PYTHON_REPRO_VEHICLE`) reproduces `REPRO_SLICE_CONTENT`
+ * byte-for-byte. Names exactly one ecosystem per call — never a catalog.
+ *
+ * @sem domain=prompting role=repro-seed
+ */
+export function reproSliceContent(vehicle: ReproVehicle = PYTHON_REPRO_VEHICLE): string {
+  return compileReproVehicle(REPRO_SLICE_TEXT, vehicle)
+}
+
+export const REPRO_SLICE_CONTENT = reproSliceContent()
 
 /**
  * L4.2 — content of the design pre-pass the GRIND VALVE (turn-supervisor.ts

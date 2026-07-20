@@ -800,6 +800,25 @@ const REPRO_DIR_RE = /(?:^|\/)_?(?:repro|reproduce)(?:_[\w.-]*)?\//i
 // canonicalScriptProbeCommand.
 const REPRO_SCRIPT_UNDERSCORE_RE = /(?:^|[\s/])_(?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb)\b/i
 
+// P4 (agnostic-hands-eyes.md §4.6) — the hardcoded extension set above,
+// available for union with the active RepoProfile's `repro.ext` so a repro
+// script in an ecosystem outside {py,js,ts,mjs,sh,rb} (e.g. `.go`, `.rs`)
+// still counts as scratch evidence, not a landed source fix. Omitted/already-
+// covered `extraExt` returns the exact base regex — zero behavior change.
+const REPRO_SCRIPT_BASE_EXTENSIONS = ["py", "js", "ts", "mjs", "sh", "rb"] as const
+
+function reproScriptExtRe(extraExt?: string): RegExp {
+  if (!extraExt || (REPRO_SCRIPT_BASE_EXTENSIONS as readonly string[]).includes(extraExt)) return REPRO_SCRIPT_RE
+  const exts = `${REPRO_SCRIPT_BASE_EXTENSIONS.join("|")}|${extraExt}`
+  return new RegExp(`(?:^|[\\s/])((?:repro|reproduce)[\\w.-]*\\.(?:${exts}))\\b`, "i")
+}
+
+function reproScriptUnderscoreExtRe(extraExt?: string): RegExp {
+  if (!extraExt || (REPRO_SCRIPT_BASE_EXTENSIONS as readonly string[]).includes(extraExt)) return REPRO_SCRIPT_UNDERSCORE_RE
+  const exts = `${REPRO_SCRIPT_BASE_EXTENSIONS.join("|")}|${extraExt}`
+  return new RegExp(`(?:^|[\\s/])_(?:repro|reproduce)[\\w.-]*\\.(?:${exts})\\b`, "i")
+}
+
 /**
  * Whether a file path is an agent-authored scratch reproduction artifact
  * rather than product source — a repro-named FILE (REPRO_SCRIPT_RE, or its
@@ -807,12 +826,19 @@ const REPRO_SCRIPT_UNDERSCORE_RE = /(?:^|[\s/])_(?:repro|reproduce)[\w.-]*\.(?:p
  * repro-named DIRECTORY segment (REPRO_DIR_RE, e.g. a scaffolded
  * `_repro_app/models.py`). Writing one must not count as "a source fix
  * landed" anywhere done-time evidence is weighed (S3's zero-source-edit bar,
- * S8's converge-now counter), or a repro-only turn looks fixed.
+ * S8's converge-now counter), or a repro-only turn looks fixed. `extraExt`
+ * (the active RepoProfile's `repro.ext`, when set) unions into the FILE
+ * regexes so a non-Python-default repro vehicle still matches; omitted or
+ * already-covered extensions are a no-op.
  *
  * @sem domain=routing role=repro-specificity
  */
-export function isReproScratchPath(filePath: string): boolean {
-  return REPRO_SCRIPT_RE.test(filePath) || REPRO_DIR_RE.test(filePath) || REPRO_SCRIPT_UNDERSCORE_RE.test(filePath)
+export function isReproScratchPath(filePath: string, extraExt?: string): boolean {
+  return (
+    reproScriptExtRe(extraExt).test(filePath) ||
+    REPRO_DIR_RE.test(filePath) ||
+    reproScriptUnderscoreExtRe(extraExt).test(filePath)
+  )
 }
 
 /**

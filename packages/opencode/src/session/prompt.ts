@@ -68,9 +68,10 @@ import {
   LENGTH_CONTINUATION_NUDGE,
   ENVIRONMENT_SLOW_NUDGE,
   reproDriftNudgeText,
-  REPRO_DRIFT_ESCALATION_NUDGE,
+  reproDriftEscalationNudgeText,
   convergeNowNudgeText,
   pinGreenFinishNudgeText,
+  PYTHON_REPRO_VEHICLE,
   reproFidelityNudgeText,
   toothlessReproNudgeText,
   seenRedUnresolvedNudgeText,
@@ -89,6 +90,7 @@ import {
   deliverableFinishGateNudgeText,
 } from "./prompts/nudges"
 import { classifyReproDrift, extractScriptFilename, extractScriptPath, type ReproDriftKind } from "./repro-drift"
+import { getRepoProfileSync } from "../code-intelligence/repo-profile"
 import {
   findUnresolvedSeenRed,
   partitionSeenRedByInversion,
@@ -2725,6 +2727,13 @@ export const layer = Layer.effect(
               }
             }
 
+            // P4 (agnostic-hands-eyes.md §4.6) — the profile-compiled repro
+            // vehicle every repro-drift/converge nudge below fills its
+            // `repro_issue.<ext>`/run-command tokens from; falls back to the
+            // python fill (byte-identical to the pre-P4 hardcoded prose) when
+            // the profile can't resolve one (empty/unknown, fail-soft).
+            const reproVehicle = getRepoProfileSync(ctx.directory).ecosystems[0]?.repro ?? PYTHON_REPRO_VEHICLE
+
             // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
             // once-per-kind steer. Deliberately OUTSIDE the reproHandoffDone
             // gate above, re-armed on !turnPinnedProbe instead: django-11790
@@ -2770,7 +2779,7 @@ export const layer = Layer.effect(
                     messageID: escalationNudge.id,
                     sessionID,
                     type: "text",
-                    text: REPRO_DRIFT_ESCALATION_NUDGE,
+                    text: reproDriftEscalationNudgeText(reproVehicle),
                     synthetic: true,
                   } satisfies SessionV1.TextPart)
                   continue
@@ -2798,7 +2807,7 @@ export const layer = Layer.effect(
                     messageID: driftNudge.id,
                     sessionID,
                     type: "text",
-                    text: reproDriftNudgeText(freshKind),
+                    text: reproDriftNudgeText(freshKind, undefined, reproVehicle),
                     synthetic: true,
                   } satisfies SessionV1.TextPart)
                   continue
@@ -3010,10 +3019,14 @@ export const layer = Layer.effect(
                   messageID: deletionNudge.id,
                   sessionID,
                   type: "text",
-                  text: reproDriftNudgeText("pinned-repro-deleted", {
-                    file: pinnedScriptFilename,
-                    probeCommand: turnPinnedProbe.probe.command,
-                  }),
+                  text: reproDriftNudgeText(
+                    "pinned-repro-deleted",
+                    {
+                      file: pinnedScriptFilename,
+                      probeCommand: turnPinnedProbe.probe.command,
+                    },
+                    reproVehicle,
+                  ),
                   synthetic: true,
                 } satisfies SessionV1.TextPart)
                 continue
@@ -3057,7 +3070,7 @@ export const layer = Layer.effect(
                   messageID: convergeNudge.id,
                   sessionID,
                   type: "text",
-                  text: convergeNowNudgeText(postFixNoPinSteps),
+                  text: convergeNowNudgeText(postFixNoPinSteps, reproVehicle),
                   synthetic: true,
                 } satisfies SessionV1.TextPart)
                 continue
