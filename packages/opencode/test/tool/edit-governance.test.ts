@@ -539,8 +539,10 @@ import {
   inheritHubEditTurnBounceState,
   hubEditRepeatBounceMessage,
   hubEditJudgeRedirectMessage,
+  couplingUnknownWarning,
   type HubFanInGraph,
   type HubEditJudgeVerdict,
+  type CouplingCoverageGraph,
 } from "../../src/tool/edit-governance"
 
 describe("Wave 5 — hub-edit gate store", () => {
@@ -1421,5 +1423,69 @@ describe("Wave 10 — memoizeHubEditDefiningSites", () => {
     ).resolves.toBeUndefined()
     expect(hubEditDefiningResolved("ses_hub_memo_d")).toBe(true)
     expect(hubEditDefiningFiles("ses_hub_memo_d")).toEqual(["a.py"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6 — couplingUnknownWarning
+// ---------------------------------------------------------------------------
+
+describe("P6 — couplingUnknownWarning", () => {
+  const unknownCouplingGraph: CouplingCoverageGraph = {
+    edgeCoverage: () => ({
+      // go-shaped: files >= 2, zero import edges extracted at all — no
+      // import extractor exists for go in ast-extractor.ts yet (P6 §7.1
+      // interim signal), not a low resolution ratio.
+      go: { files: 5, imports: 0, resolvedImports: 0, calls: 3 },
+      python: { files: 10, imports: 200, resolvedImports: 154, calls: 40 },
+      other: { files: 8, imports: 0, resolvedImports: 0, calls: 0 },
+    }),
+  }
+  const coldGraph: CouplingCoverageGraph = { edgeCoverage: () => ({}) }
+  const throwingGraph: CouplingCoverageGraph = {
+    edgeCoverage: () => {
+      throw new Error("graph unavailable")
+    },
+  }
+
+  it("fires for a go-shaped coverage row (files >= 2, zero imports extracted — no resolver exists) and names the language", () => {
+    const warning = couplingUnknownWarning("ses_coupling_a", "main.go", unknownCouplingGraph)
+    expect(warning).not.toBeNull()
+    expect(warning).toContain("ur|rsk")
+    expect(warning).toContain("go")
+  })
+
+  it("does not fire for a python file with well-resolved coverage", () => {
+    const warning = couplingUnknownWarning("ses_coupling_b", "app.py", unknownCouplingGraph)
+    expect(warning).toBeNull()
+  })
+
+  it("never fires for the `other` bucket even with files >= 2 and zero imports — markdown/config edits must stay silent", () => {
+    const warning = couplingUnknownWarning("ses_coupling_other", "README.md", unknownCouplingGraph)
+    expect(warning).toBeNull()
+  })
+
+  it("fires at most once per (session, file) per turn — a second edit to the same file stays silent", () => {
+    const first = couplingUnknownWarning("ses_coupling_c", "main.go", unknownCouplingGraph)
+    expect(first).not.toBeNull()
+    const second = couplingUnknownWarning("ses_coupling_c", "main.go", unknownCouplingGraph)
+    expect(second).toBeNull()
+  })
+
+  it("a different file in the same session still fires its own warning", () => {
+    const a = couplingUnknownWarning("ses_coupling_d", "main.go", unknownCouplingGraph)
+    const b = couplingUnknownWarning("ses_coupling_d", "other.go", unknownCouplingGraph)
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+  })
+
+  it("a cold/unindexed graph (no language buckets at all) fails open — no warning, even for a go file", () => {
+    const warning = couplingUnknownWarning("ses_coupling_e", "main.go", coldGraph)
+    expect(warning).toBeNull()
+  })
+
+  it("defensive: a throwing graph fails open, never throws", () => {
+    expect(() => couplingUnknownWarning("ses_coupling_f", "main.go", throwingGraph)).not.toThrow()
+    expect(couplingUnknownWarning("ses_coupling_f", "main.go", throwingGraph)).toBeNull()
   })
 })

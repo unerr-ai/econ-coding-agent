@@ -223,6 +223,57 @@ function matchesGlob(pattern: string, filePath: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Edge coverage — per-language import-resolution measurement (P6, see
+// docs/design/agnostic-hands-eyes.md §7.1). Import resolution only exists for
+// Python and relative JS/TS; Go/Java/Rust/C/C++ have no resolver rules, so
+// every import edge there is unresolved (to_file IS NULL) even though the
+// import statement itself was found. One extension map is the single source
+// for both the SQL CASE below (edgeCoverage groups files/edges in SQLite,
+// never loads rows into JS to classify them) and coverageLanguage's JS
+// mirror, which callers use to look up one file's own bucket — keep them in
+// sync by editing only this map.
+// ---------------------------------------------------------------------------
+
+const COVERAGE_LANGUAGE_BY_EXT: Record<string, string> = {
+  ".py": "python",
+  ".ts": "typescript",
+  ".tsx": "typescript",
+  ".js": "javascript",
+  ".jsx": "javascript",
+  ".mjs": "javascript",
+  ".cjs": "javascript",
+  ".go": "go",
+  ".rs": "rust",
+  ".java": "java",
+  ".rb": "ruby",
+  ".php": "php",
+  ".c": "c",
+  ".h": "c",
+  ".cc": "cpp",
+  ".cpp": "cpp",
+  ".hpp": "cpp",
+}
+
+/** Classify filePath into the same per-language bucket edgeCoverage() groups by (extension-only — unrecognized extensions bucket to "other", matching the SQL CASE). */
+export function coverageLanguage(filePath: string): string {
+  return COVERAGE_LANGUAGE_BY_EXT[extname(filePath).toLowerCase()] ?? "other"
+}
+
+/** SQL CASE expression classifying `column` (a file-path column) into edgeCoverage()'s language buckets, generated from COVERAGE_LANGUAGE_BY_EXT so the SQL and the JS mirror above never drift apart. */
+function languageCaseSql(column: string): string {
+  const whens = Object.entries(COVERAGE_LANGUAGE_BY_EXT)
+    .map(([ext, lang]) => `WHEN ${column} LIKE '%${ext}' THEN '${lang}'`)
+    .join("\n    ")
+  return `CASE\n    ${whens}\n    ELSE 'other'\n  END`
+}
+
+/** Per-language edge-coverage row: file count alongside import/call edge totals and how many imports actually resolved. */
+export type EdgeCoverage = Record<
+  string,
+  { files: number; imports: number; resolvedImports: number; calls: number }
+>
+
+// ---------------------------------------------------------------------------
 // BunSqliteGraph
 // ---------------------------------------------------------------------------
 
@@ -450,6 +501,46 @@ export class BunSqliteGraph implements CodeIntelligence {
     const count = (table: string) =>
       (this.db.prepare(`SELECT COUNT(*) as n FROM ${table}`).get() as { n: number } | null)?.n ?? 0
     return { files: count("files"), entities: count("entities"), edges: count("edges") }
+  }
+
+  /**
+   * Per-language edge-coverage measurement (P6, docs/design/agnostic-hands-eyes.md
+   * §7.1): for each language bucket present in the graph, the file count plus
+   * import/call edge totals and how many imports actually resolved
+   * (edge_kind='import' AND to_file IS NOT NULL). Entirely SQL-aggregated —
+   * never loads edge or file rows into JS to classify them — so it stays
+   * cheap on a large repo. A language with zero files and zero edges is
+   * simply absent from the result, not zero-padded.
+   *
+   * @sem domain=intelligence role=analysis
+   */
+  edgeCoverage(): EdgeCoverage {
+    const fileRows = this.db
+      .prepare(`SELECT ${languageCaseSql("path")} as lang, COUNT(*) as n FROM files GROUP BY lang`)
+      .all() as { lang: string; n: number }[]
+
+    const edgeRows = this.db
+      .prepare(
+        `SELECT ${languageCaseSql("from_file")} as lang,
+                SUM(CASE WHEN edge_kind = 'import' THEN 1 ELSE 0 END) as imports,
+                SUM(CASE WHEN edge_kind = 'import' AND to_file IS NOT NULL THEN 1 ELSE 0 END) as resolvedImports,
+                SUM(CASE WHEN edge_kind = 'call' THEN 1 ELSE 0 END) as calls
+         FROM edges GROUP BY lang`,
+      )
+      .all() as { lang: string; imports: number; resolvedImports: number; calls: number }[]
+
+    const coverage: EdgeCoverage = {}
+    for (const row of fileRows) {
+      coverage[row.lang] = { files: row.n, imports: 0, resolvedImports: 0, calls: 0 }
+    }
+    for (const row of edgeRows) {
+      const entry = coverage[row.lang] ?? { files: 0, imports: 0, resolvedImports: 0, calls: 0 }
+      entry.imports = row.imports ?? 0
+      entry.resolvedImports = row.resolvedImports ?? 0
+      entry.calls = row.calls ?? 0
+      coverage[row.lang] = entry
+    }
+    return coverage
   }
 
   // -------------------------------------------------------------------------

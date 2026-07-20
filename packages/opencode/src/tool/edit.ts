@@ -21,6 +21,7 @@ import * as Bom from "@/util/bom"
 import {
   callersAtRiskWarning,
   breakingChangeWarning,
+  couplingUnknownWarning,
   isTestFilePath,
   testEditGateArmed,
   testEditDenialMessage,
@@ -464,6 +465,21 @@ export const EditTool = Tool.define(
             breakingChangeWarning(filePath, contentOld, contentNew),
           )
           if (breakingChange) output += `\n\n${breakingChange}`
+
+          // P6: coupling=unknown surface — filePath's language has no import
+          // resolver, so a zero fan-in/hub score above is not evidence this
+          // edit is safe. Non-blocking, at most once per (session, file).
+          const couplingUnknown = couplingUnknownWarning(ctx.sessionID, filePath)
+          if (couplingUnknown) {
+            output += `\n\n${couplingUnknown}`
+            yield* publishSignalFx({
+              name: "coupling_unknown",
+              sessionID: ctx.sessionID,
+              severity: "info",
+              decision: "surface",
+              evidence: { file: path.relative(instance.worktree, filePath) },
+            })
+          }
 
           return {
             metadata: {

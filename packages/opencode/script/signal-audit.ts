@@ -73,6 +73,7 @@ const SIGNAL_NAMES: string[] = [
   "interpreter_mismatch",
   "interpreter_harvested",
   "gate_block",
+  "coupling_unknown",
   "deferral_armed",
   "deferral_dispatched",
   "surface_asked",

@@ -82,6 +82,15 @@ export interface RiskResult {
   score: number
   /** Raw factor values (un-normalized). */
   factors: RiskFactors
+  /**
+   * Whether fanIn/blastRadius/centrality above reflect real edge resolution
+   * for the entity's language, or read low by construction because no
+   * import resolver exists for it yet (P6, §7.1) — "unknown" is a coupling-
+   * blind route, never a risk-free one. "measured" when the caller passed no
+   * coverage data at all (today's only wired path: Python/TS via
+   * computeTurnRisk/riskScore), so existing behavior is unchanged.
+   */
+  coverage: "measured" | "unknown"
 }
 
 /** Per-entity risk result with its entity reference. */
@@ -137,6 +146,44 @@ function dedupeCallerRefs(refs: Reference[]): Reference[] {
   return out
 }
 
+/**
+ * Coupling floor (P6, §7.1): below this resolved-import ratio, treat a
+ * language's coupling data as unmeasured rather than genuinely low-risk. Set
+ * at 0.10 because it exactly separates the two populations we've measured —
+ * a zero-resolver language (Go/Java/Rust/C/C++) always lands at 0% resolved,
+ * while Python (~77%) and TypeScript (~84%) sit far above it, so no real
+ * resolver can cross this floor and misfire.
+ */
+const COVERAGE_CONFIDENCE_FLOOR = 0.1
+
+/**
+ * Whether coverage counts for one language are trustworthy enough to read
+ * computeRisk's fan-in/blast-radius factors as meaningful, or whether they
+ * read zero purely because that language has no import resolver yet.
+ * "unknown" when: coverage is missing entirely (nothing measured for this
+ * language); the language has ≥2 indexed files but extracted zero import
+ * edges at all (the go/java/rust/c/cpp extraction gap, P6 §7.1 — a single
+ * file is too thin to tell "no resolver" from "this file genuinely imports
+ * nothing", so it stays "measured"); or its resolved-import ratio is below
+ * COVERAGE_CONFIDENCE_FLOOR. "measured" otherwise. INTERIM: the zero-imports
+ * branch only exists to cover languages ast-extractor's extractEdges has no
+ * import extractor for yet — once wave G's G1a adds generic import
+ * extraction those languages produce imports > 0 and the ratio rule alone
+ * covers them; G5 then retires this branch.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export function couplingConfidence(
+  coverage: { files: number; imports: number; resolvedImports: number } | undefined
+): "measured" | "unknown" {
+  if (!coverage) return "unknown"
+  if (coverage.files >= 2 && coverage.imports === 0) return "unknown"
+  if (coverage.imports > 0 && coverage.resolvedImports / coverage.imports < COVERAGE_CONFIDENCE_FLOOR) {
+    return "unknown"
+  }
+  return "measured"
+}
+
 // ---------------------------------------------------------------------------
 // Core scorer
 // ---------------------------------------------------------------------------
@@ -151,12 +198,16 @@ function dedupeCallerRefs(refs: Reference[]): Reference[] {
  *   cx 10%  — body line count (surface area for mistakes)
  *
  * Each factor is normalized to [0, 1] against its ceiling before weighting.
+ * An optional `coverage` argument (the entity's language's import counts)
+ * tags the result via couplingConfidence; omitting it defaults the result to
+ * "measured" so callers that don't pass coverage data see unchanged behavior.
  *
  * @sem domain=intelligence role=analysis
  */
 export async function computeRisk(
   graph: RiskGraph,
-  target: Entity
+  target: Entity,
+  coverage?: { files: number; imports: number; resolvedImports: number }
 ): Promise<RiskResult> {
   // Direct callers (fan-in) — pass the full key so BunSqliteGraph scopes
   // the query to this entity's own file (two same-named entities in
@@ -192,6 +243,7 @@ export async function computeRisk(
   return {
     score,
     factors: { blastRadius, fanIn, centrality, cx },
+    coverage: coverage === undefined ? "measured" : couplingConfidence(coverage),
   }
 }
 

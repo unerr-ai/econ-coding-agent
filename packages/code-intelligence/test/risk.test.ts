@@ -6,7 +6,7 @@
 import { describe, it, expect } from "bun:test"
 import type { Entity, Reference } from "../src/index.js"
 import type { RiskGraph } from "../src/risk.js"
-import { computeRisk, computeTurnRisk } from "../src/risk.js"
+import { computeRisk, computeTurnRisk, couplingConfidence } from "../src/risk.js"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -236,5 +236,75 @@ describe("computeTurnRisk", () => {
     const result = await computeTurnRisk(mockGraph, [leaf])
     expect(result!.topEntity.name).toBe("leaf")
     expect(result!.perEntity).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P6 — couplingConfidence + computeRisk's coverage field
+// ---------------------------------------------------------------------------
+
+describe("couplingConfidence — boundaries", () => {
+  it("coverage missing entirely → unknown", () => {
+    expect(couplingConfidence(undefined)).toBe("unknown")
+  })
+
+  it("zero imports extracted, files >= 2 → unknown (the go/java/rust/c/cpp extraction gap — P6's interim signal)", () => {
+    expect(couplingConfidence({ files: 2, imports: 0, resolvedImports: 0 })).toBe("unknown")
+  })
+
+  it("zero imports extracted, files === 1 → measured (too thin to tell 'no resolver' from 'genuinely no imports')", () => {
+    expect(couplingConfidence({ files: 1, imports: 0, resolvedImports: 0 })).toBe("measured")
+  })
+
+  it("0 resolved out of a nonzero import count → unknown", () => {
+    expect(couplingConfidence({ files: 5, imports: 10, resolvedImports: 0 })).toBe("unknown")
+  })
+
+  it("9% resolved → unknown (below the 0.10 floor)", () => {
+    expect(couplingConfidence({ files: 20, imports: 100, resolvedImports: 9 })).toBe("unknown")
+  })
+
+  it("a 5% ratio → unknown", () => {
+    expect(couplingConfidence({ files: 10, imports: 100, resolvedImports: 5 })).toBe("unknown")
+  })
+
+  it("10% resolved → measured (at the floor, not below it)", () => {
+    expect(couplingConfidence({ files: 20, imports: 100, resolvedImports: 10 })).toBe("measured")
+  })
+
+  it("python-shaped coverage at 80% resolved → measured", () => {
+    expect(couplingConfidence({ files: 3036, imports: 5000, resolvedImports: 4000 })).toBe("measured")
+  })
+
+  it("typescript-shaped coverage at 37% resolved → measured", () => {
+    expect(couplingConfidence({ files: 12, imports: 100, resolvedImports: 37 })).toBe("measured")
+  })
+
+  it("85% resolved → measured", () => {
+    expect(couplingConfidence({ files: 20, imports: 100, resolvedImports: 85 })).toBe("measured")
+  })
+})
+
+describe("computeRisk — coverage field", () => {
+  it("defaults to measured when the caller passes no coverage argument (today's Python/TS paths, unchanged behavior)", async () => {
+    const result = await computeRisk(mockGraph, leaf)
+    expect(result.coverage).toBe("measured")
+  })
+
+  it("reports unknown when given zero-resolution coverage for the entity's language", async () => {
+    const result = await computeRisk(mockGraph, leaf, { files: 5, imports: 20, resolvedImports: 0 })
+    expect(result.coverage).toBe("unknown")
+  })
+
+  it("reports measured when given well-resolved coverage", async () => {
+    const result = await computeRisk(mockGraph, leaf, { files: 5, imports: 20, resolvedImports: 17 })
+    expect(result.coverage).toBe("measured")
+  })
+
+  it("score/factors are unaffected by the coverage argument — same inputs, same score either way", async () => {
+    const withoutCoverage = await computeRisk(mockGraph, central)
+    const withUnknownCoverage = await computeRisk(mockGraph, central, { files: 5, imports: 5, resolvedImports: 0 })
+    expect(withUnknownCoverage.score).toBe(withoutCoverage.score)
+    expect(withUnknownCoverage.factors).toEqual(withoutCoverage.factors)
   })
 })

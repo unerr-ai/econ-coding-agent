@@ -1,8 +1,28 @@
 import { EOL } from "os"
 import path from "path"
 import { Effect } from "effect"
+import { couplingConfidence, type EdgeCoverage } from "@opencode-ai/code-intelligence"
 import { effectCmd } from "../effect-cmd"
 import { UI } from "../ui"
+
+/**
+ * Compact per-language coverage summary for the `opencode init` receipt —
+ * e.g. "python 77% (3036f) · javascript 84% (12f) · go unknown (204f)".
+ * A language shows its resolved-import percentage, or "unknown" when
+ * couplingConfidence reads it below the P6 floor (§7.1), or "n/a" when it
+ * has zero import statements to resolve. Sorted by file count, descending,
+ * so the repo's dominant languages lead the line.
+ */
+function formatCoverageLine(coverage: EdgeCoverage): string {
+  return Object.entries(coverage)
+    .sort(([, a], [, b]) => b.files - a.files)
+    .map(([lang, c]) => {
+      const label =
+        c.imports === 0 ? "n/a" : couplingConfidence(c) === "unknown" ? "unknown" : `${Math.round((c.resolvedImports / c.imports) * 100)}%`
+      return `${lang} ${label} (${c.files}f)`
+    })
+    .join(" · ")
+}
 
 /**
  * `opencode init` — build (or refresh) this repo's code-graph index up front so
@@ -41,10 +61,11 @@ export const InitCommand = effectCmd({
     const dir = args.directory ? path.resolve(String(args.directory)) : process.cwd()
 
     const started = Date.now()
-    const { root, dbPath, stats, reindexed } = yield* Effect.promise(() =>
+    const { root, dbPath, stats, reindexed, coverage } = yield* Effect.promise(() =>
       prepareGraphIndex(dir, { force: args.force }),
     )
     const elapsedMs = Date.now() - started
+    const coverageSummary = formatCoverageLine(coverage)
 
     // Purely additive to the graph step above — a profile derivation failure
     // (unreadable manifest, permission error) never blocks graph indexing.
@@ -70,6 +91,7 @@ export const InitCommand = effectCmd({
           reindexed,
           elapsedMs,
           repoProfile: profile,
+          coverage,
         }) + EOL,
       )
       return
@@ -85,6 +107,7 @@ export const InitCommand = effectCmd({
     w(`  Edges:    ${stats.edges}`)
     w(`  Time:     ${elapsedMs}ms`)
     w(`  Profile:  ${profileSummary}`)
+    if (coverageSummary) w(`  Coverage: ${coverageSummary}`)
     w("")
     w(`${S.TEXT_DIM}[opencode] Graph persisted to ${dbPath} — the agent warm-starts off it next run.${S.TEXT_NORMAL}`)
   }),

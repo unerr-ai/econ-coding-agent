@@ -13,7 +13,7 @@
 
 // Z1 — resolved via tsconfig paths alias (no bun install needed during dev;
 // add "workspace:*" dep to package.json before shipping)
-import { BunSqliteGraph, makeReconTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool, computeTurnRisk, type Entity, type VerifyCommand } from "@opencode-ai/code-intelligence"
+import { BunSqliteGraph, makeReconTool, makeGetReferencesTool, makeSearchCodeTool, makeFileOutlineTool, makeNoteSaveTool, computeTurnRisk, type Entity, type VerifyCommand, type EdgeCoverage } from "@opencode-ai/code-intelligence"
 
 import * as Tool from "./tool"
 import { Effect, Schema } from "effect"
@@ -199,6 +199,9 @@ export async function ensureGraphReady(startDir: string = process.cwd()): Promis
  * result rather than swallowing it. `force` wipes the db first so the rebuild
  * ignores the content-hash cache. `stats` is the whole-graph total; `reindexed`
  * is how many files were re-extracted this run (0 when the cache was fresh).
+ * `coverage` is the P6 per-language edge-coverage measurement (docs/design/
+ * agnostic-hands-eyes.md §7.1) so `opencode init` can report import-
+ * resolution parity per language without a second graph query.
  *
  * @sem domain=intelligence role=indexing
  */
@@ -210,6 +213,7 @@ export async function prepareGraphIndex(
   dbPath: string
   stats: { files: number; entities: number; edges: number }
   reindexed: number
+  coverage: EdgeCoverage
 }> {
   const root = canonicalRepoRoot(startDir)
   const dbPath = graphDbPath(root)
@@ -232,14 +236,20 @@ export async function prepareGraphIndex(
     entry = { graph, indexReady: indexReady.catch(() => {}) }
     _graphs.set(root, entry)
     const delta = await indexReady
-    return { root, dbPath, stats: graph.stats(), reindexed: delta.files }
+    return { root, dbPath, stats: graph.stats(), reindexed: delta.files, coverage: graph.edgeCoverage() }
   }
 
   // Root already has a live graph in this process — let any in-flight initial
   // index settle, then refresh (hash-skip makes the second pass cheap).
   await entry.indexReady
   const delta = await entry.graph.index(root)
-  return { root, dbPath, stats: entry.graph.stats(), reindexed: delta.files }
+  return {
+    root,
+    dbPath,
+    stats: entry.graph.stats(),
+    reindexed: delta.files,
+    coverage: entry.graph.edgeCoverage(),
+  }
 }
 
 /**

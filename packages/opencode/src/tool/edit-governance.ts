@@ -8,7 +8,10 @@
  * lands. Also owns the hub-edit bounce gate: a blocking (but one-time-
  * bounceable) deny for edits that land on a file-level import hub, steering
  * a fix toward the root-most layer instead of the hub every value flows
- * through.
+ * through. Also surfaces coupling=unknown (P6): a non-blocking, once-per-
+ * (session, file) warning when the edited file's language has no import
+ * resolver, so a zero fan-in/hub score there is never read as evidence of
+ * low risk.
  *
  * @sem domain=intelligence role=tools
  */
@@ -23,8 +26,11 @@ import {
   renderBreakingChangeWarning,
   extractEntities,
   detectLanguage,
+  coverageLanguage,
+  couplingConfidence,
   type EditImpactGraph,
   type BreakingChange,
+  type EdgeCoverage,
 } from "@opencode-ai/code-intelligence"
 import type { StuckSignal } from "../../../code-intelligence/src/orchestration-fsm"
 import { getGraph, issueSymbolDefinitionSitesIfReady } from "./graph-tools"
@@ -628,6 +634,74 @@ export function hubEditSecondDenialMessage(relPath: string, definingSites: reado
 /** Narrow graph surface the hub-edit gate needs — BunSqliteGraph satisfies it structurally; tests pass a synthetic fake (including one whose fileFanIn never resolves, to exercise the budget race). */
 export interface HubFanInGraph {
   fileFanIn(filePath: string): number | Promise<number>
+}
+
+// ---------------------------------------------------------------------------
+// P6 — coupling=unknown surface. computeRisk's fan-in/blast-radius factors
+// (and this same gate's own fileFanIn check above) read exactly 0 for a
+// language with no import resolver (Go/Java/Rust/C/C++, docs/design/
+// agnostic-hands-eyes.md §7.1) — indistinguishable from a genuinely safe
+// edit. Per the §2.7 no-advisory invariant this must surface, not just log:
+// a non-blocking, once-per-(session,file) inline `ur|rsk` line stating that
+// blast radius isn't measurable for this language, so breadth must be
+// verified directly. Never denies — the same fail-open shape as
+// callersAtRiskWarning/breakingChangeWarning above.
+// ---------------------------------------------------------------------------
+
+/** Narrow graph surface the coupling-unknown warning needs — BunSqliteGraph satisfies it structurally. */
+export interface CouplingCoverageGraph {
+  edgeCoverage(): EdgeCoverage
+}
+
+/** Per-session set of file paths already warned about unknown coupling this turn — fires at most once per file. */
+const couplingUnknownWarned = new Map<string, Set<string>>()
+
+/**
+ * Evaluate an in-flight edit for coupling=unknown — no import resolver
+ * exists for filePath's language, or (interim, P6 §7.1) the language has
+ * files but zero import edges extracted at all — and return an inline
+ * `ur|rsk`-style warning, or null when there's nothing to surface: this
+ * (session, file) pair already warned this turn, the graph is cold/unindexed
+ * (fail open — same as every other gate here), filePath maps to the `other`
+ * bucket (unrecognized extension — markdown/config/etc. must never warn), or
+ * couplingConfidence reads the language's coverage row as "measured". Never
+ * throws.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export function couplingUnknownWarning(
+  sessionID: string,
+  filePath: string,
+  graph: CouplingCoverageGraph = getGraph() as unknown as CouplingCoverageGraph,
+): string | null {
+  if (couplingUnknownWarned.get(sessionID)?.has(filePath)) return null
+
+  try {
+    const coverage = graph.edgeCoverage()
+    // Every language bucket absent → the graph itself hasn't indexed
+    // anything yet (cold), not evidence this specific language is
+    // unresolved — fail open exactly like a cold fileFanIn/getEntitiesInFile.
+    if (Object.keys(coverage).length === 0) return null
+
+    const language = coverageLanguage(filePath)
+    // `other` covers unrecognized extensions (markdown, config, JSON, etc.)
+    // — never code, so the zero-imports-extracted signal below is noise for
+    // it, not a resolver gap. Skip here rather than teach the pure
+    // couplingConfidence helper about bucket names.
+    if (language === "other") return null
+    if (couplingConfidence(coverage[language]) !== "unknown") return null
+
+    if (!couplingUnknownWarned.has(sessionID)) couplingUnknownWarned.set(sessionID, new Set())
+    couplingUnknownWarned.get(sessionID)!.add(filePath)
+
+    return (
+      `ur|rsk coupling unknown for ${language} — no import resolver exists for this language, so ` +
+      `fan-in/blast-radius read 0 by construction and are NOT evidence this edit is low-risk; ` +
+      `verify callers directly (grep or get_references) before treating a low hub-gate/risk score as safe.`
+    )
+  } catch {
+    return null
+  }
 }
 
 /**

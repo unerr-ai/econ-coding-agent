@@ -46,6 +46,7 @@ export type EconSignalName =
   | "interpreter_mismatch" // agent probe ran a non-project interpreter
   | "interpreter_harvested" // F21: interpreter reused from the turn's own green test run — converts an F14a probe-miss gate skip into a live gate
   | "gate_block" // S4 governance BLOCK ledger entry
+  | "coupling_unknown" // P6: edited file's language has no import resolver — fan-in/hub score is not evidence of safety, surfaced once per (session, file)
   | "deferral_armed" // consumer record: pre-pass planted (evidence.consumed names the tail signal)
   | "deferral_dispatched" // consumer record: the escalation slice actually ran
   | "surface_asked" // consumer record: question routed to the human
