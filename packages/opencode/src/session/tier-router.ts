@@ -1,8 +1,8 @@
 /**
  * Tier-agent identity + the OL-7.5 plan-reasoning raise for the live turn seam. Turn-level tier
- * routing was demoted here on 2026-07-06 (run-19 live-fire): the lead agent is NEVER swapped at
- * turn-open — a whole-turn hijack billed every mechanical step at the expensive tier while the
- * per-slice allocator sat idle. Escalation is slice-level only: allocateSlice (coupling ×
+ * routing was demoted here on 2026-07-06: a whole-turn hijack was observed billing every
+ * mechanical step at the expensive tier while the per-slice allocator sat idle, so the lead
+ * agent is now NEVER swapped at turn-open. Escalation is slice-level only: allocateSlice (coupling ×
  * test-strength + the conductor's `need` hint) routes each decomposed slice, and the escalation
  * ladder retries a failed slice upward. What survives at turn-open is the cheap signal pair
  * (prompt heaviness + structural risk) driving the conductor's plan-time reasoning budget.

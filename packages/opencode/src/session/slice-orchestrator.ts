@@ -156,9 +156,9 @@ export function childSlicePermission(
   delegatingSeat = false,
 ): SlicePermissionRule[] {
   // Every seat gets bash + edit as ALLOW (2026-07-16). A slice that can gather
-  // evidence and act does its job; denying shell to judgment seats starved
-  // django-11848's escalated reasoner of the sibling test's `utcnow` seam and
-  // it guessed the wrong callable. Seat and persona no longer scope these two
+  // evidence and act does its job; denying shell to judgment seats can starve
+  // an escalated reasoner of a sibling test's context (e.g. a `utcnow` seam)
+  // and lead it to guess the wrong callable. Seat and persona no longer scope these two
   // — the only limits are the floors below: the danger set, the interactive
   // `question` surface, `task` re-orchestration, and `delegate` reserved for
   // the conductor.
@@ -170,8 +170,8 @@ export function childSlicePermission(
   // web by default with no overlay entry needed. Adding an allow here used to
   // sit LAST in the merged (agent + session) ruleset, and evaluation picks the
   // last match (findLast — llm.ts), so it silently overrode an explicit
-  // user/arena `websearch`/`webfetch: "deny"` for every dispatched slice
-  // child, defeating strict-benchmark no-web configs regardless of user
+  // user/offline-run `websearch`/`webfetch: "deny"` for every dispatched
+  // slice child, defeating an offline no-web config regardless of user
   // intent. Web access now follows config, not a dispatch-time overlay.
   // (readOnly/persona/deciderSeat stay on the signature for callers + future
   // per-seat policy; they no longer gate the core tools.)
@@ -334,7 +334,7 @@ export const PERSONA_STEP_BUDGET: Record<EconPersona, number> = {
  * The diagnosis pre-pass writer localizes across a whole unfamiliar repo AND
  * then applies the fix and re-runs the failing test in the SAME session, so it
  * needs headroom beyond a plain applier: 45 tool calls (a read-only
- * localization at 15 burned out with NOTHING delivered in the caseA live fire;
+ * localization at 15 burned out with NOTHING delivered in one observed run;
  * a writer that must also edit and iterate to green needs more, not less).
  */
 export const FRAME_SLICE_STEP_BUDGET = 45
@@ -342,7 +342,7 @@ export const FRAME_SLICE_STEP_BUDGET = 45
 /**
  * Hard step cap for a slice session dispatched on the reasoner or oracle tier
  * (an above-conductor seat) — independent of, and tighter than, the persona
- * budget above. Forensics (mini10-11999): a reasoner/oracle child re-derives
+ * budget above. A reasoner/oracle child can re-derive
  * the conductor's own exploration from a cold cache (33-43 tool calls, fresh
  * context) at 10x+ the cost of the conductor's own step. Capping the session
  * forces the SAME loud best-so-far settle a persona budget exhaustion already
@@ -365,7 +365,7 @@ export interface SliceStepBudgetOpts {
   readonly hard?: boolean
   /** True on an escalated rescue dispatch. */
   readonly escalated?: boolean
-  /** The tier this dispatch runs on. reasoner/oracle (above-conductor seats) are capped at `ABOVE_CONDUCTOR_STEP_CAP` regardless of persona or the P8 ×1.5 lift (item 2, mini10-11999 forensics). Absent — the pre-existing behavior — never caps. */
+  /** The tier this dispatch runs on. reasoner/oracle (above-conductor seats) are capped at `ABOVE_CONDUCTOR_STEP_CAP` regardless of persona or the P8 ×1.5 lift. Absent — the pre-existing behavior — never caps. */
   readonly tier?: EconTier
 }
 
@@ -656,10 +656,10 @@ function isDispatchableSlice(todo: OrchestrationTodo): boolean {
 /**
  * The engagement predicate for the conductor hook: true only when at least one
  * todo carries an explicit, conductor-authored sliceType and is still
- * `pending`. Run-8 post-mortem (OL-9.5c): the old rule ALSO engaged any
+ * `pending`. OL-9.5c: the old rule ALSO engaged any
  * untyped batch of >=3 items with one pending, on the theory that the
- * conductor had simply skipped typing — but every run-8 todo was untyped, so
- * that clause alone spun up 109 child sessions / 868 LLM calls for one
+ * conductor had simply skipped typing — but on an observed turn every todo
+ * was untyped, so that clause alone spun up 109 child sessions / 868 LLM calls for one
  * trivial issue. It is deleted here; `withDerivedTypes`/`inferSliceType`
  * still exist to backfill a sliceType for a caller that hands
  * todosToLoopSlices an all-untyped batch directly (e.g. the eval
@@ -677,7 +677,7 @@ export function hasPendingTypedSlices(todos: readonly OrchestrationTodo[]): bool
 /**
  * Path-shaped tokens a slice's text names — fed to the probes. Two forms: a
  * `/`-qualified path with any short extension, or a BARE filename with a known
- * source extension (12039 tuning, M1: the conductor typed "Apply the fix to
+ * source extension (e.g. the conductor typed "Apply the fix to
  * ddl_references.py" — no slash, so the slice probed with zero files, landed
  * untestable, and a handed fix authored at the reasoner). Bare matching stays
  * extension-whitelisted so prose abbreviations ("e.g.", "v1.2") never match.
@@ -696,7 +696,7 @@ export function extractSliceFiles(text: string): string[] {
 const DOTTED_MODULE_RE = /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}\b/g
 
 /**
- * 12039 tuning (M2): python prose names code by MODULE path, not file path —
+ * Python prose can name code by MODULE path, not file path —
  * "django.db.backends.ddl_references.Columns" carries the file but
  * `extractSliceFiles` can't see it. Resolve each dotted chain against the
  * REAL tree: the longest prefix (≥2 segments) that exists as `<segs>.py`
@@ -771,7 +771,7 @@ export function extractVerifyCommands(text: string): VerifyCommand[] {
 // as a generic verifyCommands entry, just never as probeCommand.
 const REPRO_FILE_RE = /\.(?:test|spec)\.[a-zA-Z]+\b|(?:^|[\s/])(?:tests?|specs?)\/[^\s`]+/i
 const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
-// S1 — an AUTHORED repro script (django-11964/12039: no existing test names
+// S1 — an AUTHORED repro script (no existing test names
 // the bug) qualifies as a pin too: `repro`/`reproduce`-named source file, any
 // language. Scored below a named test file/filter (2-3) so a real test still
 // outranks a synthetic script when both are on offer; a bare whole-suite
@@ -779,7 +779,7 @@ const REPRO_FILTER_RE = /(?:^|\s)(?:-t|-k|--grep)\b/
 // matched filename (group 1) so F10's canonicalScriptProbeCommand can pin the
 // FILE without a second, driftable copy of this pattern.
 const REPRO_SCRIPT_RE = /(?:^|[\s/])((?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs|sh|rb))\b/i
-// django-11885 round C — a scaffolded scratch APP (`_repro_app/models.py`)
+// A scaffolded scratch APP (`_repro_app/models.py`)
 // isn't a repro-named FILE, so REPRO_SCRIPT_RE above missed it entirely and
 // the scratch edit counted as a landed source fix. This is a SEPARATE regex
 // (not folded into REPRO_SCRIPT_RE — its capture group is load-bearing for
@@ -789,7 +789,7 @@ const REPRO_SCRIPT_RE = /(?:^|[\s/])((?:repro|reproduce)[\w.-]*\.(?:py|js|ts|mjs
 // `/`, so `reports/` and `reproducibility/` (no underscore break) don't
 // false-positive.
 const REPRO_DIR_RE = /(?:^|\/)_?(?:repro|reproduce)(?:_[\w.-]*)?\//i
-// tracker #30 follow-up (django-11265 replay) — `_repro_field_error.py` (a
+// tracker #30 follow-up — `_repro_field_error.py` (a
 // leading-underscore scratch FILE, no directory segment) matched neither
 // REPRO_SCRIPT_RE (its `(?:^|[\s/])` boundary doesn't allow an underscore
 // right before "repro"/"reproduce") nor REPRO_DIR_RE (requires a trailing
@@ -853,8 +853,8 @@ export function reproSpecificity(cmd: VerifyCommand): number {
   if (cmd.kind !== "test") return 0
   // A multi-line compound command (a batched probe script) is a PROBE, not a
   // contract: pinning one wedges the turn on every section it bundles —
-  // including self-invented edge asserts stricter than the issue (observed on
-  // the first strict 11790 run, which timed out gate-locked on one). Only a
+  // including self-invented edge asserts stricter than the issue (a batched
+  // probe can time out gate-locked on one such assert). Only a
   // single runnable command may become the turn's pinned reproduction.
   if (cmd.command.includes("\n")) return 0
   const named = (REPRO_FILE_RE.test(cmd.command) ? 2 : 0) + (REPRO_FILTER_RE.test(cmd.command) ? 1 : 0)
@@ -988,7 +988,7 @@ function mostSpecificRepro(commands: readonly VerifyCommand[]): VerifyCommand | 
 const TEST_AUTHORING_RE = /^\s*(?:add|write|create|author|update|extend)\b.*\btests?\b/i
 
 /**
- * The unmodified-test-tree guard (benchmark 11885): a green suite proves
+ * The unmodified-test-tree guard: a green suite proves
  * nothing when the suite itself was edited to match the patch. Prepended to
  * every command-backed spec — lists tracked test files with MODIFICATIONS
  * (`--diff-filter=M`; brand-new repro test files stay legal) and fails the
@@ -1090,7 +1090,7 @@ export async function deriveTurnProbe(opts: {
 // shells/interpreters when the target script is gone) plus python's
 // "can't open file" variant, checked against the probe's OWN output tail so
 // a probe re-run failing this way names the real cause (the pinned repro
-// file was deleted post-pin — django-11790 strict run #4) rather than the
+// file was deleted post-pin) rather than the
 // generic "STILL FAILING" reason, which reads as an unfixed bug instead of a
 // tampered contract. F13f — also reused by deriveTurnProbe (above) and
 // prompt.ts's engine-initiated probe to reject a phantom red before it
@@ -1220,7 +1220,7 @@ const JUDGMENT_KEYWORDS = /\b(audit|verdict|soundness|residual risk|edge.?cases?
 const VERIFY_RUN_KEYWORDS = /\b(run|re-?run|verify|check)\b.*\b(tests?|suites?|typecheck|lint|build|green|pass(?:es|ing)?)\b/i
 // Mechanical INTENT is an imperative verb opening the item — "Implement fix in
 // util.ts", "Add regression tests". Matching these verbs anywhere in the text
-// is the run-21 false positive: the noun "fix" in a judgment item ("does fix
+// was a false positive: the noun "fix" in a judgment item ("does fix
 // keep migration coherent?") read as a build turn and suppressed all typing.
 const MECHANICAL_START = /^\s*(implement|fix|apply|add|wire|rename|refactor|write|create|build|update|remove|delete)\b/i
 // A leading bracketed tag on a todo item ("[audit] …", "[verdict] …") — the
@@ -1235,7 +1235,7 @@ const TODO_TAG_RE = /^\s*\[[^\]\n]{1,24}\]\s*/
 const VERDICT_SHAPED_RE = /\bverdict\b|\bship or do not ship\b|\bapprove or reject\b|\bfinal\s+sign.?off\b/i
 // Defect-shaped item openers — the repair subset of the imperative verbs.
 // Deliberately excludes implement/add/build/etc so an ordinary build list
-// (the run-20 T2 shape) never reads as a bug turn.
+// never reads as a bug turn.
 const DIAGNOSIS_START = /^\s*(fix|debug|resolve|repair|investigate|diagnose)\b/i
 // A concrete code-file target named in an item: a slashed path ending in a
 // file extension, or a bare filename with a known code extension. Conservative
@@ -1306,7 +1306,7 @@ export interface InjectedSliceTodo extends OrchestrationTodo {
  * slice to the executor via allocateSlice and floors it to the reasoner ONLY
  * when the arming judge rates the bug genuinely hard/ambiguous (the difficulty
  * floor) — "generator tier ← difficulty". A trivial, already-located bug stays
- * on the cheap executor instead of the old blanket reasoner pin (django-12039).
+ * on the cheap executor instead of the old blanket reasoner pin.
  */
 export const LOCALIZATION_PREPASS_TODO: InjectedSliceTodo = {
   content: LOCALIZATION_SLICE_CONTENT,
@@ -1377,7 +1377,7 @@ export const PLAN_PREPASS_TODO: InjectedSliceTodo = {
 /**
  * L4.2 — the design seed the GRIND VALVE plants MID-TURN (prompt.ts SM4
  * block) when an inline conductor turn crosses its soft step budget with no
- * green verify in the stall window (django-11885's 179-step, $0.8447 grind).
+ * green verify in the stall window (e.g. a 179-step grind).
  * Same edit-free `design`/reasoner shape as the two seeds above: the OL-7.3b
  * slice hook dispatches it through the EXISTING delegation machinery — its
  * CONTENT is listed in `HARNESS_SEED_CONTENTS` below, which `todosToLoopSlices`
@@ -1424,8 +1424,8 @@ const HARNESS_SEED_CONTENTS: ReadonlySet<string> = new Set([
  * a compiled enumerate-then-choose evidence brief (buildDeferralSliceContent),
  * never a static prompt — dedupe/filters key on DEFERRAL_SLICE_PREFIX.
  * DELIBERATELY excluded from `HARNESS_SEED_CONTENTS`: the deferral cascade
- * has a measured cost cliff (11964 shipped a 15/17-failing patch after
- * `deferral_armed`; 11880 burned 62 above-conductor turns post-deferral for
+ * has a measured cost cliff (e.g. a 15/17-failing patch shipped after
+ * `deferral_armed`; 62 above-conductor turns burned post-deferral for
  * zero outcome change), so this seed must earn orchestration the normal way
  * (real width, or probe-derived coupling/risk) rather than buying it
  * automatically the way the other three prepass seeds do.
@@ -1453,11 +1453,11 @@ const PROMPT_TEST_WORK_RE =
   /\b(?:add|write|create|author|update|extend|adjust|modify|fix|repair|rewrite)\b[^.!?\n;:—]{0,24}?\btests?\b(?!\s+(?:pass|passes|passing|still|go|stay|remain|green))/gi
 
 // A negation directly before the verb means PROHIBITION, not authorization —
-// the caseA live fire showed "Do not modify any test files" disarming the
+// an observed prompt showed "Do not modify any test files" disarming the
 // very gate that sentence asks for. The window tolerates comma-separated verb
-// enumerations ("Never weaken, delete, skip, or edit the test"): the 11885
-// full-stack live fire showed the engine's own fix-slice seed disarming the
-// child gate because "not" sat more than two plain words back.
+// enumerations ("Never weaken, delete, skip, or edit the test"): the
+// engine's own fix-slice seed can disarm the child gate when "not" sits more
+// than two plain words back.
 const TEST_WORK_NEGATION_RE = /\b(?:not|never|don'?t|won'?t|avoid|without|no)\s+(?:[\w'’]+,?\s+){0,4}(?:or\s+)?$/i
 
 /**
@@ -1479,8 +1479,8 @@ export function promptAuthorizesTestEdits(userPrompt: string): boolean {
 
 /** Engine-authored frame-seed contents (the diagnosis pre-pass writer and the P12 build plan seed) — the typed slices the turn-open skeleton plants, which a conductor rewrite must never drop. */
 /**
- * F4c — diagnosis-shaped work denies test edits by default (11885 fire-3 live
- * fire): triage constraints are quote-grounded, so a ticket that never
+ * F4c — diagnosis-shaped work denies test edits by default: triage
+ * constraints are quote-grounded, so a ticket that never
  * mentions tests can NEVER arm the gate via triage, and optimization-phrased
  * diagnosis work evades the fix-shape regex — with both doors shut, slices
  * edited the grading tests and self-greened a wrong fix twice. The verdict's
@@ -1497,7 +1497,7 @@ export function diagnosisDeniesTestEdits(goalShapes: readonly string[], userProm
 const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLAN_SLICE_CONTENT])
 
 /**
- * Todowrite-boundary reconcile net (case-2 tierfire3 double-wave decode): slice
+ * Todowrite-boundary reconcile net: slice
  * settlement is monotonic — a conductor rewrite of the todo list cannot
  * resurrect a settled slice or drop an engine-planted frame seed. Two nets in
  * one seam: (a) an incoming item whose content matches a stored typed slice
@@ -1506,7 +1506,7 @@ const FRAME_SEED_CONTENTS = new Set<string>([LOCALIZATION_SLICE_CONTENT, PLAN_SL
  * longer un-complete paid-for slices and re-trigger a full dispatch wave;
  * (b) a stored typed slice the incoming list omits is re-appended when it is
  * settled (settlement memory survives omission) or when it is a frame seed
- * (the case-1 skeleton-clobber race). An unstarted conductor-authored slice
+ * (a skeleton-clobber race). An unstarted conductor-authored slice
  * omitted by the rewrite stays dropped — that is a legitimate re-plan.
  *
  * @sem domain=routing role=router
@@ -1597,8 +1597,8 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * localization arming (`armLocalization` — the P1-alt code table over the
  * turn-read's extracted evidence, arming-judge.ts), so `needsPlan` cannot
  * override it; its old OR would else force a reasoner pre-pass onto an
- * already-located bug the decision correctly declined (the django-12039
- * regression). For a NON-diagnosis/build goal, `needsPlan` owns the planning
+ * already-located bug the decision correctly declined. For a
+ * NON-diagnosis/build goal, `needsPlan` owns the planning
  * pre-pass and plants the P12 PLAN seed — fresh work with no bug must not
  * receive the diagnosis writer's bug-hunt brief; a diagnosis goal never
  * plants the PLAN seed (needsPlan is ignored on the diagnosis branch — the
@@ -1615,8 +1615,8 @@ export interface TriageTodoRow extends OrchestrationTodo {
  * prompt already named a pinnable command) drops the repro seed regardless of
  * `armReproduction`. (Formerly either/or — repro suppressed localization
  * entirely on a diagnosis-vague-with-repro-need turn, so its root-most-layer/
- * typed-equality/existing-idiom fix discipline never reached the turn; the
- * django-11964 iter-3 and 11848 iter-2 regressions.) `opts.reproVehicle`
+ * typed-equality/existing-idiom fix discipline never reached the turn.)
+ * `opts.reproVehicle`
  * (default `PYTHON_REPRO_VEHICLE` via `reproPrepassTodo`) profile-compiles
  * the repro seed's content for the session's actual ecosystem (V3) — the
  * caller passes the same vehicle it derived for the turn's repro nudges so
@@ -1660,7 +1660,7 @@ export function buildTriageTodoSkeleton(
 }
 
 /**
- * F3/B8 — the plan-first build net (case-5 decode). Self-typing was the only
+ * F3/B8 — the plan-first build net. Self-typing was the only
  * door to the mechanical dispatch cell, and the conductor never once used it
  * — zero typed items across 20+ observed runs. When a todowrite call IS a
  * plan — a fresh list (isFreshPlan) with at least TWO decided changes
@@ -1715,22 +1715,22 @@ function typeBuildPlan<T extends OrchestrationTodo>(todos: readonly T[]): T[] {
 const VENUE_INLINE_MAX_ITEMS = 2
 
 /**
- * Structural auto-typing for the judgment class (2026-07-06, run-20 decode).
+ * Structural auto-typing for the judgment class (2026-07-06).
  * Advisory typing rules never steer the conductor model, so on the one turn
  * shape where inline judgment is a proven quality hole — an audit/verdict turn
  * — the todowrite boundary types the slices itself: judgment-shaped pending
  * items become read-only `verify` slices pinned `need:"reasoner"`, and pure
  * check-run items become `verify` slices (runner persona via personaForSlice).
- * Three guards keep run 8 buried: a list the conductor typed itself is never
+ * Three guards keep this failure mode buried: a list the conductor typed itself is never
  * touched; a list with any build/mechanical-shaped active item (a build turn)
  * is never judgment-typed — it takes the build branch below instead; and
- * terminal-status items are never retyped. One deliberate exception (case-2
- * tierfire3 attempt B): an in_progress JUDGMENT item is a conductor inline
- * claim — the run-20 self-grade hole — so it types and dispatches anyway;
+ * terminal-status items are never retyped. One deliberate exception: an
+ * in_progress JUDGMENT item is a conductor inline
+ * claim — an observed self-grade hole — so it types and dispatches anyway;
  * in_progress check-runs stay with the conductor.
  *
  * One structural exception on the build-turn branch — the diagnosis pre-pass
- * (SWE-bench django-11964/11885 decode; hardened 2026-07-09 against the
+ * (hardened 2026-07-09 against the
  * PROMPT_SLICING_CORPUS.md live-judge over-fires, rule R4): on a
  * build/mechanical batch, the turn-open arming decision
  * (`armLocalization`, threaded in) is the SEMANTIC gate — true/false, or,
@@ -1812,8 +1812,8 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
     }
     const mapped = todos.map((t) => {
       // A leading bracket tag ("[audit] …", "[verdict] …") is presentation the
-      // triage preamble taught the conductor, not content (case-2 tierfire3
-      // decode: the suite run priced at reasoner because the tag's literal
+      // triage preamble taught the conductor, not content (observed: a suite
+      // run priced at reasoner because the tag's literal
       // "audit" judgment-typed it). Classify the BODY first: a tag-hidden
       // mechanical opener stays untyped, and a pure check-run with no judgment
       // language in its body types plain verify (runner) even inside an
@@ -1821,8 +1821,8 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
       // whose body carries no keyword at all ("[verdict] SHIP or DO NOT SHIP").
       const body = t.content.replace(TODO_TAG_RE, "")
       // An in_progress judgment item is a conductor CLAIM, and inline judgment
-      // claims are the run-20 self-grade hole — observed flaking in case-2
-      // tierfire3 attempt B (claimed, never executed, cancelled at turn close).
+      // claims are a self-grade hole — observed flaking: claimed, never
+      // executed, cancelled at turn close.
       // Decision-shaped ambiguity rounds UP: the claim dispatches anyway.
       // Check-runs stay pending-only — a run the conductor is actually
       // executing inline must not double-run.
@@ -1836,8 +1836,8 @@ export function autoTypeTodos<T extends OrchestrationTodo>(
     })
     // The closing verdict is decision-shaped — it consumes the other
     // dimensions' results, yet judgment typing used to emit a dep-less DAG and
-    // the verdict slice launched blind in wave 1 (case-2 tierfire3 attempt B,
-    // identical creation timestamps). A deps-less verdict-shaped typed item
+    // the verdict slice launched blind in wave 1 (observed: identical creation
+    // timestamps). A deps-less verdict-shaped typed item
     // gains deps on every other newly-typed sibling; conductor-authored deps
     // always win.
     const dimensionIds = mapped
@@ -2130,25 +2130,25 @@ export async function todosToLoopSlices(
  *     finish gate exhausted its bounded retries — `probe_gate_exhausted`),
  *     and `reproUnresolved` (a reproduction stayed unresolved at
  *     finish-intent — `repro_unresolved`). `deferralPrepassTodo`'s content
- *     is deliberately excluded from `harnessSeeded` (the 11880/11964 cost
+ *     is deliberately excluded from `harnessSeeded` (the cost
  *     cliff on the OLD multi-rung ladder), so before this these three fired
- *     on the signal bus and were silently discarded — 11265/10097/10999 all
+ *     on the signal bus and were silently discarded — every affected turn
  *     stayed conductor-only, gate never opened. Safe to admit now because
  *     §4.3's one-hop bounded draw is what the cost cliff blamed.
  *
- * What this gate deliberately does NOT key on (reversing run-21, 2026-07-15
- * live-fire): the ALLOCATED tier. Allocation reads `sliceType` and `need` — both
+ * What this gate deliberately does NOT key on (reversing the prior design,
+ * 2026-07-15): the ALLOCATED tier. Allocation reads `sliceType` and `need` — both
  * written by the conductor into its own todo — and its test-strength default is
  * `untestable` whenever the probe observed nothing. On a real repo that default
  * is the common case, and an unbacked mechanical slice then floors to the oracle
  * (allocation.ts, post-§4.3 — the reasoner never solves), so a tier-keyed gate
  * escalates on a MISSING probe signal plus the model's self-report. Measured:
- * 11848/11880/11885 each dispatched ONE trivial-judged slice and burned 26-47
- * above-conductor turns at $0.48-0.54, while 11790 solved the same bug
- * conductor-only for $0.067 that it spent $0.6639 on when the gate opened.
+ * dispatching ONE trivial-judged slice can burn 26-47
+ * above-conductor turns at $0.48-0.54, while the same bug can be solved
+ * conductor-only for a fraction of that ($0.067 vs $0.6639 when the gate opened).
  * Letting the model price its own work is not a benefit signal. A width-1
- * chain of cheap work gains nothing from being split (run-8: 868 LLM calls for
- * one trivial linear issue) — that reasoning always held; it was the tier
+ * chain of cheap work gains nothing from being split (observed: 868 LLM calls
+ * for one trivial linear issue) — that reasoning always held; it was the tier
  * escape hatch that made it moot. The harness's own prepass seeds previously
  * cleared the gate as a SIDE EFFECT of that tier inference (their
  * `sliceType:"design"` floored to reasoner, pre-§4.3); losing the inference
@@ -2402,7 +2402,7 @@ export interface ConductorOrchestrationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Cascade-failed inline latch (item 3, mini10-11999 forensics): the conductor
+// Cascade-failed inline latch: the conductor
 // re-engaged an already-failed cascade 3x via unverified-finish nudges, each
 // re-run re-paying the same doomed decomposition from a cold cache. When an
 // engaged cascade settles with >=1 unverified/blocked slice and ZERO verified
@@ -2577,7 +2577,7 @@ export async function runConductorOrchestration(
           interactive,
           needsUserInput: resolveAttempts >= 1,
           // 1b — an armed vague diagnosis localizes inline, then keeps fixing
-          // INLINE and never decomposes (11885: decompose-after-localize 0/4
+          // INLINE and never decomposes (decompose-after-localize went 0/4
           // REAL FAIL vs inline 3/3 REAL PASS).
           armLocalization: deps.arming?.armLocalization === true,
           resolveAttempts,
@@ -2613,14 +2613,14 @@ export async function runConductorOrchestration(
           // Armed turn that already localized — the conductor keeps working the
           // todos INLINE (they stay plain todos); orchestration never engages,
           // nothing is appended or asked. The grind valve is the only escalation
-          // (11885: decompose-after-localize 0/4 REAL FAIL vs inline 3/3 REAL PASS).
+          // (decompose-after-localize went 0/4 REAL FAIL vs inline 3/3 REAL PASS).
           return { engaged: false }
         }
         // mode === "decompose-now" — fall through to the slice path below.
       }
     }
 
-    // L4.2 degraded stand-down (11964: $0.3467 orchestrated vs $0.0985 the same
+    // L4.2 degraded stand-down (e.g. $0.3467 orchestrated vs $0.0985 the same
     // ticket conductor-solo): a degraded turn-read (verdict===null →
     // DEGRADED_ARMING, `degraded:true`) keeps the conductor INLINE for the whole
     // turn — its own mid-turn todos are tracked but must NOT flow into tiered
@@ -2732,7 +2732,7 @@ export async function runConductorOrchestration(
     // was rejected (the ladder exhausted on a genuine reject or a wall-clock
     // timeout) or a P6a "blocked" (never dispatched) counts as dead. A
     // cascade with even one accepted verdict is real progress, not the
-    // doomed-cascade shape the forensics named, so it is left untouched.
+    // doomed-cascade shape this guard exists to exclude, so it is left untouched.
     if (deps.sessionID !== undefined && result.engaged) {
       const hasAccepted = result.outcomes.some((o) => o.verdict.accepted === true)
       const deadOutcome = result.outcomes.find(
@@ -2868,7 +2868,7 @@ export function buildRepoPrimer(opts?: RepoPrimerOptions): string {
   if (tree.length > 0) sections.push(tree.join("\n"))
   const manifest = summarizePackageJson(cwd)
   if (manifest) sections.push(manifest)
-  // 12039 tuning (M1): name the repo's REAL test harness so no slice guesses
+  // Name the repo's REAL test harness so no slice guesses
   // one (the live failure: a runner guessed `pytest` on a django checkout and
   // the whole DAG settled unverified).
   const harness = detectPythonHarness(cwd)

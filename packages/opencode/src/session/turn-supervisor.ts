@@ -44,7 +44,7 @@ function hashString(s: string): string {
 // mistaking normal work for a loop: three DIFFERENT edits to one file (import, then
 // collect, then the delete loop) hash differently and read as progress, while only
 // the SAME call re-issued verbatim collides. And a burst of DIVERSE reads/spawns
-// yields diverse signatures rather than the same empty one. Both were run-11885
+// yields diverse signatures rather than the same empty one. Both were
 // false positives that escalated to the reasoner before a test ran (v1: empty
 // read/spawn signatures; v2: path-only edit signatures) — a 3× cost regression.
 function actionKey(tool: string, input: Record<string, unknown>): string {
@@ -204,10 +204,10 @@ export function observeStep(parts: readonly unknown[], opts?: { isTestSlice?: bo
 
 /**
  * Soft step budget for an INLINE conductor turn before the valve may open.
- * django-11885 evidence (tracker tuning log 2026-07-10): the honest pass
- * ground 179 inline edit-test-edit steps ($0.8447) that the stuck supervisor
- * never caught — the steps were DIVERSE (different edits, different reds), so
- * no repetition pathology fired; the pathology was volume without convergence.
+ * An observed honest-effort pass ground through 179 inline edit-test-edit
+ * steps ($0.8447) that the stuck supervisor never caught — the steps were
+ * DIVERSE (different edits, different reds), so no repetition pathology
+ * fired; the pathology was volume without convergence.
  */
 export const GRIND_VALVE_STEPS = 60
 
@@ -272,10 +272,9 @@ export function createGrindValve(): GrindValve {
 
 /**
  * Consecutive single-call steps before the batch-momentum nudge fires. Three
- * is the smallest run that reads as a pattern rather than coincidence: the
- * live probes (fw-batch-probe round 2, 2026-07-10) showed three single-call
- * history steps already drag the default tier from 3/3 spontaneous batching
- * to 1/3.
+ * is the smallest run that reads as a pattern rather than coincidence: a
+ * probe on 2026-07-10 showed three single-call history steps already drag
+ * the default tier from 3/3 spontaneous batching to 1/3.
  */
 export const BATCH_NUDGE_AFTER_SINGLE_STEPS = 3
 
@@ -300,8 +299,8 @@ export interface BatchMomentumWatcher {
  * default tier batches tool calls natively on a clean transcript but imitates
  * its own history once it carries a run of single-call messages, and a
  * recency-positioned reminder recovers batching where the system-prompt
- * BATCH_RULE alone does not (fw-batch-probe rounds 1–3: stack clean 12/12,
- * poisoned history 2/6 despite the rule, tail reminder 6/6). Fires after
+ * BATCH_RULE alone does not (observed: stack clean 12/12, poisoned history
+ * 2/6 despite the rule, tail reminder 6/6). Fires after
  * `BATCH_NUDGE_AFTER_SINGLE_STEPS` consecutive single-call steps, re-arming
  * every `BATCH_NUDGE_REARM_STEPS` steps while the run persists. A multi-call
  * step resets the run (momentum broken — imitation now works for us); a
@@ -334,7 +333,7 @@ export function createBatchMomentumWatcher(): BatchMomentumWatcher {
 // ---------------------------------------------------------------------------
 // Round-H — identical-run dedupe (probe_rerun_dedupe): the same shell command
 // producing byte-identical output for the 3rd+ time carries zero new
-// information (django-11815: ~72 repro re-runs, roughly half byte-identical).
+// information (observed: ~72 repro re-runs, roughly half byte-identical).
 // ---------------------------------------------------------------------------
 
 /** A command must repeat this many times with an identical (normalized) output before it counts as a no-information rerun — the first two runs could be a legitimate confirm-then-reconfirm. */
@@ -413,10 +412,11 @@ const TEST_EXEC_RUNNER_RE = /^runtests(\.py)?$/i
 /**
  * True when `cmd` actually RUNS a python test suite at command position — the
  * start of the command, or right after `&&`/`;`/`|` — never merely reads or
- * greps for one. The 11885 autopsy: the agent's one `runtests.py`-matching
- * command was `cat tests/runtests.py` (a read), and `py_compile` was its only
- * verification before shipping a 36-line source patch — a plain substring
- * scan for "runtests.py"/"test" would have called that verified.
+ * greps for one. An observed failure mode: the agent's one
+ * `runtests.py`-matching command was `cat tests/runtests.py` (a read), and
+ * `py_compile` was its only verification before shipping a 36-line source
+ * patch — a plain substring scan for "runtests.py"/"test" would have called
+ * that verified.
  * `cat`/`head`/`tail`/`sed`/`grep` never qualify no matter what their
  * arguments name, since only the executable at command position is checked;
  * a python interpreter additionally needs an argument naming "test" or
@@ -529,9 +529,9 @@ export type PatchSanityGapReason = "no-overlap" | "test-infra-unjustified"
  * judge's own sanity check (`hub-design-judge.ts`'s `pathsRefer`-against-
  * `definitionSites` floor, `runHubDesignJudge`) from one judge-picked file to
  * the WHOLE landed patch. `files(patch) ∩ (issue-named files/symbols ∪
- * localization-probe candidates)` empty ⇒ `"no-overlap"` — the astropy-7166
- * shape (a $1.31 escalated fix that shipped a conftest.py-only patch with
- * zero relation to the issue). A patch whose files ALL overlap but are ALSO
+ * localization-probe candidates)` empty ⇒ `"no-overlap"` — the shape of a
+ * $1.31 escalated fix that shipped a conftest.py-only patch with zero
+ * relation to the issue. A patch whose files ALL overlap but are ALSO
  * all test-infrastructure (`isTestInfraFilePath`) additionally needs the
  * issue text to explicitly name every one of them — a graph-coincidental
  * symbol match inside a conftest.py is not the same as the issue actually
@@ -638,14 +638,14 @@ export function resolveBugShapedFallback(input: {
 /**
  * Pure gate decision for the H9 flip (tracker #30): `hub_bounce_repeat` is a
  * second, evidence-bearing hub-edit bounce this turn — precisely the signal
- * that fires on a LOCALLY-GREEN finish (django-11265 replay: bounce at step
- * 48/49, every deterministic check green, the fix was symptom-layer).
+ * that fires on a LOCALLY-GREEN finish (observed: a bounce at step 48/49,
+ * every deterministic check green, the fix was symptom-layer).
  * Unlike the seven failure-evidence deferral arms in prompt.ts, this one
  * fires on the otherwise-CLEAN finish path: a bug-shaped ROOT turn that
  * landed source edits and drew a `hub_bounce_repeat` this turn gets the
  * one-shot escalation slice, same one-shot budget (`deferralAvailable`) as
- * every other arm. `repro_unresolved` (the 14369 replay — a $1.01/188t
- * escalation that landed nothing) is deliberately NOT a valid trigger for
+ * every other arm. `repro_unresolved` (an escalation that cost $1.01/188t
+ * and landed nothing) is deliberately NOT a valid trigger for
  * this gate: only a live `hubBounceRepeat` fact arms it.
  *
  * @sem domain=routing role=gate

@@ -603,7 +603,7 @@ async function checkProbeRung(
  * apply, the slice is accepted with `unverified: true`
  * (OL-9.5d) rather than rejected: absence of any applicable check is not
  * evidence of failure, and laddering an unverifiable slice only re-runs
- * identical work with no new signal (run-8 post-mortem: 8 briefs escalated
+ * identical work with no new signal (observed: 8 briefs escalated
  * into 62 runner sessions, one "Apply the fix" dispatched 5x, against work
  * that was already correct). Every OTHER reject path still carries a
  * `missing` field (OL-9.4c) — synthesized from the failing check itself for

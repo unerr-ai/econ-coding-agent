@@ -21,7 +21,7 @@
  * (§6, `requiredLiterals`) the repro never asserts. RF-5 adds a third
  * deterministic tooth of the same shape — `detectStringifiedMirrorAssert` +
  * `applyStringifiedMirrorGap` catch an assert whose EXPECTED side is
- * coerced through `str(...)` (django-11790: the repro's own pinned assert
+ * coerced through `str(...)` (the repro's own pinned assert
  * stringified the mirror and a `str()` fix passed it while the hidden
  * test's typed assert then failed) — plus an optional `statedRules` rubric
  * threaded through `runReproFidelityJudge` that asks the judge to check
@@ -39,9 +39,9 @@
  * narrower RF-8-shaped gap directly: it now also scans `if`/`elif`
  * error-gating conditionals (not just `assert`/`assertEqual`) and follows a
  * second alias hop symmetric to the str()-alias one — a bare local bound to
- * an attr/subscript chain counts as the chain itself — so django-11790's
- * final pinned form (`widget_maxlength = widget.attrs.get(...)` then
- * `if widget_maxlength != str(expected_maxlength):`) fires on the mirror
+ * an attr/subscript chain counts as the chain itself — so a pinned assert
+ * shaped like `widget_maxlength = widget.attrs.get(...)` then
+ * `if widget_maxlength != str(expected_maxlength):` fires on the mirror
  * check alone, without needing `detectNumericStringConflict`'s broader
  * digit-co-occurrence heuristic.
  *
@@ -54,8 +54,8 @@
  * `detectMissingRoundtripAssert` / `applyRoundtripGap` add a sixth tooth of
  * the same shape: when `roundtrip-witness.ts`'s graph-sibling synthesis
  * finds a read/write counterpart for the turn's focus entity, the repro
- * must exercise it or the gate forces a gap (converts 14365/14598/14182's
- * one-sided fixes). `checkTestSetCoverage` extends the same kernel to a
+ * must exercise it or the gate forces a gap (converts one-sided fixes).
+ * `checkTestSetCoverage` extends the same kernel to a
  * harness-visible failing-test-id scope (H1 tooth 3, the full-F2P harvest)
  * — this module only builds that coverage verdict; wiring a live id source
  * into a finish gate is a separate seam.
@@ -115,8 +115,8 @@ export type ReproFidelityComplete = (request: { system: string; user: string }) 
  * §6 issue-derived `requiredLiterals` the caller wires in once the
  * issue-expectations extractor runs — `applyRequiredLiteralsGap` reads it
  * directly, `runReproFidelityJudge` itself never consumes it. The optional
- * `statedRules` (issue-stated numeric boundary rules, e.g. django-11848's
- * "more than 50 years in the future") IS consumed by `runReproFidelityJudge`
+ * `statedRules` (issue-stated numeric boundary rules, e.g. a stated
+ * "more than 50 years in the future" rule) IS consumed by `runReproFidelityJudge`
  * itself — rendered into the judge prompt as a rubric asking it to check
  * both sides of each boundary are exercised; absent/empty changes nothing.
  * H3 adds the same diff-aware scaffolding as the cross-model and hub-design
@@ -372,7 +372,7 @@ export function applyRenderedAssertGap(verdict: ReproFidelityVerdict, reproConte
  * H1 (gap-closure-plan §2.7) — the turn's witness `ClaimScope` built from
  * the §6 issue-derived expected literals: each literal is a named
  * obligation, so a repro asserting only some of them is a strict subset,
- * never promotion-worthy (the 14369 "settled on 2/3 cases" shape). Routes
+ * never promotion-worthy (a "settled on 2/3 cases" shape). Routes
  * through the shared `checkClaimCoverage` kernel rather than an inline
  * filter — a plain substring-presence check supplies each literal's
  * evidence.
@@ -440,8 +440,8 @@ const roundtripWitnessId = (counterpart: string): string => `roundtrip:${counter
  * never calls the synthesized roundtrip counterpart (`roundtrip-witness.ts`
  * finds it as a same-file read/write sibling of the turn's focus entity): a
  * one-sided fix that only touches the parse/read/load/escape half never
- * gets caught by any other tooth (astropy-14365 parse-only, 14598 inverted
- * unescape, 14182 param-never-threaded). A plain call-site presence check —
+ * gets caught by any other tooth (parse-only, inverted unescape, a param
+ * never threaded through). A plain call-site presence check —
  * shape-independent, same discipline as `hasAssertionTeeth`. `undefined`
  * counterpart (no sibling found this turn) always passes.
  *
@@ -615,8 +615,7 @@ const CONDITIONAL_GATE = /^(?:el)?if\s+(.+):$/
 /**
  * Extract the two operands of an `if A == B:` / `if A != B:` / `elif ...:`
  * error-gating conditional — a script that gates an `errors.append(...)` (or
- * similar) behind a plain comparison instead of an `assert`, django-11790's
- * final pinned form. Same split as `extractAssertComparisonSides`, just
+ * similar) behind a plain comparison instead of an `assert`. Same split as `extractAssertComparisonSides`, just
  * stripping the `if `/`elif ` prefix and the trailing `:` instead of
  * `assert `. Returns `undefined` when the line is not such a conditional, or
  * has no top-level `==`/`!=` to split on — a membership `in`/`not in` gate,
@@ -653,10 +652,10 @@ function isAttrOrSubscriptChain(arg: string): boolean {
  * Resolves ONE hop of variable indirection on EITHER side: an
  * `expected = str(<chain>)` binding lets a later `assert <chain> ==
  * expected` / `if <chain> != expected:` fire the same as the inline
- * `== str(...)` form (django-11790's first evasion), and — symmetrically — a
+ * `== str(...)` form, and — symmetrically — a
  * `local = <chain>` binding (`widget_maxlength = widget.attrs.get(...)`) lets
  * a later `if local != str(<chain>):` fire the same as comparing the chain
- * directly (11790's final pinned form, which also swapped the assert for an
+ * directly (a shape that also swapped the assert for an
  * `if`/`errors.append` gate specifically to dodge assert-anchored detectors).
  * Returns the offending line, trimmed, or `undefined` when nothing matches.
  * Conservative on purpose: stringifying the SUBJECT under test
@@ -764,11 +763,11 @@ function stripQuotedLiterals(content: string): string {
  * `assertEqual`/`assertNotEqual(` call) whose one side is a full quoted
  * pure-integer token (`'150'`, never `'3.9'` or `'"name" DESC'`), where that
  * same digit sequence also appears, unquoted and word-boundary-matched,
- * anywhere else in the script — django-11790's final pinned repro, rewritten
+ * anywhere else in the script — a repro rewritten
  * to `if`/`failures.append` after a fidelity nudge specifically to dodge
- * every assert-anchored detector in this file: `if field.max_length != 150`
+ * every assert-anchored detector in this file — e.g. `if field.max_length != 150`
  * (bare int) alongside `if widget.attrs.get('maxlength') != '150'` (the same
- * numeral, quoted) is exactly the internal type conflict the hidden test's
+ * numeral, quoted) — is exactly the internal type conflict the hidden test's
  * typed assert catches and a `str()` source fix does not. Works on any line
  * shape (if-condition, assert, unittest call) — that is the point, since the
  * evasion was structural, not assert-specific. Skips a line containing
@@ -779,7 +778,7 @@ function stripQuotedLiterals(content: string): string {
  * matches. Known limitation (accepted): relatedness of the two occurrences is
  * approximated by whole-repro digit co-occurrence, so two genuinely unrelated
  * values sharing a numeral (`status_code == '200'` + `bytes_written = 200`)
- * can trip it — a same-variable requirement would MISS 11790, whose conflict
+ * can trip it — a same-variable requirement would MISS a conflict that
  * spans different attributes (`field.max_length` vs `attrs['maxlength']`). The
  * cost of a false positive is bounded: the finish re-check denies once with a
  * nudge and then passes loud, never a wrong verdict.

@@ -47,7 +47,7 @@ export interface ResolutionInput {
   needsUserInput?: boolean
   /** When false, the step-2 valid-plan short-circuit validates `candidatePlan` STRUCTURALLY ONLY — cycles/depth/branching/deps/budget — skipping the per-node objective/outputShape/successCriterion check. Required for todo-derived plans (which carry no node fields). Defaults to true (full validation). */
   requireNodeFields?: boolean
-  /** True when the arming judge armed the localization pre-pass (vague diagnosis, location/mechanism unknown). On the FIRST pass this bypasses the step-2 valid-plan short-circuit: a structurally-valid todo skeleton is a plan-shaped guess, not a fixed approach — decompose-blind went 0/3 on the 11885 live fires while localize-inline-first passed 2/2. */
+  /** True when the arming judge armed the localization pre-pass (vague diagnosis, location/mechanism unknown). On the FIRST pass this bypasses the step-2 valid-plan short-circuit: a structurally-valid todo skeleton is a plan-shaped guess, not a fixed approach — decompose-blind measured 0/3 while localize-inline-first passed 2/2. */
   armLocalization?: boolean
   /** How many resolution passes already ran on this task — the recursion/termination guard. */
   resolveAttempts: number
@@ -85,7 +85,7 @@ export const MAX_RESOLVE_ATTEMPTS = 2
  * approach first, ask the user, or continue inline — in strict precedence order
  * so exactly one branch ever fires. A harness-mandated escalation seed
  * (`escalationSeedPending`) takes TOP precedence over every branch below,
- * including the armed-turn veto (1b): 1b's 11885 calibration measured
+ * including the armed-turn veto (1b): the calibration measured
  * conductor-authored decomposition going 0/4 on an armed turn, not a
  * gate-mandated escalation carrying its own executed evidence — applying 1b's
  * veto to a harness-planted deferral/grind seed would be a category error, not
@@ -125,7 +125,7 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
   //     means the location/mechanism is by definition unknown, so no approach
   //     can be "fixed" yet, and the step-2 short-circuit below must not fire.
   //     After localization (resolveAttempts ≥ 1) the conductor keeps fixing
-  //     INLINE (continue-inline) instead of decomposing-with-knowledge: on 11885
+  //     INLINE (continue-inline) instead of decomposing-with-knowledge:
   //     the decompose-after-localize route went 0/4 REAL FAIL (three wrong fixes,
   //     one grind timeout) while the inline route went 3/3 REAL PASS, so the
   //     grind valve (turn-supervisor) is the ONLY escalation for an armed turn.
@@ -146,7 +146,7 @@ export function resolutionDecision(input: ResolutionInput): ResolutionDecision {
     input.candidatePlan !== undefined &&
     validatePlan(input.candidatePlan, input.budget, { requireNodeFields: input.requireNodeFields ?? true }).ok
   ) {
-    // 2b. Direct-first valve (narrow, item 4 / mini10-11999 forensics): the
+    // 2b. Direct-first valve (narrow, item 4): the
     //     conductor already knows where the fix goes (a diagnosis goal named
     //     the location or a fix), this is the FIRST resolution pass on an
     //     unarmed turn, the aggregate hardness isn't "hard", and the plan is

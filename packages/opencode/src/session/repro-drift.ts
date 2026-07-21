@@ -1,6 +1,6 @@
 // Repro-drift classifier — the NUDGE_V2-style tiered anti-drift port onto the
 // repro-first contract (targeted, event-triggered, once-per-kind, silent
-// otherwise). Two strict 11790 runs showed the conductor never authoring a
+// otherwise). Two observed runs showed the conductor never authoring a
 // pinnable `repro_issue.*` file: inline `python -c` one-liners for 12 steps
 // in one run, an attempt to edit the existing suite (denied) in the other.
 // This module distils one observed SM4 step into the drift kinds it
@@ -37,7 +37,7 @@ function hasSuiteEditDenial(parts: readonly unknown[]): boolean {
 }
 
 // A shell/bash tool part naming a deletion of the pinned repro script AFTER
-// the turn already pinned it (django-11790 strict run #4: `rm
+// the turn already pinned it (an observed run saw `rm
 // repro_issue.py` at step 24, 3600s wall-killed one step later with no
 // recovery) — the done-gate re-runs the pinned command, so a missing file
 // counts as RED, not as done.

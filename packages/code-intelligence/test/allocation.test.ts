@@ -96,7 +96,7 @@ describe("allocateSlice — slice type", () => {
   })
 
   // SM5 regression: coupling and difficulty are different axes. An atomic
-  // insight bug (django-11885: combine fast-delete queries with
+  // insight bug (combine fast-delete queries with
   // defaultdict(list) + reduce(operator.or_, …)) can sit in the
   // high-coupling·testable cell and still exceed executor capability — the
   // matrix must not demote it there because a sound check exists.

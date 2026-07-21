@@ -53,7 +53,7 @@ describe("seenRedInversionNudgeText", () => {
 // re-signed to take a `vehicle` parameter, defaulting to
 // `PYTHON_REPRO_VEHICLE`, and MUST still emit exactly the pre-P4 hardcoded
 // text when called with no vehicle (or the python one explicitly) — the
-// mini-10 benchmark surface stays bit-stable. These literals were captured
+// benchmark-facing prompt surface stays bit-stable. These literals were captured
 // from nudges.ts BEFORE the profile-compilation refactor landed.
 describe("P4 byte-parity — python/default profile snapshots", () => {
   test("reproDriftNudgeText('inline-repro') is byte-identical to the pre-P4 text", () => {

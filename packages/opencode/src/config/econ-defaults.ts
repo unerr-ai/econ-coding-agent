@@ -41,7 +41,7 @@ const PERSONA_PERMISSION: Record<EconPersona, Record<string, "allow" | "ask" | "
  * advertised set entirely, unlike `PERSONA_PERMISSION` above which only gates execution while
  * still listing the tool in the prompt. All six personas are equally capable now, so no
  * persona-specific trim remains here: `task`, `question`, and `todowrite` are dropped for every
- * persona by the wiring below (OL-9.5e — run-8 post-mortem: a procedure child wrote its own
+ * persona by the wiring below (OL-9.5e — observed: a procedure child wrote its own
  * typed slices and became a recursive orchestrator, parenting 43 grandchildren, because typing a
  * `todowrite` item is the explicit opt-in to decomposition and personas still had the tool); no
  * persona drops the edit-family or bash tools any longer — every persona shares the full
@@ -77,7 +77,7 @@ function econModel(key: string, name: string, options: Record<string, unknown>) 
     // ConfigV1's FLAT cost keys (core/v1/config/provider.ts: input/output/cache_read/
     // cache_write) — provider.ts maps them to the nested Model.cost.cache at load. The
     // original nested `cache:{read,write}` shape was silently stripped by the loadConfig
-    // schema pass, so every cached token was DB-priced at $0 (run-20/21: 2.3x receipt-vs-DB
+    // schema pass, so every cached token was DB-priced at $0 (measured: 2.3x receipt-vs-DB
     // drift on the conductor, the only tier with cache hits). Rates are sourced from
     // ECON_MODELS[key].cost (ECON_COST_MATRIX, the single home for rates). cache_write is
     // hardcoded 0, NOT the matrix's cacheWrite field: the authoritative Fireworks serverless
@@ -233,15 +233,15 @@ export function econDefaultConfig(): ConfigV1.Info {
           baseURL: "https://econ-litellm.fly.dev/v1",
           // Stall watchdogs (2026-07-10): a fly.dev gateway stall wedged a live
           // run forever — request accepted, zero bytes, nothing to abort it
-          // (11964 full-stack probe 2; the same stall class nulled turn-read on
-          // the 11999 probe). Both timeouts map to retryable APIErrors upstream
-          // (HeaderTimeoutError / ResponseStreamError), so the session loop's
-          // existing backoff absorbs the blip instead of hanging the run.
+          // (a full-stack probe; the same stall class nulled turn-read on a
+          // second full-stack probe). Both timeouts map to retryable APIErrors
+          // upstream (HeaderTimeoutError / ResponseStreamError), so the session
+          // loop's existing backoff absorbs the blip instead of hanging the run.
           headerTimeout: 45_000,
           chunkTimeout: 120_000,
           // Total request cap: chunkTimeout only wraps SSE bodies — a stalled
           // NON-streaming response (judge/triage generateText) has no byte-level
-          // watchdog and sat 6+ min on the 11885 probe before a silent exit.
+          // watchdog and sat 6+ min before a silent exit.
           // 300s bounds any single request; legitimate calls average ~15s.
           timeout: 300_000,
         },
@@ -265,7 +265,7 @@ export function econDefaultConfig(): ConfigV1.Info {
           // 2026-07-08 catalog add; 2026-07-09 conductor swap: minimax-m3 is now bound to the
           // conductor tier (see ECON_TIER_BINDING in model-registry.ts). 2026-07-12 E0: bounded
           // explicit "high" — "none" suppressed the judgment tier, and DELETING the param meant
-          // unbounded server-side thinking (one 2,453s step on 11964). Pin it; never omit it.
+          // unbounded server-side thinking (one 2,453s step observed). Pin it; never omit it.
           // kimi remains catalog-only, not bound to a tier.
           "minimax/minimax-m3": econModel("minimax/minimax-m3", "MiniMax M3 (econ conductor — experiment)", {
             reasoningEffort: "high",

@@ -6,7 +6,7 @@
  * E0 (native-loop-gap.md): an ordinary request never ships the mute marker —
  * a stale config-pinned "none" is rewritten to the bounded "high", never
  * deleted, because omitting the param means unbounded server-side thinking
- * (one 2,453s step on django-11964, e0-mini10-r1). Small housekeeping
+ * (one 2,453s step observed). Small housekeeping
  * one-shots are muted instead: thinking starves/slows their JSON output.
  *
  * No live model call is made — we drive `LLMRequestPrep.prepare` directly

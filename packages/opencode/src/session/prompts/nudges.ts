@@ -194,8 +194,8 @@ export function reproDriftEscalationNudgeText(vehicle: ReproVehicle = PYTHON_REP
  * S8 — converge-now nudge: prompt.ts's SM4 block injects this when a
  * bug-shaped turn has landed a source fix but never pinned a reproduction
  * for POST_FIX_CONVERGE_STEPS observed steps — broad "verification" that
- * never converges (django-11790 strict run #3: 38 more minutes of tool calls
- * after a rejected finish, no second finish attempt). Names both concrete
+ * never converges (observed: 38 more minutes of tool calls after a rejected
+ * finish, with no second finish attempt). Names both concrete
  * exits — a single-file repro run, or an honest finish — rather than another
  * open-ended "keep verifying." Profile-compiled (`vehicle`, default
  * `PYTHON_REPRO_VEHICLE`) like `reproDriftNudgeText`.
@@ -213,9 +213,9 @@ export function convergeNowNudgeText(steps: number, vehicle: ReproVehicle = PYTH
  * S9 — pin-green finish nudge: prompt.ts's SM4 block injects this when the
  * turn's pinned reproduction has already run GREEN after the source fix
  * landed and the model keeps "verifying" broadly for PIN_GREEN_FINISH_STEPS
- * more observed steps (django-11790 strict run #4: green at step 18, 9 more
- * steps of re-running suites, then a step-24 `rm` of the pinned file and a
- * 3600s wall-kill at step 25 — nothing told it the done-gate is now the
+ * more observed steps (observed: green at step 18, 9 more steps of
+ * re-running suites, then a step-24 `rm` of the pinned file and a 3600s
+ * wall-kill at step 25 — nothing told it the done-gate is now the
  * terminator). Unlike `convergeNowNudgeText`, there is no repro-run
  * alternative to offer — the pin already confirmed green — so this names
  * only the honest finish, plus the one concrete thing NOT to touch.
@@ -257,7 +257,7 @@ export function toothlessReproNudgeText(script: string): string {
  * S3 — unverified-finish nudge: prompt.ts's finish-time block injects this
  * on each rejected finish arrival for a bug-shaped turn with no verified
  * reproduction / no source change, up to MAX_UNVERIFIED_FINISH_ATTEMPTS
- * times (django-11848 iter-3: the old once-nudge model let a second silent
+ * times (an observed shape: the old once-nudge model let a second silent
  * arrival fail open loud with source edits shipped and no repro ever run).
  * `attempt` 1 keeps the original ask-for-a-repro wording plus any S4
  * unresolved-block fold-in; attempt 2+ escalates to the explicit either/or
@@ -281,8 +281,8 @@ export function unverifiedFinishNudgeText(attempt: number, blockLines?: string):
  * when `findUnresolvedSeenRed` (seen-red.ts) finds a test/repro run the
  * turn's own transcript shows went red and was never re-run green. Names
  * each command plus its evidence tail so the model can't claim it never saw
- * the failure — the django-11790 shape (a mid-turn pytest run failed, was
- * never re-run, and the patch shipped anyway).
+ * the failure — the observed shape of a mid-turn pytest run that failed, was
+ * never re-run, and shipped anyway.
  */
 export function seenRedUnresolvedNudgeText(unresolved: readonly { command: string; outputTail: string }[]): string {
   const single = unresolved.length === 1
@@ -296,9 +296,9 @@ export function seenRedUnresolvedNudgeText(unresolved: readonly { command: strin
  * `partitionSeenRedByInversion` (seen-red.ts) finds a red from a COMMITTED
  * visible test whose failure shows the code PRODUCING the issue's stated
  * desired value while the assertion still expects the value the issue calls
- * wrong. The 2026-07-15 11815 shape: the agent applied the general
- * gold-equivalent fix, the stale committed suite went red on it, and the
- * confirm-GREEN nudge forced a retreat to a narrowed conditional patch.
+ * wrong. One observed shape: the agent applied the general gold-equivalent
+ * fix, the stale committed suite went red on it, and the confirm-GREEN
+ * nudge forced a retreat to a narrowed conditional patch.
  * This nudge sanctions that red explicitly — keep the general fix, never
  * narrow it, state the conflict — the same senior-oracle rule the
  * no-test-edit denial and the localization seed's EXCEPTION already name.
@@ -327,8 +327,8 @@ export function seenRedInversionNudgeText(
 /**
  * Wave 10 — unverified-finish-gate nudge: prompt.ts's finish-time block
  * injects this once, when a FIX-SHAPED root turn lands a non-test source
- * edit with ZERO real test executions anywhere in its own transcript (the
- * 11885 autopsy: a 36-line deletion.py patch shipped after only
+ * edit with ZERO real test executions anywhere in its own transcript (an
+ * observed failure: a 36-line source patch shipped after only
  * `py_compile`, whose one `runtests.py`-matching command was
  * `cat tests/runtests.py` — a read, never a run). `command` is the concrete
  * verify command derived from the edited files (`probeSliceVerifyCommands`,
@@ -345,8 +345,8 @@ export function unverifiedFinishGateNudgeText(command?: string): string {
  * H3 — patch-sanity-floor nudge: prompt.ts's finish-time block injects this
  * once, when `detectPatchSanityGap` (turn-supervisor.ts) flags the landed
  * patch — either it touches NONE of the candidate definition sites the
- * issue names or the graph resolves for it (the astropy-7166 shape: a
- * conftest.py-only patch with zero relation to the issue), or it touches
+ * issue names or the graph resolves for it (a test-config-only patch with
+ * zero relation to the issue), or it touches
  * ONLY test-infrastructure files (conftest.py/setup.py/setup.cfg/CI config)
  * with no explicit issue-text justification for that being the whole fix.
  * Same enumerate-then-choose shape as `hubDesignDegradedNudgeText`: names
@@ -386,7 +386,7 @@ export function f2pClaimNudgeText(missing: readonly string[]): string {
  * this once per session, at the moment `detectReceiverMethodDivergence`
  * (convention-divergence.ts) flags an added `<receiver>.<method>(...)` call
  * whose receiver is already established in the file but never paired with
- * this method before (the django-11848 A4 red shape). Never names the right
+ * this method before. Never names the right
  * answer or an alternative — only points back at the file's own existing
  * usage and asks for a re-read; an identical retry is accepted.
  */
@@ -420,9 +420,8 @@ export function conventionDivergenceSecondDenyNudgeText(
  * Round-H — identical-run dedupe nudge: turn-supervisor.ts's `createRerunDedupeTracker`
  * injects this once per distinct command, the first time it produces
  * byte-identical (normalized) output for the `occurrence`-th time in a row
- * with no edit landed in between. The django-11815 shape: ~72 repro
- * re-runs, roughly half byte-identical, adding zero information between
- * them.
+ * with no edit landed in between. An observed shape: ~72 repro re-runs,
+ * roughly half byte-identical, adding zero information between them.
  */
 export function identicalRunDedupeNudgeText(command: string, occurrence: number): string {
   return `Identical run ${occurrence} of \`${command}\` produced identical output — no new information. Change the code or your approach before re-running it: either land an edit that could change the result, or investigate the failure a different way.`
@@ -434,9 +433,9 @@ export function identicalRunDedupeNudgeText(command: string, occurrence: number)
  * `partitionSeenRedByEnvBlock` (seen-red.ts) finds a red whose evidence is
  * environment-shaped (a missing backend/service, `ImproperlyConfigured`, a
  * missing binary) or predates this turn's first edit, repeated at least
- * twice. The 2026-07-15 django-11880 shape: a GIS-backend-required
- * regression neighbor burned 42 of 59 turns re-running a red that can never
- * pass in this arena.
+ * twice. An observed shape: an environment-dependent regression neighbor
+ * burned 42 of 59 turns re-running a red that could never pass in that
+ * environment.
  */
 export function seenRedEnvBlockedNudgeText(blocked: readonly { command: string; outputTail: string }[]): string {
   const single = blocked.length === 1

@@ -169,7 +169,7 @@ describe("extractScriptFilename", () => {
 })
 
 describe("extractScriptPath", () => {
-  it("preserves an absolute path verbatim — round-F 11848's basename-extraction miss made readPinnedReproFile join cwd+basename and degrade to file-missing", () => {
+  it("preserves an absolute path verbatim — round-F's basename-extraction miss made readPinnedReproFile join cwd+basename and degrade to file-missing", () => {
     const command = "python /var/folders/ab/T/opencode/repro_parse_http_date.py"
     expect(extractScriptPath(command)).toBe("/var/folders/ab/T/opencode/repro_parse_http_date.py")
   })

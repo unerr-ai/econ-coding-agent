@@ -3,7 +3,7 @@
  * ordinary request never ships the mute marker: a config-pinned
  * `reasoningEffort:"none"` is rewritten to the bounded "high" — never
  * deleted, because omitting the param means UNBOUNDED server-side thinking
- * (one 2,453s step on django-11964, e0-mini10-r1). A small housekeeping
+ * (one observed 2,453s step). A small housekeeping
  * one-shot is muted instead: thinking starves/slows its JSON output, so any
  * pinned effort collapses to the minimal VALID level "low". It is NOT muted to
  * "none": the small_model (gpt-oss-120b) rejects reasoningEffort "none" on

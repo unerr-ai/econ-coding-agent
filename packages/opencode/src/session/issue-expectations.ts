@@ -10,7 +10,7 @@ const EXPECTED_MARKER_RE = /\bexpected\b|\bshould\s+(?:be|return|render|print|pr
 /** Prose markers that signal a quoted/backticked span nearby is the CURRENT (buggy) value. */
 const ACTUAL_MARKER_RE = /\binstead of\b|\brather than\b|\bgot\b|\bactual\b|\breturns\b/gi
 
-/** A worked-example marker line introducing the DESIRED statement — value is whatever follows the marker's colon on the same line, or, when that's empty, the next non-empty line taken whole (the 12039 shape: a bare unquoted CREATE INDEX line after "The following would be expected:"). */
+/** A worked-example marker line introducing the DESIRED statement — value is whatever follows the marker's colon on the same line, or, when that's empty, the next non-empty line taken whole (a bare unquoted CREATE INDEX line after "The following would be expected:"). */
 const EXPECTED_PROSE_BLOCK_RE = /\b(?:would be expected|should be|should generate|expected output)\b.*?:\s*(.*)$/i
 /** The CURRENT (buggy) mirror of EXPECTED_PROSE_BLOCK_RE — e.g. "Will generate ... statement:\n<bare buggy line>". */
 const ACTUAL_PROSE_BLOCK_RE = /\b(?:instead of|rather than|currently generates?|will generate)\b.*?:\s*(.*)$/i
@@ -126,8 +126,8 @@ function nearestMarkerKind(
  * quoted/backticked spans from prose ("expected `X`", "actual output `Y`"),
  * assertion-shaped and expected-block lines inside fenced code, prose-marker
  * worked examples whose statement line carries no quotes at all ("The
- * following would be expected:" / "Will generate ...:", 12039's bare
- * CREATE INDEX pair), and the traceback's final error line — deduped and
+ * following would be expected:" / "Will generate ...:", a bare
+ * CREATE INDEX statement pair), and the traceback's final error line — deduped and
  * capped at 8 values 2-120 chars long.
  *
  * @sem domain=routing role=analysis
@@ -178,7 +178,7 @@ export function extractIssueExpectations(issueText: string): { literals: IssueEx
 
     // Prose-marker worked example: "The following would be expected:" / "Will
     // generate ... statement:" introducing a bare (unquoted) statement line —
-    // the 12039 shape a quoted/backticked-span scan below never sees.
+    // a shape a quoted/backticked-span scan below never sees.
     const expectedBlock = trimmedLine.match(EXPECTED_PROSE_BLOCK_RE)
     const actualBlock = expectedBlock ? null : trimmedLine.match(ACTUAL_PROSE_BLOCK_RE)
     if (expectedBlock || actualBlock) {
@@ -239,7 +239,7 @@ function sentenceBounds(text: string, index: number): { start: number; end: numb
 /**
  * A stated numeric-boundary rule pulled from issue prose — its value and the
  * containing sentence, quoted verbatim. Feeds the fidelity judge's
- * required-coverage list alongside `IssueExpectation` (11848's RFC 7231
+ * required-coverage list alongside `IssueExpectation` (an RFC 7231
  * "more than 50 years ... MUST interpret" two-digit-year rule).
  *
  * @sem domain=routing role=type
@@ -283,7 +283,7 @@ export function extractIssueThresholds(issueText: string): readonly IssueThresho
 /**
  * The oracle-inversion verdict (§5): whether a failing assertion's output
  * shows the code PRODUCING the issue's stated desired value while the
- * assertion still expects the value the issue calls wrong — the 11815 trap
+ * assertion still expects the value the issue calls wrong — a trap
  * where the pin-green pressure chain rejects the gold-equivalent fix.
  *
  * @sem domain=routing role=type
@@ -316,7 +316,7 @@ const SUBSCRIPT_FORM_RE = /\b([A-Za-z_][A-Za-z0-9_]*)\[(['"])[^'"\]]+\2\]/
  * asked for and the visible test encodes the bug.
  *
  * Rung 2 (form-class, gated on `opts.fromTrackedSuite === true`, tried only
- * when rung 1 found nothing): covers the django-11815 shape where the issue
+ * when rung 1 found nothing): covers the shape where the issue
  * extractor stores a single expected-kind literal in enum subscript form
  * (`X['NAME']`) with no "actual"-kind counterpart, so rung 1 is structurally
  * blind. The gate is PROVENANCE: the red must come from a COMMITTED tracked
@@ -367,7 +367,7 @@ export function detectOracleInversion(
 
   if (opts?.fromTrackedSuite !== true) return { inverted: false }
 
-  // Form-class rung (django-11815): a tracked committed test carried these
+  // Form-class rung: a tracked committed test carried these
   // expectations before this turn, so if the region shows the SAME identifier
   // in both the issue's subscript form and a value-call form, the assertion —
   // not the fix — is stale. Gated to tracked-suite provenance only; an

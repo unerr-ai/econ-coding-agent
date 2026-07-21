@@ -7,9 +7,14 @@
  * of a wrong fix (§2): they fire on "I did not verify this", not on "this is
  * broken". Dispatching an oracle at that evidence answers a verification
  * request with the most expensive AUTHOR we have, which is why the measured
- * conversion was zero source edits 6/6 (§1.1). This module keeps escalation for
- * the case that needs it — a cheap response was already tried and the signal
- * fired again — and answers everything else in place.
+ * conversion was zero source edits 6/6 (§1.1) — confirmed again live: the
+ * same escalate-then-repeat shape recurred on 4 instances across 3
+ * verification arms, up to 3 extra firings after the escalation, still
+ * unresolved. Verification is therefore terminal here — it never
+ * escalates, at any repeat count, because an oracle cannot run a check, only
+ * re-derive an answer. Escalation stays live for capability (no cheap answer
+ * exists to try first) and knowledge (the same argument likely applies, but
+ * unproven live, so it is left unchanged).
  *
  * Language/framework-agnostic by construction: the table is keyed on the signal
  * NAME alone. No path, extension, runner, or ecosystem is consulted, so a new
@@ -35,11 +40,12 @@ export type DeferralComplaint = "verification" | "knowledge" | "corrected" | "ca
 export type DeferralResponse = "none" | "verify-inline" | "knowledge-fetch" | "escalate"
 
 /**
- * How many non-escalating rungs a single turn may spend before the ladder stops
- * offering cheap answers and escalates. One — deliberately the same bound the
- * one-shot deferral budget enforced before this ladder existed, so the worst
- * case stays "one extra rung, then the loud path" rather than one rung per
- * complaint class.
+ * How many non-escalating rungs a single turn may spend before the ladder
+ * stops offering the knowledge complaint's cheap answer and escalates.
+ * Verification is exempt — it is terminal (§0/§1.1, confirmed live) and never
+ * escalates regardless of this budget — and capability has no cheap answer to
+ * spend in the first place, so knowledge is the only complaint this bound
+ * still gates.
  *
  * @sem domain=routing role=config
  */
@@ -54,9 +60,10 @@ export const CHEAP_RESPONSE_BUDGET = 1
  */
 export const COMPLAINT_BY_SIGNAL: Record<string, DeferralComplaint> = {
   // Lagging indicator of an ALREADY-SOLVED problem: it means "the agent tried
-  // the wrong layer twice and the deterministic hub gate corrected it". On
-  // 11964 the correct root-layer fix was on disk ~250 log lines before this
-  // armed, and the oracle spent 42 turns re-deriving it (§1.2).
+  // the wrong layer twice and the deterministic hub gate corrected it".
+  // Observed once: the correct root-layer fix was already on disk ~250 log
+  // lines before this armed, and the oracle spent 42 turns re-deriving it
+  // (§1.2).
   hub_bounce_repeat: "corrected",
 
   // "I did not verify this" — the check exists (or is discoverable); run it.
@@ -118,9 +125,15 @@ export interface DeferralPolicyVerdict {
 }
 
 /**
- * Choose the cheapest response that answers this signal's complaint, escalating
- * only once a cheaper response for the same complaint has already been spent
- * and the signal fired anyway.
+ * Choose the cheapest response that answers this signal's complaint.
+ * Verification never escalates, at any repeat count, because an oracle cannot
+ * run a check — only re-derive an answer — so escalating it is a category
+ * error (§0, confirmed live: escalation-economics.md §1.1). It asks for the
+ * check in-line once and then declines (`none`), which ends the ladder rather
+ * than re-nudging the same unanswered ask forever. Knowledge and
+ * capability still escalate — knowledge once its cheap answer (or the turn's
+ * shared budget) is spent and the signal fires again, capability immediately
+ * since it has no cheap answer to try first.
  *
  * @sem domain=routing role=gate
  */
@@ -167,15 +180,32 @@ export function decideDeferralResponse(input: DeferralPolicyInput): DeferralPoli
       }
 
     case "verification":
-      // The complaint is an ABSENT check, so run the check. Only a repeat
-      // firing — the check ran and the signal persists — is evidence the
-      // conductor cannot close this out.
-      if (spent.includes("verify-inline")) return escalated("verify-inline already spent; signal fired again")
-      if (cheapBudgetSpent) return escalated("turn's cheap-response budget already spent")
+      // Terminal: never escalates, at any repeat count. The complaint is an
+      // ABSENT check, and an oracle cannot RUN a check — only re-derive an
+      // answer — so a repeat firing is not evidence escalation would help;
+      // it is the same unresolved gap. Confirmed live: all 6 escalations on
+      // this complaint converted zero source edits across up to 4 repeat
+      // firings after the escalation (§1.1).
+      //
+      // Terminal means the ladder stops OFFERING rungs, not that it offers
+      // the same rung forever: `verify-inline` plants a todo and sends a
+      // nudge, which the finish gate treats as "something changed" and
+      // re-loops on (prompt.ts:3678 vs the `none` path at :3667, which
+      // returns without re-looping). Re-answering `verify-inline` on every
+      // firing is therefore an unbounded finish loop — it hangs the turn
+      // instead of ending it. Ask for the check ONCE; a second firing means
+      // the ask went unanswered, and repeating it buys nothing.
+      if (spent.includes("verify-inline"))
+        return {
+          complaint,
+          response: "none",
+          reason: "verification gap already asked for in-line this turn; repeating the ask buys nothing and never escalates",
+          escalationEarned: false,
+        }
       return {
         complaint,
         response: "verify-inline",
-        reason: "verification gap — run the discovered check at the conductor, no tier change",
+        reason: "verification gap — run the discovered check at the conductor; never escalates (oracle cannot run a check)",
         escalationEarned: false,
       }
 

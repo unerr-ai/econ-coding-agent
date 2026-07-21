@@ -1,12 +1,13 @@
 /**
  * escalation-economics.md §10 Step 1 — the deferral response ladder.
  * Unit coverage for the pure policy (`decideDeferralResponse`) and its
- * ledger fold (`recordDeferralResponse`): per-complaint response choice,
- * the exhaustion transition to escalate, the unknown-signal fail-safe, and
- * the turn-wide `CHEAP_RESPONSE_BUDGET` bound (the regression guard for the
- * one-rung-per-complaint-class defect: before this ladder existed,
- * `markDeferralUsed` was a hard one-rung bound on the whole turn; making
- * cheap rungs free removed that bound, so the budget restores it).
+ * ledger fold (`recordDeferralResponse`): per-complaint response choice, the
+ * verification complaint's terminal contract (never escalates, at any repeat
+ * count — confirmed live: escalation-economics.md §1.1),
+ * the knowledge/capability exhaustion transitions to escalate, the
+ * unknown-signal fail-safe, and the turn-wide `CHEAP_RESPONSE_BUDGET` bound
+ * (now scoped to the knowledge complaint only — verification is exempt from
+ * it, and capability has no cheap answer to spend in the first place).
  */
 import { describe, expect, test } from "bun:test"
 import {
@@ -57,18 +58,30 @@ describe("decideDeferralResponse — verification complaint", () => {
     }
   })
 
-  test("exhaustion transition: a second firing after verify-inline was already spent escalates", () => {
+  test("terminal: a repeat firing after verify-inline was already spent declines with none, never escalate — asking once and then declining ends the ladder instead of re-nudging (a repeated verify-inline would re-loop the finish gate forever, prompt.ts:3678); confirmed live that the OLD escalated path converted zero source edits across up to 4 repeat firings (escalation-economics.md §1.1)", () => {
     const priorResponses = { verification: ["verify-inline"] as readonly DeferralResponse[] }
     const verdict = decideDeferralResponse({ signal: "unverified_finish", priorResponses, cheapResponsesSpent: 1 })
     expect(verdict.complaint).toBe("verification")
-    expect(verdict.response).toBe("escalate")
-    expect(verdict.escalationEarned).toBe(true)
+    expect(verdict.response).toBe("none")
+    expect(verdict.escalationEarned).toBe(false)
   })
 
-  test("a DIFFERENT verification signal also escalates once verify-inline was spent for the shared complaint class", () => {
+  test("a DIFFERENT verification signal also stays terminal once verify-inline was spent for the shared complaint class", () => {
     const priorResponses = { verification: ["verify-inline"] as readonly DeferralResponse[] }
     const verdict = decideDeferralResponse({ signal: "regression_red", priorResponses, cheapResponsesSpent: 1 })
-    expect(verdict.response).toBe("escalate")
+    expect(verdict.response).toBe("none")
+    expect(verdict.escalationEarned).toBe(false)
+  })
+
+  test("never escalates no matter how many times the same complaint fires or how spent the turn's cheap-response budget is — verification is exempt from CHEAP_RESPONSE_BUDGET, unlike knowledge; a repeat firing declines with none rather than re-asking", () => {
+    const priorResponses = { verification: ["verify-inline"] as readonly DeferralResponse[] }
+    const verdict = decideDeferralResponse({
+      signal: "seen_red_unresolved",
+      priorResponses,
+      cheapResponsesSpent: CHEAP_RESPONSE_BUDGET + 5,
+    })
+    expect(verdict.response).toBe("none")
+    expect(verdict.escalationEarned).toBe(false)
   })
 })
 
@@ -171,20 +184,32 @@ describe("decideDeferralResponse — CHEAP_RESPONSE_BUDGET turn-wide bound", () 
     expect(verdict.escalationEarned).toBe(false)
   })
 
-  test("boundary: cheapResponsesSpent one below the budget still buys the cheap response; at the budget it escalates", () => {
+  test("boundary (knowledge complaint): cheapResponsesSpent one below the budget still buys the cheap response; at the budget it escalates — verification no longer has this boundary (it is exempt, see the verification describe block), so knowledge is the only complaint left to exercise it", () => {
     const underBudget = decideDeferralResponse({
-      signal: "regression_red",
+      signal: "hub_bounce_repeat", // irrelevant — overridden by knowledgeGap
       priorResponses: {},
       cheapResponsesSpent: CHEAP_RESPONSE_BUDGET - 1,
+      knowledgeGap: true,
     })
-    expect(underBudget.response).toBe("verify-inline")
+    expect(underBudget.response).toBe("knowledge-fetch")
 
+    const atBudget = decideDeferralResponse({
+      signal: "hub_bounce_repeat",
+      priorResponses: {},
+      cheapResponsesSpent: CHEAP_RESPONSE_BUDGET,
+      knowledgeGap: true,
+    })
+    expect(atBudget.response).toBe("escalate")
+  })
+
+  test("verification ignores this bound entirely — at/above the budget it still answers verify-inline, never escalate (contrast with the knowledge boundary above)", () => {
     const atBudget = decideDeferralResponse({
       signal: "regression_red",
       priorResponses: {},
       cheapResponsesSpent: CHEAP_RESPONSE_BUDGET,
     })
-    expect(atBudget.response).toBe("escalate")
+    expect(atBudget.response).toBe("verify-inline")
+    expect(atBudget.escalationEarned).toBe(false)
   })
 })
 

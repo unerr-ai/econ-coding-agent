@@ -4,8 +4,8 @@
  * read<->write counterpart living beside it (same file — sibling entities
  * via BunSqliteGraph.getEntitiesInFile, no new index) so the repro-fidelity
  * gate can demand a roundtrip assert (parse -> write -> parse == original)
- * as an additional witness, converting one-sided fixes (astropy-14365
- * parse-only, 14598 inverted unescape, 14182 param-never-threaded). The
+ * as an additional witness, converting one-sided fixes (observed shapes: a
+ * parse-only fix, an inverted unescape, a param-never-threaded fix). The
  * name-pairing itself is pure and graph-free — `findRoundtripCounterpart`
  * only needs a candidate name list, so it is fully unit-testable without a
  * live graph; `synthesizeRoundtripWitness` is the thin async wrapper that

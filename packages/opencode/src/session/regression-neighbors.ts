@@ -45,9 +45,9 @@
  *
  * F20 — graph-derived reach: every filename rung above sees only stem-shaped
  * proximity, so a fix whose blast radius flows through the CALL GRAPH stays
- * invisible (shapely-2226: editing geometry/collection.py regressed
- * test_split/test_clip_by_rect, which reach the edit through ops.py — zero
- * filename overlap; the gate ran collection-stem suites and passed green).
+ * invisible (e.g. editing one source module regressed two tests that reach
+ * the edit only through a separate module — zero filename overlap; a
+ * filename-stem-only gate ran the wrong suites and passed green).
  * `collectGraphNeighborCandidates` walks reverse-call edges from the touched
  * files' entities (one hop to callers, one more hop through non-test caller
  * files, tests-only at the far hop) and hands back runnable commands for the
@@ -62,20 +62,20 @@
  * strips `sys.path[0]` by design, so a Django-project-style package that is
  * only importable from the repo root fails every candidate and the gate
  * skips — while the transcript already holds a command that provably ran the
- * suite (linkding-995: `python -m pytest …` green in-turn, probe missed 2/2,
- * gate skipped, one regression shipped). Observed-green evidence outranks a
- * synthetic probe.
+ * suite (observed: the suite ran green in-turn, but the synthetic-import
+ * probe missed 2/2 candidates, so the gate skipped and shipped one
+ * regression). Observed-green evidence outranks a synthetic probe.
  *
  * H2 (gap-closure-plan §2, round 3) — every rung above keys off entity/
  * filename proximity, which is blind to an import-time blast radius
  * (`isHighP2PBreadthEdit`/`detectsModuleLevelSideEffect`: a module-level
  * statement, a default-arg change, or a base-class edit reaches "every
- * importer", not a reverse-call edge — astropy-13236/8872) and to a
+ * importer", not a reverse-call edge) and to a
  * zero-selection turn (`findSiblingTestCommand` — the gate's last-resort
  * fallback before it surfaces "unverifiable regression surface" instead of
  * staying silent). H8 — `runDifferentialBaseline` runs the selected set once
  * against pre-edit (HEAD) content so the gate consumer can tell an
- * environment-red (astropy-8707) from a model-induced one; the subtraction
+ * environment-red from a model-induced one; the subtraction
  * itself is the shared claim–evidence kernel's job (`checkClaimCoverage`,
  * `code-intelligence/claim-evidence.ts`), not this module's.
  *
@@ -615,7 +615,7 @@ function collectFileNeighborCandidates(
  * it, then same-file proximity, then module-package breadth), and the lists
  * are then filled into the
  * result ROUND-ROBIN across files — file1's 1st, file2's 1st, file1's 2nd,
- * ... — instead of file-major: a django-11885 round-C replay showed one
+ * ... — instead of file-major: observed evidence showed one
  * touched file's fuzzy matches (an unrelated scaffolded `models.py`) filling
  * every slot before a second touched file's real neighbors ever got a turn,
  * so no single file's candidates can crowd out another's. A single touched
@@ -722,7 +722,7 @@ function isModuleLevelSideEffectLine(entry: { line: string; next: string | undef
  * from `oldContent` — a warning emission, global/registry/env mutation, a
  * bare module-level call, or a decorator applied directly to a module-level
  * class. This blast radius is "everyone who imports the module", invisible
- * to the F20 call-graph walk (astropy-13236: a bare module-level
+ * to the F20 call-graph walk (e.g. a bare module-level
  * `warnings.warn(DeprecationWarning)` broke 644 P2P tests behind zero graph
  * neighbors — the gate silently passed). `oldContent` empty/absent (a
  * brand-new file) never trips this — there is no prior silent behavior to
@@ -738,7 +738,7 @@ export function detectsModuleLevelSideEffect(oldContent: string, newContent: str
 // H2.4 — the two other high-P2P-breadth shapes beyond a module-level side
 // effect: a default-argument change (dtype/default-behavior — changes every
 // caller relying on the default, not just ones the graph walks) and a
-// class's base-list edit (astropy-8872: a base-class change broke 80 P2P
+// class's base-list edit (e.g. a base-class change broke 80 P2P
 // tests behind a 3-file green neighbor subset).
 const DEFAULT_ARG_DEF_RE = /^\s*(?:async\s+)?def\s+\w+\([^)]*=/
 const BASE_CLASS_DEF_RE = /^class\s+\w+\([^)]+\)\s*:/
@@ -750,7 +750,7 @@ const BASE_CLASS_DEF_RE = /^class\s+\w+\([^)]+\)\s*:/
  * a function/method default-argument change, or a class base-list edit. The
  * gate consumer widens selection BEFORE running for this class rather than
  * promoting a narrow green subset to "no regressions" after the fact
- * (8872's 3-file green subset shipped 80 broken P2P tests) — every green
+ * (a 3-file green subset shipped 80 broken P2P tests) — every green
  * verdict still states its real verified scope regardless.
  *
  * @sem domain=routing role=side-effect-detection
@@ -915,9 +915,9 @@ function graphTestFileCommand(relTestFile: string, isDjangoRepo: boolean): strin
  * F20 — graph-derived neighbor reach: per touched file, the runnable test
  * commands for TEST files that call the touched code (reverse-call walk,
  * two bounded hops — see `graphReachableTestFiles`), the blast radius the
- * filename rungs cannot see (shapely-2226's gate passed green on
- * collection-stem suites while call-graph neighbors test_split /
- * test_clip_by_rect broke through ops.py). Any per-file graph error or an
+ * filename rungs cannot see (e.g. a filename-stem-only gate passed green
+ * while call-graph neighbors reached the edit only through an intermediate
+ * module — zero filename overlap). Any per-file graph error or an
  * unindexed file degrades to an empty entry so the F11 gate falls back to
  * pure filename discovery — never a false red, never a throw.
  *
@@ -1259,7 +1259,7 @@ const GREEN_RUN_SIGNATURE_RE = /\b[1-9]\d* passed\b|(?:^|\n)\s*OK\b/
  * that command's interpreter token. An observed green suite run outranks
  * F14a's synthetic import probe, which strips `sys.path[0]` by design and
  * therefore fails on every repo whose package resolves only from the repo
- * root (Django-project layouts — linkding-995's gate skip shipped a
+ * root (Django-project layouts — a gate skip shipped a
  * regression this way). Null when the transcript holds no trustworthy
  * specimen; callers fall back to the probe. Piped/substituted commands are
  * skipped (the exit code may not belong to the test run), as are
@@ -1330,8 +1330,8 @@ export function rewriteInterpreterCommand(command: string, interpreter: string |
  * H8 — differential regression baseline: runs `neighbors` against the
  * touched files' pre-edit (HEAD) content, then restores the current
  * (post-edit) content — so the gate consumer can tell "was already red
- * before your change" (an environment fact, astropy-8707's broken `np.int`
- * import) from "your change broke it". Returns the command strings that
+ * before your change" (an environment fact — e.g. a pre-existing broken
+ * dependency import) from "your change broke it". Returns the command strings that
  * failed pre-edit; the caller feeds this straight into `Evidence.baseline`
  * (`code-intelligence/claim-evidence.ts`) — the subtraction itself happens
  * in the kernel's `checkClaimCoverage`, not here. A touched file with no

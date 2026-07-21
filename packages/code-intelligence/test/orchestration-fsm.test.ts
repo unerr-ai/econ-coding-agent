@@ -11,7 +11,7 @@
  * the same maxClimbs as any other slice (no extra forced climbs) that
  * settles unverified LOUD for review on exhaustion, plain ladder
  * exhaustion, budget-exhausted → abandoned, and the terminal-is-absorbing
- * re-dispatch guard (run-8).
+ * re-dispatch guard.
  *
  * Covers `createStuckSupervisor`: test-edit priority, repeated-red
  * (tolerating interleaved non-command steps), repeated-tool, a changing
@@ -212,7 +212,7 @@ describe("sliceTransition", () => {
     expect(withoutReason.terminal?.reason).toBe("budget-exhausted")
   })
 
-  it("a terminal state is absorbing — re-applying any event returns it unchanged (run-8 re-dispatch guard)", () => {
+  it("a terminal state is absorbing — re-applying any event returns it unchanged (re-dispatch guard)", () => {
     const ctx = makeCtx({})
     const settled = sliceTransition(initialSliceState("executor"), accept(), ctx)
     expect(settled.terminal).toBeDefined()

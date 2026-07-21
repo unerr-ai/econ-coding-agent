@@ -3,7 +3,7 @@
  * F11's discoverNeighborTests — Django-style tests/runtests.py + tests/<dir> matching, the
  * pytest-style filename fallback under tests/** and the source file's own directory, the
  * no-match empty-array case, and the 3-command cap — F17's additive module-package breadth:
- * the django-11885 scenario (basename stem surfaces tests/delete + tests/delete_regress, the
+ * a basename-stem scenario (basename stem surfaces tests/delete + tests/delete_regress, the
  * noisy "models" parent stem excluded so tests/model_forms/model_fields never appear), a
  * generic non-django repo reaching a one-level-below package tests/ tree via the parent-stem
  * only, the "ion"-stripped morphological variant reaching a strictly-prefixed pytest file, a
@@ -25,11 +25,11 @@
  * novelty-deduped, round-robin unchanged) — and F21's harvestTurnInterpreter (green/test-shaped/
  * python-headed detection, piped/env-prefixed/laundered-mixed rejection, latest-run-wins) —
  * and H2/H8 (gap-closure-plan.md §2, round 3): detectsModuleLevelSideEffect/
- * isHighP2PBreadthEdit's four side-effect shapes (astropy-13236's module-level DeprecationWarning,
- * astropy-8872's base-class edit, a default-arg change, a class decorator) vs. an indented/
+ * isHighP2PBreadthEdit's four side-effect shapes (a module-level DeprecationWarning added at
+ * column 0, a base-class edit, a default-arg change, a class decorator) vs. an indented/
  * unrelated/brand-new-file non-trigger, widenForModuleSideEffect's package-test-dir widening
  * capped at 5, findSiblingTestCommand's H2.2 fail-loud fallback (found/none), and
- * runDifferentialBaseline's H8 pre-edit revert-run-restore (astropy-8707's baseline subtraction
+ * runDifferentialBaseline's H8 pre-edit revert-run-restore (a baseline subtraction
  * per test-id, combined with the kernel's checkClaimCoverage for the false-fire guard: a
  * pre-existing red is excused, a genuinely new one is not).
  */
@@ -173,7 +173,7 @@ describe("discoverNeighborTests — pytest-style fallback (no tests/runtests.py)
 })
 
 describe("discoverNeighborTests — module-package breadth (F17, additive)", () => {
-  it("django-11885: deletion.py's basename stem surfaces tests/delete and tests/delete_regress, with the noisy 'models' parent stem excluded (never tests/model_forms or tests/model_fields)", () => {
+  it("deletion.py's basename stem surfaces tests/delete and tests/delete_regress, with the noisy 'models' parent stem excluded (never tests/model_forms or tests/model_fields)", () => {
     const cwd = makeFixture()
     mkdirSync(join(cwd, "tests"), { recursive: true })
     writeFileSync(join(cwd, "tests", "runtests.py"), "")
@@ -365,7 +365,7 @@ describe("discoverNeighborTests — Django exact-twin (F19, highest rank)", () =
   })
 })
 
-describe("discoverNeighborTests — round-robin across touched files (django-11885 round C replay)", () => {
+describe("discoverNeighborTests — round-robin across touched files (a fuzzy-twin-crowding replay)", () => {
   it("a scratch file's fuzzy twin matches never crowd out a second touched file's real neighbors", () => {
     const cwd = makeFixture()
     mkdirSync(join(cwd, "tests"), { recursive: true })
@@ -655,7 +655,7 @@ describe("selectRegressionPinCandidate", () => {
 })
 
 describe("collectGraphNeighborCandidates — F20 graph-derived reach", () => {
-  it("shapely-2226 shape: two-hop reverse-call walk reaches BOTH the direct test caller and the caller-of-caller test, depth-1 first", async () => {
+  it("two-hop reverse-call walk reaches BOTH the direct test caller and the caller-of-caller test, depth-1 first", async () => {
     const cwd = makeFixture()
     mkdirSync(join(cwd, "shapely", "geometry"), { recursive: true })
     writeFileSync(join(cwd, "shapely", "geometry", "collection.py"), "")
@@ -991,7 +991,7 @@ describe("seen-red.ts exports the regexes harvestTurnInterpreter depends on", ()
 })
 
 describe("detectsModuleLevelSideEffect — H2.1 import-time side-effect heuristic", () => {
-  it("astropy-13236 shape: a module-level warnings.warn(...) added at column 0 trips it", () => {
+  it("a module-level warnings.warn(...) added at column 0 trips it", () => {
     const oldContent = "import warnings\n\ndef helper():\n    return 1\n"
     const newContent = 'import warnings\n\nwarnings.warn("old API", DeprecationWarning)\n\ndef helper():\n    return 1\n'
     expect(detectsModuleLevelSideEffect(oldContent, newContent)).toBe(true)
@@ -1033,7 +1033,7 @@ describe("detectsModuleLevelSideEffect — H2.1 import-time side-effect heuristi
 })
 
 describe("isHighP2PBreadthEdit — H2.4 high-P2P-breadth classification", () => {
-  it("astropy-8872 shape: a class base-list edit trips it", () => {
+  it("a class base-list edit trips it", () => {
     const oldContent = "class Quantity:\n    pass\n"
     const newContent = "class Quantity(np.ndarray):\n    pass\n"
     expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
@@ -1045,7 +1045,7 @@ describe("isHighP2PBreadthEdit — H2.4 high-P2P-breadth classification", () => 
     expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
   })
 
-  it("subsumes detectsModuleLevelSideEffect's own shapes (13236)", () => {
+  it("subsumes detectsModuleLevelSideEffect's own shapes (the DeprecationWarning case above)", () => {
     const oldContent = "def helper():\n    return 1\n"
     const newContent = 'warnings.warn("old", DeprecationWarning)\n\ndef helper():\n    return 1\n'
     expect(isHighP2PBreadthEdit(oldContent, newContent)).toBe(true)
@@ -1110,7 +1110,7 @@ describe("findSiblingTestCommand — H2.2 fail-loud fallback", () => {
 })
 
 describe("runDifferentialBaseline — H8 differential regression baseline", () => {
-  it("astropy-8707 shape: reverts touched files to HEAD, runs neighbors once, restores current content", async () => {
+  it("reverts touched files to HEAD, runs neighbors once, restores current content", async () => {
     const headContent = new Map([["astropy/_np_utils.pyx", "# old: uses np.int\n"]])
     const currentContent = new Map([["astropy/_np_utils.pyx", "# new: uses np.int_\n"]])
     const writes: { filePath: string; content: string }[] = []
@@ -1475,7 +1475,7 @@ describe("resolveActiveEcosystem / resolveToolchainEcosystem — P3 production c
   })
 })
 
-describe("selectNonPythonEcosystem — django-11885: an ecosystem must OWN a touched file to be selected", () => {
+describe("selectNonPythonEcosystem — an ecosystem must OWN a touched file to be selected", () => {
   it("the regression: a mixed python+javascript profile with only .py touched files falls back to python, and the build-check rung never fires", async () => {
     const cwd = makeFixture()
     writeFileSync(join(cwd, "pyproject.toml"), "[project]\nname = \"proj\"\n")

@@ -65,9 +65,9 @@ const GOVERNANCE_GRAPH_BUDGET_MS = 750
 // consumed only as a POLICY INPUT inside evaluateTestEditGate — never a
 // second independent gate a caller checks on its own. On a fix-shaped turn
 // (armed) the structural diff hard-denies via testEditDenialMessage, same as
-// before (the 11885 self-verification failure; SWE Atlas / SWE-bench
-// validators enforce the same rule post-hoc — we enforce it at the
-// chokepoint we own). On any other turn this is NOT a blanket ban: a
+// before (a self-verification failure — editing the test to fit a wrong
+// patch; external graders enforce the same rule post-hoc — we enforce it at
+// the chokepoint we own). On any other turn this is NOT a blanket ban: a
 // structural test edit coincident with a red→green transition raises a
 // StuckSignal instead of blocking, so the reasoner can adjudicate
 // code-wrong vs test-stale, since a legitimate fix sometimes touches a test.
@@ -469,7 +469,7 @@ const hubEditIssueTextStore = new Map<string, string>()
 /** Session IDs whose defining-file allowlist resolution has completed — either supplied directly at arming time or resolved lazily by `evaluateHubEditGate`. Once a session is in this set the resolver is never called again for it (memoized). Cleared on disarm. Kept private — read through `hubEditDefiningResolved` so the accessor name doesn't collide with the Set itself. */
 const hubEditDefiningResolvedSet = new Set<string>()
 
-/** Wave 9 — session IDs whose retry of a bounced edit landed on a path outside the resolved defining-file allowlist: the denial message named the graph's candidates and the model re-issued the same edit against a different, non-candidate file anyway (round-A3 django-11964: bounced query_utils.py, denial named enums.py, conductor re-issued query_utils.py). Read through `hubEditRetriedAgainstCandidates`. Cleared on disarm. */
+/** Wave 9 — session IDs whose retry of a bounced edit landed on a path outside the resolved defining-file allowlist: the denial message named the graph's candidates and the model re-issued the same edit against a different, non-candidate file anyway (a bounced query_utils.py case: denial named enums.py, conductor re-issued query_utils.py). Read through `hubEditRetriedAgainstCandidates`. Cleared on disarm. */
 const hubEditRetryAgainstCandidatesSet = new Set<string>()
 
 /**
@@ -480,7 +480,7 @@ const hubEditRetryAgainstCandidatesSet = new Set<string>()
  * child session at arming time from its parent's own count
  * (`inheritHubEditTurnBounceState`), so a hard-tail escalation spawning a
  * fresh session mid-turn doesn't reset a hub file's bounce history to zero
- * — the 2026-07-15 django-11815 forensics: 2 sessions each independently
+ * — on 2026-07-15, 2 sessions each independently
  * ran the full first-bounce/second-bounce cycle on the SAME file
  * (serializer.py), 4 bounce events total for one file in one turn, and the
  * escalation session's pair never reached the hub-design judge at all
@@ -609,12 +609,12 @@ export function hubEditDefiningResolved(sessionID: string): boolean {
   return hubEditDefiningResolvedSet.has(sessionID)
 }
 
-/** Wave 9 — has this session re-issued a bounced edit against a file that is NOT one of the graph's named defining candidates? A retry against a non-candidate is itself the hub-shopping tell (round-A3 django-11964's conductor re-issued its bounced edit rather than moving to the denial message's named candidate). Read by prompt.ts's hub-shopping trigger as an alternate fire condition alongside the 2-distinct-bounced-files check. */
+/** Wave 9 — has this session re-issued a bounced edit against a file that is NOT one of the graph's named defining candidates? A retry against a non-candidate is itself the hub-shopping tell (a conductor re-issuing its bounced edit rather than moving to the denial message's named candidate). Read by prompt.ts's hub-shopping trigger as an alternate fire condition alongside the 2-distinct-bounced-files check. */
 export function hubEditRetriedAgainstCandidates(sessionID: string): boolean {
   return hubEditRetryAgainstCandidatesSet.has(sessionID)
 }
 
-/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining-site candidates to check first — framed as candidates, not a verdict, since the graph resolves symbol NAMES and cannot see whether the issue's BEHAVIOR is actually implemented at this hub file (round-F post-mortem on django-11815: the gate bounced the correct fix site and the old wording told the model the candidates WERE the root-most site, actively misdirecting it). */
+/** The reason string thrown at the edit/write boundary when the hub-edit gate bounces a first edit to an over-threshold file. When `rootMostCandidates` is non-empty (Wave 8d) the message names the resolved defining-site candidates to check first — framed as candidates, not a verdict, since the graph resolves symbol NAMES and cannot see whether the issue's BEHAVIOR is actually implemented at this hub file (round-F: the gate had bounced the correct fix site and the old wording told the model the candidates WERE the root-most site, actively misdirecting it). */
 export function hubEditDenialMessage(relPath: string, importers: number, rootMostCandidates: readonly string[] = []): string {
   const base =
     `${importers} other modules import ${relPath} directly — it is shared infrastructure. ` +
@@ -629,7 +629,7 @@ export function hubEditDenialMessage(relPath: string, importers: number, rootMos
   )
 }
 
-/** Round-F §7 — the reason string thrown when the hub-edit gate denies a SECOND time: a bounced-retry landed on a file outside a non-empty resolved defining-site allowlist, so the model was shown the graph's named candidates and re-issued a non-candidate edit anyway. Names the defining-site candidates concretely and states the fail-open floor: a re-issue naming the concrete evidence that the behavior lives in `relPath` itself is allowed — the candidates are symbol-name hits, not a behavior verdict (round-F post-mortem on django-11815). */
+/** Round-F §7 — the reason string thrown when the hub-edit gate denies a SECOND time: a bounced-retry landed on a file outside a non-empty resolved defining-site allowlist, so the model was shown the graph's named candidates and re-issued a non-candidate edit anyway. Names the defining-site candidates concretely and states the fail-open floor: a re-issue naming the concrete evidence that the behavior lives in `relPath` itself is allowed — the candidates are symbol-name hits, not a behavior verdict (round-F). */
 export function hubEditSecondDenialMessage(relPath: string, definingSites: readonly string[]): string {
   return (
     `This is the second time this edit has landed on ${relPath}, which is not one of the SYMBOL-definition sites the code graph resolved for this issue: ${definingSites.join(", ")}. ` +
@@ -1125,7 +1125,7 @@ export async function evaluateHubEditGate(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Wave 10 — dispatch-time defining-site memoization. Round-A4 django-11964:
+// Wave 10 — dispatch-time defining-site memoization. A cold-graph race:
 // the hub-design trigger (prompt.ts) fired its judge dispatch while this
 // gate's own lazy resolution (above) was still unresolved — the graph was
 // cold at bounce time — so the judge got definitionSites=[] and, with the
@@ -1186,7 +1186,7 @@ export async function memoizeHubEditDefiningSites(
 // defining-site allowlist is only ever used to ALLOW; nothing anywhere
 // denies an edit for being outside the issue's scope, so a file below the
 // fan-in threshold is allowed unconditionally — the gate never asks that
-// question. django-11880: escalation ran a broad multi-app sweep, hit two
+// question. An escalation ran a broad multi-app sweep, hit two
 // pre-existing failures, proved via its own `git stash` + rerun that they
 // pre-dated its change, then shipped 8 unrequested lines into the
 // collateral module anyway — the required fix was 1 line elsewhere. This

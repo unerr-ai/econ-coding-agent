@@ -2,7 +2,7 @@
  * Types for the everyday-capability eval (OL-7.12) — the honesty gate that
  * scores what everyday users feel on test-poor real repos (little/no test
  * coverage, so the verifier ladder leans on QE/judge rungs) instead of
- * SWE-bench-style test-pass deltas, per
+ * test-pass deltas measured on test-rich repos, per
  * docs/architecture/DECOMPOSITION_ORCHESTRATION_PLAN.md §6/§8 (OL-7.12).
  * @sem domain=eval role=types
  */

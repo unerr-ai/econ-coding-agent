@@ -137,7 +137,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // Reasoning-effort guard (reasoning-gate.ts): an ordinary request never
   // ships the mute marker — a stale config-pinned "none" is rewritten to the
   // bounded "high", never deleted, since omitting the param means unbounded
-  // server-side thinking (one 41-minute step in e0-mini10-r1). Small
+  // server-side thinking (one observed 41-minute step). Small
   // (housekeeping) one-shots are muted to the minimal valid "low" instead:
   // un-muted thinking starves or slows their JSON output, but "none" 400s the
   // small_model (gpt-oss-120b: "Invalid reasoning effort: none"). (The

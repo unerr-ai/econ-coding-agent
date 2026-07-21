@@ -2210,25 +2210,27 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
     // true throughout: no repro is ever pinned or run). Once S3's bound is
     // spent, round F plants its own deferral rung before the loud break.
     //
-    // That deferral rung is now a LADDER, not one hop (deferral-policy.ts,
+    // That deferral rung is ASK-ONCE-THEN-DECLINE (deferral-policy.ts,
     // docs/design/escalation-economics.md §10 Step 1): S3's complaint is a
-    // verification gap, so the first firing answers it in place at the
-    // conductor (verify-inline) and does NOT spend the escalation budget
-    // (CHEAP_RESPONSE_BUDGET is irrelevant here — only one complaint class
-    // ever fires this turn, so the pre-existing per-complaint exhaustion
-    // check alone already forces the second `unverified_finish` firing to
-    // escalate; the turn-wide budget only matters once a SECOND, DIFFERENT
-    // complaint class tries to buy its own rung, see deferral-policy.test.ts).
-    // This mock never runs a repro, so the same complaint fires again, the
-    // ladder finds verify-inline already spent, and only THEN escalates.
-    // Two rungs instead of one — the extra reply below absorbs the second.
+    // verification gap, and a verification gap NEVER escalates at any repeat
+    // count — an oracle cannot run a check, only re-derive an answer. So the
+    // first firing answers it in place at the conductor (verify-inline, one
+    // reply) and this mock never runs a repro, so the same complaint fires
+    // again — at which point the ladder finds verify-inline already spent and
+    // returns `none`: no nudge, no reply, no escalation. One rung, not two.
     //
-    // A ninth call is also live-verified as necessary: the escalated finish
-    // attempt lands on P2b's build-first rung (regression-neighbors.ts's
-    // `runBuildCheckRung`, unrelated to the deferral ladder) — the written
-    // `src/parser.ts` fails this fixture's compile check once, which is its
-    // own independently-bounded reject-then-loud gate (`turnBuildCheckGateNudged`)
-    // and costs one more rung before the turn is finally let through loud.
+    // The `none` verdict is also why the S3-exhausted call site must not
+    // `continue` unconditionally (prompt.ts): `none` plants no nudge and
+    // spends no deferral budget, so re-looping on it would re-enter the same
+    // branch forever against an unchanged transcript. Falling through on a
+    // decline is what lets this turn reach its loud finish at all.
+    //
+    // The last call is live-verified as necessary: the finish attempt lands on
+    // P2b's build-first rung (regression-neighbors.ts's `runBuildCheckRung`,
+    // unrelated to the deferral ladder) — the written `src/parser.ts` fails
+    // this fixture's compile check once, which is its own independently-bounded
+    // reject-then-loud gate (`turnBuildCheckGateNudged`) and costs one more
+    // rung before the turn is finally let through loud.
     yield* llm.tool("write", {
       filePath: path.resolve(dir, "src/parser.ts"),
       content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
@@ -2238,7 +2240,6 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
     yield* llm.text("still investigating")
     yield* llm.text("still investigating")
     yield* llm.text("still investigating after verify-inline")
-    yield* llm.text("still investigating after deferral")
     yield* llm.text("done, no repro run")
     yield* llm.text("still not fixing the compile error")
 
@@ -2250,11 +2251,11 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
 
     expect(result.info.role).toBe("assistant")
     if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
-    // 1 write + 8 text replies: wave-10 (1), S3's own 3 rejects, the deferral
-    // ladder's two rungs (verify-inline, then escalate on the repeat firing),
-    // P2b's build-check rung (1, unrelated to the ladder), then the final
-    // loud accept.
-    expect(yield* llm.calls).toBe(9)
+    // 1 write + 7 text replies: wave-10 (1), S3's own 3 rejects, the deferral
+    // ladder's single rung (verify-inline — the repeat firing declines with
+    // `none` and costs no reply), P2b's build-check rung (1, unrelated to the
+    // ladder), then the final loud accept.
+    expect(yield* llm.calls).toBe(8)
 
     const msgs = yield* sessions.messages({ sessionID: session.id })
     const nudgeTexts = msgs
@@ -2318,7 +2319,7 @@ it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with
 )
 
 // H9 — hub_bounce_repeat fires on an otherwise-clean bug-shaped finish
-// (tracker #30, django-11265 replay), but under the §10 response ladder
+// (tracker #30), but under the §10 response ladder
 // (escalation-economics.md) it is classified "corrected" — a lagging
 // indicator the deterministic hub gate already fixed — so it declines
 // instead of escalating (it never did, on any firing; see
@@ -2333,7 +2334,7 @@ it.instance(
       const sessions = yield* Session.Service
       const todos = yield* SessionTodo.Service
       const session = yield* sessions.create({
-        title: "django-11265 replay",
+        title: "hub-bounce replay",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
 
@@ -2378,8 +2379,8 @@ it.instance(
       // squarely mid-turn, exactly where tool/edit.ts / tool/write.ts
       // publish a real hub-edit bounce. Mirrors their evidence shape: a
       // first evidence-bearing bounce (hub_bounce) then a second,
-      // evidence-bearing repeat (hub_bounce_repeat) — the django-11265
-      // replay shape (bounce at step 48/49, every deterministic check
+      // evidence-bearing repeat (hub_bounce_repeat) — a replay
+      // shape (bounce at step 48/49, every deterministic check
       // green, the fix landed on/near the hub anyway).
       yield* llm.wait(1)
       publishSignal({

@@ -379,8 +379,8 @@ const GATE_BLOCK_RE = /\[econ-gate\]\s*BLOCKED:[^\n]*?\bin\s+(\S+?)\.\s/i
  * S4 — scan a completed step's parts for an econ-gate governance BLOCK on an
  * edit/write tool (an errored tool part whose output carries the
  * `[econ-gate] BLOCKED` reason) so the turn-store ledger can track it and the
- * S3 done-time nudge can flag an abandoned block (django-12039: blocked
- * twice, never re-landed, shipped an empty patch).
+ * S3 done-time nudge can flag an abandoned block (blocked twice, never
+ * re-landed, shipped an empty patch).
  */
 // S2 — how many SM4-observed steps (assistant steps with tool calls) the
 // repro pre-pass gets before abstaining — plant localization anyway and
@@ -390,10 +390,10 @@ export const REPRO_PIN_DEADLINE_STEPS = 12
 
 // S8 — how many SM4-observed steps a bug-shaped turn may spend verifying
 // AFTER a source edit has landed with still no reproduction pinned before
-// the converge-now nudge pre-arms the S3 exit ramp (django-11790 strict run
-// #3: a step-21 finish rejection was followed by 38 more minutes of tool
-// calls and no second finish attempt — every done-time bar lives in the
-// !hasToolCalls exit path, which a tool-calling agent can evade forever).
+// the converge-now nudge pre-arms the S3 exit ramp (a finish rejection can
+// be followed by 38 more minutes of tool calls and no second finish
+// attempt — every done-time bar lives in the !hasToolCalls exit path,
+// which a tool-calling agent can evade forever).
 export const POST_FIX_CONVERGE_STEPS = 8
 
 // D4 (09-ops-hands) — the headless completion re-entry gate's own bounded
@@ -406,12 +406,11 @@ export const MAX_HEADLESS_REENTRIES = 20
 
 // S9 — how many SM4-observed steps a turn may keep "verifying" broadly AFTER
 // its pinned reproduction has already run GREEN before the finish nudge
-// fires (django-11790 strict run #4: the pin went green at step 18, then 9
-// more steps of re-running suites, a step-24 `rm` of the pinned file, and
-// the 3600s wall killed it at step 25 — nothing told the model the
-// done-gate is now the terminator). Shorter than POST_FIX_CONVERGE_STEPS
-// because a green pin is stronger done-evidence than a landed source edit
-// alone.
+// fires (a pin can go green early, then 9 more steps of re-running suites,
+// an `rm` of the pinned file, and a 3600s wall-clock timeout — nothing told
+// the model the done-gate is now the terminator). Shorter than
+// POST_FIX_CONVERGE_STEPS because a green pin is stronger done-evidence than
+// a landed source edit alone.
 export const PIN_GREEN_FINISH_STEPS = 3
 
 // S9 — tool names whose input carries a `command` field worth checking for a
@@ -564,9 +563,9 @@ function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: stri
     const part = raw as { type?: string; tool?: string; state?: { status?: string; output?: string; error?: string } }
     if (part?.type !== "tool" || !part.tool || !GATE_BLOCK_TOOLS.has(part.tool)) continue
     if (part.state?.status !== "error") continue
-    // An errored tool part carries the reason in `state.error` (verified on
-    // django-12039's live transcript: the [econ-gate] BLOCKED text is the
-    // error field, and there is no output field on the error state).
+    // An errored tool part carries the reason in `state.error` (the
+    // [econ-gate] BLOCKED text lives in the error field; there is no output
+    // field on the error state).
     const output = part.state?.error ?? part.state?.output ?? ""
     const m = GATE_BLOCK_RE.exec(output)
     if (!m) continue
@@ -583,7 +582,7 @@ function scanGateBlocks(parts: readonly unknown[]): { file: string; reason: stri
  * below assembles) plus the repo's resolved dependency versions, then defers
  * to `shouldSearchForError` for the fire/no-fire call. `websearchDisabled`
  * short-circuits to `undefined` before anything else runs — the
- * arena/benchmark strip-the-web discipline (OPENCODE_DISABLE_WEBSEARCH).
+ * offline-run strip-the-web discipline (OPENCODE_DISABLE_WEBSEARCH).
  * `undefined` also covers the case where `failingOutput` carries no
  * recognizable error/trace shape (never a false-positive query). Kept as a
  * standalone, exported, pure function — separate from the wiring block that
@@ -1052,7 +1051,7 @@ export const layer = Layer.effect(
      * fires this at most once per turn and degrades silently to
      * DEGRADED_HUB_DESIGN on any model/language resolution failure or judge
      * parse failure — the trigger falls back to hubDesignDegradedNudgeText.
-     * Wave 8 (O-J1): raised from a 700-token budget that live-fire evidence
+     * Wave 8 (O-J1): raised from a 700-token budget after observed evidence
      * showed the reasoning tier burning before ever emitting the JSON
      * (`judge-degraded` 2-of-2), and the reasoning/text concatenation order
      * flipped — reasoning first, final `text` last — so the parser's
@@ -1551,7 +1550,7 @@ export const layer = Layer.effect(
         throw error
       }
 
-      // Turn-level tier routing demoted 2026-07-06 (run-19 live-fire): the lead agent is never
+      // Turn-level tier routing demoted 2026-07-06: the lead agent is never
       // swapped at turn-open. Escalation is slice-level only — allocateSlice (coupling ×
       // test-strength + the conductor's `need` hint) routes each decomposed slice and the
       // escalation ladder retries a failed slice upward. A prior-turn abstention is visible to
@@ -2139,17 +2138,18 @@ export const layer = Layer.effect(
         // RF-8 — finish-time type-fidelity re-check state: probe-green may not
         // conclude over a pinned repro whose CURRENT on-disk content carries a
         // type-unfaithful shape (stringified mirror / quoted-numeral conflict),
-        // no longer covers every issue-stated witness (H1 tooth 1, the 14369
-        // strict-subset shape), or never exercises a synthesized roundtrip
-        // counterpart (H1 tooth 2). The 11790 re-fire proved the pin-time judge
-        // runs once on the FIRST pin, and a nudge-prompted rewrite into
+        // no longer covers every issue-stated witness (H1 tooth 1, the
+        // strict-subset shape: the repro exercises only some of the issue's
+        // stated witnesses, not all of them), or never exercises a synthesized
+        // roundtrip counterpart (H1 tooth 2). A re-fire proved the pin-time
+        // judge runs once on the FIRST pin, and a nudge-prompted rewrite into
         // if/failures style — or a later narrowing of the witness set — evades
         // every pin-time detector while keeping the misconception. One bounded
         // deny, then loud pass-through — never a wedge.
         let fidelityFinishDenied = false
         // Round-G — a promoted pin reaching green arms the deferral consumer at
-        // most once per turn: the regressed-then-appeased finish (11815's
-        // retreat signature) is a hard-tail moment, but only its FIRST green
+        // most once per turn: the regressed-then-appeased finish (the retreat
+        // signature) is a hard-tail moment, but only its FIRST green
         // arrival may spend the budget; later arrivals pass through normally.
         let promotedPinGreenNoted = false
         // RF-2 §5 — once the oracle-inversion escape has fired, the pin stops
@@ -2173,7 +2173,7 @@ export const layer = Layer.effect(
         // cancellation (the repro seed's own escape hatch) short-circuits
         // straight to the loud, turn-ending branch at any attempt — a
         // reasoned cancellation is not the silence this gate exists to
-        // catch (django-11848 iter-3).
+        // catch.
         let unverifiedFinishAttempts = 0
         const MAX_UNVERIFIED_FINISH_ATTEMPTS = 3
         // F11 — the turn-end regression gate's own bounded retry, mirroring
@@ -2276,7 +2276,7 @@ export const layer = Layer.effect(
         let landedSourceEditThisTurn = false
         let convergeNudgeFired = false
         // S9 — pin-green finish-nudge state: mirrors the S8 locals above but
-        // for the OTHER half of the trace (django-11790 strict run #4) —
+        // for the OTHER half of the trace —
         // once the pinned probe has been OBSERVED to run green this turn,
         // count subsequent observed steps with a source fix on the board and
         // nudge once at the deadline instead of letting the turn re-verify
@@ -2368,14 +2368,16 @@ export const layer = Layer.effect(
             diffHunks: reproFidelityDiffHunks,
           })
           // RF-4 §8 — the deterministic teeth stack: assertion teeth (F14b),
-          // the rendered-assert detector (11790's `'maxlength="254"' in html`
-          // face, judged repro_fidelity_ok on 0713), required-literal
-          // coverage from the issue-derived expectations (12039's ignored
-          // `'"name" DESC'` witness), and the stringified-mirror detector
-          // (round F 11790's `== str(created.pk)` — an assert whose expected
-          // side stringifies the very value under test proves representation,
-          // not type) — each merges as a forced gap exactly like the teeth
-          // gap; the LLM verdict still covers what mechanics can't see.
+          // the rendered-assert detector (catches an assert against a
+          // rendered HTML face, e.g. `'maxlength="254"' in html`, that an
+          // LLM fidelity judge alone can wrongly pass), required-literal
+          // coverage from the issue-derived expectations (catches an
+          // issue-stated witness like `'"name" DESC'` that a judge alone can
+          // overlook), and the stringified-mirror detector (catches an
+          // assert like `== str(created.pk)` — its expected side stringifies
+          // the very value under test, proving representation, not type) —
+          // each merges as a forced gap exactly like the teeth gap; the LLM
+          // verdict still covers what mechanics can't see.
           // requiredLiterals is computed above, ahead of the dispatch call,
           // so the judge scaffolding (#26) and this deterministic check see
           // the identical list.
@@ -2464,8 +2466,8 @@ export const layer = Layer.effect(
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // SM4 — root-loop stuck supervisor. The inline path (this loop) had no
-        // per-step supervisor: django-11885 thrashed 12x on the same red test
-        // and then fake-green-edited it, all before the M4 exit gate below ever
+        // per-step supervisor: a turn can thrash 12x on the same red test and
+        // then fake-green-edit it, all before the M4 exit gate below ever
         // ran (every thrash step carried tool calls, so the turn never took the
         // exit path). The supervisor distils each completed step and, on a stuck
         // signal, climbs a capped two-rung ladder: rung 1 injects a rethink
@@ -2477,15 +2479,15 @@ export const layer = Layer.effect(
         // L4.2 — the grind valve rides the SAME observation stream as SM4's
         // stuck supervisor (one observeStep call feeds both). The stuck ladder
         // catches repetition pathology; the valve catches VOLUME without
-        // convergence — django-11885's 179 diverse inline edit-test-edit steps
-        // ($0.8447) that never tripped a repeat signal. Root sessions only,
+        // convergence — 179 diverse inline edit-test-edit steps that never
+        // tripped a repeat signal. Root sessions only,
         // fires at most once per turn.
         const grindValve = session.parentID ? undefined : createGrindValve()
         // L1.2c — root-session-only, same round-trip economy as the valve
         // above: child slices already run the slice-loop FSM.
         const batchWatcher = session.parentID ? undefined : createBatchMomentumWatcher()
         // Round-H — probe_rerun_dedupe: the SAME per-step stream, root-only,
-        // once-per-command signal (django-11815: ~72 repro re-runs, roughly
+        // once-per-command signal (~72 repro re-runs is possible, roughly
         // half byte-identical).
         const rerunDedupe = session.parentID ? undefined : createRerunDedupeTracker()
         let escalatedModelRef: { providerID: string; modelID: string } | undefined
@@ -2528,8 +2530,8 @@ export const layer = Layer.effect(
             })
             // Round-H — probe_rerun_dedupe: the SAME command producing
             // byte-identical (normalized) output for the 3rd+ time with no
-            // edit landed in between carries zero new information (django-
-            // 11815: ~72 repro re-runs, roughly half byte-identical). Fires
+            // edit landed in between carries zero new information (~72
+            // repro re-runs is possible, roughly half byte-identical). Fires
             // once per distinct command; an edit resets every counter, a
             // different output resets that command's own counter (never
             // trips on a flaky test).
@@ -2654,11 +2656,11 @@ export const layer = Layer.effect(
                 })
                 if (fidelityResult.gap) continue
               } else if (!toothlessScript) {
-                // S8 — pin-miss observability: django-11790 strict run #3 hit
-                // a red run of a named repro file that did NOT pin, and the
-                // pin path had no logging to say why (all candidates scored
-                // 0, or deriveTurnProbe's own re-run disagreed). Cheap: only
-                // reached when a pin was attempted and missed, no throttling.
+                // S8 — pin-miss observability: a red run of a named repro
+                // file can fail to pin, and the pin path had no logging to
+                // say why (all candidates scored 0, or deriveTurnProbe's own
+                // re-run disagreed). Cheap: only reached when a pin was
+                // attempted and missed, no throttling.
                 yield* Effect.logInfo("turn_probe_pin_miss", {
                   "session.id": sessionID,
                   candidates: candidateTests.map((c) => ({
@@ -2701,9 +2703,9 @@ export const layer = Layer.effect(
                 landedSourceEditThisTurn = true
               // S9 — observability only, no throttle: a file-edit touching
               // the pinned script AFTER it was pinned is tamper-shaped
-              // (django-11790 strict run #4's `rm repro_issue.py`) — lets
-              // trace analysis see every post-pin repro edit, not just the
-              // deletion the guard below reacts to.
+              // (e.g. an `rm repro_issue.py`) — lets trace analysis see
+              // every post-pin repro edit, not just the deletion the guard
+              // below reacts to.
               if (turnPinnedProbe && pinnedScriptFilename && event.kind === "file-edit" && path.basename(event.filePath) === pinnedScriptFilename)
                 yield* Effect.logInfo("pinned_probe_edited", { "session.id": sessionID, file: event.filePath })
             }
@@ -2738,11 +2740,11 @@ export const layer = Layer.effect(
                 // deadline passed, with no pin — plant localization anyway
                 // (degrade to today's behavior) and nudge ONCE. The drift
                 // nudge that used to live in this branch moved OUT to right
-                // after this whole S2 if/else (see below): django-11790
-                // strict run #3 showed every actual drift signal (inline
-                // python -c probes, a denied suite edit, a broken repro
-                // file) landing AFTER this abstention had already fired, so
-                // gating the nudge on !reproHandoffDone meant it never ran.
+                // after this whole S2 if/else (see below): every actual
+                // drift signal (inline python -c probes, a denied suite
+                // edit, a broken repro file) can land AFTER this abstention
+                // has already fired, so gating the nudge on !reproHandoffDone
+                // meant it never ran.
                 const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
                 const reproTodo = currentTodos.find((t) => t.content === reproSliceContent(getReproVehicle(sessionID)))
                 const reproSettled =
@@ -2803,12 +2805,12 @@ export const layer = Layer.effect(
 
             // Repro drift nudge (NUDGE_V2 port) — targeted, event-triggered,
             // once-per-kind steer. Deliberately OUTSIDE the reproHandoffDone
-            // gate above, re-armed on !turnPinnedProbe instead: django-11790
-            // strict run #3 showed every actual drift signal (inline
-            // python -c probes, a denied suite edit, a broken repro file)
-            // landing AFTER the step-12 deadline abstention had already set
-            // reproHandoffDone — gating the nudge on that flag meant it never
-            // fired. It now survives abstention deliberately and stays live
+            // gate above, re-armed on !turnPinnedProbe instead: every actual
+            // drift signal (inline python -c probes, a denied suite edit, a
+            // broken repro file) can land AFTER the step-12 deadline
+            // abstention has already set reproHandoffDone — gating the
+            // nudge on that flag meant it never fired. It now survives
+            // abstention deliberately and stays live
             // until a pin lands or the turn ends. Tier-2 takes precedence
             // once the running drift count crosses the threshold (one
             // stronger combined reminder beats another per-kind nudge); each
@@ -2885,14 +2887,14 @@ export const layer = Layer.effect(
               // drift that keeps recurring (every per-kind nudge above, and
               // the tier-2 escalation, already exhausted this turn) means
               // the model literally cannot produce a pinnable command on its
-              // own — django case: 199 turns burned this way while
-              // repro_issue.py sat on disk unused the whole time. Rather
+              // own — as many as 199 turns can burn this way while
+              // repro_issue.py sits on disk unused the whole time. Rather
               // than nudge forever, look for the scratch repro file itself
               // and run it, pinning on a runner-confirmed red exactly like
               // the probe-from-red path above. A phantom ENOENT run (F13f —
               // the file doesn't actually exist where expected) and a green
-              // run (11964 protection: a green repro pre-fix proves nothing)
-              // are both skipped, never pinned. Fires at most once per turn;
+              // run (a green repro pre-fix proves nothing) are both skipped,
+              // never pinned. Fires at most once per turn;
               // never on a child session (this whole SM4 block already
               // implies root-only).
               if (
@@ -3053,10 +3055,10 @@ export const layer = Layer.effect(
             // (armed on !turnPinnedProbe, before a pin lands), this one only
             // makes sense WITH a pin already landed — the pinned file IS the
             // turn's verification contract, and deleting it post-pin
-            // (django-11790 strict run #4: `rm repro_issue.py` at step 24,
-            // then the 3600s wall killed the turn one step later with no
-            // recovery) must be caught even though the repro pre-pass itself
-            // already resolved. Same once-per-kind Set as the drift block
+            // (e.g. an `rm repro_issue.py` followed by the 3600s wall
+            // killing the turn with no recovery) must be caught even though
+            // the repro pre-pass itself already resolved. Same once-per-kind
+            // Set as the drift block
             // above, same synthetic-nudge pattern.
             if (
               reproSeededThisTurn &&
@@ -3102,11 +3104,11 @@ export const layer = Layer.effect(
 
             // S8 — converge-now deadline: a bug-shaped turn whose fix has
             // already landed (a source edit is on the board) but never gets
-            // pinned keeps "verifying" broadly forever — run #3's step-21
-            // finish rejection was followed by 38 more minutes of tool calls
-            // and no second finish attempt, because every done-time bar (S3
-            // below) lives in the !hasToolCalls exit path a tool-calling
-            // agent never enters. Count observed post-fix, no-pin steps; at
+            // pinned keeps "verifying" broadly forever — a finish rejection
+            // can be followed by 38 more minutes of tool calls and no second
+            // finish attempt, because every done-time bar (S3 below) lives
+            // in the !hasToolCalls exit path a tool-calling agent never
+            // enters. Count observed post-fix, no-pin steps; at
             // the deadline, pre-arm unverifiedFinishAttempts to its cap so
             // the S3 bar treats the NEXT finish attempt as its final
             // loud-fail-open exit ramp (this converge-now nudge already told
@@ -3146,12 +3148,12 @@ export const layer = Layer.effect(
 
             // S9 — pin-green finish nudge: symmetric to the converge-now
             // nudge above, for the case that block deliberately excludes
-            // (turnPinnedProbe set). django-11790 strict run #4: the pin ran
-            // GREEN at step 18 and the model kept re-running suites for 9
-            // more steps (~2.4 min/step) before a step-24 cleanup deleted
-            // the pinned file and the 3600s wall killed it at step 25 —
-            // nothing told it the done-gate is now the terminator once a pin
-            // is green. Detect a green run of the pinned probe THIS step
+            // (turnPinnedProbe set). The pin can run GREEN early and the
+            // model keeps re-running suites for 9 more steps (~2.4 min/step)
+            // before a cleanup deletes the pinned file and the 3600s wall
+            // kills the turn — nothing told it the done-gate is now the
+            // terminator once a pin is green. Detect a green run of the
+            // pinned probe THIS step
             // (stepRanPinnedProbeGreen — the bash tool's own
             // `metadata.exit === 0`, not an output-text heuristic), then
             // count observed steps with a source fix already landed; at the
@@ -3296,13 +3298,12 @@ export const layer = Layer.effect(
             // this turn. Root sessions only (a dispatched child slice runs
             // its own verified slice-loop, not this inner loop). Fires ONCE
             // per turn-loop instance when the hub-edit bounce gate has denied
-            // two DISTINCT files this session — the live-fire tell (django-
-            // 11964 forensics) that the conductor is moving the same
-            // wrong-layer fix to another shared module instead of
-            // reconsidering where the fix belongs. Wave 9 (round-A3 11964):
-            // a confident single-file wrong-layer draw never produces a
-            // second distinct bounce — it just re-issues its own bounced
-            // edit against the SAME file, which evaluateHubEditGate allows
+            // two DISTINCT files this session — the signal that the
+            // conductor is moving the same wrong-layer fix to another shared
+            // module instead of reconsidering where the fix belongs.
+            // Wave 9: a confident single-file wrong-layer draw never
+            // produces a second distinct bounce — it just re-issues its own
+            // bounced edit against the SAME file, which evaluateHubEditGate allows
             // as a retry and this trigger's 2-distinct-files count never
             // fires. But a retry against a file the denial message already
             // named a defining candidate for is the same hub-shopping tell
@@ -3332,9 +3333,9 @@ export const layer = Layer.effect(
               })
               // RF-7 §10 — the judge's issue text comes from the turn-open
               // STORE (the user's original prompt), never from lastUser:
-              // lastUser can be a synthetic injected nudge, and the 11815
-              // forensics caught the judge chewing on an injected "ECONOMY
-              // CHECK" meta-prompt as if it were the issue.
+              // lastUser can be a synthetic injected nudge, and a judge can
+              // chew on an injected "ECONOMY CHECK" meta-prompt as if it
+              // were the issue.
               const issueText =
                 hubEditIssueText(sessionID) ??
                 (msgs.find((m) => m.info.id === lastUser.id)?.parts ?? [])
@@ -3345,10 +3346,10 @@ export const layer = Layer.effect(
               // Wave 10 — dispatch-time memoization: the full-budget
               // resolution above (issueSymbolDefinitionSites,
               // RISK_PROBE_INDEX_BUDGET_MS internally) is otherwise thrown
-              // away after this one dispatch — round-A4 django-11964's
-              // timing gap was this resolution going unshared with
-              // evaluateHubEditGate's own lazy resolver, which then had to
-              // redo the same work independently, a gate evaluation later.
+              // away after this one dispatch — a timing gap can arise when
+              // this resolution goes unshared with evaluateHubEditGate's own
+              // lazy resolver, which then has to redo the same work
+              // independently, a gate evaluation later.
               // When this session's defining-file allowlist isn't resolved
               // yet and it has stored issue text to resolve against, feed
               // the sites just fetched into the gate's store so the model's
@@ -3744,8 +3745,9 @@ export const layer = Layer.effect(
               // RF-6 §9 — interpreter discipline: the same F14a discovery the
               // regression gate uses now also governs the pinned-probe run; a
               // bare `python`/`python3` head is rewritten to the discovered
-              // project interpreter (11964-A's phantom root cause was a base
-              // conda py3.11 running the py3.6 testbed's repro).
+              // project interpreter (a mismatched base interpreter — e.g. a
+              // conda py3.11 — running a differently-versioned project
+              // testbed's repro is a common phantom root cause).
               if (
                 turnDiscoveredInterpreter === undefined &&
                 finishLandedSourceEdits &&
@@ -3802,10 +3804,10 @@ export const layer = Layer.effect(
                 // reject-nudge: when the red shows the code PRODUCING the
                 // issue's stated desired value while the pinned assertion
                 // still expects the value the issue calls wrong, the pin must
-                // not bind as green-required — the 0713 11815 runs applied the
-                // gold-equivalent fix and this exact chain (pin-green pressure
-                // + no-test-edit deny + "do not edit the test" nudge) forced
-                // the retreat to the failing patch. Never re-checked once
+                // not bind as green-required — applying the gold-equivalent
+                // fix, this exact chain (pin-green pressure + no-test-edit
+                // deny + "do not edit the test" nudge) can force the retreat
+                // to the failing patch. Never re-checked once
                 // noted; the pin then stops binding for the rest of the turn.
                 const inversion = oracleInversionNoted
                   ? { inverted: false as const }
@@ -3889,11 +3891,10 @@ export const layer = Layer.effect(
                 // MISSING_FILE_RE/MODULE_MISSING_RE family, or a
                 // conservative "backend required"/"ImproperlyConfigured"/
                 // "command not found" marker) at least twice in a row must
-                // not keep binding as green-required — the 2026-07-15
-                // django-11880 shape, where a GIS-backend-required
-                // regression neighbor burned 42 of 59 turns on a red that
-                // can never pass in this arena. Never re-checked once
-                // noted; the pin then stops binding for the rest of the
+                // not keep binding as green-required — a backend-required
+                // regression neighbor can burn 42 of 59 turns on a red that
+                // can never pass in the current environment. Never
+                // re-checked once noted; the pin then stops binding for the rest of the
                 // turn, same discipline as oracleInversionNoted.
                 if (!envBlockedPinNoted && !inversion.inverted) {
                   const gateSignature = gate.outputTail ? normalizeResult(gate.outputTail) : undefined
@@ -4023,15 +4024,15 @@ export const layer = Layer.effect(
                 }
               } else {
                 // RF-8 — finish-time type-fidelity re-check (pure code, no
-                // LLM call): the 11790 re-fire finished green over a repro
-                // rewritten AFTER the pin-time judgment — quoted-numeral
-                // expectation ('150') mirroring the agent's own str() source
-                // fix, in if/failures style no assert-anchored detector sees.
+                // LLM call): a repro can finish green after being rewritten
+                // AFTER the pin-time judgment — a quoted-numeral expectation
+                // ('150') mirroring the agent's own str() source fix, in
+                // if/failures style no assert-anchored detector sees.
                 // Re-read the pin's CURRENT content and deny once on the
                 // HIGH-PRECISION teeth only (stringified mirror +
                 // numeric-string conflict); rendered/teeth classes stay
                 // pin-time converts — a repro may legitimately assert rendered
-                // output when the issue is about rendered output (12039's SQL).
+                // output when the issue is about rendered output.
                 const finishScriptPath = extractScriptPath(turnPinnedProbe.probe.command)
                 const finishReproContent =
                   finishScriptPath === undefined ? undefined : readPinnedReproFile(process.cwd(), finishScriptPath)
@@ -4039,7 +4040,7 @@ export const layer = Layer.effect(
                 // re-check re-runs the ALL-witness check too, not just
                 // type-fidelity: the pin-time coverage gate (F14b) fires at
                 // most ONCE, so a repro rewritten AFTER pin time down to a
-                // strict subset (the 14369 "settled on 2/3 cases" shape)
+                // strict subset (the "settled on 2/3 cases" shape)
                 // would otherwise reach GREEN unnoticed. Re-check the
                 // CURRENT on-disk content against the SAME witness list
                 // (issue-derived literals + the pin-time roundtrip
@@ -4103,8 +4104,8 @@ export const layer = Layer.effect(
                 if (finishTypeGap !== undefined && deferralAvailable(sessionID)) {
                   // Round-G §A1 — the convert FAILED: the bounded deny already
                   // fired (fidelityFinishDenied) and the on-disk repro is
-                  // STILL type-unfaithful at the next finish (the 11790 red:
-                  // the agent swapped `str(expected_max_length)` for
+                  // STILL type-unfaithful at the next finish (a red where the
+                  // agent swaps `str(expected_max_length)` for
                   // `str(field.max_length)`, obeying the "natural source"
                   // clause while keeping the stringified mirror). The probe is
                   // green-on-wrong for this class, so no other gate can ever
@@ -4142,10 +4143,10 @@ export const layer = Layer.effect(
                   // Round-G §A2 — the regressed-then-appeased signature: this
                   // pin exists because the turn's fix regressed a previously-
                   // green tracked neighbor (F16 promotion), and the turn is
-                  // now finishing GREEN against that stand-in oracle. On the
-                  // 11815 class the green was bought by NARROWING the fix
-                  // (Promise-conditional) until the visible suite — which
-                  // encodes the bug — passed again. One deferral verifies the
+                  // now finishing GREEN against that stand-in oracle. The
+                  // green can be bought by NARROWING the fix
+                  // (e.g. made Promise-conditional) until the visible suite —
+                  // which encodes the bug — passes again. One deferral verifies the
                   // fix is the general root-cause fix before the finish is
                   // accepted; a legitimately-repaired regression costs one
                   // bounded slice and proceeds.
@@ -4196,9 +4197,9 @@ export const layer = Layer.effect(
             // reaching done with NO verified reproduction OR ZERO landed
             // source (non-test) edits gets ONE reject-with-nudge cycle before
             // a loud, never-deadlocked break. Catches the shapes the M4 pin
-            // never sees: 11964 (test-only false-green — a pin existed and
-            // went green, but nothing source-side landed) and 12039 (empty
-            // patch — nothing pinnable was ever authored/run).
+            // never sees: a test-only false-green (a pin existed and
+            // went green, but nothing source-side landed) and an empty
+            // patch (nothing pinnable was ever authored/run).
             if (!session.parentID) {
               const storedVerdict = getTurnVerdict(sessionID)
               // P4b — a READ-ONLY turn (every goal qa/research/audit/run-only)
@@ -4209,7 +4210,7 @@ export const layer = Layer.effect(
               // so the S3 "author a repro" nudge fired 3× and the conductor
               // churned inventing verification for a fix that was never in
               // scope. The disjunct still guards fix turns that evade the
-              // diagnosis shape (11885's enhancement wording) — those are NOT
+              // diagnosis shape (enhancement-phrased wording) — those are NOT
               // read-only, so their protection is untouched; a null verdict
               // (P5 degrade) is not read-only either and stays protected.
               // tracker #29 — a null verdict (prompt.test.ts disables triage,
@@ -4249,7 +4250,7 @@ export const layer = Layer.effect(
               // F18 — seen-red must re-verify: a turn that LANDED source
               // edits while a mid-turn test/repro run it saw fail red was
               // never re-run green must not ship silently — the gap that let
-              // django-11790 ship after a failing mid-turn test run. None of
+              // a turn ship after a failing mid-turn test run. None of
               // M4 (a narrower pinned-probe check), S3 (below), or F11 (a
               // neighbor-regression check) replay the turn's own transcript
               // for this shape. Guarded on landedSourceEdits, not bugShaped:
@@ -4272,11 +4273,11 @@ export const layer = Layer.effect(
                   turnPinnedProbeRanGreen ? turnPinnedProbe?.probe.command : undefined,
                 )
                 // F18b — oracle-inversion partition, checked BEFORE the
-                // confirm-GREEN demand: the 2026-07-15 11815 runs applied the
-                // general gold-equivalent fix, watched the stale committed
-                // suite go red on it (its assertions encode the bug; gold's
-                // test_patch rewrites them), and THIS nudge's "confirm GREEN
-                // before finishing" forced the retreat to a narrowed
+                // confirm-GREEN demand: applying a general gold-equivalent
+                // fix can watch the stale committed suite go red on it (its
+                // assertions encode the bug; gold's test_patch rewrites
+                // them), and THIS nudge's "confirm GREEN before finishing"
+                // can force the retreat to a narrowed
                 // Promise-conditional patch. The RF-2 escape at the M4 gate
                 // never saw it: the agent's own issue-faithful pin stayed
                 // green under the narrow patch, so the inversion surfaced
@@ -4330,9 +4331,9 @@ export const layer = Layer.effect(
                 // environment-shaped or predates this turn's first source
                 // edit, AND has repeated with an identical signature at
                 // least twice, can never be fixed by editing the issue's
-                // code — the 2026-07-15 django-11880 shape (a GIS-backend-
-                // required regression neighbor burned 42 of 59 turns
-                // re-running a red that can never pass in this arena).
+                // code — a backend-required regression neighbor can burn
+                // 42 of 59 turns re-running a red that can never pass in
+                // the current environment.
                 // Sanctioned once — the model states the environment gap
                 // instead of re-running it forever, same reject-once-
                 // then-loud discipline as every sibling gate.
@@ -4352,8 +4353,8 @@ export const layer = Layer.effect(
                 // websearch doctrine, unchanged). Bounded to ONE per turn
                 // AND never the same trace signature twice — same one-shot
                 // latch discipline as every sibling gate here. Never fires
-                // when OPENCODE_DISABLE_WEBSEARCH is set — the arena/
-                // benchmark strip-the-web discipline (the model has no
+                // when OPENCODE_DISABLE_WEBSEARCH is set — the offline-run
+                // strip-the-web discipline (the model has no
                 // search tool to act on the nudge with).
                 if (bindingSeenRed.length > 0 && !turnErrorSearchNudged) {
                   const errorSearchTarget = bindingSeenRed[0]!
@@ -4507,8 +4508,8 @@ export const layer = Layer.effect(
               if (bugShaped) {
                 // Wave 10 — unverified-finish gate: a FIX-SHAPED root turn
                 // that landed a non-test source edit with ZERO real test
-                // executions anywhere in its own transcript (the 11885
-                // autopsy: a 36-line deletion.py patch shipped after only
+                // executions anywhere in its own transcript (e.g. a 36-line
+                // deletion.py patch shipped after only
                 // `py_compile`, whose one `runtests.py`-matching command was
                 // `cat tests/runtests.py` — a read, never a run; neither M4
                 // (needs a pin), S3 below (needs bugShaped+no-pin), nor F18
@@ -4572,10 +4573,10 @@ export const layer = Layer.effect(
                 // H3 — patch-level sanity floor: extends the hub-design
                 // judge's own sanity floor (hub-design-judge.ts's
                 // `pathsRefer`-against-`definitionSites` check) from one
-                // judge-picked file to the WHOLE landed patch. The
-                // astropy-7166 shape — a $1.31 escalated fix that shipped a
-                // conftest.py-only patch with ZERO overlap with the issue —
-                // is caught here at ~$0 (a graph query, never a judge call).
+                // judge-picked file to the WHOLE landed patch. An escalated
+                // fix that ships a test-config-only patch with ZERO overlap
+                // with the issue is caught here at ~$0 (a graph query, never
+                // a judge call).
                 // Bounded to ONE deny per session (patch-sanity-store.ts,
                 // same "never a wedge" discipline as the unverified-finish
                 // gate above); a still-insane retry fails open LOUD (a tail
@@ -4739,7 +4740,7 @@ export const layer = Layer.effect(
                 // Fire when there is no pin at all, OR when the pin was
                 // authored THIS turn yet no source edit landed (a red repro
                 // cannot legitimately flip green with zero source changes —
-                // that is repro/environment tampering, the 11964 shape). An
+                // that is repro/environment tampering). An
                 // INHERITED pin with no new edits is a confirm/report
                 // continuation turn and passes (the M4 gate above already
                 // re-ran it green).
@@ -4748,8 +4749,8 @@ export const layer = Layer.effect(
                   // REPRO_SLICE_TEXT point 6) lets the model cancel the
                   // repro after 2 distinct failed approaches by marking the
                   // todo cancelled with a one-line reason. That is a
-                  // legitimate, reasoned exit, not the silence django-11848
-                  // iter-3 shipped unverified on — short-circuit straight to
+                  // legitimate, reasoned exit, not the silence a turn ships
+                  // unverified on — short-circuit straight to
                   // the loud, turn-ending branch whenever the todo store
                   // actually records one, regardless of attempt count.
                   const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
@@ -4773,7 +4774,7 @@ export const layer = Layer.effect(
                     })
                     // S4 — fold any still-unresolved governance-gate block
                     // into the same nudge, first rejection only
-                    // (django-12039: blocked twice, never re-landed).
+                    // (blocked twice, never re-landed).
                     const unresolvedBlocks = unverifiedFinishAttempts === 1 ? [...getGateBlocks(sessionID)] : []
                     const blockLines = unresolvedBlocks
                       .map(
@@ -4809,8 +4810,8 @@ export const layer = Layer.effect(
                   } else {
                     // MAX_UNVERIFIED_FINISH_ATTEMPTS rejections spent and no
                     // cancellation on record — round F: one deferral rung
-                    // before the loud break (12039's terminal
-                    // turn_completed_unverified with landed source edits was
+                    // before the loud break (a terminal
+                    // turn_completed_unverified with landed source edits is
                     // the named advisory-only anti-pattern).
                     yield* publishSignalFx({
                       name: "unverified_finish",
@@ -4820,7 +4821,7 @@ export const layer = Layer.effect(
                       evidence: { rung: "s3-exhausted", hadPin: turnPinnedProbe !== undefined, landedSourceEdits },
                     })
                     if (deferralAvailable(sessionID)) {
-                      yield* armDeferral({
+                      const unverifiedFinishVerdict = yield* armDeferral({
                         signal: "unverified_finish",
                         gateEvidence:
                           `Bug-shaped turn is finishing UNVERIFIED after ${unverifiedFinishAttempts} bounded rejects: ` +
@@ -4832,7 +4833,16 @@ export const layer = Layer.effect(
                         expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                         statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                       })
-                      continue
+                      // Mirrors the hub-bounce site below: only re-loop when
+                      // armDeferral actually intercepted the finish. A verdict
+                      // of "none" plants no nudge AND spends no budget (only
+                      // the "escalate" branch calls markDeferralUsed), so
+                      // `deferralAvailable` stays true and a bare `continue`
+                      // re-enters this branch forever against an unchanged
+                      // transcript — the turn never terminates. Falling through
+                      // on a decline IS the intended S3 semantics: bounded
+                      // rejects, then fail open loud.
+                      if (unverifiedFinishVerdict.response !== "none") continue
                     }
                     yield* Effect.logWarning("turn_completed_unverified", {
                       "session.id": sessionID,
@@ -4941,7 +4951,8 @@ export const layer = Layer.effect(
                 // F20 — graph-derived reach: bounded-wait for the in-process
                 // graph, then collect reverse-call test neighbors per touched
                 // file; any miss (cold index, timeout, query error) degrades
-                // to the filename rungs alone (shapely-2226's gap).
+                // to the filename rungs alone, which miss a test file whose
+                // name carries no correlation to the touched module.
                 const graphCandidates = yield* Effect.promise(() =>
                   ensureGraphReadyBounded(GRAPH_NEIGHBOR_READY_BUDGET_MS)
                     .then((readiness) =>
@@ -4981,9 +4992,9 @@ export const layer = Layer.effect(
                 // widening (gap-closure-plan.md §2 H2, round 3): the
                 // filename/graph rungs above key off entity/filename
                 // proximity, blind to an import-time blast radius
-                // (astropy-13236: a module-level DeprecationWarning, 644 P2P
+                // (e.g. a module-level DeprecationWarning causing 644 P2P
                 // broken, zero graph neighbors) and to a default-arg/
-                // base-class edit's caller-wide reach (astropy-8872: an
+                // base-class edit's caller-wide reach (e.g. an
                 // 80-test P2P break behind a 3-file green subset). Widening
                 // BEFORE the run — rather than promoting a narrow green
                 // subset after the fact — means a risky edit class always
@@ -5111,8 +5122,9 @@ export const layer = Layer.effect(
                   if (turnDiscoveredInterpreter === undefined) {
                     // F21 — harvest-first (see the M4 site): observed-green
                     // in-turn evidence outranks the synthetic import probe
-                    // and un-skips the gate on Django-project layouts
-                    // (linkding-995's turn_regression_env probed=2 miss).
+                    // and un-skips the gate on Django-project layouts (an
+                    // environment check that already probed twice still
+                    // missed the layout).
                     const harvestedInterpreter = harvestTurnInterpreter(extractTurnBashExecutions(turnAssistantParts))
                     if (harvestedInterpreter !== null) {
                       turnDiscoveredInterpreter = harvestedInterpreter
@@ -5190,8 +5202,8 @@ export const layer = Layer.effect(
                     // H8 — differential regression baseline: run the
                     // neighbor set ONCE against pre-edit (HEAD) content
                     // before comparing against the post-edit run, so a
-                    // pre-existing environment red (astropy-8707's broken
-                    // `np.int`) never gets chased as model-induced. Cached
+                    // pre-existing environment red (e.g. a broken `np.int`
+                    // reference) never gets chased as model-induced. Cached
                     // per turn — the first selection's baseline stands for
                     // the whole turn, mirroring turnDiscoveredInterpreter's
                     // own once-per-turn cache.
@@ -5267,7 +5279,20 @@ export const layer = Layer.effect(
                         preExisting: regressionVerdict.preExisting,
                       })
                     }
-                    if (!regressionVerdict.covered) {
+                    // H8 — gate on `failing`, NOT on `covered`. Every neighbor
+                    // here is evidenced pass-or-fail (see regressionEvidence
+                    // above), so `missing` is exactly `failing ∪ preExisting`
+                    // and `covered` is false whenever ANY red exists —
+                    // including the pre-existing environment reds excused one
+                    // line above. Reading `covered` re-admits every excused red
+                    // and enters this branch with an EMPTY `failingNeighbors`,
+                    // so the nudge below names zero tests while ordering "fix
+                    // the regression" — an unfalsifiable instruction, which the
+                    // model can only answer by widening test scope until the
+                    // turn exhausts its budget. Any repo carrying a pre-existing
+                    // environment red hits this on EVERY turn, which is exactly
+                    // the case the excusal exists to neutralize.
+                    if (regressionVerdict.failing.length > 0) {
                       // F13a — env-red vs assertion-red was previously
                       // indistinguishable from the bare command name alone;
                       // each failure's exit code + a ~15-line output tail
@@ -5396,11 +5421,11 @@ export const layer = Layer.effect(
               // top before reaching here). A second, evidence-bearing
               // hub-edit bounce (`hub_bounce`+`hub_bounce_repeat`, published
               // by edit.ts/write.ts) on a bug-shaped root turn that landed
-              // source edits is precisely the django-11265 replay shape: a
+              // source edits is precisely this shape: a
               // LOCALLY-GREEN finish whose fix landed on/near a
               // high-coupling hub after two evidence-bearing bounces.
-              // `repro_unresolved` alone (the 14369 replay — a $1.01/188t
-              // escalation that landed nothing) never arms this — only a
+              // `repro_unresolved` alone (an escalation that lands nothing)
+              // never arms this — only a
               // live `hub_bounce_repeat` fact does.
               {
                 const hubBounceSignals = signalsFor(sessionID).filter(
@@ -5444,8 +5469,8 @@ export const layer = Layer.effect(
                   if (hubBounceVerdict.response !== "none") continue
                 } else if (hubBounceRepeatPresent) {
                   // A live `hub_bounce_repeat` fact was on the bus at this
-                  // arrival yet the AND-gate declined — a django-11265-shaped
-                  // silent no-fire (all five inputs read true at turn-summary
+                  // arrival yet the AND-gate declined — a silent no-fire
+                  // shape (all five inputs read true at turn-summary
                   // time, but `deferral_armed` never published). Bounded by
                   // the signal's own presence so this never fires on the
                   // (expected) common case of no bounce this turn; names
@@ -5631,8 +5656,8 @@ export const layer = Layer.effect(
               // treatment as the defining-file allowlist above), so a
               // hard-tail escalation slice spawned mid-turn continues a hub
               // file's bounce count instead of running the first/second
-              // bounce cycle again from zero (round-07-15 django-11815
-              // forensics: 2 sessions × 2 bounces = 4 events on one file).
+              // bounce cycle again from zero (e.g. 2 sessions × 2 bounces
+              // = 4 events on one file).
               inheritHubEditTurnBounceState(sessionID, session.parentID)
             } else {
               const regexDenyTestEdits = !promptAuthorizesTestEdits(userText)
@@ -5643,8 +5668,7 @@ export const layer = Layer.effect(
               // (evaluateHubEditGate), not here — turn-open's graph is cold
               // on a fresh repo (initial index ~12s vs. the 3s probe budget
               // this used to race), so the eager version always resolved
-              // empty and the feature was provably inert
-              // (django/contrib/auth/forms.py, ddl_references.py forensics).
+              // empty and the feature was provably inert.
               // Store the issue text so the lazy resolver has something to
               // resolve once the graph has had a chance to warm.
               setHubEditGate(sessionID, true)
@@ -5676,7 +5700,7 @@ export const layer = Layer.effect(
                   // turn that only answers), and skip the LLM turn-read. It can
                   // never fire on a fix task — any fix/action/failure token
                   // forces the model path — so a real ticket is never gated
-                  // into a symptom-only finish (the 11964 false-green shape).
+                  // into a symptom-only finish (a false-green shape).
                   const qaVerdict = nonFixQaShortCircuit(userText)
                   if (qaVerdict) {
                     verdict = qaVerdict
@@ -5820,8 +5844,8 @@ export const layer = Layer.effect(
                 // a gate the regex would have armed on its own. F4c ORs in the
                 // verdict's goal shapes: constraints are quote-grounded, so a
                 // ticket that never mentions tests can't arm via triage, and
-                // optimization phrasing evades the fix-shape regex — 11885
-                // fire-3 walked through both gaps and edited the grading tests.
+                // optimization phrasing evades the fix-shape regex — a turn
+                // can walk through both gaps and edit the grading tests.
                 const triageDenyTestEdits = verdict.constraints.some((c) => c.kind === "no-test-edit")
                 const shapeDenyTestEdits = diagnosisDeniesTestEdits(
                   verdict.goals.map((g) => g.shape),
@@ -5950,8 +5974,8 @@ export const layer = Layer.effect(
                 // turn has no goal tree to continue). A wrong guess steers the
                 // conductor worse than no guess. But the MECHANICAL extractors
                 // below still run — issue-stated literals/thresholds are
-                // verbatim quotes (facts, not guesses), and round F's 11848
-                // showed the whole witness pipeline dying when they stood down
+                // verbatim quotes (facts, not guesses), and the whole witness
+                // pipeline can die when they stand down
                 // with the LLM.
                 setTestEditGate(sessionID, regexDenyTestEdits)
                 if (regexDenyTestEdits) yield* Effect.logInfo("test_edit_gate_armed", { "session.id": sessionID })
@@ -6051,8 +6075,8 @@ export const layer = Layer.effect(
           //    token-tail prune, both floor-guarded);
           //  · past STEP_CTX_ECONOMIC_CEILING — additionally maskObservations.
           //    Masking rewrites results the model may still be steering by
-          //    into one-line syntheses; on the lean 11999 L2 probe a %10 mask
-          //    cadence drove repeat searches (+4× turns), so it is reserved
+          //    into one-line syntheses; a %10 mask
+          //    cadence can drive repeat searches (+4× turns), so it is reserved
           //    for runs whose context has actually grown past the economic
           //    ceiling (the grind case it was designed for).
           // These passes are $0 and non-destructive (`time.compacted` tags /
@@ -6419,7 +6443,7 @@ export const layer = Layer.effect(
                         )
                         const language = yield* provider.getLanguage(resolved)
                         const startedAt = Date.now()
-                        // OL-7.8b: live-fire proved two silent degrades — a reasoning
+                        // OL-7.8b: two silent degrades were observed — a reasoning
                         // judge model burns the output budget on thinking before the
                         // verdict token (400 truncated every time; 1024 gives headroom),
                         // and a transient gateway throw looked identical to an abstain.
@@ -6499,13 +6523,13 @@ export const layer = Layer.effect(
               // and the rule rides escalation rescues too (sliceType travels in the request).
               // Ask-coercion: childSlicePermission also flattens every askable surface to
               // allow/deny — an "ask" in a headless child parks the run on a Deferred no
-              // one resolves (runs 4 and 5 froze exactly there, on bash asks).
+              // one resolves (observed: sessions froze exactly there, on bash asks).
               const dispatch: ConductorSliceDispatch = (req) =>
                 bridge.promise(
                   Effect.gen(function* () {
                     const readOnly = isReadOnlySlice(req.sliceType)
-                    // OL-9.1b: resolve the intern persona this slice runs as (this is the
-                    // run-6 root-bug fix — the child used to inherit the conductor's own
+                    // OL-9.1b: resolve the intern persona this slice runs as (this is
+                    // a root-bug fix — the child used to inherit the conductor's own
                     // agent identity). An explicit `persona` on the originating todo wins
                     // when present (read defensively — the field may not exist on every
                     // todo yet); otherwise it derives from sliceType. Drives both the
@@ -6560,7 +6584,7 @@ export const layer = Layer.effect(
                     // transcript-shaped repo-primer/ledger/parent-task block: the
                     // expensive tier buys judgment, not re-exploration, and the
                     // brief is the only thing that crosses the cold-cache model
-                    // boundary (mini10-11999: two 16-turn reasoner children re-did
+                    // boundary (e.g. two 16-turn reasoner children re-deriving
                     // the conductor's recon from a cold start). Escalated hops
                     // already carry buildEscalationBrief; executor slices keep the
                     // primer path byte-identical.
@@ -6603,7 +6627,7 @@ export const layer = Layer.effect(
                         : readOnly
                           ? "LANE: reconnaissance/verification — your deliverable is findings as text, so you normally don't change files. The full toolset (run commands, read, edit) is there if you genuinely need it; just don't drift into doing the fix this slice was meant to scope."
                           : "",
-                      // Case-2 tierfire3 attempt B: a budget-capped judgment slice
+                      // Observed: a budget-capped judgment slice
                       // died with its analysis unwritten and the dimension came back
                       // empty. The watchdog reads back whatever text exists — so the
                       // brief demands incremental delivery, mirroring the frame
@@ -6643,8 +6667,8 @@ export const layer = Layer.effect(
                       // Item 2 — a reasoner/oracle seat is hard-capped at
                       // ABOVE_CONDUCTOR_STEP_CAP inside sliceStepBudget: the
                       // expensive tiers advise from the brief, they don't
-                      // tool-loop (mini10 forensics: 33-43 tool calls per
-                      // above-conductor child at near-frontier prices).
+                      // tool-loop (33-43 tool calls per above-conductor child
+                      // at near-frontier prices is the observed cost).
                       tier: req.tier,
                     })
                     const watchdog: Effect.Effect<void> = Effect.gen(function* () {
@@ -6934,10 +6958,10 @@ export const layer = Layer.effect(
                   // OL-9.5c — the benefit gate's own decision, logged on BOTH
                   // outcomes: neither `orchestration_engaged` below (final loop
                   // outcome, no reason) nor a silent decline told us WHY the gate
-                  // opened or stayed shut (2026-07-15 forensics: coupling/risk
+                  // opened or stayed shut (2026-07-15: coupling/risk
                   // never appeared in a run log). Named gate_engaged/gate_declined —
                   // NOT orchestration_engaged, which stays the post-hoc loop outcome;
-                  // two same-named events with different fields is a forensics trap.
+                  // two same-named events with different fields is a debugging trap.
                   onGateDecision: (info) => {
                     bridge.fork(
                       Effect.logInfo(info.verdict === "engaged" ? "gate_engaged" : "gate_declined", {

@@ -623,7 +623,7 @@ export interface SliceContainedEvent {
   reverted: boolean
 }
 
-/** Why an escalation fired — the live-fire decode gap U3 logs at INFO. */
+/** Why an escalation fired — the decode gap U3 logs at INFO. */
 export interface EscalationProvenanceEvent {
   type: "escalation_provenance"
   sessionID: string

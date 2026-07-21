@@ -145,8 +145,8 @@ describe("econDefaultConfig vs opencode.json (drift guard — one source of trut
   // #51 regression (2026-07-06): the cost block rides the CONFIG layer, which loadConfig
   // schema-normalizes via ConfigParse.schema(ConfigV1.Info, …). The original provider-shaped
   // nested `cache:{read,write}` block passed the type-check but was silently STRIPPED by that
-  // decode, so the server DB-priced every cached token at $0 (run-20/21: 2.33x receipt-vs-DB
-  // drift on the conductor — the only tier with cache hits). Push econDefaultConfig() through
+  // decode, so the server DB-priced every cached token at $0 (2.33x receipt-vs-DB drift on the
+  // conductor — the only tier with cache hits). Push econDefaultConfig() through
   // the exact same decode and assert the cache rates survive it.
   it("cost cache rates survive the ConfigV1 schema decode loadConfig applies (the #51 stripping regression)", () => {
     const decoded = ConfigParse.schema(

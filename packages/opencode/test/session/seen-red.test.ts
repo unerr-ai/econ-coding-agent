@@ -135,20 +135,20 @@ describe("findUnresolvedSeenRed", () => {
     ])
   })
 
-  // --- exit-code laundering (11885 rounds C+C3 live replay) ---
+  // --- exit-code laundering (live replay of a piped/compound test run) ---
 
   const C3_LAUNDERED_RED =
     '.venv/bin/python tests/runtests.py delete delete_regress 2>&1 | grep -E "^(test_|FAIL|ERROR|OK|PASS|Ran|FAILED|test_) |^[0-9]+ tests" | tail -40; echo "---INSPECT---"; .venv/bin/python repro_inspect_combined.py'
   const C3_RED_OUTPUT = "Ran 63 tests in 0.511s\nFAILED (failures=2, errors=7, skipped=3)\n---INSPECT---\ncomposed WHERE clause: (OR: ...)"
 
-  it("(g) flags a piped/compound test run whose exit was laundered to 0 (11885 C3 shape)", () => {
+  it("(g) flags a piped/compound test run whose exit was laundered to 0", () => {
     const executions: SeenRedExecution[] = [{ command: C3_LAUNDERED_RED, exitCode: 0, output: C3_RED_OUTPUT }]
     const unresolved = findUnresolvedSeenRed(executions)
     expect(unresolved).toHaveLength(1)
     expect(unresolved[0]!.command).toBe(C3_LAUNDERED_RED)
   })
 
-  it("(h) flags a tail-piped runtests red with exit 0 (11885 round-C shape)", () => {
+  it("(h) flags a tail-piped runtests red with exit 0", () => {
     const executions: SeenRedExecution[] = [
       {
         command: "python runtests.py delete --verbosity 1 2>&1 | tail -10",
@@ -248,7 +248,7 @@ describe("isTrackedSuiteCommand", () => {
   })
 })
 
-// --- 2026-07-15 django-11815 live-run fixtures (oracle-inversion partition) ---
+// --- 2026-07-15 live-run fixtures (oracle-inversion partition) ---
 
 describe("partitionSeenRedByInversion", () => {
   const TRACKED_SUITE_COMMAND =
@@ -312,7 +312,7 @@ describe("partitionSeenRedByInversion", () => {
   })
 })
 
-// --- 2026-07-15 django-11880 live-run fixtures (env/baseline-blocked partition) ---
+// --- 2026-07-15 live-run fixtures (env/baseline-blocked partition) ---
 
 describe("isEnvBlockedSignature", () => {
   it("matches the conservative marker set (backend required / ImproperlyConfigured / command not found)", () => {

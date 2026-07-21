@@ -757,7 +757,7 @@ describe("nonFixQaShortCircuit — the pre-LLM non-fix Q&A over-work guard", () 
 
   // The load-bearing safety property: a fired qa verdict must NEVER carry a
   // fix task. Every one of these MUST reach the LLM turn-read (null) — a false
-  // positive here would strip repro/localization from a real fix (11964).
+  // positive here would strip repro/localization from a real fix.
   test("anything carrying fix / mutation / diagnosis intent NEVER fires", () => {
     for (const prompt of [
       // explicit fix framing

@@ -76,7 +76,7 @@ describe("resolutionDecision — branch 1: not flagged", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolutionDecision — branch 1b: armed turn never decomposes", () => {
-  it("resolves first on the first pass even when candidatePlan validates (the 11885 case)", () => {
+  it("resolves first on the first pass even when candidatePlan validates", () => {
     const result = resolutionDecision(
       baseInput({ ambiguity: "ambiguous", armLocalization: true, candidatePlan: VALID_PLAN }),
     )
@@ -84,7 +84,7 @@ describe("resolutionDecision — branch 1b: armed turn never decomposes", () => 
     expect(result.reason).toBe("armed vague diagnosis — localize before slicing")
   })
 
-  it("continues inline (NOT decompose-now) after one localization pass, even when candidatePlan validates — tonight's 0/4-vs-3/3 failure pinned", () => {
+  it("continues inline (NOT decompose-now) after one localization pass, even when candidatePlan validates — pins the measured 0/4-vs-3/3 outcome", () => {
     const result = resolutionDecision(
       baseInput({
         ambiguity: "ambiguous",
@@ -144,7 +144,7 @@ describe("resolutionDecision — branch 1b: armed turn never decomposes", () => 
 // Branch 0 — harness escalation seed pending: TOP precedence, beats branch
 // 1b's armed-turn veto. The finish-gate deferral seed and the grind valve's
 // design seed are gate-mandated escalations carrying executed evidence,
-// never conductor-authored decomposition — 1b's 11885 calibration does not
+// never conductor-authored decomposition — 1b's calibration does not
 // apply to them.
 // ---------------------------------------------------------------------------
 
@@ -233,7 +233,7 @@ describe("resolutionDecision — branch 2: valid candidatePlan short-circuit", (
 })
 
 // ---------------------------------------------------------------------------
-// Branch 2b — direct-first valve (item 4 / mini10-11999 forensics): a narrow
+// Branch 2b — direct-first valve (item 4): a narrow
 // conjunction inside the valid-plan short-circuit that trades decompose-now
 // for one cheap continue-inline swing. Every disqualifier is tested alone so
 // the valve's signature stays exact — any one of them must fall back to the

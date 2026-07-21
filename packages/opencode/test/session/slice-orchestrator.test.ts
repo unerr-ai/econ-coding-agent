@@ -2,7 +2,7 @@
  * Tests for the live slice-loop wiring in packages/opencode/src/session/slice-orchestrator.ts
  * (OL-7.3 + OL-2.2 + OL-9.5c). Covers the trajectory-capture seam (child message parts →
  * SliceTrajectory), tier→model resolution, the hasPendingTypedSlices gate (an explicitly-typed
- * pending slice only — no untyped-batch backstop; see the run-8 regression test) and the
+ * pending slice only — no untyped-batch backstop; see the regression test) and the
  * shouldOrchestrate benefit gate on runConductorSliceLoop/runConductorOrchestration (no real
  * parallelism and under 6 slices → no dispatch, legacy path continues). The pure state machine
  * itself is covered in code-intelligence/test/slice-loop.test.ts.
@@ -130,13 +130,13 @@ describe("hasPendingTypedSlices", () => {
     expect(hasPendingTypedSlices([{ content: "x", status: "pending", sliceType: "mechanical" }])).toBe(true)
   })
 
-  // Run-8 post-mortem (2026-07-05, OL-9.5c): the old OL-9.3f backstop engaged
+  // 2026-07-05 (OL-9.5c): the old OL-9.3f backstop engaged
   // ANY untyped batch of >=3 pending items on the theory the conductor had
-  // simply skipped typing. Every run-8 todo was untyped, so that clause alone
+  // simply skipped typing. Every todo in that batch was untyped, so that clause alone
   // — with no benefit gate downstream — spun up 109 child sessions / 868 LLM
   // calls (~8 briefs x ~8 re-dispatches) for one trivial issue. It is deleted:
   // an untyped batch, of any size, no longer engages on its own.
-  it("run-8 regression: an untyped batch of >=3 pending items no longer engages", () => {
+  it("regression: an untyped batch of >=3 pending items no longer engages", () => {
     expect(
       hasPendingTypedSlices([
         { content: "find the bug", status: "pending" },
@@ -181,7 +181,7 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
     { content: "State verdict: soundness, completeness, residual risk", status: "pending" },
   ]
 
-  it("types run-20's audit turn: judgment items get verify+need:reasoner, suite-run gets verify", () => {
+  it("types an audit turn: judgment items get verify+need:reasoner, suite-run gets verify", () => {
     const typed = autoTypeTodos(auditTurn)
     expect(typed[0]).toMatchObject({ sliceType: "verify" })
     expect(typed[0]!.need).toBeUndefined()
@@ -189,7 +189,7 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
     expect(hasPendingTypedSlices(typed)).toBe(true)
   })
 
-  it("a build turn is never judgment-typed — run-20 T2 takes the plan-first net instead (F3)", () => {
+  it("a build turn is never judgment-typed — it takes the plan-first net instead (F3)", () => {
     const buildTurn: OrchestrationTodo[] = [
       { content: "Study extend/safeExtend/pick/omit/partial refinement handling", status: "pending" },
       { content: "Implement fix in core/util.ts merge()", status: "pending" },
@@ -231,8 +231,8 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
     expect(typed[1]).toMatchObject({ sliceType: "verify", need: "reasoner" })
   })
 
-  it("run-21 regression: noun 'fix' in a judgment item must not read as a build turn", () => {
-    // The literal run-21 T3 list — "Does fix keep migration coherent?" matched
+  it("regression: noun 'fix' in a judgment item must not read as a build turn", () => {
+    // The literal list — "Does fix keep migration coherent?" matched
     // the old anywhere-in-text mechanical guard and suppressed all typing.
     const t3: OrchestrationTodo[] = [
       { content: "Run full monorepo test suite from root", status: "pending" },
@@ -264,7 +264,7 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
     expect(hasPendingTypedSlices(typed)).toBe(false)
   })
 
-  // Diagnosis pre-pass (SWE-bench django-11964/11885 decode): a bug-shaped
+  // Diagnosis pre-pass: a bug-shaped
   // build turn with no named file target gets ONE writer pre-pass appended —
   // reasoner-pinned (need) + mechanical/applier persona, so edit+bash stay
   // ALLOWED and it localizes, fixes, and verifies in one session. The hook
@@ -308,7 +308,7 @@ describe("autoTypeTodos — structural typing nets (judgment, diagnosis pre-pass
       expect(autoTypeTodos(localized)).toEqual(localized)
     })
 
-    it("a build list without repair verbs never triggers — run-20 T2 verbs are not diagnosis-shaped", () => {
+    it("a build list without repair verbs never triggers — build verbs are not diagnosis-shaped", () => {
       const buildTurn: OrchestrationTodo[] = [
         { content: "Implement the new formatter", status: "pending" },
         { content: "Add regression tests", status: "pending" },
@@ -540,11 +540,11 @@ describe("shouldOrchestrate — the OL-9.5c benefit gate", () => {
     expect(shouldOrchestrate(slices)).toBe(false)
   })
 
-  // Reverses run-21/pre-OL-9.5c: a bare wave of width >=2 used to qualify on
+  // Reverses pre-OL-9.5c: a bare wave of width >=2 used to qualify on
   // its own (planWaves-derived width was an admissible signal). The wave
   // trigger is gone — width alone is not benefit evidence; only >=6 slices,
   // goalCount >=2, or a probe-derived critical slice (coupling/risk) qualify.
-  it("run-21 reversal: a bare wave of >=2 independent slices no longer qualifies on width alone", () => {
+  it("reversal: a bare wave of >=2 independent slices no longer qualifies on width alone", () => {
     const slices = [
       { id: "a", prompt: "" },
       { id: "b", prompt: "" },
@@ -570,12 +570,12 @@ describe("shouldOrchestrate — the OL-9.5c benefit gate", () => {
     expect(shouldOrchestrate(slices)).toBe(false)
   })
 
-  // Reverses run-21: a lone slice's self-reported `need` used to qualify it by
+  // Reverses the prior behavior: a lone slice's self-reported `need` used to qualify it by
   // itself via the ALLOCATED tier (allocateSlice reads sliceType/need, both
   // written by the conductor into its own todo). The gate no longer keys on
   // allocation at all — a self-reported need is not benefit evidence the
   // conductor did not author, so a lone slice can no longer escalate on it.
-  it("run-21 reversal: a lone slice's self-reported need (reasoner/oracle) cannot escalate on its own", () => {
+  it("reversal: a lone slice's self-reported need (reasoner/oracle) cannot escalate on its own", () => {
     expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "reasoner" }])).toBe(false)
     expect(shouldOrchestrate([{ id: "final verdict", prompt: "", need: "oracle" }])).toBe(false)
     // an executor-need width-1 chain still gains nothing — stays declined
@@ -971,7 +971,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
 
-  it("duplicate-dispatch fix: two goals whose seeds resolve to the SAME content plant it once, parented to the first (case-2 live-fire, $0.112/36% of run)", () => {
+  it("duplicate-dispatch fix: two goals whose seeds resolve to the SAME content plant it once, parented to the first ($0.112/36% of run)", () => {
     const verdict: TriageVerdict = {
       goals: [
         {
@@ -993,7 +993,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.filter((t) => t.parentID === 1)).toHaveLength(0)
   })
 
-  it("single-seed collapse (django-12050 fix): ONE diagnosis goal flagged needsPlan plants the localization seed only — needsPlan is ignored on the diagnosis branch", () => {
+  it("single-seed collapse (fix): ONE diagnosis goal flagged needsPlan plants the localization seed only — needsPlan is ignored on the diagnosis branch", () => {
     const verdict: TriageVerdict = {
       goals: [
         {
@@ -1029,7 +1029,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.find((t) => t.content === PLAN_SLICE_CONTENT)!.parentID).toBe(1)
   })
 
-  it("django-12039 regression: a diagnosis-grounded goal with needsPlan:true but armLocalization:false plants NO seed — the judge, not needsPlan, owns diagnosis arming", () => {
+  it("regression: a diagnosis-grounded goal with needsPlan:true but armLocalization:false plants NO seed — the judge, not needsPlan, owns diagnosis arming", () => {
     // The exact over-route: the bug names its own file → the arming judge (the
     // semantic authority) declines localization → but the conductor's blind
     // `needsPlan` flag would previously OR its way past the judge and force a
@@ -1054,7 +1054,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
     expect(todos.every((t) => t.parentID === undefined)).toBe(true)
   })
 
-  it("S2 — repro-then-localization: a diagnosis goal needing both plants BOTH seeds, repro first, same parentID (django-11964 iter-3 / 11848 iter-2 fix)", () => {
+  it("S2 — repro-then-localization: a diagnosis goal needing both plants BOTH seeds, repro first, same parentID (iter-3 / iter-2 fix)", () => {
     const verdict: TriageVerdict = {
       goals: [{ quote: "the importer rejects vCard files", shape: "diagnosis-vague", deliverable: "importer fixed" }],
       constraints: [],
@@ -1145,7 +1145,7 @@ describe("buildTriageTodoSkeleton — U2 turn-open goal-tree materialization", (
   })
 })
 
-describe("autoTypeTodos — bracket-tagged audit lists (case-2 tierfire3 decode)", () => {
+describe("autoTypeTodos — bracket-tagged audit lists (tag-hidden judgment decode)", () => {
   const pending = (content: string): OrchestrationTodo => ({ content, status: "pending" })
 
   it("a tagged pure check-run types plain verify (runner) — the tag alone is not judgment", () => {
@@ -1401,7 +1401,7 @@ describe("reproPrepassTodo() (S2 — the repro-authoring pre-pass seed)", () => 
     expect(reproSliceContent()).not.toBe(LOCALIZATION_SLICE_CONTENT)
   })
 
-  // S8 (django-11790 strict run #3): the repro died on `ImportError: cannot
+  // S8: the repro died on `ImportError: cannot
   // import name 'CustomEmailField'` — it imported from a tests module and
   // was placed inside tests/auth_tests/.
   it("the template places the repro at the repo ROOT and forbids importing from a tests module", () => {
@@ -1427,7 +1427,7 @@ describe("reproPrepassTodo() (S2 — the repro-authoring pre-pass seed)", () => 
     expect(reproSliceContent()).toMatch(/never a silently narrowed subset/)
   })
 
-  // django-11964: the issue text literally quoted `str(self.my_str_value)` but
+  // The issue text literally quoted `str(self.my_str_value)` but
   // the repro asserted a downstream model-field effect instead of that exact
   // expression — half-verified fix.
   it("demands asserting the issue's own literal quoted expression, not a downstream effect of it", () => {
@@ -1446,7 +1446,7 @@ describe("reproPrepassTodo() (S2 — the repro-authoring pre-pass seed)", () => 
 describe("promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
   // ROOT arming (prompt.ts) is `!promptAuthorizesTestEdits(userText)` — no
   // fix-shape gate: an enhancement-shaped prompt with zero defect words still
-  // arms unless the user explicitly asked for test work (the 11885 "Combine
+  // arms unless the user explicitly asked for test work (the "Combine
   // fast delete queries" gap — isFixShapedPrompt never fired, so the gate
   // never armed and the agent laundered a design divergence through the
   // test). isFixShapedPrompt and PROMPT_DEFECT_EVIDENCE_RE are deleted.
@@ -1473,7 +1473,7 @@ describe("promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
     expect(promptAuthorizesTestEdits("fix the divmod bug; make sure the tests stay green")).toBe(false)
   })
 
-  it("negated phrasing is prohibition, not authorization — the caseA live-fire bug", () => {
+  it("negated phrasing is prohibition, not authorization", () => {
     expect(promptAuthorizesTestEdits("Fix the enum bug. Do not modify any test files.")).toBe(false)
     expect(promptAuthorizesTestEdits("fix the crash but never update the tests")).toBe(false)
     expect(promptAuthorizesTestEdits("resolve it without adjusting the tests")).toBe(false)
@@ -1491,12 +1491,12 @@ describe("promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
     ).toBe(false)
   })
 
-  // 11885 full-stack live fire: the fix-slice seed's own prose disarmed the
+  // The fix-slice seed's own prose disarmed the
   // child gate — "a described fix; the test must actually pass" matched
   // verb→object across the semicolon, and "Never weaken, delete, skip, or
   // edit…" put the negation more than two plain words back. Engine-authored
   // boilerplate must NEVER read as authorization.
-  it("clause boundaries break the verb→tests span (the 11885 seed live-fire bug)", () => {
+  it("clause boundaries break the verb→tests span (a seed bug)", () => {
     expect(promptAuthorizesTestEdits("do not stop at a described fix; the test must actually pass")).toBe(false)
     expect(promptAuthorizesTestEdits("apply the fix: the test suite is the arbiter")).toBe(false)
     expect(promptAuthorizesTestEdits("ship the fix — the tests define done")).toBe(false)
@@ -1509,7 +1509,7 @@ describe("promptAuthorizesTestEdits (B3 — no-test-edit gate arming)", () => {
     expect(promptAuthorizesTestEdits("never rename, rewrite or update the tests")).toBe(false)
   })
 
-  // F4c — 11885 fire-3: triage constraints are quote-grounded (a ticket that
+  // F4c — triage constraints are quote-grounded (a ticket that
   // never mentions tests can't arm the gate) and optimization phrasing evades
   // the fix-shape regex; the verdict's own diagnosis shape is the evidence.
   it("diagnosis-shaped goals deny test edits even when the prompt never mentions tests", () => {
@@ -1561,7 +1561,7 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     // No trace of the old read-only shackle.
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/Do not write code/i)
     expect(LOCALIZATION_SLICE_CONTENT).not.toMatch(/deliver targets, mechanism, and strategy only/i)
-    // django-11848: the fix used datetime.now() where the surrounding module's
+    // A fix used datetime.now() where the surrounding module's
     // idiom (and the hidden grader's mock) was datetime.utcnow() — copy the
     // module's existing environment-read idiom, never introduce a new one.
     expect(LOCALIZATION_SLICE_CONTENT).toMatch(/COPY the exact idiom the surrounding module already uses/i)
@@ -1593,7 +1593,7 @@ describe("diagnosis pre-pass seat (a single reasoner WRITER slice — localize �
     expect(Permission.evaluate("bash", "python -m pytest -k failing", effective).action).toBe("allow")
   })
 
-  // Reverses run-21/OL-9.5c: this test used to assert the difficulty floor's
+  // Reverses OL-9.5c: this test used to assert the difficulty floor's
   // ALLOCATED tier (executor vs reasoner) drove shouldOrchestrate directly —
   // exactly the self-reported-need coupling the new gate deliberately severed
   // (allocateSlice reads hardness/need, both conductor/arming-judge authored,
@@ -2036,7 +2036,7 @@ describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixe
     expect(isReproScratchPath("src/session/prompt.ts")).toBe(false)
     expect(isReproScratchPath("tests/auth_tests/test_forms.py")).toBe(false)
   })
-  it("matches a repro-named DIRECTORY segment anywhere in the path (django-11885 round C: a scaffolded scratch app)", () => {
+  it("matches a repro-named DIRECTORY segment anywhere in the path (a scaffolded scratch app)", () => {
     expect(isReproScratchPath("_repro_app/models.py")).toBe(true)
     expect(isReproScratchPath("repro_app/models.py")).toBe(true)
     expect(isReproScratchPath("repro/conftest.py")).toBe(true)
@@ -2046,7 +2046,7 @@ describe("isReproScratchPath (S8 — scratch repro writes are evidence, not fixe
     expect(isReproScratchPath("reproducibility/utils.py")).toBe(false)
     expect(isReproScratchPath("django/db/models/deletion.py")).toBe(false)
   })
-  it("matches a leading-underscore scratch FILE at root, no directory segment (django-11265 replay: _repro_field_error.py)", () => {
+  it("matches a leading-underscore scratch FILE at root, no directory segment (_repro_field_error.py)", () => {
     expect(isReproScratchPath("_repro_field_error.py")).toBe(true)
     expect(isReproScratchPath("~/econ-swe-arena/arena-django__django-11265/_repro_field_error.py")).toBe(true)
     expect(isReproScratchPath("_reproduce_crash.sh")).toBe(true)
@@ -2086,7 +2086,7 @@ describe("reproSpecificity via deriveTurnProbe (S1 — authored repro scripts qu
     })
   })
 
-  it("a repro script GREEN on unpatched code cannot pin (the 11964 false-green shape)", async () => {
+  it("a repro script GREEN on unpatched code cannot pin (a false-green shape)", async () => {
     const candidates: VerifyCommand[] = [{ kind: "test", command: "python repro_issue.py" }]
     const runner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" })
     const result = await deriveTurnProbe({
@@ -2670,12 +2670,12 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     expect(dispatched).toBe(0)
   })
 
-  // Run-8 regression test (2026-07-04 live run): 13 untyped todos drove 109
+  // Regression test (2026-07-04 live run): 13 untyped todos drove 109
   // child sessions / 868 LLM calls for one trivial issue because the old
   // OL-9.3f backstop engaged any untyped batch of >=3 pending items. The
   // backstop is deleted (OL-9.5c) — an untyped batch never engages, whatever
   // its size, so this must stay at zero dispatches.
-  it("run-8 regression: an untyped batch of >=3 pending items → engaged false, zero dispatches", async () => {
+  it("regression: an untyped batch of >=3 pending items → engaged false, zero dispatches", async () => {
     let dispatched = 0
     const res = await runConductorOrchestration({
       getTodos: async () => [
@@ -2764,7 +2764,7 @@ describe("runConductorOrchestration — gating, mirroring, fallback", () => {
     expect(firstCompleted).toBeGreaterThan(lastInProgress)
   })
 
-  // L4.2 degraded stand-down (11964): a degraded turn-read (DEGRADED_ARMING,
+  // L4.2 degraded stand-down: a degraded turn-read (DEGRADED_ARMING,
   // `degraded:true`) keeps the conductor INLINE — its own mid-turn todos, even a
   // typed DAG that would otherwise engage, must not orchestrate into tiered
   // slices (that structural-cell allocation bought a 3.5× overrun on an ex-solo
@@ -3150,7 +3150,7 @@ describe("runConductorOrchestration — #53/#54 resolution gate", () => {
     const res = await runConductorOrchestration({
       // dispatchableTodos form a structurally valid plan — a non-armed turn
       // would short-circuit to decompose-now and dispatch; the armed branch
-      // must bypass that and continue inline instead (11885 0/4-vs-3/3 fix).
+      // must bypass that and continue inline instead (a 0/4-vs-3/3 fix).
       getTodos: async () => dispatchableTodos,
       probes: fakeProbes(),
       dispatch: async () => {
@@ -3564,12 +3564,12 @@ describe("childSlicePermission — evaluated against real Permission.merge/evalu
     { permission: "webfetch", pattern: "*", action: "ask" },
   ]
 
-  it("allows the run-5 freeze command (node -e ...) despite the base bash-ask", () => {
+  it("allows a freeze command (node -e ...) despite the base bash-ask", () => {
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false))
     expect(Permission.evaluate("bash", 'node -e "const p = require(\'./x\')"', effective).action).toBe("allow")
   })
 
-  it("allows the run-4 freeze command (TZ-prefixed jest invocation)", () => {
+  it("allows a freeze command (TZ-prefixed jest invocation)", () => {
     const effective = Permission.merge(BASE_AGENT_RULES, childSlicePermission(undefined, false))
     expect(
       Permission.evaluate("bash", "TZ=America/Los_Angeles npx jest test/timezone.test.js --runInBand", effective)
@@ -4149,8 +4149,8 @@ describe("slice child prompt assembly includes primer + ledger (OL-9.4b)", () =>
   })
 })
 
-describe("reconcileSettledSlices — settled-slice memory + frame-seed preservation (case-2 tierfire3 double-wave)", () => {
-  it("case-2 tierfire3 replay: a completed 4-dim+verdict wave re-emitted bare comes back completed with fields carried", () => {
+describe("reconcileSettledSlices — settled-slice memory + frame-seed preservation (double-wave)", () => {
+  it("replay: a completed 4-dim+verdict wave re-emitted bare comes back completed with fields carried", () => {
     const existing: OrchestrationTodo[] = [
       { content: "Audit edge cases: both-refinements, superRefine, chained merge", status: "completed", sliceType: "verify", need: "reasoner" },
       { content: "Verify deprecation posture coherence", status: "completed", sliceType: "verify", need: "reasoner" },

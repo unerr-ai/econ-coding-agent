@@ -638,7 +638,7 @@ export const RunCommand = effectCmd({
           let error: string | undefined
           // OL-9.6b: track the last assistant finish reason so a run that ends
           // on an output-cap truncation (finish=length) is reported honestly —
-          // run 9 exited 0 with a success receipt after a truncated turn.
+          // observed: a run exited 0 with a success receipt after a truncated turn.
           let lastAssistantFinish: string | undefined
           // OL-3.6: cheap-tier spend discarded when a turn escalates and has to
           // be re-run on a higher tier (double-pay). The current router only
@@ -710,7 +710,7 @@ export const RunCommand = effectCmd({
               const info = event.properties.info
               const isRoot = event.properties.sessionID === sessionID
               // #51: the receipt covers the WHOLE turn — child slice sessions bill real
-              // tokens on their own tiers (run-21: root-only $0.28 vs $1.84 with slices),
+              // tokens on their own tiers (measured: root-only $0.28 vs $1.84 with slices),
               // so their assistant messages join the same per-model fold as the root's.
               if (isRoot || childSessions.has(event.properties.sessionID)) {
                 messageModels.set(info.id, {

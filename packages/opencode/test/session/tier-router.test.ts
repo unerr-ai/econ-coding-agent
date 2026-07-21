@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { planRaiseForTurn, isEconTierAgent, ECON_TIER_AGENTS } from "../../src/session/tier-router"
 
-// Turn-level tier routing was demoted 2026-07-06 (run-19 live-fire): the lead never swaps at
+// Turn-level tier routing was demoted 2026-07-06: the lead never swaps at
 // turn-open; escalation is slice-level (allocateSlice + the escalation ladder). This module now
 // owns only tier-agent identity and the OL-7.5 plan-reasoning raise.
 describe("tier-router", () => {

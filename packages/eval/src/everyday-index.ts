@@ -1,6 +1,6 @@
 /**
  * CLI entrypoint for the everyday-capability eval (OL-7.12) — the honesty
- * gate against SWE-bench-style deltas. Scores EVERYDAY_CASES against their
+ * gate against test-pass-delta scoring. Scores EVERYDAY_CASES against their
  * canned/mock fields (offline, no network, no live model call) and prints
  * the pass/fail flip-gate summary CP-D can cite for the OL-7.6 default-flip
  * criterion.

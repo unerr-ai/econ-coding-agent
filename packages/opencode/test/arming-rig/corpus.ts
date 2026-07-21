@@ -47,7 +47,7 @@ export const CORPUS: ArmingScenario[] = [
       localizationArmed: false,
       reason: "R2 STRONG — file+line named; site is known, no localization pre-pass needed",
     },
-    note: "django-12039: trivial whitespace fix in a central file",
+    note: "trivial whitespace fix in a central file",
   },
 
   {
@@ -221,7 +221,7 @@ export const CORPUS: ArmingScenario[] = [
       reason:
         "R2 NONE-grounding + R6 — optimization phrasing with no file named: localization armed, hardness-floored at the reasoner",
     },
-    note: "django-11885 flavor: performance bug described without file path (R6 hardness calibration)",
+    note: "performance bug described without file path (R6 hardness calibration)",
   },
 
   {
@@ -232,7 +232,7 @@ export const CORPUS: ArmingScenario[] = [
       goals: [
         {
           quote: "combine the fast delete queries",
-          // L4.1/R6 — the django-11885 archetype VERBATIM: optimization-phrased,
+          // L4.1/R6 — the archetype VERBATIM: optimization-phrased,
           // zero defect keywords, no file named. The live turn-read used to
           // read this hardness=trivial/shape=build ("no diagnosis-shaped goal")
           // → no arming, no decomposition → a 179-step, $0.8447 inline grind
@@ -253,9 +253,9 @@ export const CORPUS: ArmingScenario[] = [
       localizationArmed: true,
       seedKind: "localization",
       reason:
-        "R6 — optimization-phrased goal with no location is design-shaped work: diagnosis-vague, armed, hardness 'hard' floors the fix slice at the reasoner (never 'build'/trivial — the 11885 under-call)",
+        "R6 — optimization-phrased goal with no location is design-shaped work: diagnosis-vague, armed, hardness 'hard' floors the fix slice at the reasoner (never 'build'/trivial — the archetype under-call)",
     },
-    note: "django-11885 (the real archetype): 'combine fast delete queries' — optimization-phrased, no location, no defect keyword",
+    note: "the archetype: 'combine fast delete queries' — optimization-phrased, no location, no defect keyword",
   },
 
   {
@@ -395,7 +395,7 @@ export const CORPUS: ArmingScenario[] = [
       localizationArmed: true,
       seedKind: "localization",
       reason:
-        "R2/R3 — a hard vague bug arms the LOCALIZATION writer (hardness floors its tier); on a DIAGNOSIS goal needsPlan never plants the plan seed — the single-seed collapse (12050)",
+        "R2/R3 — a hard vague bug arms the LOCALIZATION writer (hardness floors its tier); on a DIAGNOSIS goal needsPlan never plants the plan seed — the single-seed collapse",
     },
     note: "hard vague diagnosis — localization writer, hardness-floored; the P12 plan seed is build-only",
   },
@@ -845,7 +845,7 @@ export const CORPUS: ArmingScenario[] = [
       localizationArmed: false,
       reason: "R4 — to-dos name a file (database.ts); Door-2 net stays disarmed even though the goal is already grounded",
     },
-    note: "django-12039 Door-2: mechanical todos bind the location, suppress localization",
+    note: "Door-2: mechanical todos bind the location, suppress localization",
   },
 
   {
@@ -1116,15 +1116,15 @@ export const CORPUS: ArmingScenario[] = [
   },
 
   // -------------------------------------------------------------------------
-  // L4.1 ladder negative controls — the nine cheap SWE-mini-10 instances'
-  // prompt shapes (SWE_BENCH_TRACKER.md ladder). HARD GATE: none of these may
-  // change its read under the R6 optimization calibration — 0 over-fires, and
-  // the armed ones stay at their pre-calibration hardness (moderate, never
-  // "hard"). django-12039 is covered by grounded-trivial-central +
+  // L4.1 ladder negative controls — nine cheap prompt shapes from the ladder
+  // corpus (SWE_BENCH_TRACKER.md ladder). HARD GATE: none of these may change
+  // its read under the R6 optimization calibration — 0 over-fires, and the
+  // armed ones stay at their pre-calibration hardness (moderate, never
+  // "hard"). The trivial central-file case is covered by grounded-trivial-central +
   // door2-grounded-mechanical-todos above; the other eight are encoded here.
   // -------------------------------------------------------------------------
   {
-    id: "ladder-11790-form-attr",
+    id: "ladder-form-attr",
     prompt:
       "AuthenticationForm's username field doesn't render the maxlength HTML attribute anymore — a regression from an earlier refactor",
     mockVerdict: {
@@ -1146,11 +1146,11 @@ export const CORPUS: ArmingScenario[] = [
       seedKind: "localization",
       reason: "R2 WEAK — symbol without a file; unchanged by R6 (defect phrasing, not optimization)",
     },
-    note: "django-11790: missing maxlength attr — cheap-ladder negative control",
+    note: "missing maxlength attr — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-11815-enum-name",
+    id: "ladder-enum-name",
     prompt:
       "generated migrations write the enum's value — Status('Good') — which breaks under translation; the serializer should write the name instead, Status['GOOD']",
     mockVerdict: {
@@ -1176,13 +1176,13 @@ export const CORPUS: ArmingScenario[] = [
     },
     expect: {
       localizationArmed: false,
-      reason: "R2 SPECIFIED-FIX — the exact change is stated; no localization (live-validated non-arm, 11815)",
+      reason: "R2 SPECIFIED-FIX — the exact change is stated; no localization (live-validated non-arm)",
     },
-    note: "django-11815: enum serialized by value not name — cheap-ladder negative control",
+    note: "enum serialized by value not name — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-11848-http-date",
+    id: "ladder-http-date",
     prompt:
       "django.utils.http.parse_http_date's two-digit year handling is incorrect — RFC 7231 says a date more than 50 years in the future must be read as the most recent past year with those two digits, but the code hardcodes the century split",
     mockVerdict: {
@@ -1208,11 +1208,11 @@ export const CORPUS: ArmingScenario[] = [
       localizationArmed: false,
       reason: "R2 STRONG — dotted module names the site; no localization pre-pass",
     },
-    note: "django-11848: parse_http_date century bug — cheap-ladder negative control",
+    note: "parse_http_date century bug — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-11880-deepcopy",
+    id: "ladder-deepcopy",
     prompt:
       "Form Field.__deepcopy__ doesn't deep-copy the error messages — every copy of a field shares one error_messages dict, so customizing one form's message leaks into all the others",
     mockVerdict: {
@@ -1233,11 +1233,11 @@ export const CORPUS: ArmingScenario[] = [
       seedKind: "localization",
       reason: "R2 WEAK — method symbol without a file; unchanged by R6 (shared-state defect, not optimization)",
     },
-    note: "django-11880: __deepcopy__ shares error_messages — cheap-ladder negative control",
+    note: "__deepcopy__ shares error_messages — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-11951-batch-size",
+    id: "ladder-batch-size",
     prompt:
       "bulk_create's batch_size param overrides the compatible batch size calculation — it should take the minimum of batch_size and the max compatible batch size, the way bulk_update already does",
     mockVerdict: {
@@ -1267,11 +1267,11 @@ export const CORPUS: ArmingScenario[] = [
       reason:
         "R2 SPECIFIED-FIX — exact change handed (clamp to min); 'batch' wording alone never triggers R6",
     },
-    note: "django-11951: batch_size override — the R6 near-miss negative control",
+    note: "batch_size override — the R6 near-miss negative control",
   },
 
   {
-    id: "ladder-11964-choices-type",
+    id: "ladder-choices-type",
     prompt:
       "the value of a TextChoices/IntegerChoices field has a differing type — reading the field right after creating the object returns the enum member, so str() gives 'Status.GOOD' instead of 'GOOD'",
     mockVerdict: {
@@ -1293,11 +1293,11 @@ export const CORPUS: ArmingScenario[] = [
       seedKind: "localization",
       reason: "R2 WEAK — API classes named, no file; unchanged by R6 (type defect, not optimization)",
     },
-    note: "django-11964: Choices field type mismatch — cheap-ladder negative control",
+    note: "Choices field type mismatch — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-11999-display-override",
+    id: "ladder-display-override",
     prompt:
       "cannot override get_FOO_display() anymore — defining get_status_display() on the model has no effect now, though the same override worked in the previous release",
     mockVerdict: {
@@ -1317,13 +1317,13 @@ export const CORPUS: ArmingScenario[] = [
     expect: {
       localizationArmed: true,
       seedKind: "localization",
-      reason: "R2 WEAK — method symbol, no file (live-validated arm at moderate/clear, 11999); unchanged by R6",
+      reason: "R2 WEAK — method symbol, no file (live-validated arm at moderate/clear); unchanged by R6",
     },
-    note: "django-11999: get_FOO_display override regression — cheap-ladder negative control",
+    note: "get_FOO_display override regression — cheap-ladder negative control",
   },
 
   {
-    id: "ladder-12050-list-coerce",
+    id: "ladder-list-coerce",
     prompt:
       "Query.resolve_lookup_value coerces a list value to a tuple, which breaks exact-match queries for field types whose matching depends on the input type",
     mockVerdict: {
@@ -1346,7 +1346,7 @@ export const CORPUS: ArmingScenario[] = [
       seedKind: "localization",
       reason: "R2 WEAK — symbol without file; unchanged by R6 (wrong-type defect, not optimization)",
     },
-    note: "django-12050: list→tuple coercion — cheap-ladder negative control",
+    note: "list→tuple coercion — cheap-ladder negative control",
   },
 
   // -------------------------------------------------------------------------

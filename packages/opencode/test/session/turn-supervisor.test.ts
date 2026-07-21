@@ -256,7 +256,7 @@ describe("identicalRunDedupeNudgeText", () => {
   })
 })
 
-// -- integration: the 11885 thrash shape -----------------------------------
+// -- integration: a thrash shape ---------------------------------------------
 
 describe("observeStep + createStuckSupervisor", () => {
   it("catches the same red result repeated 3x even with an interleaved source edit", () => {
@@ -297,7 +297,7 @@ describe("observeStep + createStuckSupervisor", () => {
     expect(sup.observe(observeStep([bash(CMD, GREEN)]).observation)).toBeUndefined()
   })
 
-  it("diverse read-only exploration never trips repeated-tool (the run-11885 false positive)", () => {
+  it("diverse read-only exploration never trips repeated-tool (a false positive)", () => {
     const sup = createStuckSupervisor()
     // read a file, spawn an explorer, read two more — varied signatures, not a loop
     expect(sup.observe(observeStep([read("a.py")]).observation)).toBeUndefined()
@@ -314,9 +314,9 @@ describe("observeStep + createStuckSupervisor", () => {
     expect(signal?.reason).toBe("repeated-tool")
   })
 
-  it("three progressive (different) edits to one file never trip repeated-tool (run-11885 v2 false positive)", () => {
+  it("three progressive (different) edits to one file never trip repeated-tool (a false positive)", () => {
     const sup = createStuckSupervisor()
-    // import edit, then collect edit, then the delete-loop edit — the real 11885 fix shape
+    // import edit, then collect edit, then the delete-loop edit — a real fix shape
     expect(sup.observe(observeStep([edit("d.py", "completed", "import a", "import a, b")]).observation)).toBeUndefined()
     expect(sup.observe(observeStep([edit("d.py", "completed", "x = []", "x = {}")]).observation)).toBeUndefined()
     expect(sup.observe(observeStep([edit("d.py", "completed", "for q in x", "for q in x.values()")]).observation)).toBeUndefined()
@@ -365,13 +365,13 @@ describe("observeStep + createStuckSupervisor", () => {
 // -- L4.2 grind valve --------------------------------------------------------
 // The once-per-turn budget rung riding SM4's observation stream: opens at
 // GRIND_VALVE_STEPS observed steps when no green verify landed in the last
-// GRIND_VALVE_STALL_WINDOW (the django-11885 grind: 179 DIVERSE inline steps
+// GRIND_VALVE_STALL_WINDOW (a real grind: 179 DIVERSE inline steps
 // the repetition ladder never caught). Signals are mocked the same way as the
 // supervisor tests above — synthetic tool-part arrays through observeStep.
 
 describe("createGrindValve", () => {
   // One grinding step: a landed source edit + a red test run (diverse inputs so
-  // the stuck ladder's repeat signatures never collide — the 11885 shape).
+  // the stuck ladder's repeat signatures never collide — a real shape).
   const grindStep = (i: number) => observeStep([edit(`src/f${i}.ts`, "completed", `a${i}`, `b${i}`), bash(CMD, RED)])
   const greenStep = () => observeStep([bash(CMD, GREEN)])
 
@@ -605,7 +605,7 @@ describe("convergeNowNudgeText", () => {
 // -- S8 reproDriftNudgeText suite-edit-denied clause -------------------------
 
 describe("reproDriftNudgeText (suite-edit-denied)", () => {
-  it("names the repo root and forbids importing from a tests module (django-11790 strict run #3)", () => {
+  it("names the repo root and forbids importing from a tests module", () => {
     const text = reproDriftNudgeText("suite-edit-denied")
     expect(text.toLowerCase()).toContain("repo root")
     expect(text.toLowerCase()).toContain("never inside")
@@ -645,7 +645,7 @@ describe("pinGreenFinishNudgeText", () => {
 })
 
 // -- wave 10: looksLikeTestExecution ------------------------------------------
-// django-11885 autopsy: the agent's one `runtests.py`-matching command was
+// Autopsy: the agent's one `runtests.py`-matching command was
 // `cat tests/runtests.py` (a read), and `py_compile` was its only
 // verification before shipping a 36-line source patch.
 
@@ -856,9 +856,9 @@ describe("isTestInfraFilePath", () => {
 })
 
 describe("detectPatchSanityGap", () => {
-  // The astropy-7166 shape: a $1.31 escalated fix that shipped a
-  // conftest.py-only patch with ZERO overlap with the issue.
-  it("7166 shape: a conftest-only patch with no candidate-site overlap and no issue justification denies, naming the sites", () => {
+  // A live case: a $1.31 escalated fix shipped a conftest.py-only patch with
+  // ZERO overlap with the issue.
+  it("a conftest-only patch with no candidate-site overlap and no issue justification denies, naming the sites", () => {
     const gap = detectPatchSanityGap({
       patchFiles: ["astropy/conftest.py"],
       candidateSites: ["astropy/io/fits/hdu/base.py", "astropy/io/fits/header.py"],
@@ -1081,14 +1081,14 @@ describe("shouldArmHubBounceDeferral", () => {
     expect(shouldArmHubBounceDeferral({ ...base, deferralAvailable: false })).toBe(false)
   })
 
-  // 14369 replay ($1.01/188t escalation that landed nothing) — repro_unresolved
+  // A replay ($1.01/188t escalation that landed nothing) — repro_unresolved
   // alone must NEVER arm this gate. This helper only ever sees `hubBounceRepeat`
   // (the caller derives it from `signalsFor(sessionID)` filtering on the
   // `hub_bounce_repeat` signal name, never on `repro_unresolved`), so the
   // negative case is: a turn with everything else true but NO live
   // hub_bounce_repeat fact — e.g. one that only carries a repro_unresolved
   // signal — must not arm.
-  it("never arms on hubBounceRepeat:false — repro_unresolved (the 14369 replay) is not a valid trigger for this gate", () => {
+  it("never arms on hubBounceRepeat:false — repro_unresolved is not a valid trigger for this gate", () => {
     expect(shouldArmHubBounceDeferral({ ...base, hubBounceRepeat: false })).toBe(false)
   })
 })

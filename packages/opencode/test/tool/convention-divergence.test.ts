@@ -1,7 +1,7 @@
 /**
  * detectReceiverMethodDivergence: the wave-11 stage-1 pure helper — fires the
  * one bounded rescan when added code extends an established receiver's usage
- * surface with a method the file never called (django-11848 A4 red shape),
+ * surface with a method the file never called (A4 red shape),
  * language-agnostic (py/rb/sh `#` comments, ts/js/java/go/c-family `//`
  * comments, self/cls/this receivers universally excluded).
  */
@@ -22,7 +22,7 @@ import {
 import { conventionDivergenceNudgeText, conventionDivergenceSecondDenyNudgeText } from "../../src/session/prompts/nudges"
 
 describe("detectReceiverMethodDivergence", () => {
-  it("11848 shape: before has datetime.datetime(...), added has datetime.datetime.now( — FIRES with receiverSites", () => {
+  it("before has datetime.datetime(...), added has datetime.datetime.now( — FIRES with receiverSites", () => {
     const beforeContent = [
       "import datetime",
       "",
@@ -245,7 +245,7 @@ describe("detectFamilyConflictEvidence", () => {
     expect(out).toBeNull()
   })
 
-  it("call evidence: another family member already called on the same receiver — 11848 shape (utcnow beside now)", () => {
+  it("call evidence: another family member already called on the same receiver (utcnow beside now)", () => {
     const beforeContent = [
       "import datetime",
       "def parse_http_date(date):",

@@ -1,8 +1,8 @@
 /**
  * Wave-11 stage 1+2: a pure, language-agnostic detector for the "established
- * receiver, novel method" shape (django-11848 A4 red — the agent added
- * `datetime.datetime.now()` beside the file's existing `datetime.datetime(...)`
- * constructor calls, never noticing the file's own `.now()`-free history or
+ * receiver, novel method" shape (an agent adding `datetime.datetime.now()`
+ * beside a file's existing `datetime.datetime(...)` constructor calls, never
+ * noticing the file's own `.now()`-free history or
  * the disambiguating docstring nearby), plus the pure gate decision and
  * per-session deny-once store that wire it into edit.ts/write.ts's edit
  * path. It never knows or names the right answer — it only flags that a
@@ -111,7 +111,7 @@ export function addedLines(before: string, after: string): string {
 
 // ---------------------------------------------------------------------------
 // Round-F §7 stage 3 — semantic method families: methods that are mutually
-// ambiguous variants of the same idea (the 11848 shape: datetime.datetime's
+// ambiguous variants of the same idea (datetime.datetime's
 // now()/utcnow() differ only in timezone) so an identical retry past the
 // first deny gets one more evidence-bearing check before it is allowed to
 // pass silently.
@@ -140,7 +140,7 @@ function memberCallSites(beforeLines: string[], receiver: string, method: string
   return sites
 }
 
-/** Per-line "is this a comment or inside a docstring block" flag for RAW (comment-intact) `beforeLines` — tracks `#`/`//` full-line comments plus `"""`/`'''` triple-quote block state across lines, so a token inside a multi-line docstring BODY (the 11848 shape: "...in UTC." mid-docstring, not on the opening-quote line) is still found. */
+/** Per-line "is this a comment or inside a docstring block" flag for RAW (comment-intact) `beforeLines` — tracks `#`/`//` full-line comments plus `"""`/`'''` triple-quote block state across lines, so a token inside a multi-line docstring BODY ("...in UTC." appearing mid-docstring, not on the opening-quote line) is still found. */
 function commentOrDocstringLineFlags(beforeLines: string[]): boolean[] {
   const flags = new Array<boolean>(beforeLines.length).fill(false)
   let openTriple: string | null = null
@@ -179,7 +179,7 @@ export interface FamilyConflictEvidence {
  * whether the file itself corroborates that the two family members are NOT
  * interchangeable here — an existing call to another family member on the
  * same receiver, or the disambiguating "UTC" token on a comment/docstring
- * line anywhere in the file (the 11848 shape: the file's own docstring
+ * line anywhere in the file (the file's own docstring
  * already said UTC). Pure and bounded — no family match or no evidence
  * returns null, and the gate then passes on retry exactly as it did before
  * round F.

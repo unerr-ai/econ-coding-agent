@@ -2,8 +2,8 @@
  * H3 — per-session "already denied" flag for the patch-sanity floor
  * (prompt.ts's finish-time block, `detectPatchSanityGap`/`shouldDenyPatchSanity`
  * in turn-supervisor.ts): a bug-shaped root turn whose landed patch touches
- * none of the issue-named/candidate-definition files — the astropy-7166
- * shape, a $1.31 conftest.py-only patch with zero relation to the issue —
+ * none of the issue-named/candidate-definition files — a $1.31
+ * conftest.py-only patch with zero relation to the issue —
  * gets ONE reject-with-nudge cycle, then is always allowed to finish (fail
  * open LOUD via a tail signal, never a deny loop). Same per-session
  * module-state pattern as unverified-finish-store.ts: keyed by sessionID,

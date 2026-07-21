@@ -11,7 +11,7 @@
  * (OL-9.5d: absence of a check is not evidence of failure) — and only a real
  * reject works the tier ladder, capped at a per-slice `maxAttempts` total
  * dispatches (one rescue hop for a normal slice, none at all for a read-only
- * recon/verify slice; run-8 post-mortem: an un-capped ladder re-ran identical
+ * recon/verify slice; observed: an un-capped ladder re-ran identical
  * work up to 4x per slice with no new signal) with a compiled failure brief
  * per hop (brief.ts), re-verifying each rescue and recording every discarded
  * attempt as double-pay (double-pay.ts). A rejected attempt first squeezes
@@ -298,7 +298,7 @@ export interface SliceLoopDeps {
   /**
    * Escalation provenance sink (U3): fired once per escalation hop with the
    * rejecting rung's reason, so an INFO-level log can decode WHY a rung
-   * escalated — the live-fire decode gap where INFO logs never carried this.
+   * escalated — the decode gap where INFO logs never carried this.
    * A no-op when absent.
    */
   onProvenance?: (e: { sliceId: string; fromTier: EconTier; toTier: EconTier; rungReason: string }) => void
@@ -691,7 +691,7 @@ async function dispatchRescueHop(args: {
   const squeeze = targetTier === atTier
 
   // Escalation provenance (U3): one line per hop naming why it moved — closes
-  // the live-fire decode gap where INFO logs never showed this. A squeeze
+  // the decode gap where INFO logs never showed this. A squeeze
   // retry is marked distinctly (fromTier === toTier + a "squeeze-retry"
   // reason prefix) so the trace shows max-out-the-tier vs a real climb.
   deps.onProvenance?.({
@@ -976,7 +976,7 @@ export const LOOP_BUDGET_FACTOR = 1.2
  * on every climb), the non-critical climb depth (`maxClimbs` in `runSlice`),
  * the signature-stall guard (a repeated verdict signature climbs immediately
  * instead of spending more squeeze budget), and the tier ceiling — together
- * these already prevent the run-8 regression (an un-capped ladder re-running
+ * these already prevent the regression (an un-capped ladder re-running
  * identical work up to 4x per slice, 8 briefs -> 62 runner sessions) without
  * needing a tight flat cap, so this backstop can sit high. Read-only
  * (recon/verify) slices override this to 1 instead (see `defaultMaxAttempts`)
@@ -1177,7 +1177,7 @@ async function runSlice(
     cheapAttempt.verdict ?? (await runVerifierLadder(buildLadderInput(slice, allocation, { ...cheap, trajectory }, deps)))
 
   // Consequence (isCritical) no longer blocks a vacuous accept to force a generator
-  // climb — that was the 12039 double-pay (pay the oracle to re-author something
+  // climb — that was a double-pay (pay the oracle to re-author something
   // still unverifiable). A judge-verified critical slice accepts at any tier; a
   // slice we cannot verify soft-settles LOUDLY for review below (deps.onProvenance),
   // never by force-authoring at the oracle.
@@ -1276,7 +1276,7 @@ async function runSlice(
   // bypasses `maxClimbs` via `forceFloorClimb` and climbs every tier up to
   // the oracle. `MAX_SLICE_ATTEMPTS` (`defaultMaxAttempts` unless overridden)
   // is a runaway backstop on total dispatches, not the real control — the
-  // signature-stall guard already prevents the run-8 regression (an
+  // signature-stall guard already prevents the regression (an
   // un-capped ladder re-running identical work up to 4x per slice, 8 briefs
   // -> 62 runner sessions) since a squeeze only fires while NEW evidence
   // keeps surfacing. Read-only (recon/verify) slices never squeeze or climb
@@ -1332,7 +1332,7 @@ async function runSlice(
   // truth for the squeeze-vs-climb-vs-settle decision that used to live in an
   // implicit local tuple (attempts/sameTierRetries/climbs/atTier/
   // lastSignatureAtTier) — `isSliceTerminal` gates every iteration below, so
-  // a settled slice is never re-dispatched (the run-8 "never marks slices
+  // a settled slice is never re-dispatched (the "never marks slices
   // settled" blocker). `attempt`/`attemptVerdict`/`escalation` still track
   // the latest dispatch's output; everything the loop used to thread by hand
   // now lives in `state`.

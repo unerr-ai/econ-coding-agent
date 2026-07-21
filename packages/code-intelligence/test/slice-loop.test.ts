@@ -467,14 +467,14 @@ describe("runSliceLoop — read-only slice attempt cap (no ladder at all, OL-9.5
 })
 
 // ---------------------------------------------------------------------------
-// Untestable slice accepted-unverified, not laddered — the run-8 regression:
+// Untestable slice accepted-unverified, not laddered — the regression:
 // derived slices carry no sound spec, so the old default-reject fallback ×
 // the (then-uncapped) ladder meant up to 4 dispatches of already-finished
 // work (8 distinct briefs -> 62 runner sessions; "Apply the fix" dispatched
 // 5x). OL-9.5d: absence of a check is not evidence of failure.
 // ---------------------------------------------------------------------------
 
-describe("runSliceLoop — untestable slice accepted unverified, not laddered (run-8 regression)", () => {
+describe("runSliceLoop — untestable slice accepted unverified, not laddered (regression)", () => {
   it("accepts a slice with no sound spec, no extension rung, and no QE sampler on the cheap attempt alone", async () => {
     const { dispatch, calls } = recordingDispatch()
     const slice: LoopSlice = { id: "s", prompt: "do the thing", sliceType: "mechanical" }
@@ -1232,7 +1232,7 @@ describe("runSliceLoop — failure-containment bracket (U3, OL-ORCH-4.3)", () =>
 // squeeze-vs-climb-vs-settle decision (replacing the old implicit local
 // tuple: attempts/sameTierRetries/climbs/atTier/lastSignatureAtTier). This
 // table proves the swap kept every dispatch sequence above byte-identical,
-// plus the run-8 fix: `isSliceTerminal` is the only thing that stops
+// plus the fix: `isSliceTerminal` is the only thing that stops
 // dispatching, so a settled slice's dispatch count always equals its
 // `attempts` — never re-dispatched once terminal.
 // ---------------------------------------------------------------------------
@@ -1322,7 +1322,7 @@ describe("runSliceLoop — FSM table (sliceTransition drives squeeze/climb/settl
       expect(calls.map((call) => call.tier)).toEqual(c.expectTiers)
       expect(outcome.state).toBe(c.expectState)
       expect(outcome.attempts).toBe(c.expectAttempts)
-      // The run-8 invariant: dispatch count must exactly equal attempts —
+      // The invariant: dispatch count must exactly equal attempts —
       // no extra hop after the reducer's terminal state settles the slice.
       expect(calls.length).toBe(c.expectAttempts)
     })

@@ -7,7 +7,7 @@ import {
 } from "../../src/session/issue-expectations"
 
 describe("extractIssueExpectations", () => {
-  test("12039-shaped: quoted-identifier spacing bug — expected and actual both extracted with correct kinds", () => {
+  test("quoted-identifier spacing bug — expected and actual both extracted with correct kinds", () => {
     const issueText = [
       "The generated ORDER BY clause is missing a space before the direction keyword.",
       'Expected output contains the ordering `"name" DESC` with a space before DESC.',
@@ -22,7 +22,7 @@ describe("extractIssueExpectations", () => {
     expect(actual?.kind).toBe("actual")
   })
 
-  test("11790-shaped: typed-integer maxlength expectation extracted", () => {
+  test("typed-integer maxlength expectation extracted", () => {
     const issueText =
       "Expected: the maxlength attribute should be the typed integer `254`, not the string 254 rendered as text."
 
@@ -34,7 +34,7 @@ describe("extractIssueExpectations", () => {
     expect(literal?.source).toContain("maxlength")
   })
 
-  test("11815-shaped: desired vs current enum serialization extracted with correct kinds", () => {
+  test("desired vs current enum serialization extracted with correct kinds", () => {
     const issueText = [
       "Expected serialization is `TextEnum['A']` for the enum field.",
       "Actual serialization returns `TextEnum('a-value')` instead.",
@@ -84,7 +84,7 @@ describe("detectOracleInversion", () => {
     { value: "TextEnum('a-value')", kind: "actual", source: "currently got `TextEnum('a-value')`" },
   ]
 
-  test("11815-shaped inversion: produced side carries the issue-desired value, assertion expects the buggy one", () => {
+  test("inversion: produced side carries the issue-desired value, assertion expects the buggy one", () => {
     const redTail = [
       "FAIL: test_serialize_enum (migrations.test_writer.WriterTests)",
       "Traceback (most recent call last):",
@@ -134,9 +134,9 @@ describe("detectOracleInversion", () => {
   })
 })
 
-describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", () => {
+describe("detectOracleInversion — FORM-CLASS rung (promoted-pin form)", () => {
   // The issue extractor stores a single expected-kind literal here (no
-  // "actual"-kind counterpart) — the live 11815 shape where the literal rung
+  // "actual"-kind counterpart) — the live promoted-pin shape where the literal rung
   // is structurally blind and only the form rung can fire.
   const promotedLiterals: IssueExpectation[] = [
     {
@@ -230,13 +230,13 @@ describe("detectOracleInversion — FORM-CLASS rung (11815 promoted-pin form)", 
   })
 })
 
-// Round-F strict-sweep forensics: the ten real django-issue prompts from the
-// Mini-10 ladder, embedded verbatim (trimmed to the relevant excerpt) so the
+// Round-F strict-sweep: the ten real django-issue prompts from the
+// benchmark ladder, embedded verbatim (trimmed to the relevant excerpt) so the
 // extractors are proven against real prose, not hand-shaped synthetic text.
-// 12039 and 11848 were the two live failures the gap closes; the other eight
+// Two of the ten were live failures the gap closes; the other eight
 // are the false-fire audit protecting the instances already passing.
 describe("extractIssueExpectations / extractIssueThresholds — round-F real issue-text fixtures", () => {
-  test("11790 (typed-integer maxlength regression) — no marker language in the real prompt, extracts nothing", () => {
+  test("typed-integer maxlength regression — no marker language in the real prompt, extracts nothing", () => {
     const issueText = [
       "AuthenticationForm's username field doesn't set maxlength HTML attribute.",
       "AuthenticationForm's username field doesn't render with maxlength HTML attribute anymore.",
@@ -249,7 +249,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(literals).toEqual([])
   })
 
-  test("11815 (migration enum value vs name) — 'It should be:' worked example captures the corrected line", () => {
+  test("migration enum value vs name — 'It should be:' worked example captures the corrected line", () => {
     const issueText = [
       "Migrations uses value of enum object instead of its name.",
       "When using Enum object as a default value for a CharField, the generated migration file uses the value of the Enum object instead of the its name. This causes a problem when using Django translation on the value of the Enum object.",
@@ -274,7 +274,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     ])
   })
 
-  test("11848 (RFC 7231 two-digit-year rule) — extractIssueThresholds finds the stated 50-year boundary", () => {
+  test("RFC 7231 two-digit-year rule — extractIssueThresholds finds the stated 50-year boundary", () => {
     const issueText = [
       "RFC 850 does not mention this, but in RFC 7231 (and there's something similar in RFC 2822), there's the following quote:",
       "Recipients of a timestamp value in rfc850-date format, which uses a",
@@ -297,7 +297,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueExpectations(issueText).literals).toEqual([])
   })
 
-  test("11880 (deepcopy shares error_messages dict) — false-fire audit: pre-existing 'sealed' quote, no new noise, ≤4 items", () => {
+  test("deepcopy shares error_messages dict — false-fire audit: pre-existing 'sealed' quote, no new noise, ≤4 items", () => {
     const issueText = [
       "Form Field's __deepcopy__ does not (deep)copy the error messages.",
       "The __deepcopy__ method defined for the formfields performs a shallow copy of self and does not include additional treatment for the error_messages dictionary. As a result, all copies of the same field share the same dictionary and any modification of either the dictionary or the error message itself for one formfield is immediately reflected on all other formfiels.",
@@ -319,7 +319,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueThresholds(issueText)).toEqual([])
   })
 
-  test("11885 (combine fast delete queries) — false-fire audit: raw DELETE/SQL prose never mistaken for a worked example", () => {
+  test("combine fast delete queries — false-fire audit: raw DELETE/SQL prose never mistaken for a worked example", () => {
     const issueText = [
       "Combine fast delete queries",
       "When emulating ON DELETE CASCADE via on_delete=models.CASCADE the deletion.Collector will try to perform fast queries which are DELETE FROM table WHERE table.pk IN .... There's a few conditions required for this fast path to be taken but when this happens the collection logic should combine such queries by table to reduce the number of roundtrips to the database.",
@@ -352,7 +352,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueThresholds(issueText)).toEqual([])
   })
 
-  test("11951 (TextChoices differing type) — false-fire audit: no fenced code block means the assertion/diff lines stay unextracted, ≤4 items", () => {
+  test("TextChoices differing type — false-fire audit: no fenced code block means the assertion/diff lines stay unextracted, ≤4 items", () => {
     const issueText = [
       "If we create an instance of a model having a CharField or IntegerField with the keyword choices pointing to IntegerChoices or TextChoices, the value returned by the getter of the field will be of the same type as the one created by enum.Enum (enum value).",
       'self.assertEqual(str(my_object.my_str_value), "first")',
@@ -367,7 +367,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueThresholds(issueText)).toEqual([])
   })
 
-  test("11964 (cannot override get_FOO_display) — false-fire audit: pre-existing 'returns X or Y' triple, ≤4 items", () => {
+  test("cannot override get_FOO_display — false-fire audit: pre-existing 'returns X or Y' triple, ≤4 items", () => {
     const issueText = [
       "Cannot override get_FOO_display() in Django 2.2+.",
       "I cannot override the get_FIELD_display function on models since version 2.2. It works in version 2.1.",
@@ -400,7 +400,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueThresholds(issueText)).toEqual([])
   })
 
-  test("11999 (resolve_lookup_value tuple coercion) — false-fire audit: 'expected ... should match' has no colon, extracts nothing", () => {
+  test("resolve_lookup_value tuple coercion — false-fire audit: 'expected ... should match' has no colon, extracts nothing", () => {
     const issueText = [
       "Query.resolve_lookup_value coerces value of type list to tuple",
       "Changes introduced in #30687 cause an input value list to be coerced to tuple breaking exact value queries. This affects ORM field types that are dependent on matching input types such as PickledField.",
@@ -414,7 +414,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     expect(extractIssueThresholds(issueText)).toEqual([])
   })
 
-  test("12039 (CREATE INDEX quoted-identifier whitespace) — extracts the discriminating expected/actual DESC statement pair", () => {
+  test("CREATE INDEX quoted-identifier whitespace — extracts the discriminating expected/actual DESC statement pair", () => {
     const issueText = [
       "Creating an index through:",
       "Will generate the valid but not so pretty CREATE INDEX statement:",
@@ -443,7 +443,7 @@ describe("extractIssueExpectations / extractIssueThresholds — round-F real iss
     ])
   })
 
-  test("12050 (bulk_create batch_size override) — false-fire audit: 'picks the minimum of two:' colon never grabs the URL/formula lines", () => {
+  test("bulk_create batch_size override — false-fire audit: 'picks the minimum of two:' colon never grabs the URL/formula lines", () => {
     const issueText = [
       "bulk_create batch_size param overrides the compatible batch size calculation",
       "batch_size param overrides compatible batch size calculation. This looks like a bug as bulk_update properly picks the minimum of two:",

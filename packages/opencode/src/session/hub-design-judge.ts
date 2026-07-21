@@ -163,8 +163,9 @@ function tokenizeAlphanumeric(text: string): string[] {
  * RF-7 sanity floor: whether `verdict`'s `entity`/`change` share at least
  * one non-trivial token (length >= 4, case-insensitive) with `issueText` —
  * catches a verdict that names an entity/change the issue never mentions at
- * all (11964-A's `Q.__invert__`/De Morgan verdict against a Django
- * Choices/enum `str()` issue fails this trivially). Tokenizes on runs of
+ * all (e.g. a verdict describing an unrelated operator-overload/logic-
+ * negation mechanism scored against an issue about a different
+ * enum-to-string conversion fails this trivially). Tokenizes on runs of
  * non-alphanumeric characters.
  *
  * @sem domain=routing role=hub-design-judge
@@ -260,8 +261,8 @@ export async function runHubDesignJudge(
   }
   const verdict = parseHubDesignResponse(raw)
   if (!verdict) return { verdict: DEGRADED_HUB_DESIGN, rawHead: raw.slice(0, 200) }
-  // Sanity floor: a verdict whose file isn't even path-like (round-A4 live:
-  // the model hedged with literal "unknown" when it had no candidate sites)
+  // Sanity floor: a verdict whose file isn't even path-like (observed: the
+  // model hedged with literal "unknown" when it had no candidate sites)
   // carries no design signal — degrade regardless of definitionSites.
   const verdictFile = verdict.file.trim()
   if (verdictFile === "" || (!verdictFile.includes("/") && !verdictFile.includes("."))) {

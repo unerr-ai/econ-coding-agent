@@ -6,7 +6,7 @@
  * (turn-triage.ts). The model reports facts per diagnosis goal —
  * locationNamed / fixSpecified (verbatim quotes) plus the judged
  * hardness/ambiguity — and this function applies the policy. Misapplied
- * prose rules (the django-12039 class: a trivial, file-named fix cascading
+ * prose rules (a trivial, file-named fix cascading
  * to the oracle) are structurally impossible; policy changes are code
  * review; the rig's decision tests are table tests. Both localization doors
  * consume ONE decision: the turn-open skeleton (buildTriageTodoSkeleton) and
@@ -98,8 +98,8 @@ export function verdictIsReadOnly(verdict?: TriageVerdict | null): boolean {
  *    (resolution-phase.ts).
  *  - No decomposition: `degraded:true` flags the turn so runConductorOrchestration
  *    keeps the conductor INLINE — its own mid-turn todos are tracked but never
- *    flow through todosToLoopSlices/shouldOrchestrate into tiered slices. On the
- *    2026-07-10 11964 fire a degraded turn-read decomposed an ex-conductor-solo
+ *    flow through todosToLoopSlices/shouldOrchestrate into tiered slices. On a
+ *    2026-07-10 run a degraded turn-read decomposed an ex-conductor-solo
  *    ticket ($0.0985 solo) into reasoner/oracle slices via the allocator's
  *    structural cells, costing $0.3467 (3.5×) for zero quality gain.
  * The ONLY way up on a degraded turn is the grind valve (turn-supervisor.ts
@@ -144,7 +144,7 @@ export const DEGRADED_ARMING: ArmingVerdict = {
  * diagnosis goal exists, independent of `arm`. Repro-first sequencing needs
  * this: even an already-located, non-arming bug must still manufacture and
  * confirm red evidence before a fix lands, because a repro authored AFTER the
- * fix can only ever run green (11964's false-green shape).
+ * fix can only ever run green (a false-green shape).
  *
  * @sem domain=routing role=router
  */

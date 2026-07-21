@@ -31,10 +31,10 @@ const SCOPE_NEIGHBOR_FILE_CAP = 16
  * other direction. Deliberately one-way: the defining site's own
  * dependencies (what it calls out to) are not pulled into scope, only what
  * calls it. This is what keeps a defining site's incidental collaborator
- * (django-11880: `fields.py` — the resolved defining site — imports
- * `validators.py`, which is not itself in the issue's scope) OUT of the
- * derived boundary instead of quietly re-admitting exactly the collateral
- * file this feature exists to flag. Reuses the getEntitiesInFile/getCallers
+ * (a resolved defining site importing an unrelated helper module that isn't
+ * itself in the issue's scope) OUT of the derived boundary instead of
+ * quietly re-admitting exactly the collateral file this feature exists to
+ * flag. Reuses the getEntitiesInFile/getCallers
  * primitives `computeEditImpact` (edit-impact.ts) already walks for the
  * callers-at-risk warning — no new graph query shape. Never throws: a
  * cold/unindexed file or an unresolved entity's callers is skipped,
@@ -90,7 +90,7 @@ export async function deriveIssueScope(
 // ---------------------------------------------------------------------------
 // §6.1 — the missing second primitive: a place to record "this failure
 // pre-dates my change." The agent already computes this proof itself
-// (django-11880: `git stash push` its own edited file, re-run, see the same
+// (`git stash push` its own edited file, re-run, see the same
 // failure) — it previously had nowhere to put that proof, so the correct
 // conclusion (leave it alone, it is not yours) was re-derived each time or
 // ignored outright. Same per-session Map-of-Set lifecycle as
@@ -128,9 +128,9 @@ export function clearPreExistingFailures(sessionID: string): void {
  * model can see what WAS in-bounds, and — when this session already proved
  * (§6.1) a failure pre-dates its change — states that explicitly, so the
  * correct conclusion is available instead of re-derived or ignored (the
- * django-11880 chain this boundary exists to stop: the agent proved two
- * failures pre-existed via its own stash-and-rerun experiment, then shipped
- * 8 unrequested lines into the collateral module anyway).
+ * chain this boundary exists to stop: an agent proved two failures
+ * pre-existed via its own stash-and-rerun experiment, then shipped 8
+ * unrequested lines into the collateral module anyway).
  */
 export function issueScopeReason(relPath: string, scope: readonly string[], sessionID: string): string {
   const scopeList = scope.length > 0 ? scope.join(", ") : "(none resolved)"

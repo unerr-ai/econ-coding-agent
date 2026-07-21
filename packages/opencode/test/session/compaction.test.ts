@@ -847,7 +847,7 @@ describe("session.compaction.prune", () => {
 
 describe("session.compaction.pruneStaleReads — L2.1 window rule", () => {
   it.live(
-    // 11999 L2-probe regression: path-level read dedupe cleared page N−1 of a
+    // L2-probe regression: path-level read dedupe cleared page N−1 of a
     // large file whenever page N was read (base.py read 10× in different
     // windows, 9 cleared → re-read thrash). A later READ supersedes an earlier
     // one only when it covers the IDENTICAL window; a later WRITE/EDIT of the

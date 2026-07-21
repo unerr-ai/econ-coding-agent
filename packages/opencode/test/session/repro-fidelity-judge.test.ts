@@ -13,11 +13,11 @@
  * (rendered/serialized-surface asserts) and `missingRequiredLiterals`/
  * `applyRequiredLiteralsGap` (§6 issue-derived literal coverage). RF-5 adds
  * a third tooth of the same shape — `detectStringifiedMirrorAssert`/
- * `applyStringifiedMirrorGap` (django-11790's stringified-expected-side
+ * `applyStringifiedMirrorGap` (a stringified-expected-side
  * assert) — plus prompt-plumbing coverage for `runReproFidelityJudge`'s
  * optional `statedRules` boundary rubric. RF-8 adds a fifth tooth,
  * `detectNumericStringConflict`/`applyNumericStringConflictGap`, for
- * django-11790's later `if`/`failures.append` evasion (a quoted pure-int
+ * a later `if`/`failures.append` evasion (a quoted pure-int
  * literal on one line vs. the same digit sequence bare elsewhere), plus
  * `detectTypeUnfaithfulRepro`, the mirror+conflict composite consumed by
  * a finish-time re-check. The
@@ -29,9 +29,9 @@
  * covered directly below instead.
  *
  * H1 (gap-closure-plan §2.7) adds coverage for the claim-evidence kernel
- * instances: `checkWitnessCoverage` (the 14369 strict-subset shape),
+ * instances: `checkWitnessCoverage` (a strict-subset shape),
  * `checkRoundtripWitness`/`detectMissingRoundtripAssert`/`applyRoundtripGap`
- * (the 14365/14598 one-sided-fix shapes), and `checkTestSetCoverage` (the
+ * (a one-sided-fix shape), and `checkTestSetCoverage` (the
  * F2P full-set shape).
  */
 
@@ -463,7 +463,7 @@ describe("missingRequiredLiterals / applyRequiredLiteralsGap", () => {
 })
 
 describe("detectStringifiedMirrorAssert", () => {
-  test("django-11790's exact line fires", () => {
+  test("a real captured stringified-mirror assert line fires", () => {
     const line = "assert widget_maxlength == str(expected_max_length), ("
     expect(detectStringifiedMirrorAssert(line)).toBe(line)
   })
@@ -519,7 +519,7 @@ assertEqual(widget.attrs["maxlength"], 254)
     expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
   })
 
-  test("django-11790's ALIASED evasion fires — expected = str(...) one hop up, plain assert compares the alias", () => {
+  test("an ALIASED evasion fires — expected = str(...) one hop up, plain assert compares the alias", () => {
     const reproContent = `expected = str(form.fields['username'].max_length)
 assert widget_attrs['maxlength'] == expected, (
     "Expected maxlength=%r, got %r" % (expected, widget_attrs['maxlength'])
@@ -537,7 +537,7 @@ assert widget_attrs['maxlength'] == expected, (
     expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
   })
 
-  test("MUST-FIRE: django-11790's final conditional+alias evasion — a value-alias local compared against a str()-wrapped chain in an `if` gate", () => {
+  test("MUST-FIRE: a final conditional+alias evasion — a value-alias local compared against a str()-wrapped chain in an `if` gate", () => {
     const reproContent = [
       "widget_maxlength = widget.attrs.get(\"maxlength\")",
       "expected_maxlength = form.fields['username'].max_length",
@@ -557,7 +557,7 @@ assert widget_attrs['maxlength'] == expected, (
     expect(detectStringifiedMirrorAssert(line)).toBe(line)
   })
 
-  test("MUST-NOT-FIRE: arena-12039's aliased-vs-plain-var shape — a str()-alias compared against a plain var with no chain alias", () => {
+  test("MUST-NOT-FIRE: an aliased-vs-plain-var shape — a str()-alias compared against a plain var with no chain alias", () => {
     const reproContent = ["out3 = str(ic)", "if out3 != expected3:"].join("\n")
     expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
   })
@@ -571,7 +571,7 @@ assert widget_attrs['maxlength'] == expected, (
     expect(detectStringifiedMirrorAssert("if a != b:")).toBeUndefined()
   })
 
-  test("MUST-NOT-FIRE: a membership conditional (the 11790 repro's other `if` line) never trips the comparison split", () => {
+  test("MUST-NOT-FIRE: a membership conditional (the repro's other `if` line) never trips the comparison split", () => {
     expect(detectStringifiedMirrorAssert("if expected_attr not in rendered:")).toBeUndefined()
   })
 })
@@ -614,7 +614,7 @@ describe("applyStringifiedMirrorGap", () => {
 })
 
 describe("detectNumericStringConflict", () => {
-  test("MUST-FIRE: django-11790's final if/failures.append pair — quoted '150' vs bare 150 elsewhere", () => {
+  test("MUST-FIRE: a final if/failures.append pair — quoted '150' vs bare 150 elsewhere", () => {
     const reproContent = [
       "if field.max_length != 150:",
       '    failures.append(f"field.max_length = {field.max_length!r}, expected 150")',
@@ -664,7 +664,7 @@ describe("detectNumericStringConflict", () => {
     expect(detectNumericStringConflict(reproContent)).toBeUndefined()
   })
 
-  test("does NOT fire on a quoted literal with embedded quote marks around non-numeral text (12039's real shape)", () => {
+  test("does NOT fire on a quoted literal with embedded quote marks around non-numeral text", () => {
     const reproContent = [
       'expected1 = \'CREATE INDEX "idx" ON "schema_author" ("name" DESC)\'',
       "assert out1 == expected1, (out1, expected1)",
@@ -683,7 +683,7 @@ describe("detectNumericStringConflict", () => {
     expect(detectNumericStringConflict(reproContent)).toBeUndefined()
   })
 
-  test("REAL-FIXTURE — fires on django-11790's actual arena repro_issue.py", () => {
+  test("REAL-FIXTURE — fires on a real captured arena repro_issue.py", () => {
     const reproContent = `"""
 Regression per #27515 followup / forum report:
 AuthenticationForm's username field does not render with a maxlength
@@ -809,7 +809,7 @@ describe("detectTypeUnfaithfulRepro", () => {
     expect(detectTypeUnfaithfulRepro("assert response.status_code == 200")).toBeUndefined()
   })
 
-  test("REAL-FIXTURE — does NOT fire on arena-11848's passing-run assert/comparison lines", () => {
+  test("REAL-FIXTURE — does NOT fire on a passing run's assert/comparison lines", () => {
     const reproContent = `def check(label, actual, expected):
     assert actual == expected, (
         f"{label}: expected {expected!r}, got {actual!r}"
@@ -818,7 +818,7 @@ describe("detectTypeUnfaithfulRepro", () => {
     expect(detectTypeUnfaithfulRepro(reproContent)).toBeUndefined()
   })
 
-  test("REAL-FIXTURE — does NOT fire on arena-12039's passing-run assert/comparison lines", () => {
+  test("REAL-FIXTURE — does NOT fire on a passing run's rendered-index-columns assert/comparison lines", () => {
     const reproContent = `c = Columns(qtable, ['name'], qn, col_suffixes=['DESC'])
 out1 = 'CREATE INDEX "idx" ON "schema_author" (' + str(c) + ')'
 expected1 = 'CREATE INDEX "idx" ON "schema_author" ("name" DESC)'
@@ -843,7 +843,7 @@ assert str(c) == '"a", "b"'
     expect(detectTypeUnfaithfulRepro(reproContent)).toBeUndefined()
   })
 
-  test("REAL-FIXTURE — fires on arena-11790's attempt-2 aliased evasion repro via the mirror path", () => {
+  test("REAL-FIXTURE — fires on an aliased evasion repro via the mirror path", () => {
     const reproContent = `form = AuthenticationForm()
 widget_attrs = form.fields['username'].widget.attrs
 assert 'maxlength' in widget_attrs, (
@@ -861,7 +861,7 @@ assert widget_attrs['maxlength'] == expected, (
 })
 
 describe("checkWitnessCoverage — H1 tooth 1 (gap-closure-plan §2.7)", () => {
-  test("the 14369 shape: a repro asserting 2 of 3 issue-stated witnesses is a strict subset, never covered", () => {
+  test("a repro asserting 2 of 3 issue-stated witnesses is a strict subset, never covered", () => {
     const reproContent = "assert case_a == 1\nassert case_b == 2\n"
     const verdict = checkWitnessCoverage(reproContent, ["case_a", "case_b", "case_c"])
     expect(verdict.covered).toBe(false)
@@ -890,7 +890,7 @@ describe("checkWitnessCoverage — H1 tooth 1 (gap-closure-plan §2.7)", () => {
 })
 
 describe("checkRoundtripWitness / detectMissingRoundtripAssert / applyRoundtripGap — H1 tooth 2", () => {
-  test("14365 shape: a parse-only repro never calling the synthesized format/serialize counterpart is uncovered", () => {
+  test("a parse-only repro never calling the synthesized format/serialize counterpart is uncovered", () => {
     const reproContent = "actual = parse_date('2024-01-01')\nassert actual == expected\n"
     const gap = detectMissingRoundtripAssert(reproContent, "format_date")
     expect(gap).toBeDefined()
@@ -900,7 +900,7 @@ describe("checkRoundtripWitness / detectMissingRoundtripAssert / applyRoundtripG
     expect(verdict.missing).toEqual(["roundtrip:format_date"])
   })
 
-  test("14598 shape: a repro exercising unescape() is covered once the roundtrip call is present", () => {
+  test("a repro exercising unescape() is covered once the roundtrip call is present", () => {
     const reproContent = "escaped = escape_html(raw)\nroundtripped = unescape_html(escaped)\nassert roundtripped == raw\n"
     expect(detectMissingRoundtripAssert(reproContent, "unescape_html")).toBeUndefined()
     expect(checkRoundtripWitness(reproContent, "unescape_html").covered).toBe(true)
@@ -925,7 +925,7 @@ describe("checkRoundtripWitness / detectMissingRoundtripAssert / applyRoundtripG
     expect(merged).toBe(verdict)
   })
 
-  test("14182 shape: a param-never-threaded repro that reads but never writes it back is uncovered", () => {
+  test("a param-never-threaded repro that reads but never writes it back is uncovered", () => {
     const reproContent = "value = read_param(cfg, 'x')\nassert value == 1\n"
     expect(checkRoundtripWitness(reproContent, "write_param").covered).toBe(false)
   })

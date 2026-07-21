@@ -225,37 +225,56 @@ describe("infra/litellm/config.yaml vs ECON_MODELS (drift guard — OL-8.B2)", (
   }
 
   const configText = readFileSync(LITELLM_CONFIG_PATH, "utf-8")
-  const modelNames = [...configText.matchAll(/^\s*-\s*model_name:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
-  const upstreamModels = [...configText.matchAll(/^\s*model:\s*(\S+)\s*$/gm)].map((m) => m[1]!)
 
-  it("gateway model_name set matches ECON_MODELS' litellm-provider keys exactly (catches a gateway-side rename/addition)", () => {
-    // gap-closure-plan §4.4: claude-opus-4-8 (providerID "anthropic") deliberately bypasses this
-    // gateway — direct-to-Anthropic, so it never appears in config.yaml. Filter to litellm-provider
-    // keys before comparing sets.
-    const litellmKeys = Object.entries(ECON_MODELS)
-      .filter(([, profile]) => profile.providerID === "litellm")
-      .map(([key]) => key)
-    expect(new Set(modelNames)).toEqual(new Set(litellmKeys))
+  // gap-closure-plan §4.4: claude-opus-4-8 (providerID "anthropic") deliberately bypasses this
+  // gateway — direct-to-Anthropic, so it never appears in config.yaml. Filter to litellm-provider
+  // keys before comparing.
+  const litellmKeys = Object.entries(ECON_MODELS)
+    .filter(([, profile]) => profile.providerID === "litellm")
+    .map(([key]) => key)
+
+  // Block parse: split on model_name entries, then read each block's upstream + cost keys.
+  // Dependency-free (no yaml lib in this package) and sufficient — these values never span lines.
+  const entries = configText
+    .split(/^\s*-\s*model_name:\s*/m)
+    .slice(1)
+    .map((block) => ({
+      name: block.split(/\s/)[0]!,
+      upstream: block.match(/^\s*model:\s*(\S+)\s*$/m)?.[1],
+      block,
+    }))
+
+  // The gateway is SHARED, not econ-owned: alongside econ's tier models it also carries the
+  // benchmark harness's comparison arms (a real-OpenAI ensemble backing the claude arm's
+  // ANTHROPIC_DEFAULT_* tier map, added gateway-side 2026-07-19). Those are deliberately NOT
+  // fireworks passthrough — they are real upstream OpenAI — and deliberately absent from
+  // ECON_MODELS, because econ must never route a tier to them. So this guard asserts the ONE
+  // direction that carries risk: every model econ declares must exist gateway-side, with a
+  // fireworks upstream and mirrored rates. A gateway entry econ doesn't know about is a
+  // legitimate comparison arm, not drift, and is intentionally not asserted on — adding those
+  // keys to ECON_MODELS to satisfy a set-equality check would falsely declare them routable.
+  const econEntries = entries.filter((e) => litellmKeys.includes(e.name))
+
+  it("every ECON_MODELS litellm-provider key exists gateway-side (catches a gateway-side rename or a dropped model econ still routes to)", () => {
+    const gatewayNames = new Set(entries.map((e) => e.name))
+    expect(litellmKeys.filter((key) => !gatewayNames.has(key))).toEqual([])
   })
 
-  for (const model of upstreamModels) {
-    it(`litellm_params.model "${model}" is pinned to a fireworks_ai upstream (dumb-pipe invariant)`, () => {
-      expect(model.startsWith("fireworks_ai/")).toBe(true)
+  for (const { name, upstream } of econEntries) {
+    it(`litellm_params.model for "${name}" is pinned to a fireworks_ai upstream (dumb-pipe invariant)`, () => {
+      expect(upstream?.startsWith("fireworks_ai/")).toBe(true)
     })
   }
 
   // 2026-07-06: the gateway carries per-token rates so litellm's response-cost /
   // key-spend apply the cached-token discount (the default fireworks_ai cost map
   // has no cache-read rate → discount was always 0.0). Those rates must mirror
-  // ECON_COST_MATRIX exactly (USD per 1M ÷ 1e6) — one source of truth, enforced
-  // here. Block parse: split on model_name entries, read the three cost keys.
-  const blocks = configText.split(/^\s*-\s*model_name:\s*/m).slice(1)
+  // ECON_COST_MATRIX exactly (USD per 1M ÷ 1e6) — one source of truth, enforced here.
   const rateOf = (block: string, key: string): number | undefined => {
     const m = block.match(new RegExp(`^\\s*${key}:\\s*([\\d.eE+-]+)\\s*$`, "m"))
     return m ? Number(m[1]) : undefined
   }
-  for (const block of blocks) {
-    const name = block.split(/\s/)[0]!
+  for (const { name, block } of econEntries) {
     it(`gateway rates for "${name}" mirror ECON_COST_MATRIX`, () => {
       const rate = ECON_COST_MATRIX[name]
       expect(rate).toBeDefined()

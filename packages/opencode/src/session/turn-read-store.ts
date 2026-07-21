@@ -49,7 +49,7 @@ export function getPinnedProbe(sessionID: string): TurnProbePin | undefined {
   return probeBySession.get(sessionID)
 }
 
-/** S4 — record (or update) a governance-gate BLOCK for a file this session hit — the abandonment signal (django-12039: blocked twice, never re-applied, empty patch). */
+/** S4 — record (or update) a governance-gate BLOCK for a file this session hit — the abandonment signal (observed: a file blocked twice, never re-applied, leaving an empty patch). */
 export function recordGateBlock(sessionID: string, file: string, reason: string): void {
   let files = blocksBySession.get(sessionID)
   if (!files) {
@@ -104,7 +104,7 @@ export function getIssueExpectations(sessionID: string): readonly IssueExpectati
   return expectationsBySession.get(sessionID) ?? []
 }
 
-/** Round F fix-wave — issue-stated numeric boundary rules (11848's "more than 50 years… MUST"): sessionID → the rules the fidelity judge must see asserted on BOTH sides. */
+/** Round F fix-wave — issue-stated numeric boundary rules (e.g., an issue stating "more than 50 years… MUST" as a threshold): sessionID → the rules the fidelity judge must see asserted on BOTH sides. */
 const thresholdsBySession = new Map<string, readonly IssueThreshold[]>()
 
 /** Record (or, on empty, clear) the fresh turn's issue-stated boundary rules. Extracted by pure code, so this runs even on a degraded turn-read. */

@@ -1,8 +1,8 @@
 /**
  * Tests for roundtrip-witness.ts (H1 tooth 2, gap-closure-plan §2.7):
  * `findRoundtripCounterpart`'s pure name-pairing over the live failure
- * shapes (astropy-14365 parse-only, 14598 inverted unescape, 14182
- * param-never-threaded) and `synthesizeRoundtripWitness`'s graph-stub
+ * shapes (parse-only, inverted unescape, param-never-threaded) and
+ * `synthesizeRoundtripWitness`'s graph-stub
  * wiring (never throws, degrades to undefined on a graph error).
  */
 import { describe, test, expect } from "bun:test"
@@ -13,7 +13,7 @@ import {
 } from "../../src/session/roundtrip-witness"
 
 describe("findRoundtripCounterpart", () => {
-  test("14365 shape: parse_date pairs with format_date (parse<->format)", () => {
+  test("parse-only shape: parse_date pairs with format_date (parse<->format)", () => {
     expect(findRoundtripCounterpart("parse_date", ["parse_date", "format_date", "validate_date"])).toBe(
       "format_date",
     )
@@ -23,13 +23,13 @@ describe("findRoundtripCounterpart", () => {
     expect(findRoundtripCounterpart("parse_config", ["parse_config", "serialize_config"])).toBe("serialize_config")
   })
 
-  test("14598 shape: escape_html pairs with unescape_html", () => {
+  test("inverted-unescape shape: escape_html pairs with unescape_html", () => {
     expect(findRoundtripCounterpart("escape_html", ["escape_html", "unescape_html", "strip_tags"])).toBe(
       "unescape_html",
     )
   })
 
-  test("14182 shape: read_config pairs with write_config", () => {
+  test("param-never-threaded shape: read_config pairs with write_config", () => {
     expect(findRoundtripCounterpart("read_config", ["read_config", "write_config"])).toBe("write_config")
   })
 

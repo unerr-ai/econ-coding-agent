@@ -3,8 +3,8 @@ import { guardReasoningEffort } from "../../src/session/llm/reasoning-gate"
 
 // E0 (native-loop-gap.md): the conductor is never muted, and the mute marker
 // is never deleted either — "none" rewrites to the bounded "high", because an
-// absent param means unbounded server-side thinking (one 2,453s step on
-// django-11964, e0-mini10-r1). Small housekeeping one-shots mute instead;
+// absent param means unbounded server-side thinking (one 2,453s step
+// observed). Small housekeeping one-shots mute instead;
 // bounded efforts pass through untouched.
 describe("reasoning-gate", () => {
   test("'none' rewrites to bounded 'high' on ordinary requests", () => {

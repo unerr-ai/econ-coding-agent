@@ -78,12 +78,11 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, SessionTod
           })
 
           // Two structural nets at the tool boundary, in order. Reconcile
-          // first (case-2 tierfire3 double-wave decode): a conductor rewrite
-          // wholesale-replaces the stored list, so settled slice statuses and
-          // engine-planted frame seeds must be re-stuck against the store
-          // before anything else — otherwise a stale re-emission un-completes
-          // paid-for slices and re-triggers a full dispatch wave. Then
-          // judgment-slice typing (run-20 decode): on an untyped
+          // first: a conductor rewrite wholesale-replaces the stored list, so
+          // settled slice statuses and engine-planted frame seeds must be
+          // re-stuck against the store before anything else — otherwise a
+          // stale re-emission un-completes paid-for slices and re-triggers a
+          // full dispatch wave. Then judgment-slice typing: on an untyped
           // audit/verify-shaped list, type the judgment + check-run items here
           // at the tool boundary so the OL-7.3b hook can dispatch them —
           // advisory typing rules alone never steer the conductor model.

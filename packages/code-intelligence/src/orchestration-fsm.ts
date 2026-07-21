@@ -5,7 +5,7 @@
  *
  *  - the SLICE loop's squeeze-then-climb becomes a pure `sliceTransition`
  *    reducer with real terminal states, so a settled slice is never
- *    re-dispatched (the run-8 "868 calls / slices never settled" blocker);
+ *    re-dispatched (an un-settled-slice blocker: 868 calls, slices never settled);
  *  - the ROOT turn loop's continuation is expressed as Claude-Code-style
  *    `Continue`/`Terminal` named reasons (query.ts:204-239 pattern);
  *  - a `StuckSupervisor` turns repeated-red / repeated-tool / a test-edit /
@@ -120,7 +120,7 @@ export function sliceTransition(
   event: SliceEvent,
   ctx: SliceTransitionCtx,
 ): SliceMachineState {
-  if (state.terminal) return state // terminal is absorbing (run-8 re-dispatch fix)
+  if (state.terminal) return state // terminal is absorbing (re-dispatch fix)
 
   if (event.type === "budget-exhausted") {
     return settle(state, {
@@ -335,7 +335,7 @@ export function createStuckSupervisor(
 
       // 3. repeated-red — the same failing command result `repeatThreshold` times.
       // Its tally only advances on result steps, so it tolerates interleaved
-      // reads/edits (the django-11885 12x-thrash caught at the 3rd). A command step
+      // reads/edits. A command step
       // ends here: its progress IS its result, never the verbatim-repeat check below.
       // Reclassifies as environment-slow the moment any run in the streak carried
       // the slow-command signal — a CPU-starved/timeout-killed shell producing the
@@ -373,7 +373,7 @@ export function createStuckSupervisor(
       // 5. repeated-tool — the EXACT same call (tool + args) re-issued
       // `repeatThreshold` times. The signature hashes the full input, so progressive
       // edits to one file and diverse reads yield distinct signatures and never
-      // collide — only a verbatim repeat does (run 11885 v1/v2 false positives).
+      // collide — only a verbatim repeat does.
       noopRun = 0
       const t = tally(dupRun, step.toolSignature)
       if (t >= config.repeatThreshold) {

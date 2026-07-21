@@ -420,7 +420,7 @@ export function candidateRiskTokens(prompt: string): string[] {
  * EVERY token (bounded — at most 12 tokens × 3 matches), union the matches,
  * and when the union exceeds the pool cap keep the highest-fan-in entities.
  * The old first-token-wins fill never even searched a decisive symbol that
- * sat past the first few tokens (run-20 replay: the fix target itself was
+ * sat past the first few tokens (the fix target itself was
  * dropped), and any order-based fill still loses it to eight unique noise
  * matches — fan-in rank is position-independent. Tops `into` up to
  * RISK_PROBE_ENTITY_LIMIT; never evicts entities already in it.
@@ -905,7 +905,7 @@ export interface PythonHarness {
 }
 
 /**
- * 12039 tuning (M1): detect the python repo's REAL test harness from its own
+ * M1: detects the python repo's REAL test harness from its own
  * files. The live failure this grounds: a runner slice on a django checkout
  * guessed `pytest` (which django does not use, under whatever python was on
  * PATH), every slice settled unverified, and the unverified cascade tripled
@@ -1132,7 +1132,7 @@ export async function probeSliceVerifyCommands(files: string[]): Promise<VerifyC
       }
     }
 
-    // Python fallback (12039 tuning, M1): no JS package root produced
+    // Python fallback (M1): no JS package root produced
     // commands. Detect the repo's real harness and target ONLY the test files
     // whose content references the slice's own modules — evidence, never a
     // guess. No referencing test file ⇒ no command: the sound rung must never

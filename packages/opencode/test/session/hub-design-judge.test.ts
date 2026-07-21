@@ -237,7 +237,7 @@ describe("runHubDesignJudge", () => {
     expect(suffixResult.rawHead).toBeUndefined()
   })
 
-  test("round-A4 sanity floor: a hedge like \"unknown\" (no path separator or dot) degrades with rawHead, even with no candidate definition sites to check against", async () => {
+  test("sanity floor: a hedge like \"unknown\" (no path separator or dot) degrades with rawHead, even with no candidate definition sites to check against", async () => {
     const raw = JSON.stringify({ file: "unknown", entity: "unknown", change: "x" })
     const complete: HubDesignComplete = async () => raw
     const result = await runHubDesignJudge({ issueText, bouncedFiles, definitionSites: [], complete })

@@ -3,9 +3,10 @@
 // localization EVIDENCE. The model reports facts; the arming decision itself is
 // a pure code table over the verdict (decideArming, arming-judge.ts).
 // L4.1 (turn-cache-economics §5) — the optimization-phrasing calibration lives
-// IN this rubric (a taught evidence criterion, never a regex door): django-11885
-// ("combine fast delete queries") read hardness=trivial/shape=build → no arming,
-// no decomposition → a 179-step, $0.84 inline grind. The corpus rule is R6
+// IN this rubric (a taught evidence criterion, never a regex door): an
+// optimization-phrased goal like "combine fast delete queries" read as
+// hardness=trivial/shape=build → no arming, no decomposition → a 179-step,
+// $0.84 inline grind. The corpus rule is R6
 // (docs/testing/PROMPT_SLICING_CORPUS.md).
 
 /** Stable, single-line prefix of `TURN_READ_SYSTEM_PROMPT` — lets an out-of-band test harness (e.g. a scripted LLM stub) recognize a turn-read request by its system message without duplicating the full prompt text. */

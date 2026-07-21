@@ -101,7 +101,7 @@ describe("decideArming — stand-down cases", () => {
 })
 
 describe("decideArming — the per-goal evidence table", () => {
-  test("location named, not hard → no arm, localized (django-12039: the trivial file-named fix stays cheap)", () => {
+  test("location named, not hard → no arm, localized (the trivial file-named fix stays cheap)", () => {
     const decision = decideArming(
       verdictOf([
         {

@@ -569,7 +569,7 @@ describe("Wave 5 — hubEditDenialMessage", () => {
     expect(msg).toContain("DIFFERENT shared file")
   })
 
-  it("wave 8d: lists the resolved root-most candidates as candidates, not a verdict (round-F post-mortem on django-11815)", () => {
+  it("wave 8d: lists the resolved root-most candidates as candidates, not a verdict (round-F)", () => {
     const msg = hubEditDenialMessage("django/db/models/fields/__init__.py", 26, [
       "django/db/models/enums.py",
       "django/db/models/base.py",
@@ -609,7 +609,7 @@ describe("round-F §7 — hubEditSecondDenialMessage", () => {
     expect(msg).toContain("re-issue this exact edit once more")
   })
 
-  it("frames the defining sites as symbol-definition candidates, not a behavior verdict (round-F post-mortem on django-11815)", () => {
+  it("frames the defining sites as symbol-definition candidates, not a behavior verdict (round-F)", () => {
     const msg = hubEditSecondDenialMessage("django/db/models/query_utils.py", ["django/db/models/enums.py"])
     expect(msg).toContain("django/db/models/query_utils.py")
     expect(msg).toContain("django/db/models/enums.py")
@@ -1045,14 +1045,13 @@ describe("Wave 8c — evaluateHubEditGate applies the band filter to resolved si
 
 // ---------------------------------------------------------------------------
 // Wave 9 — a retry against a non-candidate is itself the hub-shopping tell.
-// Round-A3 django-11964 forensics: a confident single-file wrong-layer draw
-// bounces query_utils.py, the denial message names enums.py as the defining
-// candidate, and the conductor re-issues the SAME bounced edit rather than
-// moving to enums.py. That never produces the 2-distinct-bounced-files
-// count the wave 7 trigger needs, so evaluateHubEditGate now flags the
-// session (via hubEditRetriedAgainstCandidates) whenever a bounced-set
-// retry lands on a file outside a non-empty resolved defining-file
-// allowlist.
+// A confident single-file wrong-layer draw bounces query_utils.py, the
+// denial message names enums.py as the defining candidate, and the
+// conductor re-issues the SAME bounced edit rather than moving to
+// enums.py. That never produces the 2-distinct-bounced-files count the
+// wave 7 trigger needs, so evaluateHubEditGate now flags the session (via
+// hubEditRetriedAgainstCandidates) whenever a bounced-set retry lands on a
+// file outside a non-empty resolved defining-file allowlist.
 // ---------------------------------------------------------------------------
 
 describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate file", () => {
@@ -1155,15 +1154,15 @@ describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate f
 })
 
 // ---------------------------------------------------------------------------
-// Wave 12 — per-file per-turn bounce memory. Round-07-15 django-11815
-// forensics: a hard-tail escalation spawns a fresh session mid-turn, and the
-// hub-edit gate's per-session bounce state reset to zero for it — the SAME
-// hub file (serializer.py) ran the full first-bounce/second-bounce cycle
-// TWICE (once per session), 4 bounce events for one file in one turn. Fix:
-// inheritHubEditTurnBounceState carries a file's turn-wide bounce count into
-// a child session, so a session that never itself denied the file but whose
-// turn already has history for it gets a cheap cached repeat (rung 2) then
-// an auto-dispatched hub-design judge verdict (rung 3) instead of resetting
+// Wave 12 — per-file per-turn bounce memory. A hard-tail escalation spawns
+// a fresh session mid-turn, and the hub-edit gate's per-session bounce
+// state reset to zero for it — the SAME hub file (serializer.py) ran the
+// full first-bounce/second-bounce cycle TWICE (once per session), 4 bounce
+// events for one file in one turn. Fix: inheritHubEditTurnBounceState
+// carries a file's turn-wide bounce count into a child session, so a
+// session that never itself denied the file but whose turn already has
+// history for it gets a cheap cached repeat (rung 2) then an
+// auto-dispatched hub-design judge verdict (rung 3) instead of resetting
 // to a fresh first bounce.
 // ---------------------------------------------------------------------------
 
@@ -1597,7 +1596,7 @@ describe("§10 Step 4 — evaluateIssueScopeGate", () => {
     expect(result).toEqual({ action: "allow" })
   })
 
-  it("django-11880 shape: the defining site's own dependency (what it calls OUT to) stays out of scope — one-way neighborhood only", async () => {
+  it("the defining site's own dependency (what it calls OUT to) stays out of scope — one-way neighborhood only", async () => {
     setHubEditGate("ses_scope_oneway", true, ["fields.py"])
     // fields.py calls INTO validators.py in real Django, but getCallers only
     // ever answers "who calls fields.py's entities" — validators.py never

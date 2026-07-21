@@ -1,10 +1,16 @@
 # Escalation economics — why the deferral cascade over-fires
 
-> **Status (2026-07-21): BUILT, NOT YET MEASURED.** The root cause below is source-verified
-> against the live engine. §10 Steps 1, 2 and 4 are now **implemented and unit-green**
-> (`deferral-policy.ts` + its wiring, the `escalationEarned` gate guard, `issue-scope.ts`, and
-> the trigger-rate invariant test). **No live run has been done.** Every cost and rate claim in
-> §10 remains a prediction until the A/B lands.
+> **Status (2026-07-21): BUILT, NOT YET MEASURED** — committed as `3a527a5a1`. The root cause
+> below is source-verified against the live engine. §10 Steps 1, 2, 4 and 5 are **implemented,
+> wired and unit-green** (`deferral-policy.ts` + its wiring, the `escalationEarned` gate guard,
+> `issue-scope.ts`, the trigger-rate invariant test, and the escalated-payload trim).
+> **No live run has been done.** Every cost and rate claim in §10 remains a prediction until
+> the A/B lands.
+>
+> One caveat on an earlier revision of this header: it called Step 4 "implemented and
+> unit-green" while `evaluateIssueScopeGate` had **12 green tests and zero production callers**.
+> It was unreachable. Wired in `3a527a5a1` via the exported `evaluateHubEditGate`. Green tests
+> are not evidence of reach — check callers.
 >
 > The current binary (`bin-snapshots/opencode-v2-0720-2114`) holds **10/10 real-graded on the
 > SWE mini-10** ([§1](#1-the-measured-result)) — that is the only evidence we have that today's
@@ -422,7 +428,8 @@ risk, and never consults repro state. Error-search is available as a tool but is
 escalation path. So a turn that loops on an unresolved repro jumps to the oracle rather than
 first fetching the right versioned doc at the cheap tier.
 
-Minor debt: `docUrlForDependency` hardcodes Django for the Python case.
+*(An earlier revision noted `docUrlForDependency` hardcoding Django as a minor debt. Fixed in
+`3a527a5a1` — it is now a data table; see [§11](#11-language-agnosticism-and-v3-20).)*
 
 ---
 
@@ -523,13 +530,22 @@ rust, java-maven, java-gradle, ruby, php); adding Kotlin is one row. `compileRep
 comparisons stay in the repo's own ecosystem. Skip-detection and case-count extraction use
 multi-pattern fallbacks plus a structured-report override.
 
-**Engine debts (small, real):**
+**Engine debts — re-measured against source 2026-07-21 (`3a527a5a1`).** An earlier revision of
+this table listed three debts. Three of the four items below were **already fixed when it was
+written**; the table was inferred from a design doc's to-do state rather than checked against
+the code. Corrected:
 
-| debt | site | severity |
+| claimed debt | site | verdict |
 |---|---|---|
-| `PYTHON_REPRO_VEHICLE` fallback default | `nudges.ts:17` | HIGH in principle, mitigated by turn-open sequencing |
-| interpreter regex in the probe-gate arm | `prompt.ts:3639` — `/^python3?\b/` | real branch |
-| ecosystem branch in the regression gate | `prompt.ts:5027`, `:5030`, `:5054` — `toolchainEcosystem === "python"` | real branch |
+| `PYTHON_REPRO_VEHICLE` fallback default | `prompts/nudges.ts:17` | **not a debt** — fail-soft only. Both production callers (`prompt.ts:2802`, `:5912`) already derive the vehicle from `getRepoProfileSync(...).ecosystems[0]?.repro`; the constant is reached only when detection fails outright. |
+| `REPRO_SLICE_CONTENT` frozen at the Python default | `seeds.ts:71` | **not a debt** — sole production path is `reproSliceContent` → `reproPrepassTodo` → `buildTriageTodoSkeleton` → `prompt.ts:5920`, which passes that same profile-derived vehicle. (This had been carried as an open blocker on the grounds that its consumers were unverified; they are now traced.) |
+| ecosystem branch in the regression gate | `prompt.ts:~5138-5167` (was cited as `:5027`/`:5030`/`:5054`) | **not a debt** — `resolveToolchainEcosystem` / `discoverProjectToolchain` are already a generic per-ecosystem dispatcher. The residual `=== "python"` checks scope the python-only `topLevelPackage` rung, which no other ecosystem's ladder needs. |
+| `docUrlForDependency` hardcodes Django | `error-search.ts:~340-388` | **fixed** in `3a527a5a1` — replaced by two data tables (`ECOSYSTEM_DOC_URL`, `FRAMEWORK_DOC_URL`), with go and ruby added. Django's output is byte-identical. |
+| interpreter regex in the probe-gate arm | `prompt.ts:3639` — `/^python3?\b/` | **real, but mis-sited.** Generalizing this gate *alone* is a no-op: `rewriteSegmentHead` (`regression-neighbors.ts:1297`) returns the segment untouched unless the head is literally `python` or `python3`, so every other ecosystem would run a shell probe each turn and always find nothing to rewrite. The fix belongs in `regression-neighbors.ts`. **This is the only surviving engine debt.** |
+
+**Net: one real debt, not three — and it sits one layer deeper than the table said.** This is the
+same failure mode §13 catalogues: a to-do state in a plan doc was copied forward as a
+measurement. The engine's agnosticism is in better shape than this section previously claimed.
 
 **The binding V3 blocker is the arena, not the engine.** `~/econ-swe-arena` is hardcoded to
 **Django specifically**, not merely Python:
@@ -604,7 +620,7 @@ the same failure mode will recur:
    to implement against a false premise. **The absence of a caller was never verified; it was
    inferred from a design doc's to-do state.**
 
-Two earlier main-thread conclusions were also wrong, both corrected in this document:
+Three earlier main-thread conclusions were also wrong, all corrected in this document:
 
 1. *"Narrow #40 so the seed earns orchestration the normal way."* §4 shows the earn-gate
    accepts the arming signal itself, so that change alone would accomplish nearly nothing.
@@ -613,6 +629,13 @@ Two earlier main-thread conclusions were also wrong, both corrected in this docu
    deliberate, reasoned decision, and both `allocation.ts` lines implement it faithfully. The
    defect is the **frequency** of firing and the **payload** it carries (§4.5), not the tier
    map. §3 was rewritten accordingly.
+3. *"§11 lists three real engine debts."* Three of them were already fixed, and the one that
+   survived is mis-sited — the interpreter branch cannot be generalized where §11 pointed,
+   because `rewriteSegmentHead` gates on a literal `python` head one layer down. The table had
+   been copied forward from a plan's to-do state and never re-checked against source. This is
+   correction 4's failure mode repeating on the main thread rather than in a sub-agent, which
+   is the point: **the discipline is not "distrust sub-agents," it is "verify the decisive
+   measurement was actually taken" — by whoever wrote it.**
 
 **Correction 2 is the methodological lesson of this research.** The first eight streams read
 only *source*, and source alone made a deliberate decision look like an accident — the code

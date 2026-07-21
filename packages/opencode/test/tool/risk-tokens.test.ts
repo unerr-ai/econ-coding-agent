@@ -1,14 +1,14 @@
 /**
  * candidateRiskTokens: symbol-shaped tokens must beat prose to the RISK_MAX_TOKENS
- * budget cap (live-fire run 19 — prose filled the cap before mergeDefs/$ZodObject/
- * safeExtend were ever read).
+ * budget cap (prose filled the cap before mergeDefs/$ZodObject/safeExtend were
+ * ever read).
  */
 
 import { describe, it, expect } from "bun:test"
 import { candidateRiskTokens } from "../../src/tool/graph-tools"
 
 describe("candidateRiskTokens — symbol-shaped tokens beat prose", () => {
-  it("run-19 fix-turn: surfaces mergeDefs/$ZodObject/safeExtend, drops burned prose", () => {
+  it("a fix-turn-shaped prompt: surfaces mergeDefs/$ZodObject/safeExtend, drops burned prose", () => {
     const prompt =
       "Now fix it properly in the schema-composition core. The bug lives in the merge() helper in " +
       "packages/zod/src/v4/core/util.ts, which builds the merged definition via mergeDefs and clone, " +
@@ -22,7 +22,7 @@ describe("candidateRiskTokens — symbol-shaped tokens beat prose", () => {
     expect(out.map((t) => t.toLowerCase())).not.toContain("builds")
   })
 
-  it("run-19 audit-turn: surfaces $ZodObject/mergeDefs/safeExtend despite instruction-prose opener", () => {
+  it("an audit-turn-shaped prompt: surfaces $ZodObject/mergeDefs/safeExtend despite instruction-prose opener", () => {
     const prompt =
       "Before we ship this, audit the blast radius of your change across the schema-composition core. " +
       "The touched helper sits under $ZodObject composition: merge, mergeDefs, clone, extend, safeExtend, catchall"

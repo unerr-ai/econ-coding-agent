@@ -8,7 +8,7 @@ import { BATCH_RULE, PROBE_SCRIPT_RULE } from "./fragments"
 // live path yet — it awaits a live unerrd recon client for its slices (same blocker as OL-3.3).
 // The conductor delta's env-read/root-cause item (item 12) is a permanent, always-on core — unlike
 // LOCALIZATION_SLICE_CONTENT's seed-ladder priors (seeds.ts), which plant only when localization
-// arms (co-planted alongside the repro pre-pass since the 11964 iter-3 fix), so location-known
+// arms (co-planted alongside the repro pre-pass), so location-known
 // fix turns still never receive them — this item is their always-on floor.
 export const TIER_DELTA: Record<string, string> = {
   conductor: [

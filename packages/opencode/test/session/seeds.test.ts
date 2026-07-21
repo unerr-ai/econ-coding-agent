@@ -118,15 +118,19 @@ describe("seeds.ts — buildDeferralSliceContent (§3 deferral slice template)",
 // audit for the profile-compiled repro seed. reproSliceContent()/
 // GRIND_DESIGN_SLICE_CONTENT are large (thousands of chars); asserting a
 // SHA-256 digest instead of embedding the whole blob a second time still
-// proves byte-for-byte identity against the pre-P4 text without the
-// transcription risk of retyping it — the golden hashes below were computed
-// from the pre-P4 constants before this refactor landed.
+// proves byte-for-byte identity against the intended text without the
+// transcription risk of retyping it. The goldens started as the pre-P4
+// constants; reproSliceContent()'s was re-baselined once, when three benchmark
+// instance ids were dropped from a parenthetical example inside
+// REPRO_SLICE_TEXT (the three bug shapes they named were kept). Re-baseline
+// ONLY for a deliberate prompt edit — an unexplained mismatch here means the
+// seed drifted by accident, which is exactly what this guard exists to catch.
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex")
 
 describe("P4 byte-parity — python/default profile snapshots", () => {
   it("reproSliceContent() (no vehicle) is byte-identical to the pre-P4 text (SHA-256 digest)", () => {
-    expect(reproSliceContent().length).toBe(6167)
-    expect(sha256(reproSliceContent())).toBe("593b71119ac24e56ca0ed90d7f26b70c7f32838f4f51f061c1c5e2f34efd2e01")
+    expect(reproSliceContent().length).toBe(6165)
+    expect(sha256(reproSliceContent())).toBe("b2b84e669d2eec51852fc2bb08ecffc6df607d4cb88a8ad8df097bb764dde71f")
   })
 
   it("GRIND_DESIGN_SLICE_CONTENT is untouched by P4 (no Python repro tokens to compile) — byte-identical (SHA-256 digest)", () => {

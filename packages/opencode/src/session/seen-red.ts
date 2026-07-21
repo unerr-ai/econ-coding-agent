@@ -4,7 +4,7 @@
  * turn finishes. The M4/S3/F11 finish-time gates each check a narrower
  * shape (a pinned probe, zero landed source edits, a neighbor regression)
  * but none of them replay the turn's own transcript — the gap that let
- * django-11790 ship a patch after a mid-turn pytest run failed and was
+ * a fix ship a patch after a mid-turn pytest run failed and was
  * never re-verified. Transcript scan: no Effect, no commands run — the
  * caller extracts the plain execution array from message parts and injects
  * the nudge/log. Test-shaped classification and red detection also consult
@@ -71,7 +71,7 @@ export const LAUNDERED_FAILURE_SIGNATURE_RE = /FAILED\s*\(|(?:^|\n)\s*FAILED\b|\
 
 // An interpreter path (`python`, `python3.9`, `.venv/bin/python`) is shared
 // by nearly every command a turn runs — treating it as a test target let any
-// later exit-0 python invocation falsely clear a red (11885 live shape).
+// later exit-0 python invocation falsely clear a red.
 export const INTERPRETER_TOKEN_RE = /(?:^|\/)python[\w.]*$/i
 // A bare module label trailing the runner (django's `runtests.py delete`).
 const BARE_LABEL_RE = /^[A-Za-z_]\w*$/
@@ -187,7 +187,7 @@ function isRedTestExecution(exec: SeenRedExecution, cwd: string = process.cwd())
   // (regression-neighbors.ts) applies to a regression-gate failure.
   if (MISSING_FILE_RE.test(exec.output) || MODULE_MISSING_RE.test(exec.output)) return false
   if (exec.exitCode !== 0) return true
-  // Exit-code laundering (11885 rounds C+C3: 12 of 12 watched reds): a pipe
+  // Exit-code laundering (observed: 12 of 12 watched reds): a pipe
   // filter (`2>&1 | grep … | tail -40`) or compound trailer (`; python
   // inspect.py`) makes the shell report 0 for a failing run. A zero-exit
   // execution still counts as red when the command actually EXECUTES a test
@@ -355,7 +355,7 @@ export function isTrackedSuiteCommand(command: string): boolean {
  * unchanged confirm-GREEN demand) and `sanctioned` (oracle-inversion-shaped:
  * a committed visible test whose red tail shows the code PRODUCING the
  * issue's stated desired value while the assertion still expects the value
- * the issue calls wrong — the 2026-07-15 11815 shape, where the agent
+ * the issue calls wrong — a 2026-07-15 shape, where the agent
  * applied the general gold-equivalent fix, watched the stale committed suite
  * go red on it, and the confirm-GREEN nudge forced the retreat to a
  * narrowed Promise-conditional patch). A sanctioned red must NOT be re-run
@@ -390,7 +390,7 @@ export function partitionSeenRedByInversion(
 // Conservative environment-gap markers beyond the MISSING_FILE_RE/
 // MODULE_MISSING_RE family already excluded upstream (isRedTestExecution
 // above never lets those reach `unresolved` at all — checked again here only
-// as defense in depth). The django-11880 shape: the real arena text reads
+// as defense in depth). An observed shape: real arena text reads
 // "A GIS database backend is required to run gis_tests." — `backend` and
 // `required` share a clause but are not adjacent, so the gap between them
 // is bounded (never `.*`) to stay a conservative red-sanctioning marker
@@ -416,9 +416,9 @@ export interface SeenRedEnvBlock extends UnresolvedSeenRed {
  * whose evidence tail is environment-shaped (`isEnvBlockedSignature`) OR
  * whose FIRST occurrence in `executions` predates this turn's first landed
  * source edit (`sawEditBefore` unset/false), AND has repeated with an
- * identical normalized signature at least twice — the 2026-07-15 django-
- * 11880 shape (a GIS-backend-required regression neighbor burned 42 of 59
- * turns re-running a red that can never pass in this arena). Both conditions
+ * identical normalized signature at least twice — a 2026-07-15 shape (a
+ * GIS-backend-required regression neighbor burned 42 of 59 turns re-running
+ * a red that can never pass in this arena). Both conditions
  * are conservative on purpose: a red whose ONLY evidence is "first observed
  * after an edit" and carries no environment marker stays binding — it could
  * be a regression the edit itself caused. Applies uniformly to suite and

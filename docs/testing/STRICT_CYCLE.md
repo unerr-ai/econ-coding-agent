@@ -598,7 +598,7 @@ Round B is cancelled on this binary; the close-out sweep restarts on the wave-8 
 Wave 8 built cleanly (commit 470816ab9: definition-aware allowlist wired at root
 arming + judge budget 2500 / last-JSON parser / rawHead evidence; typecheck 25/25,
 117 targeted tests green). Before spending a 1.5-hour sweep on it, a new forensic
-instrument — an **offline gate probe** (temporary packages/opencode/probe-wave8.ts) —
+instrument — an **offline gate probe** (a temporary script, since removed) —
 replayed the exact arming path (extractIssueSymbols(PROMPT.txt) → graph.search →
 pathsRefer vs fileFanIn) against real checkouts of all 5 instances at their base
 commits. Verdict: the feared 11964 regression does NOT happen, but **wave 8 as shipped

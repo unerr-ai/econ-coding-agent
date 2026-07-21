@@ -38,7 +38,7 @@ export interface ArmingScenario {
     /** One-line human reason this is the correct outcome (over-fire vs under-fire rationale). */
     readonly reason: string
   }
-  /** Provenance, e.g. "django-12039: trivial fix in a central file". */
+  /** Provenance, e.g. "trivial fix in a central file". */
   readonly note?: string
 }
 

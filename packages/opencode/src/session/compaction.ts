@@ -642,7 +642,7 @@ export const layer = Layer.effect(
         // only when it covers the IDENTICAL page window (same offset+limit) — the
         // L2.1 window rule. Path-level read dedupe is wrong for paged reads of a
         // large file: it cleared page N−1 whenever page N was read, and the model
-        // re-read the cleared window on the next step (11999 L2 probe: base.py read
+        // re-read the cleared window on the next step (base.py read
         // 10× in different windows, 9 cleared — pure thrash, +4× turns).
         const superseded = touches
           .slice(i + 1)
