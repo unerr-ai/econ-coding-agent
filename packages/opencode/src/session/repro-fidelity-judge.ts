@@ -19,10 +19,11 @@
  * rendered/serialized surface, and `missingRequiredLiterals` +
  * `applyRequiredLiteralsGap` force a gap for any issue-derived literal
  * (§6, `requiredLiterals`) the repro never asserts. RF-5 adds a third
- * deterministic tooth of the same shape — `detectStringifiedMirrorAssert` +
- * `applyStringifiedMirrorGap` catch an assert whose EXPECTED side is
- * coerced through `str(...)` (the repro's own pinned assert
- * stringified the mirror and a `str()` fix passed it while the hidden
+ * deterministic tooth of the same shape — `detectCoercedMirrorAssert` +
+ * `applyCoercedMirrorGap` catch an assert whose EXPECTED side is coerced
+ * through a type-coercion builtin (`str(...)`, `int(...)`, ...) — the
+ * repro's own pinned assert compared a coercion of the value instead of
+ * the value itself, so a coercion-shaped fix passed it while the hidden
  * test's typed assert then failed) — plus an optional `statedRules` rubric
  * threaded through `runReproFidelityJudge` that asks the judge to check
  * both sides of an issue-stated numeric boundary are exercised. RF-8 adds a
@@ -35,15 +36,19 @@
  * cannot resolve. `applyNumericStringConflictGap` merges it the same way as
  * RF-5, and `detectTypeUnfaithfulRepro` composes the two into the
  * high-precision subset a finish-time re-check can safely gate on.
- * `detectStringifiedMirrorAssert` itself was later widened to close a
+ * `detectCoercedMirrorAssert` itself was later widened to close a
  * narrower RF-8-shaped gap directly: it now also scans `if`/`elif`
  * error-gating conditionals (not just `assert`/`assertEqual`) and follows a
- * second alias hop symmetric to the str()-alias one — a bare local bound to
- * an attr/subscript chain counts as the chain itself — so a pinned assert
- * shaped like `widget_maxlength = widget.attrs.get(...)` then
+ * second alias hop symmetric to the coercion-alias one — a bare local bound
+ * to an attr/subscript chain counts as the chain itself — so a pinned
+ * assert shaped like `widget_maxlength = widget.attrs.get(...)` then
  * `if widget_maxlength != str(expected_maxlength):` fires on the mirror
  * check alone, without needing `detectNumericStringConflict`'s broader
- * digit-co-occurrence heuristic.
+ * digit-co-occurrence heuristic. The coercion family was later generalized
+ * beyond `str(...)` to every Python type-coercion builtin (int, float,
+ * bool, complex, bytes, bytearray, list, tuple, set, frozenset, dict, repr,
+ * ascii, format) — `type(...)` and `len(...)` stay excluded since neither
+ * coerces the value's type.
  *
  * H1 (gap-closure-plan §2.7) reframes literal coverage as the first
  * instance of the shared claim-evidence kernel: `checkWitnessCoverage`
@@ -525,8 +530,11 @@ export function checkTestSetCoverage(
 
 /** Locates a single `assertEqual`/`assertNotEqual(` call — the gate for both the assertion-line check and the arg extractor below. */
 const ASSERT_EQUAL_CALL = /\bassert(?:Not)?Equal\s*\(/
-/** `== str(` or `!= str(` anywhere on the line — the expected side of a comparison coerced to a string. */
-const STRINGIFIED_EXPECTED_SIDE = /(?:==|!=)\s*\bstr\(/
+/** Python type-coercion builtins that collapse a value's type when they wrap it — the family `COERCED_EXPECTED_SIDE`/`isCoercionWrap` match on. `type(...)` (asserts the type itself) and `len(...)` (a count, not a coercion of the same value) are deliberately excluded. */
+const COERCION_CALLEES =
+  "str|int|float|bool|complex|bytes|bytearray|list|tuple|set|frozenset|dict|repr|ascii|format"
+/** `== str(`, `!= int(`, ... anywhere on the line — the expected side of a comparison coerced through any type-coercion builtin. */
+const COERCED_EXPECTED_SIDE = new RegExp(`(?:==|!=)\\s*\\b(?:${COERCION_CALLEES})\\(`)
 
 /**
  * Extract the two comma-separated arguments of a single assertEqual/
@@ -627,9 +635,10 @@ function extractConditionalComparisonSides(line: string): [string, string] | und
   return splitComparisonSides(match[1])
 }
 
-/** Whether `arg` is a bare `str(...)` wrap — the coercion side of the stringified-mirror pattern. */
-function isStrWrap(arg: string): boolean {
-  return /^str\(.*\)$/.test(arg)
+/** Whether `arg` is a bare coercion-family wrap (`str(...)`, `int(...)`, `repr(...)`, ...) — the coercion side of the coerced-mirror pattern. */
+const COERCION_WRAP = new RegExp(`^(?:${COERCION_CALLEES})\\(.*\\)$`)
+function isCoercionWrap(arg: string): boolean {
+  return COERCION_WRAP.test(arg)
 }
 
 /** Whether `arg` is a bare string/number literal — never the "typed source" side of the pattern. */
@@ -644,61 +653,64 @@ function isAttrOrSubscriptChain(arg: string): boolean {
 
 /**
  * RF-5 — detect whether an assertion or error-gating conditional's EXPECTED
- * side is coerced to a string instead of comparing the typed source value
- * directly: a plain `assert x == str(y)` / `assert x != str(y)`, an
- * `assertEqual(A, B)` / `assertNotEqual(A, B)` call, or an `if A == str(y):`
- * / `elif A != str(y):` error-gating conditional — one side is `str(<chain>)`
- * and the other is an attribute/subscript access chain (not a literal).
- * Resolves ONE hop of variable indirection on EITHER side: an
- * `expected = str(<chain>)` binding lets a later `assert <chain> ==
- * expected` / `if <chain> != expected:` fire the same as the inline
- * `== str(...)` form, and — symmetrically — a
+ * side is coerced through a type-coercion builtin instead of comparing the
+ * typed source value directly: a plain `assert x == str(y)` / `assert x !=
+ * int(y)`, an `assertEqual(A, B)` / `assertNotEqual(A, B)` call, or an
+ * `if A == str(y):` / `elif A != int(y):` error-gating conditional — one
+ * side is `<coercion>(<chain>)` (str, int, float, bool, complex, bytes,
+ * bytearray, list, tuple, set, frozenset, dict, repr, ascii, or format —
+ * NOT `type(...)`, which asserts the type itself, and NOT `len(...)`, a
+ * count rather than a coercion of the same value) and the other is an
+ * attribute/subscript access chain (not a literal). Resolves ONE hop of
+ * variable indirection on EITHER side: an `expected = str(<chain>)` binding
+ * lets a later `assert <chain> == expected` / `if <chain> != expected:` fire
+ * the same as the inline `== str(...)` form, and — symmetrically — a
  * `local = <chain>` binding (`widget_maxlength = widget.attrs.get(...)`) lets
  * a later `if local != str(<chain>):` fire the same as comparing the chain
  * directly (a shape that also swapped the assert for an
  * `if`/`errors.append` gate specifically to dodge assert-anchored detectors).
  * Returns the offending line, trimmed, or `undefined` when nothing matches.
- * Conservative on purpose: stringifying the SUBJECT under test
+ * Conservative on purpose: coercing the SUBJECT under test
  * (`assert str(x) == '1'`, `assertEqual(str(member), 'value')`, or the aliased
- * `actual = str(member); if actual != '1':`) is legitimate `__str__`/rendering
+ * `actual = str(member); if actual != '1':`) is legitimate rendering/typed-repr
  * coverage and never fires — the other side is a literal or a plain var with
  * no chain alias, so the asymmetric guard stays silent; a plain-var-vs-plain-var
  * conditional (`if a != b:`) never fires either; a membership `in`/`not in`
  * gate has no top-level `==`/`!=` to split on, so it is skipped outright; and
- * a bare `str(` outside an assert/assertEqual/assertNotEqual/if/elif line (a
- * print, an f-string) never fires.
+ * a bare coercion call outside an assert/assertEqual/assertNotEqual/if/elif
+ * line (a print, an f-string) never fires.
  *
  * @sem domain=routing role=repro-judge
  */
-export function detectStringifiedMirrorAssert(reproContent: string): string | undefined {
+export function detectCoercedMirrorAssert(reproContent: string): string | undefined {
   const lines = reproContent.split("\n")
-  // One-hop indirection on the str() side: identifiers bound to a bare
-  // `str(...)` wrap (`expected = str(field.max_length)`), so a comparison
+  // One-hop indirection on the coercion side: identifiers bound to a bare
+  // coercion wrap (`expected = str(field.max_length)`), so a comparison
   // against that alias is caught the same as the inline `== str(...)` form.
-  const strAliases = new Set<string>()
+  const coercionAliases = new Set<string>()
   // Symmetric one-hop indirection on the CHAIN side: identifiers bound to a
   // bare attr/subscript chain (`widget_maxlength = widget.attrs.get(...)`),
   // so a comparison against that alias is caught the same as the chain
   // itself. A binding goes to exactly one of the two sets, never both — the
-  // str() branch is checked first.
+  // coercion branch is checked first.
   const valueAliases = new Set<string>()
   for (const rawLine of lines) {
     const bind = /^(\w+)\s*=\s*(.+)$/.exec(rawLine.trim())
     if (!bind) continue
-    if (isStrWrap(bind[2])) strAliases.add(bind[1])
+    if (isCoercionWrap(bind[2])) coercionAliases.add(bind[1])
     else if (isAttrOrSubscriptChain(bind[2])) valueAliases.add(bind[1])
   }
-  const isStrOrAlias = (arg: string) => isStrWrap(arg) || strAliases.has(arg)
+  const isCoercionOrAlias = (arg: string) => isCoercionWrap(arg) || coercionAliases.has(arg)
   const isChainOrAlias = (arg: string) => isAttrOrSubscriptChain(arg) || valueAliases.has(arg)
   const isMirrorPair = (a: string, b: string) =>
-    (isStrOrAlias(a) && isChainOrAlias(b)) || (isStrOrAlias(b) && isChainOrAlias(a))
+    (isCoercionOrAlias(a) && isChainOrAlias(b)) || (isCoercionOrAlias(b) && isChainOrAlias(a))
 
   for (const rawLine of lines) {
     const line = rawLine.trim()
     if (!line) continue
 
     if (/^assert\s+/.test(line) || ASSERT_EQUAL_CALL.test(line)) {
-      if (STRINGIFIED_EXPECTED_SIDE.test(line)) return line
+      if (COERCED_EXPECTED_SIDE.test(line)) return line
       const args = extractAssertEqualArgs(line) ?? extractAssertComparisonSides(line)
       if (args && isMirrorPair(args[0], args[1])) return line
       continue
@@ -712,31 +724,32 @@ export function detectStringifiedMirrorAssert(reproContent: string): string | un
 
 /**
  * RF-5 — the static explanation appended after the offending line in the
- * gap `applyStringifiedMirrorGap` merges — demands the typed source value
- * over a stringified mirror of it.
+ * gap `applyCoercedMirrorGap` merges — demands the typed source value over
+ * a coerced mirror of it. Model-facing: names no specific coercion, field,
+ * framework, or benchmark — stays generic across the whole coercion family.
  *
  * @sem domain=routing role=repro-judge
  */
-export const STRINGIFIED_MIRROR_GAP =
-  "assert the typed source value instead (e.g. == field.max_length, the int), never str(...) of it; string coercion hides exactly the type difference hidden tests assert."
+export const COERCED_MIRROR_GAP =
+  "assert the typed source value directly, not a coercion of it (str(...), int(...), or any other builtin type conversion) — a coercion collapses exactly the type difference a hidden test would assert."
 
 /**
- * RF-5 — force a fidelity gap when the pinned script's asserts stringify
- * the expected side of a typed comparison, regardless of what the LLM judge
- * said: a no-op (same reference returned) when `detectStringifiedMirrorAssert`
- * finds nothing, otherwise overrides to `faithful:false` with a gap naming
- * the offending line verbatim, PREPENDED to any existing gaps (deduped
- * against an identical gap already present anywhere in the list) and
- * reclamped to `REPRO_FIDELITY_MAX_GAPS` — as the outermost tooth in the
- * verdict chain this one must survive the cap, so it goes first and lets
- * earlier teeth's gaps be the ones evicted.
+ * RF-5 — force a fidelity gap when the pinned script's asserts coerce the
+ * expected side of a typed comparison through any coercion-family builtin,
+ * regardless of what the LLM judge said: a no-op (same reference returned)
+ * when `detectCoercedMirrorAssert` finds nothing, otherwise overrides to
+ * `faithful:false` with a gap naming the offending line verbatim, PREPENDED
+ * to any existing gaps (deduped against an identical gap already present
+ * anywhere in the list) and reclamped to `REPRO_FIDELITY_MAX_GAPS` — as the
+ * outermost tooth in the verdict chain this one must survive the cap, so it
+ * goes first and lets earlier teeth's gaps be the ones evicted.
  *
  * @sem domain=routing role=repro-judge
  */
-export function applyStringifiedMirrorGap(verdict: ReproFidelityVerdict, reproContent: string): ReproFidelityVerdict {
-  const line = detectStringifiedMirrorAssert(reproContent)
+export function applyCoercedMirrorGap(verdict: ReproFidelityVerdict, reproContent: string): ReproFidelityVerdict {
+  const line = detectCoercedMirrorAssert(reproContent)
   if (line === undefined) return verdict
-  const gap = `your repro asserts a STRINGIFIED mirror (\`${line}\`) — ${STRINGIFIED_MIRROR_GAP}`
+  const gap = `your repro asserts a COERCED mirror (\`${line}\`) — ${COERCED_MIRROR_GAP}`
   if (verdict.gaps.includes(gap)) return verdict
   return {
     faithful: false,
@@ -813,7 +826,7 @@ export function detectNumericStringConflict(reproContent: string): string | unde
 /**
  * RF-8 — the static explanation appended after `detectNumericStringConflict`'s
  * message in the gap `applyNumericStringConflictGap` merges — same
- * discriminator as `STRINGIFIED_MIRROR_GAP`: assert the typed value against
+ * discriminator as `COERCED_MIRROR_GAP`: assert the typed value against
  * its natural source, not the quoted numeral.
  *
  * @sem domain=routing role=repro-judge
@@ -829,7 +842,7 @@ export const NUMERIC_STRING_CONFLICT_GAP =
  * `faithful:false` with a gap naming the conflict verbatim, PREPENDED to any
  * existing gaps (deduped against an identical gap already present anywhere
  * in the list) and reclamped to `REPRO_FIDELITY_MAX_GAPS` — same prepend
- * pattern as `applyStringifiedMirrorGap` so its gap survives the cap; chained
+ * pattern as `applyCoercedMirrorGap` so its gap survives the cap; chained
  * outside it, this is the new outermost tooth.
  *
  * @sem domain=routing role=repro-judge
@@ -850,9 +863,9 @@ export function applyNumericStringConflictGap(
 
 /**
  * RF-8 — the finish-time re-check's HIGH-PRECISION composite:
- * `detectStringifiedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)`.
+ * `detectCoercedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)`.
  * Both are structural, assert-shape-independent conflicts between a typed
- * value and its stringified mirror. The rendered/serialized-surface (RF-4)
+ * value and a coerced mirror of it. The rendered/serialized-surface (RF-4)
  * and assertion-teeth (F14b) classes are deliberately excluded here — a
  * repro may legitimately assert rendered output when the issue IS about
  * rendered output (e.g. a SQL-string DDL bug), so those stay judge-only /
@@ -861,5 +874,5 @@ export function applyNumericStringConflictGap(
  * @sem domain=routing role=repro-judge
  */
 export function detectTypeUnfaithfulRepro(reproContent: string): string | undefined {
-  return detectStringifiedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)
+  return detectCoercedMirrorAssert(reproContent) ?? detectNumericStringConflict(reproContent)
 }

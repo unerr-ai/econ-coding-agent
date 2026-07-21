@@ -12,9 +12,10 @@
  * more of the same shape: `detectRenderedAssert`/`applyRenderedAssertGap`
  * (rendered/serialized-surface asserts) and `missingRequiredLiterals`/
  * `applyRequiredLiteralsGap` (§6 issue-derived literal coverage). RF-5 adds
- * a third tooth of the same shape — `detectStringifiedMirrorAssert`/
- * `applyStringifiedMirrorGap` (a stringified-expected-side
- * assert) — plus prompt-plumbing coverage for `runReproFidelityJudge`'s
+ * a third tooth of the same shape — `detectCoercedMirrorAssert`/
+ * `applyCoercedMirrorGap` (a coerced-expected-side assert, generalized
+ * across the whole Python type-coercion builtin family, not just `str()`)
+ * — plus prompt-plumbing coverage for `runReproFidelityJudge`'s
  * optional `statedRules` boundary rubric. RF-8 adds a fifth tooth,
  * `detectNumericStringConflict`/`applyNumericStringConflictGap`, for
  * a later `if`/`failures.append` evasion (a quoted pure-int
@@ -52,9 +53,9 @@ import {
   detectMissingRoundtripAssert,
   applyRoundtripGap,
   checkTestSetCoverage,
-  detectStringifiedMirrorAssert,
-  applyStringifiedMirrorGap,
-  STRINGIFIED_MIRROR_GAP,
+  detectCoercedMirrorAssert,
+  applyCoercedMirrorGap,
+  COERCED_MIRROR_GAP,
   detectNumericStringConflict,
   applyNumericStringConflictGap,
   NUMERIC_STRING_CONFLICT_GAP,
@@ -462,44 +463,44 @@ describe("missingRequiredLiterals / applyRequiredLiteralsGap", () => {
   })
 })
 
-describe("detectStringifiedMirrorAssert", () => {
+describe("detectCoercedMirrorAssert", () => {
   test("a real captured stringified-mirror assert line fires", () => {
     const line = "assert widget_maxlength == str(expected_max_length), ("
-    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+    expect(detectCoercedMirrorAssert(line)).toBe(line)
   })
 
   test("assertEqual with the str(...) mirror on the second arg fires", () => {
     const line = "assertEqual(widget.attrs['maxlength'], str(max_length))"
-    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+    expect(detectCoercedMirrorAssert(line)).toBe(line)
   })
 
   test("does NOT fire when str(...) wraps the SUBJECT, not the expected side (plain assert)", () => {
-    expect(detectStringifiedMirrorAssert("assert str(Suit.HEART) == '1'")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assert str(Suit.HEART) == '1'")).toBeUndefined()
   })
 
   test("does NOT fire when str(...) wraps the subject and the other arg is a literal (assertEqual)", () => {
-    expect(detectStringifiedMirrorAssert("assertEqual(str(member), 'value')")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assertEqual(str(member), 'value')")).toBeUndefined()
   })
 
   test("does NOT fire on a plain typed-equality assert", () => {
-    expect(detectStringifiedMirrorAssert("assert form.fields['username'].max_length == 255")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assert form.fields['username'].max_length == 255")).toBeUndefined()
   })
 
   test("does NOT fire on a membership assert", () => {
-    expect(detectStringifiedMirrorAssert("assert 'maxlength' in attrs")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assert 'maxlength' in attrs")).toBeUndefined()
   })
 
   test("does NOT fire on str() outside an assert line", () => {
-    expect(detectStringifiedMirrorAssert('print(f"{str(x)}")')).toBeUndefined()
+    expect(detectCoercedMirrorAssert('print(f"{str(x)}")')).toBeUndefined()
   })
 
   test("does NOT fire on a bare typed-equality assert with no str() at all", () => {
-    expect(detectStringifiedMirrorAssert("assert value == expected")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assert value == expected")).toBeUndefined()
   })
 
   test("does NOT fire on a strftime line", () => {
     expect(
-      detectStringifiedMirrorAssert('assert event.created_at.strftime("%Y-%m-%d") == "2024-01-01"'),
+      detectCoercedMirrorAssert('assert event.created_at.strftime("%Y-%m-%d") == "2024-01-01"'),
     ).toBeUndefined()
   })
 
@@ -516,7 +517,7 @@ print(f"max_length type: {type(field.max_length)}")
 assert widget.name.startswith("test")
 assertEqual(widget.attrs["maxlength"], 254)
 `
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
   })
 
   test("an ALIASED evasion fires — expected = str(...) one hop up, plain assert compares the alias", () => {
@@ -524,17 +525,17 @@ assertEqual(widget.attrs["maxlength"], 254)
 assert widget_attrs['maxlength'] == expected, (
     "Expected maxlength=%r, got %r" % (expected, widget_attrs['maxlength'])
 )`
-    expect(detectStringifiedMirrorAssert(reproContent)).toBe("assert widget_attrs['maxlength'] == expected, (")
+    expect(detectCoercedMirrorAssert(reproContent)).toBe("assert widget_attrs['maxlength'] == expected, (")
   })
 
   test("does NOT fire on the aliased SUBJECT-stringify __str__ shape (actual = str(member); assert actual == '1')", () => {
     const reproContent = ["actual = str(member)", "assert actual == '1'"].join("\n")
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
   })
 
   test("does NOT fire when the aliased str() is compared against a plain (non-chain) rendered variable", () => {
     const reproContent = ["expected = str(obj.value)", "assert rendered == expected"].join("\n")
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
   })
 
   test("MUST-FIRE: a final conditional+alias evasion — a value-alias local compared against a str()-wrapped chain in an `if` gate", () => {
@@ -547,57 +548,106 @@ assert widget_attrs['maxlength'] == expected, (
       "if expected_attr not in rendered:",
       "    errors.append('missing')",
     ].join("\n")
-    const line = detectStringifiedMirrorAssert(reproContent)
+    const line = detectCoercedMirrorAssert(reproContent)
     expect(line).toBe("if widget_maxlength != str(expected_maxlength):")
     expect(detectTypeUnfaithfulRepro(reproContent)).toBe(line)
   })
 
   test("MUST-FIRE: a direct conditional (no alias) comparing an attr/subscript chain against a str()-wrapped value", () => {
     const line = "if obj.attrs['maxlength'] == str(expected):"
-    expect(detectStringifiedMirrorAssert(line)).toBe(line)
+    expect(detectCoercedMirrorAssert(line)).toBe(line)
   })
 
   test("MUST-NOT-FIRE: an aliased-vs-plain-var shape — a str()-alias compared against a plain var with no chain alias", () => {
     const reproContent = ["out3 = str(ic)", "if out3 != expected3:"].join("\n")
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
   })
 
   test("MUST-NOT-FIRE: the legit __str__ alias shape in conditional form", () => {
     const reproContent = ["actual = str(member)", "if actual != '1':"].join("\n")
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
   })
 
   test("MUST-NOT-FIRE: a both-plain-vars conditional", () => {
-    expect(detectStringifiedMirrorAssert("if a != b:")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("if a != b:")).toBeUndefined()
   })
 
   test("MUST-NOT-FIRE: a membership conditional (the repro's other `if` line) never trips the comparison split", () => {
-    expect(detectStringifiedMirrorAssert("if expected_attr not in rendered:")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("if expected_attr not in rendered:")).toBeUndefined()
   })
 })
 
-describe("applyStringifiedMirrorGap", () => {
+describe("detectCoercedMirrorAssert — coercion family generalization", () => {
+  const COERCION_FAMILY = [
+    "str",
+    "int",
+    "float",
+    "bool",
+    "complex",
+    "bytes",
+    "bytearray",
+    "list",
+    "tuple",
+    "set",
+    "frozenset",
+    "dict",
+    "repr",
+    "ascii",
+    "format",
+  ]
+
+  for (const coercion of COERCION_FAMILY) {
+    test(`MUST-FIRE: ${coercion}(...) wrapping the expected side against a natural-source chain fires`, () => {
+      const line = `assertEqual(record.attr, ${coercion}(value))`
+      expect(detectCoercedMirrorAssert(line)).toBe(line)
+    })
+  }
+
+  test("MUST-NOT-FIRE: type(...) asserts the type itself, not a coercion of the value", () => {
+    expect(detectCoercedMirrorAssert("assert type(record) == int")).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: len(...) is a count, not a coercion of the same value", () => {
+    expect(detectCoercedMirrorAssert("assert len(record) == 3")).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: a non-str coercion compared against a LITERAL never fires", () => {
+    expect(detectCoercedMirrorAssert("assert int(record.count) == 5")).toBeUndefined()
+    expect(detectCoercedMirrorAssert("assertEqual(int(record.count), 5)")).toBeUndefined()
+  })
+
+  test("MUST-NOT-FIRE: a plain typed-equality assert with no coercion anywhere", () => {
+    expect(detectCoercedMirrorAssert("assert record.count == other.count")).toBeUndefined()
+  })
+
+  test("MUST-FIRE: one-hop alias indirection generalizes beyond str() to another coercion builtin", () => {
+    const reproContent = ["expected = int(source.count)", "assert record.count == expected"].join("\n")
+    expect(detectCoercedMirrorAssert(reproContent)).toBe("assert record.count == expected")
+  })
+})
+
+describe("applyCoercedMirrorGap", () => {
   const faithfulVerdict = { faithful: true, gaps: [] }
 
   test("a stringified-mirror hit forces a gap verdict even when the judge said faithful, naming the offending line", () => {
     const reproContent = "assert widget_maxlength == str(expected_max_length), ("
-    const merged = applyStringifiedMirrorGap(faithfulVerdict, reproContent)
+    const merged = applyCoercedMirrorGap(faithfulVerdict, reproContent)
     expect(merged.faithful).toBe(false)
     expect(merged.gaps).toHaveLength(1)
     expect(merged.gaps[0]).toContain(reproContent)
-    expect(merged.gaps[0]).toContain(STRINGIFIED_MIRROR_GAP)
+    expect(merged.gaps[0]).toContain(COERCED_MIRROR_GAP)
   })
 
   test("content with no stringified-mirror shape is a no-op — same verdict reference returned", () => {
     const verdict = faithfulVerdict
-    const merged = applyStringifiedMirrorGap(verdict, "assert form.fields['username'].max_length == 254")
+    const merged = applyCoercedMirrorGap(verdict, "assert form.fields['username'].max_length == 254")
     expect(merged).toBe(verdict)
   })
 
   test("applying twice on the same content dedupes — the gap is not added a second time", () => {
     const reproContent = "assert x == str(y)"
-    const once = applyStringifiedMirrorGap(faithfulVerdict, reproContent)
-    const twice = applyStringifiedMirrorGap(once, reproContent)
+    const once = applyCoercedMirrorGap(faithfulVerdict, reproContent)
+    const twice = applyCoercedMirrorGap(once, reproContent)
     expect(twice.gaps).toHaveLength(1)
     expect(twice.gaps).toEqual(once.gaps)
   })
@@ -607,9 +657,9 @@ describe("applyStringifiedMirrorGap", () => {
       faithful: false,
       gaps: Array.from({ length: REPRO_FIDELITY_MAX_GAPS }, (_, i) => `gap ${i}`),
     }
-    const merged = applyStringifiedMirrorGap(judgeVerdict, "assert x == str(y)")
+    const merged = applyCoercedMirrorGap(judgeVerdict, "assert x == str(y)")
     expect(merged.gaps).toHaveLength(REPRO_FIDELITY_MAX_GAPS)
-    expect(merged.gaps[0]).toContain(STRINGIFIED_MIRROR_GAP)
+    expect(merged.gaps[0]).toContain(COERCED_MIRROR_GAP)
   })
 })
 
@@ -799,7 +849,7 @@ describe("detectTypeUnfaithfulRepro", () => {
       "if widget.attrs.get('maxlength') != '150':",
       "    failures.append('nope')",
     ].join("\n")
-    expect(detectStringifiedMirrorAssert(reproContent)).toBeUndefined()
+    expect(detectCoercedMirrorAssert(reproContent)).toBeUndefined()
     const result = detectTypeUnfaithfulRepro(reproContent)
     expect(result).toBeDefined()
     expect(result).toEqual(detectNumericStringConflict(reproContent))
@@ -855,7 +905,7 @@ assert widget_attrs['maxlength'] == expected, (
 )`
     const result = detectTypeUnfaithfulRepro(reproContent)
     expect(result).toBeDefined()
-    expect(result).toBe(detectStringifiedMirrorAssert(reproContent))
+    expect(result).toBe(detectCoercedMirrorAssert(reproContent))
     expect(result).toBe("assert widget_attrs['maxlength'] == expected, (")
   })
 })

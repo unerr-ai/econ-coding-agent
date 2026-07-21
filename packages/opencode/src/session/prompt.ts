@@ -128,7 +128,7 @@ import {
   applyAssertionTeethGap,
   applyRenderedAssertGap,
   applyRequiredLiteralsGap,
-  applyStringifiedMirrorGap,
+  applyCoercedMirrorGap,
   applyNumericStringConflictGap,
   applyRoundtripGap,
   detectTypeUnfaithfulRepro,
@@ -2396,7 +2396,7 @@ export const layer = Layer.effect(
             : undefined
           const verdict = applyRoundtripGap(
             applyNumericStringConflictGap(
-              applyStringifiedMirrorGap(
+              applyCoercedMirrorGap(
                 applyRequiredLiteralsGap(
                   applyRenderedAssertGap(applyAssertionTeethGap(fidelityOutcome.verdict, reproContent), reproContent),
                   reproContent,
