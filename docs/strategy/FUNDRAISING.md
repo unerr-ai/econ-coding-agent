@@ -223,6 +223,17 @@ The claim these support: **GPT-5.5-class results on the hardest benchmark at rou
 than Opus** — top-open-weight class on Verified. Not frontier parity; best-in-class
 cost-per-resolved.
 
+**First measured full runs (2026-07-19):** open-weight arm ≈ **60% on BOTH Verified and
+Pro** — Pro lands inside the projection above (GPT-5.5-class confirmed); Verified misses it.
+The Verified≈Pro *equality* is the diagnostic: every model shows a 15–25pp spread between the
+two, so equal scores indicate a difficulty-independent mechanical failure floor (harness
+suppression), not a capability wall — a 100-line reference loop scores 74% with comparable
+open models. **Frontier-swap arm: parity ±5% with the top escalation model at ~1/3 its
+cost** — the harness claim is now measured, and that arm is sellable today. Fix path: failure
+taxonomy → matched-pair diffs → null-harness control → targeted SFT ($2–10k, published
+precedent), riding the open-model curve (frontier-class open weights ETA Q4 2026–Q1 2027 per
+Epoch/OpenRouter lag data).
+
 ---
 
 ## 7. Investor pushback → answers
@@ -278,3 +289,65 @@ a16z Speedrun, PearX, Neo, Antler AI residency — windows closed; late rolling 
 4. **Then the seed**, from India-focused funds (Peak XV, Accel India, Blume, Lightspeed
    India) on the three-part story in §4. Realistic ask at this stage: a few million dollars,
    not tens.
+
+---
+
+## 10. The pre-seed raise (revised 2026-07-19, post first benchmark runs)
+
+Situation: no cash runway; first full benchmark runs measured (see §6). The compute problem
+is solved without equity — **AWS Activate AI tier ($300K, GPU fine-tuning allowed) + Google
+AI credits ($350K, fine-tuning supported) + IndiaAI compute subsidy (₹115–150/GPU-hr, 2–3
+week approval; Sarvam precedent for post-training use)** cover Phases A–B compute entirely.
+The raise is for **salary runway**, sized to the Indian pre-seed norm.
+
+**The ask:** ₹2–4 crore ($300–600K) at 10–15% (SAFE/iSAFE), 12–15 months, milestone-framed:
+(a) 75%+ SWE-bench Verified by Q4 2026 — *compute already funded by Amazon, Google, and the
+Government of India; the money buys engineers, not GPUs*; (b) 10 paying pilots
+(IT-services mid-market / GCCs); (c) hybrid-mode GA. Next round raised on those numbers.
+
+**The story arc (seven beats — full lines in the pitch script):**
+1. *Shift:* software is now written by agents; India adopted fastest (Claude's #2 market) —
+   but the tools are priced for American salaries.
+2. *Villain/drawback:* the 15× price pain ([MARKET_ECONOMICS.md](./MARKET_ECONOMICS.md));
+   Indian IT squeezed between client-mandated AI discounts and unaffordable tools; every
+   "affordable AI" seller here is reselling American tokens at markup — nobody owns the cost
+   structure.
+3. *Secret (Thiel):* intelligence is commoditizing (~4-month open-weight lag, narrowing);
+   judgment is not. When intelligence is cheap, the layer that decides which intelligence
+   each task needs is the valuable one. We built that layer.
+4. *Proof:* measured — frontier models under our router = parity ±5% at 1/3 cost (sellable
+   today); same harness on open weights = 60%, already GPT-5.5-class on Pro.
+5. *Honest gap (the Mistral memo move — "we don't own the best models; we own the control
+   layer; quality closes on a dated curve"):* our 60% gap is diagnosed harness plumbing
+   (100-line loop does 74% on the same class of models), with a costed fix list and a public
+   model curve reaching frontier-class by Q1 2027. Lines, not dots: two measured arms + a
+   dated external curve + a costed plan connecting them.
+6. *Wedge now, vision later:* hybrid mode sold to Indian IT/GCCs now (revenue during the
+   climb); sovereign all-open stack (banks/defense/IndiaAI) when the curve lands. Lineage:
+   Freshworks, Zerodha — built in India, priced for India.
+7. *Ask:* milestones above; "GPUs funded by Amazon, Google, and the Government of India" is
+   a slide line — it converts cash poverty into resourcefulness.
+
+**Target checks (active AI small-check writers, 2026):** Titan Capital (fast first yes),
+First Cheque (~10% dilution), Better Capital, Eximius, 100X.VC (open application, iSAFE),
+Blume, India Quotient. Pitch 5–7 in parallel (norm; expect ~60–70% silence, ~10% engaged);
+warm intros cut ~4 weeks; process median 6–10 weeks to money. DPIIT recognition = free
+credibility signal, register immediately. Kill-factors per their own writing: "cheaper than
+OpenAI" without proof (we lead with the measured table), wrapper-thin moat (answered in §5).
+De-risker they name: 3–5 paying pilots at even small MRR.
+
+**Immediate sequence:** YC Fall (Jul 27 deadline) → AWS/Google/IndiaAI credit+subsidy
+filings (IndiaAI approval ~2–3 weeks unblocks Phase A pre-money) → DPIIT → 5–7 micro-VC
+warm-intro batch → Together Fund SwarmSpace (rolling).
+
+**Calibrated odds (researched 2026-07-19 — estimates, error bars ±half either direction):**
+YC ~2–4% (base 0.6–1%, lifted by working product + measured results, capped by category
+crowding) · SPC ~3–7% · Together SwarmSpace ~5–15% with a warm conversation (SaaSBoomi
+network), low single digits cold · micro-VCs ~5–10% per fund warm / 1–2% cold (warm intro =
+10–30× lift; 68% of closed rounds start with one) · 100X ~1–3% via open application · Surge
+<1% (post-seed skew — lottery ticket) · credits/subsidies 60–90% each (approval, not
+competition). **Cumulative over a ~3-month parallel campaign: ~50–60% with warm intros for
+half the list; ~25–35% cold; ~70%+ once 3–5 paying pilots + the 75% Verified milestone
+exist.** First-timers close after ~40–50 pitches on average — the silence rate is the
+process, not a verdict. Odds rise month-over-month as credits → benchmark climb → pilots
+land; funds that pass in Aug are re-approachable in Oct with better numbers.

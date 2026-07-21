@@ -75,6 +75,9 @@ const SIGNAL_NAMES: string[] = [
   "gate_block",
   "coupling_unknown",
   "deferral_armed",
+  "deferral_declined",
+  "deferral_verify_inline",
+  "deferral_knowledge_fetch",
   "deferral_dispatched",
   "surface_asked",
 ]

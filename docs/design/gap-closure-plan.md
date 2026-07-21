@@ -285,6 +285,15 @@ H8's baseline supplies that fact). Route-determinism logging per §5.4.
 trigger-rate audit on the 26 resolved instances (must stay rare — target ≤15% extra
 escalations). **Effort:** ~0.5–1 day. **Cost shape:** tail-only; priced per firing.
 
+> **⚠ SHIPPED, BUT BOTH PRECONDITIONS UNMET (measured 2026-07-20).** The three triggers are
+> live (`slice-orchestrator.ts:2217-2219`). The **trigger-rate audit above was never run**, and
+> the live V2 fleet escalates on **6 of 10 instances (60%)** — 4× this section's own ≤15% bar.
+> The other two constraints DO hold: the compiled brief is wired (`buildEscalationBrief`,
+> `slice-loop.ts:611`) and the 12-step cap is live. So **frequency alone** is what moved against
+> us. Measured conversion per firing: **zero source edits authored, 6/6**. H9's design judgement
+> still looks sound — what was missing is the gate between plan and production.
+> Full forensics, root cause, and the fix plan: **[escalation-economics.md](./escalation-economics.md)**.
+
 ### H3 — Patch-level sanity floor on escalated fixes (+ judge scaffolding upgrade)
 
 **Design.** Two parts:
@@ -486,6 +495,16 @@ different jobs.** The evidence:
    judge tier (degrade = deterministic gates only). Four slots stay in the registry —
    disabling is config, re-binding is one line, no re-plumbing (the models.md reversibility
    principle).
+
+> **Post-implementation (2026-07-20).** Decisions 1 and 2 are live and verified in source
+> (`allocation.ts:259`, `:322`; `model-registry.ts:177-182`). Live V2 evidence **confirms
+> decision 2** — nothing measured argues for moving judging to the oracle, and the oracle's
+> cost share argues against it. Two caveats found: (a) decision 1's **compiled brief is not
+> wired**, so the "bounded draw" is currently a full-transcript draw; (b) the collapse has an
+> unforeseen interaction — the deferral seed's `need: "reasoner"` was an honest request for a
+> *diagnosis*, and with no reasoner solve rung it now falls through to the oracle, answering a
+> verification request with the most expensive **author**. Neither is an argument to restore
+> the middle rung. See **[escalation-economics.md](./escalation-economics.md) §3**.
 
 ### 4.4 The oracle swap (the one model change the data demands)
 

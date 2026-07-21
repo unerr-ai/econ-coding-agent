@@ -4,14 +4,21 @@
  * convention divergences, oracle inversions) plus the per-turn deferral budget
  * the hard-tail consumer draws on; a signal is never advisory-only — its
  * recorded decision is convert, defer, surface, or none-loud (legal only once
- * the deferral budget is spent). Same per-session module-state pattern as
- * turn-read-store.ts: a logging-free core (`publishSignal` returns the one
- * `[signal]` log line for the call site) with an Effect wrapper
- * (`publishSignalFx`) so producers record-and-log in a single call.
+ * the deferral budget is spent). Also owns the deferral RESPONSE ledger
+ * (escalation-economics.md §10 Step 1/2): per-complaint response history plus
+ * the `escalationEarned` latch a verdict sets only when it actually escalated
+ * — the orchestration gate consumes the latch instead of the raw arming
+ * signal, which is what breaks the §4 circularity. Same per-session
+ * module-state pattern as turn-read-store.ts: a logging-free core
+ * (`publishSignal` returns the one `[signal]` log line for the call site)
+ * with an Effect wrapper (`publishSignalFx`) so producers record-and-log in a
+ * single call.
  *
  * @sem domain=routing role=config
  */
 import { Effect } from "effect"
+import { recordDeferralResponse, type DeferralComplaint, type DeferralPolicyVerdict, type DeferralResponse } from "./deferral-policy"
+import type { ReceiptDeferralBreakdown } from "../../../code-intelligence/src/receipt"
 
 export type EconSignalName =
   | "probe_gate_reject" // M4 pin ran red at finish (bounded retry)
@@ -48,6 +55,9 @@ export type EconSignalName =
   | "gate_block" // S4 governance BLOCK ledger entry
   | "coupling_unknown" // P6: edited file's language has no import resolver — fan-in/hub score is not evidence of safety, surfaced once per (session, file)
   | "deferral_armed" // consumer record: pre-pass planted (evidence.consumed names the tail signal)
+  | "deferral_declined" // §10 Step 1: complaint is "corrected" (already-solved, lagging) — nothing to do
+  | "deferral_verify_inline" // §10 Step 1: complaint is "verification" — a conductor-tier check was planted, no tier change
+  | "deferral_knowledge_fetch" // §10 Step 1: complaint is "knowledge" — a version-pinned lookup was planted, no tier change
   | "deferral_dispatched" // consumer record: the escalation slice actually ran
   | "surface_asked" // consumer record: question routed to the human
 
@@ -74,6 +84,10 @@ const SIGNAL_BUFFER_CAP = 200
 
 const signalsBySession = new Map<string, EconSignal[]>()
 const deferralUsedBySession = new Set<string>()
+/** §10 Step 1 — per-session record of which `DeferralResponse`s have already been spent per `DeferralComplaint`, the exhaustion memory `decideDeferralResponse` reads as `priorResponses`. */
+const deferralResponsesBySession = new Map<string, Partial<Record<DeferralComplaint, readonly DeferralResponse[]>>>()
+/** §10 Step 2 — sessions whose deferral ladder has actually escalated this turn (a verdict with `escalationEarned:true`). The orchestration gate's ONLY admissible proof an H9 signal earned its dispatch. */
+const escalationEarnedBySession = new Set<string>()
 
 function formatLogLine(signal: EconSignal): SignalLogLine {
   const payload: Record<string, unknown> = {
@@ -124,10 +138,36 @@ export function markDeferralUsed(sessionID: string): void {
   deferralUsedBySession.add(sessionID)
 }
 
-/** Clear the session's signals and deferral budget — fresh-turn open only, next to resetResolveAttempts; continuation turns inherit. */
+/** This session's deferral response history, per complaint class — `decideDeferralResponse`'s `priorResponses` input. Empty for a session that has never armed. */
+export function deferralResponsesFor(sessionID: string): Partial<Record<DeferralComplaint, readonly DeferralResponse[]>> {
+  return deferralResponsesBySession.get(sessionID) ?? {}
+}
+
+/** Turn-wide count of non-escalating rungs spent so far, across ALL complaint classes — `decideDeferralResponse`'s `cheapResponsesSpent` input (`CHEAP_RESPONSE_BUDGET`). Pure derivation over `deferralResponsesFor`; adds no state of its own, so it resets on the same boundary (`resetSignals`) as the ledger it reads. */
+export function cheapResponsesSpent(sessionID: string): number {
+  return Object.values(deferralResponsesFor(sessionID)).reduce(
+    (total, responses) => total + responses.filter((r) => r === "verify-inline" || r === "knowledge-fetch").length,
+    0,
+  )
+}
+
+/** Fold a `DeferralPolicyVerdict` into the session's response ledger, and set the `escalationEarned` latch when the verdict actually escalated — the single write path both `deferralResponsesFor` and `escalationEarned` read back. */
+export function recordDeferralVerdict(sessionID: string, verdict: DeferralPolicyVerdict): void {
+  deferralResponsesBySession.set(sessionID, recordDeferralResponse(deferralResponsesFor(sessionID), verdict))
+  if (verdict.escalationEarned) escalationEarnedBySession.add(sessionID)
+}
+
+/** True once this session's deferral ladder has actually escalated this turn — the orchestration gate's replacement for trusting the raw arming signal (escalation-economics.md §4/§10 Step 2). */
+export function escalationEarned(sessionID: string): boolean {
+  return escalationEarnedBySession.has(sessionID)
+}
+
+/** Clear the session's signals, deferral budget, response ledger, and escalation-earned latch — fresh-turn open only, next to resetResolveAttempts; continuation turns inherit. */
 export function resetSignals(sessionID: string): void {
   signalsBySession.delete(sessionID)
   deferralUsedBySession.delete(sessionID)
+  deferralResponsesBySession.delete(sessionID)
+  escalationEarnedBySession.delete(sessionID)
 }
 
 /** Per-name publish counts for the session — the turn-summary payload. */
@@ -135,6 +175,39 @@ export function signalSummary(sessionID: string): Record<string, number> {
   const counts: Record<string, number> = {}
   for (const signal of signalsFor(sessionID)) counts[signal.name] = (counts[signal.name] ?? 0) + 1
   return counts
+}
+
+/** The `DeferralResponse` each consumer-record signal name reports (armDeferral, prompt.ts). */
+const DEFERRAL_RESPONSE_BY_SIGNAL: Partial<Record<EconSignalName, DeferralResponse>> = {
+  deferral_declined: "none",
+  deferral_verify_inline: "verify-inline",
+  deferral_knowledge_fetch: "knowledge-fetch",
+  deferral_armed: "escalate",
+}
+
+/**
+ * This session's escalation-decision breakdown — counts by complaint class
+ * and by response, plus the resulting escalation rate — the receipt's §10
+ * Step 3 telemetry surface. Pure read over the already-recorded ring buffer
+ * (`signalsFor`); adds no state and never touches the response ledger.
+ *
+ * @sem domain=routing role=telemetry
+ */
+export function deferralBreakdownFor(sessionID: string): ReceiptDeferralBreakdown {
+  const byComplaint: Record<string, number> = {}
+  const byResponse: Record<string, number> = {}
+  let total = 0
+  let escalations = 0
+  for (const signal of signalsFor(sessionID)) {
+    const response = DEFERRAL_RESPONSE_BY_SIGNAL[signal.name]
+    if (!response) continue
+    const complaint = typeof signal.evidence["complaint"] === "string" ? (signal.evidence["complaint"] as string) : "capability"
+    total += 1
+    byComplaint[complaint] = (byComplaint[complaint] ?? 0) + 1
+    byResponse[response] = (byResponse[response] ?? 0) + 1
+    if (response === "escalate") escalations += 1
+  }
+  return { byComplaint, byResponse, escalationRate: total > 0 ? escalations / total : 0 }
 }
 
 /** The `[signal] turn_summary` line emitted at turn end — counts by name plus the deferral budget state. */

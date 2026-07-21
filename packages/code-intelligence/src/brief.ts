@@ -85,16 +85,6 @@ export interface OracleBrief {
   readonly trimmed: boolean
 }
 
-/**
- * Lightweight view of canonical state — only the fields briefFromContext reads.
- * Shape-compatible with SessionCanonicalState.CanonicalState; no Effect deps.
- */
-export interface CanonicalStateFragment {
-  readonly attempts: ReadonlyArray<{
-    readonly payload: Record<string, unknown>
-  }>
-}
-
 // ---------------------------------------------------------------------------
 // Internal constants
 // ---------------------------------------------------------------------------
@@ -214,63 +204,4 @@ export function compileBrief(input: BriefInput): OracleBrief {
   }
 }
 
-// ---------------------------------------------------------------------------
-// briefFromContext — convenience adapter
-// ---------------------------------------------------------------------------
 
-/**
- * Map a code-intelligence ReconBundle + a canonical-state fragment into a
- * compiled oracle brief. Extracts entity signatures and anchored notes as
- * slices; maps attempt payload rows to AttemptSummary.
- *
- * Keeps brief.ts a pure assembler: no Effect, no DB, no session imports —
- * callers are responsible for loading recon and canonical state.
- *
- * @sem domain=intelligence role=utilities
- */
-export function briefFromContext(
-  recon: ReconBundle,
-  canonicalState: CanonicalStateFragment,
-  question: string,
-  outputShape: string,
-  opts?: { problem?: string; tokenBudget?: number },
-): OracleBrief {
-  // Anchored notes come first — they carry conventions the oracle must honour.
-  // notes is now AnchoredNote[]; serialise each to a compact one-line string.
-  const noteSlices = recon.notes
-    .filter((n) => n.content && n.content.trim().length > 0)
-    .map((n) => `[${n.kind}|${n.anchor}|${n.polarity}] ${n.content}`)
-
-  // Entity signatures: concise structural slices (no full bodies).
-  const entitySlices = recon.entities.map((e) => {
-    const lines = [`${e.kind} \`${e.name}\` — ${e.filePath}:${e.lineStart}–${e.lineEnd}`]
-    if (e.signature) lines.push(`Signature: ${e.signature}`)
-    if (e.domain) lines.push(`Domain: ${e.domain}`)
-    return lines.join("\n")
-  })
-
-  const slices = [...noteSlices, ...entitySlices]
-
-  // Map CanonicalStateRow payload objects to AttemptSummary.
-  const attempts: AttemptSummary[] = canonicalState.attempts.map((row) => {
-    const p = row.payload
-    const status =
-      p["status"] === "success" || p["status"] === "failure" || p["status"] === "in-progress"
-        ? (p["status"] as AttemptSummary["status"])
-        : "in-progress"
-    return {
-      task: typeof p["task"] === "string" ? p["task"] : "(unknown task)",
-      status,
-      error: typeof p["error"] === "string" ? p["error"] : undefined,
-    }
-  })
-
-  return compileBrief({
-    problem: opts?.problem ?? question,
-    question,
-    outputShape,
-    slices,
-    attempts,
-    tokenBudget: opts?.tokenBudget,
-  })
-}

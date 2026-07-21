@@ -29,6 +29,8 @@
  *     section passes through unchanged when the caller supplies an
  *     already-folded root+child array; no comparison-shaped field appears on
  *     the receipt even with every section populated (standing rule guard).
+ *  5. deferrals (§10 Step 3) — same pass-through idiom as U6: absent when
+ *     omitted, unchanged when supplied.
  *
  * Uses real TelemetryStore + DoublePayLedger throughout (no mocks). Model ids
  * are read from ECON_TIER_BINDING (never hard-coded) so a model swap there
@@ -37,7 +39,7 @@
 
 import { describe, it, expect } from "bun:test"
 import { buildReceipt, formatReceipt } from "../src/receipt.ts"
-import type { ReceiptCatch, ReceiptGoal, ReceiptEvaluation, ReceiptContainment } from "../src/receipt.ts"
+import type { ReceiptCatch, ReceiptGoal, ReceiptEvaluation, ReceiptContainment, ReceiptDeferralBreakdown } from "../src/receipt.ts"
 import { TelemetryStore, emitUsageEvent } from "../src/telemetry.ts"
 import { DoublePayLedger, recordEscalation } from "../src/double-pay.ts"
 import { ECON_TIER_BINDING, contextWindow } from "../src/model-registry.ts"
@@ -282,16 +284,30 @@ describe("buildReceipt", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildReceipt — U6 trace sections", () => {
-  it("goals, evaluations, and contained are all absent (undefined, not empty arrays) when omitted — today's shape unchanged", () => {
+  it("goals, evaluations, contained, and deferrals are all absent (undefined, not empty) when omitted — today's shape unchanged", () => {
     const store = makeStore()
     const ledger = new DoublePayLedger()
     const receipt = buildReceipt({ store, ledger })
     expect(receipt.goals).toBeUndefined()
     expect(receipt.evaluations).toBeUndefined()
     expect(receipt.contained).toBeUndefined()
+    expect(receipt.deferrals).toBeUndefined()
     expect(Object.keys(receipt)).not.toContain("goals")
     expect(Object.keys(receipt)).not.toContain("evaluations")
     expect(Object.keys(receipt)).not.toContain("contained")
+    expect(Object.keys(receipt)).not.toContain("deferrals")
+  })
+
+  it("deferrals — the escalation-decision breakdown passes through unchanged when the caller supplies it (§10 Step 3)", () => {
+    const store = makeStore()
+    const ledger = new DoublePayLedger()
+    const deferrals: ReceiptDeferralBreakdown = {
+      byComplaint: { verification: 2, corrected: 1 },
+      byResponse: { "verify-inline": 2, none: 1 },
+      escalationRate: 0,
+    }
+    const receipt = buildReceipt({ store, ledger, deferrals })
+    expect(receipt.deferrals).toEqual(deferrals)
   })
 
   it("goals fold across root + child slices — every entry from both sources survives unchanged", () => {
@@ -347,6 +363,7 @@ describe("buildReceipt — U6 trace sections", () => {
       goals: [{ summary: "compound prompt goal", shape: "mechanical" }],
       evaluations: [{ sliceId: "s1", tier: "reasoner", venue: "child", reasons: ["blast-radius"] }],
       contained: [{ sliceId: "s1", fromTier: "executor", toTier: "reasoner", rungReason: "shrink-reject", reverted: true }],
+      deferrals: { byComplaint: { verification: 1 }, byResponse: { escalate: 1 }, escalationRate: 1 },
     })
     const serialized = JSON.stringify(receipt).toLowerCase()
     for (const banned of ["frontier", "counterfactual", "wouldhavecost", "netsaved", "grosssaved", "vsclaude", "vscursor"]) {

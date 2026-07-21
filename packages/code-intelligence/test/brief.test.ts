@@ -8,10 +8,9 @@
  *  (c) The compiled brief stays within the token budget.
  */
 import { describe, it, expect } from "bun:test"
-import { compileBrief, briefFromContext } from "../src/brief.ts"
+import { compileBrief } from "../src/brief.ts"
 import { estimateTokens } from "../src/trim.ts"
 import type { ReconBundle } from "../src/index.ts"
-import type { CanonicalStateFragment } from "../src/brief.ts"
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -283,120 +282,5 @@ describe("compileBrief — token budget", () => {
       tokenBudget: 2000,
     })
     expect(brief.estimatedTokens).toBeLessThanOrEqual(brief.tokenBudget * 1.15)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// briefFromContext — convenience adapter
-// ---------------------------------------------------------------------------
-
-describe("briefFromContext", () => {
-  const recon: ReconBundle = {
-    entities: [
-      {
-        key: "src/router.ts:dispatch:function",
-        name: "dispatch",
-        kind: "function",
-        filePath: "src/router.ts",
-        lineStart: 12,
-        lineEnd: 24,
-        signature: "(task: Task): Model",
-        contentHash: "abc123def456",
-      },
-      {
-        key: "src/router.ts:Task:interface",
-        name: "Task",
-        kind: "interface",
-        filePath: "src/router.ts",
-        lineStart: 5,
-        lineEnd: 8,
-        signature: "{ kind: string; payload: unknown }",
-        contentHash: "def456abc123",
-      },
-    ],
-    references: [
-      {
-        fromEntity: "src/router.ts:dispatch:function",
-        fromFile: "src/router.ts",
-        toEntity: "Task",
-        kind: "reference",
-      },
-    ],
-    notes: [
-      {
-        anchor: "f:src/router.ts",
-        kind: "rul",
-        polarity: "+",
-        content: "Per rul on src/router.ts: always check fan-in before any edit.",
-      },
-    ],
-  }
-
-  const canonical: CanonicalStateFragment = {
-    attempts: [
-      { payload: { task: "index repository", status: "success" } },
-      { payload: { task: "compute fan-in graph", status: "failure", error: "db locked" } },
-    ],
-  }
-
-  it("produces a brief containing the question", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain(QUESTION)
-  })
-
-  it("includes entity name from recon entities", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain("dispatch")
-  })
-
-  it("includes anchored notes from recon", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain("fan-in before any edit")
-  })
-
-  it("includes attempt status from canonical state", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain("failure")
-    expect(brief.text).toContain("db locked")
-  })
-
-  it("does not contain a raw transcript when called with structured inputs", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).not.toContain("=== RAW TRANSCRIPT")
-    expect(brief.text).not.toContain(RAW_TRANSCRIPT)
-  })
-
-  it("respects a custom tokenBudget via opts", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE, {
-      tokenBudget: 1500,
-    })
-    expect(brief.tokenBudget).toBe(1500)
-    expect(brief.estimatedTokens).toBeLessThanOrEqual(1500 * 1.15)
-  })
-
-  it("uses opts.problem as the problem statement when provided", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE, {
-      problem: PROBLEM,
-    })
-    expect(brief.text).toContain(PROBLEM)
-  })
-
-  it("falls back to question as problem when opts.problem is omitted", () => {
-    const brief = briefFromContext(recon, canonical, QUESTION, OUTPUT_SHAPE)
-    // With no opts.problem, problem === question — appears once in ## Problem section.
-    expect(brief.text).toContain(QUESTION)
-  })
-
-  it("handles an empty canonical state gracefully", () => {
-    const emptyCanonical: CanonicalStateFragment = { attempts: [] }
-    const brief = briefFromContext(recon, emptyCanonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain(QUESTION)
-    expect(brief.text).not.toContain("Prior Attempts")
-  })
-
-  it("handles an empty recon bundle gracefully", () => {
-    const emptyRecon: ReconBundle = { entities: [], references: [], notes: [] }
-    const brief = briefFromContext(emptyRecon, canonical, QUESTION, OUTPUT_SHAPE)
-    expect(brief.text).toContain(QUESTION)
   })
 })

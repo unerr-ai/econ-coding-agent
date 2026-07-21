@@ -152,14 +152,18 @@ import {
   type DeferralBrief,
 } from "./prompts/seeds"
 import {
+  cheapResponsesSpent,
   deferralAvailable,
+  deferralResponsesFor,
   interactiveSession,
   markDeferralUsed,
   publishSignalFx,
+  recordDeferralVerdict,
   resetSignals,
   signalsFor,
   summaryLogLine,
 } from "./signal-bus"
+import { decideDeferralResponse } from "./deferral-policy"
 import { detectOracleInversion, extractIssueExpectations, extractIssueThresholds } from "./issue-expectations"
 import {
   STRUCTURED_OUTPUT_DESCRIPTION,
@@ -3590,8 +3594,131 @@ export const layer = Layer.effect(
             // the grind valve's proven design-seed path) instead of going
             // straight to fail-open-loud; the second exhausted gate in the
             // same turn goes loud exactly as before round F.
+            // §10 Step 1 stable content prefixes for the two non-escalating
+            // planted todos — DELIBERATELY sliceType/need-less (mirrors
+            // reproPrepassTodo, not deferralPrepassTodo): an untyped todo is
+            // never a dispatchable DAG node (isTypedSlice/hasPendingTypedSlices),
+            // so it can only ever run INLINE on whichever tier is already
+            // running — allocateSlice has no field combination that outputs
+            // "conductor" (TIER_RANK.conductor is a comparison floor, never an
+            // assigned tier), so staying untyped is the only way to guarantee
+            // no tier change, not merely the cheapest allocateSlice cell.
+            const VERIFY_INLINE_TODO_PREFIX = "VERIFY-INLINE: "
+            const KNOWLEDGE_FETCH_TODO_PREFIX = "KNOWLEDGE-FETCH: "
+            const sendDeferralNudge = (text: string) =>
+              Effect.gen(function* () {
+                const nudge: SessionV1.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(nudge)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: nudge.id,
+                  sessionID,
+                  type: "text",
+                  text,
+                  synthetic: true,
+                } satisfies SessionV1.TextPart)
+              })
+            const plantUntypedTodo = (prefix: string, content: string) =>
+              Effect.gen(function* () {
+                const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
+                if (!currentTodos.some((t) => t.content.startsWith(prefix))) {
+                  yield* todoStore
+                    .update({ sessionID, todos: [...currentTodos, { content, status: "pending", priority: "high" }] })
+                    .pipe(Effect.ignore)
+                }
+              })
+            // §10 Step 1/2 — the single funnel all eight deferral arms call.
+            // Consults the response ladder (deferral-policy.ts) BEFORE
+            // spending the session's one-shot deferral budget: every arm
+            // complains about SUSPICION, never a proven-wrong fix
+            // (escalation-economics.md §2), so the cheapest response that
+            // answers the SAME complaint runs first — only a repeat firing
+            // after that response was already spent earns the oracle draw.
+            // The knowledge-gap check reuses the existing error-search path
+            // (P5 below) so a confounded-by-the-world turn gets a
+            // version-pinned lookup before any tier change either way.
             const armDeferral = (brief: DeferralBrief) =>
               Effect.gen(function* () {
+                const errorSearch = decideErrorSearchNudge({
+                  failingOutput: brief.redTail ?? brief.gateEvidence,
+                  reportContent: undefined,
+                  repoRoot: process.cwd(),
+                  ecosystemVersions: getRepoProfileSync(process.cwd()).ecosystems[0]?.versions,
+                  reproAttempts: reproObservedSteps,
+                  alreadySearchedSignatures: turnSearchedErrorSignatures,
+                  websearchDisabled: truthy("OPENCODE_DISABLE_WEBSEARCH"),
+                })
+                const knowledgeGap = errorSearch?.decision.search === true
+                const verdict = decideDeferralResponse({
+                  signal: brief.signal,
+                  cheapResponsesSpent: cheapResponsesSpent(sessionID),
+                  priorResponses: deferralResponsesFor(sessionID),
+                  knowledgeGap,
+                })
+                recordDeferralVerdict(sessionID, verdict)
+
+                if (verdict.response === "none") {
+                  yield* publishSignalFx({
+                    name: "deferral_declined",
+                    sessionID,
+                    severity: "tail",
+                    decision: "surface",
+                    evidence: { consumed: brief.signal, complaint: verdict.complaint, reason: verdict.reason },
+                  })
+                  return verdict
+                }
+
+                if (verdict.response === "verify-inline") {
+                  const checkName = brief.probeCommand ? `\`${brief.probeCommand}\`` : "the discovered check"
+                  yield* plantUntypedTodo(
+                    VERIFY_INLINE_TODO_PREFIX,
+                    `${VERIFY_INLINE_TODO_PREFIX}a deterministic signal (${brief.signal}) fired but nothing proves the fix wrong yet — run ${checkName} and confirm GREEN before continuing. GATE EVIDENCE: ${brief.gateEvidence}`,
+                  )
+                  yield* publishSignalFx({
+                    name: "deferral_verify_inline",
+                    sessionID,
+                    severity: "tail",
+                    decision: "defer",
+                    evidence: { consumed: brief.signal, complaint: verdict.complaint, reason: verdict.reason },
+                  })
+                  yield* sendDeferralNudge(
+                    `A hard-tail verification signal fired at finish, but nothing proves the fix wrong yet. Run ${checkName} now and confirm it is GREEN. Do not re-author the fix.`,
+                  )
+                  return verdict
+                }
+
+                if (verdict.response === "knowledge-fetch") {
+                  const query = knowledgeGap && errorSearch?.decision.search === true ? errorSearch.decision.query : undefined
+                  if (knowledgeGap && errorSearch) turnSearchedErrorSignatures.add(errorSearch.signature)
+                  yield* plantUntypedTodo(
+                    KNOWLEDGE_FETCH_TODO_PREFIX,
+                    `${KNOWLEDGE_FETCH_TODO_PREFIX}a deterministic signal (${brief.signal}) fired on an unrecognized/dependency-rooted error — run ONE version-pinned web search before any tier change.${query ? ` QUERY: ${query}` : ""}`,
+                  )
+                  yield* publishSignalFx({
+                    name: "deferral_knowledge_fetch",
+                    sessionID,
+                    severity: "tail",
+                    decision: "defer",
+                    evidence: { consumed: brief.signal, complaint: verdict.complaint, reason: verdict.reason },
+                  })
+                  yield* sendDeferralNudge(
+                    query
+                      ? `You hit an error our own tooling doesn't already explain. Run exactly ONE web search now with this exact query, then use what you find before continuing:\n${query}`
+                      : "A deterministic signal fired on an unrecognized/dependency-rooted error — search for the version-pinned fix before any tier change.",
+                  )
+                  return verdict
+                }
+
+                // verdict.response === "escalate" — today's exact behavior,
+                // unchanged, plus the escalationEarned latch (already set by
+                // recordDeferralVerdict above).
                 markDeferralUsed(sessionID)
                 const deferralContent = buildDeferralSliceContent(brief)
                 const currentTodos = yield* todoStore.get(sessionID).pipe(Effect.orElseSucceed(() => []))
@@ -3607,25 +3734,11 @@ export const layer = Layer.effect(
                   decision: "defer",
                   evidence: { consumed: brief.signal },
                 })
-                const deferralNudge: SessionV1.User = {
-                  id: MessageID.ascending(),
-                  sessionID,
-                  role: "user",
-                  time: { created: Date.now() },
-                  agent: lastUser.agent,
-                  model: lastUser.model,
-                }
-                yield* sessions.updateMessage(deferralNudge)
-                yield* sessions.updatePart({
-                  id: PartID.ascending(),
-                  messageID: deferralNudge.id,
-                  sessionID,
-                  type: "text",
-                  text:
-                    "A hard-tail verification signal fired at finish — a one-shot escalation slice has been planted with the full evidence brief. " +
+                yield* sendDeferralNudge(
+                  "A hard-tail verification signal fired at finish — a one-shot escalation slice has been planted with the full evidence brief. " +
                     "STOP editing; the slice will run and hand back its verdict. Fold that design in, re-run the pinned verification, then finish.",
-                  synthetic: true,
-                } satisfies SessionV1.TextPart)
+                )
+                return verdict
               })
             if (turnPinnedProbe && !session.parentID) {
               // RF-6 §9 — interpreter discipline: the same F14a discovery the
@@ -5308,7 +5421,13 @@ export const layer = Layer.effect(
                   ]
                   const importers = hubBounceSignals.find((s) => s.name === "hub_bounce")?.evidence.importers ?? null
                   const definingSites = hubBounceRepeatSignal?.evidence.definingSites ?? null
-                  yield* armDeferral({
+                  // hub_bounce_repeat is the ONLY arm whose complaint class
+                  // ("corrected" — escalation-economics.md §2/§10 Step 1) can
+                  // decline outright (response "none", no nudge planted); a
+                  // bare `continue` there would spin on the same unchanged
+                  // transcript, so only re-loop when armDeferral actually
+                  // changed something (verify-inline/knowledge-fetch/escalate).
+                  const hubBounceVerdict = yield* armDeferral({
                     signal: "hub_bounce_repeat",
                     gateEvidence:
                       `The conductor's fix landed on/near a high-coupling hub after two evidence-bearing bounces this turn ` +
@@ -5322,7 +5441,7 @@ export const layer = Layer.effect(
                     expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                     statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                   })
-                  continue
+                  if (hubBounceVerdict.response !== "none") continue
                 } else if (hubBounceRepeatPresent) {
                   // A live `hub_bounce_repeat` fact was on the bus at this
                   // arrival yet the AND-gate declined — a django-11265-shaped
@@ -6447,6 +6566,14 @@ export const layer = Layer.effect(
                     // primer path byte-identical.
                     const aboveConductorCheapHop = (req.tier === "reasoner" || req.tier === "oracle") && !req.escalated
                     const contextBlock = (() => {
+                      // §10 Step 5 — an escalated hop's `req.prompt` IS ALREADY
+                      // `buildEscalationBrief`'s compiled text (problem/question/
+                      // output-shape/context-slices/prior-attempts, all
+                      // budget-trimmed) — wrapping it in the repo-primer/
+                      // digest-ledger/parent-task block a second time is pure
+                      // redundancy, not additional context (escalation-economics.md
+                      // §10 Step 5 / §9). Dispatch it as-is.
+                      if (req.escalated) return [req.prompt]
                       if (!aboveConductorCheapHop)
                         return [
                           repoPrimer,

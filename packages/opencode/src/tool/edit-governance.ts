@@ -11,7 +11,10 @@
  * through. Also surfaces coupling=unknown (P6): a non-blocking, once-per-
  * (session, file) warning when the edited file's language has no import
  * resolver, so a zero fan-in/hub score there is never read as evidence of
- * low risk.
+ * low risk. Also owns the issue-scope boundary (§10 Step 4): a non-blocking
+ * nudge, or — behind `ECON_ISSUE_SCOPE_DENY` — a deny, for an edit landing
+ * outside the issue's derived scope (issue-scope.ts), the question the
+ * hub-edit gate's allow-only allowlist never asks.
  *
  * @sem domain=intelligence role=tools
  */
@@ -35,6 +38,7 @@ import {
 import type { StuckSignal } from "../../../code-intelligence/src/orchestration-fsm"
 import { getGraph, issueSymbolDefinitionSitesIfReady } from "./graph-tools"
 import { RSK_CALLER_THRESHOLD } from "./graph-tools-enrich"
+import { deriveIssueScope, issueScopeReason, issueScopeDenyEnabled, clearPreExistingFailures } from "./issue-scope"
 
 /**
  * Bounds how long the gate will wait on the graph per call — a cold graph
@@ -575,6 +579,8 @@ export function setHubEditGate(sessionID: string, armed: boolean, definingFiles?
     hubEditIssueTextStore.delete(sessionID)
     hubEditDefiningResolvedSet.delete(sessionID)
     hubEditRetryAgainstCandidatesSet.delete(sessionID)
+    clearIssueScopeState(sessionID)
+    clearPreExistingFailures(sessionID)
   }
 }
 
@@ -872,7 +878,7 @@ export async function bandFilterDefiningSites(
  *
  * @sem domain=intelligence role=analysis
  */
-export async function evaluateHubEditGate(opts: {
+async function evaluateHubEditGateCore(opts: {
   sessionID: string
   filePath: string
   graph?: HubFanInGraph
@@ -1055,6 +1061,69 @@ export async function evaluateHubEditGate(opts: {
   }
 }
 
+/**
+ * The production edit-path entry point (edit.ts, write.ts import this exact
+ * name): `evaluateHubEditGateCore`'s hub-coupling verdict with the
+ * issue-scope boundary (§10 Step 4, `evaluateIssueScopeGate` below) layered
+ * on top as an opinion the hub gate itself never forms. Precedence is
+ * one-directional and by construction, not by convention: a core `deny`
+ * (any bounce/repeat/second/final rung) returns untouched, and a core
+ * `allow` reached via the resolved defining-site allowlist (`definingSite:
+ * true`) also returns untouched — issue-scope is never even consulted for
+ * either, so it can neither override a bounce nor veto a site the hub gate
+ * explicitly cleared as root-most. Only a core `allow` WITHOUT a
+ * defining-site opinion (unarmed, under threshold, retried, exhausted) — a
+ * file the hub gate has no scope opinion on — reaches issue-scope, which
+ * (with `ECON_ISSUE_SCOPE_DENY` unset, the default) can only ever return
+ * `allow` with an optional `nudge` merged in, never a `deny`: the default
+ * path can add a nudge but can never turn an allowed edit into a denial.
+ * The try/catch here is a second, redundant fail-open backstop on top of
+ * `evaluateIssueScopeGate`'s own internal one — a throw here degrades to
+ * the unmodified core result, never to a thrown exception.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function evaluateHubEditGate(opts: {
+  sessionID: string
+  filePath: string
+  graph?: HubFanInGraph
+  resolveDefiningSites?: (issueText: string) => Promise<Array<{ file: string; kind?: string }> | null>
+  dispatchHubDesignJudge?: (opts: {
+    sessionID: string
+    filePath: string
+  }) => Promise<HubEditJudgeVerdict | undefined>
+}): Promise<
+  | { action: "allow"; retried?: boolean; definingSite?: boolean; exhausted?: boolean; nudge?: string }
+  | {
+      action: "deny"
+      message: string
+      importers?: number
+      second?: boolean
+      definingSites?: string[]
+      repeat?: boolean
+      final?: boolean
+    }
+> {
+  const hubResult = await evaluateHubEditGateCore(opts)
+  if (hubResult.action === "deny") return hubResult
+  if (hubResult.definingSite) return hubResult
+
+  try {
+    const scopeResult = await evaluateIssueScopeGate({
+      sessionID: opts.sessionID,
+      filePath: opts.filePath,
+      graph: opts.graph as unknown as EditImpactGraph | undefined,
+    })
+    if (scopeResult.action === "deny") return scopeResult
+    if (scopeResult.nudge) return { ...hubResult, nudge: scopeResult.nudge }
+  } catch {
+    // Fail open — evaluateIssueScopeGate already degrades every internal
+    // failure to allow; this catch is only a backstop against a throw in
+    // the merge itself, so the hub gate's own verdict always still lands.
+  }
+  return hubResult
+}
+
 // ---------------------------------------------------------------------------
 // Wave 10 — dispatch-time defining-site memoization. Round-A4 django-11964:
 // the hub-design trigger (prompt.ts) fired its judge dispatch while this
@@ -1109,4 +1178,93 @@ export async function memoizeHubEditDefiningSites(
     // Fail open — leave unresolved; evaluateHubEditGate's own lazy path
     // retries at the next gate evaluation.
   }
+}
+
+// ---------------------------------------------------------------------------
+// §10 Step 4 — issue-scope boundary (docs/design/escalation-economics.md
+// §6/§6.1). The hub-edit gate above is a hub-COUPLING gate: its
+// defining-site allowlist is only ever used to ALLOW; nothing anywhere
+// denies an edit for being outside the issue's scope, so a file below the
+// fan-in threshold is allowed unconditionally — the gate never asks that
+// question. django-11880: escalation ran a broad multi-app sweep, hit two
+// pre-existing failures, proved via its own `git stash` + rerun that they
+// pre-dated its change, then shipped 8 unrequested lines into the
+// collateral module anyway — the required fix was 1 line elsewhere. This
+// gate asks the question the hub gate never does. Default posture is NUDGE
+// only (a non-blocking `ur|rsk` the call site appends to the tool's
+// output); the hard DENY sits behind `ECON_ISSUE_SCOPE_DENY` (default off)
+// until the boundary's false-positive rate is measured on a live run — see
+// issue-scope.ts.
+// ---------------------------------------------------------------------------
+
+/** Per-session derived issue scope — memoized once non-empty (same lifecycle rationale as `hubEditDefiningResolvedSet`: the defining sites it derives from don't change mid-turn, so re-deriving per edit would only repeat the same bounded graph walk). Cleared on hub-edit-gate disarm. */
+const issueScopeStore = new Map<string, Set<string>>()
+
+/** Per-session set of file paths already nudged once for falling outside the derived scope — a nudge fires once per (session, file), same throttle shape as `couplingUnknownWarned`. Cleared on hub-edit-gate disarm. */
+const issueScopeNudgedStore = new Map<string, Set<string>>()
+
+/**
+ * Evaluate an in-flight edit against this turn's derived issue scope (see
+ * `deriveIssueScope`, issue-scope.ts) and return a non-blocking nudge
+ * (default) or a deny (behind `ECON_ISSUE_SCOPE_DENY`) when `filePath`
+ * falls outside it. Fails open on every axis that isn't itself the question
+ * being asked: the hub-edit gate's defining-site resolution not yet
+ * complete, a resolved-but-empty defining-site set, a test file, or a
+ * cold/throwing graph all allow silently — there is nothing to derive a
+ * boundary FROM, so this must never manufacture one out of absence. Once a
+ * non-empty scope IS derived for a session it is memoized, never
+ * re-derived per edit. A nudge fires once per (session, file); a deny
+ * (when armed) fires every time — it exists to stop the edit, not merely
+ * note it once.
+ *
+ * @sem domain=intelligence role=analysis
+ */
+export async function evaluateIssueScopeGate(opts: {
+  sessionID: string
+  filePath: string
+  graph?: EditImpactGraph
+}): Promise<{ action: "allow"; nudge?: string } | { action: "deny"; message: string }> {
+  if (isTestFilePath(opts.filePath)) return { action: "allow" }
+  if (!hubEditDefiningResolved(opts.sessionID)) return { action: "allow" }
+
+  let scope = issueScopeStore.get(opts.sessionID)
+  if (!scope) {
+    const definingFiles = hubEditDefiningFiles(opts.sessionID)
+    if (definingFiles.length === 0) return { action: "allow" } // nothing resolved — no boundary to derive
+    let graph: EditImpactGraph | undefined
+    try {
+      graph = opts.graph ?? (getGraph() as unknown as EditImpactGraph)
+    } catch {
+      return { action: "allow" }
+    }
+    try {
+      const derived = await deriveIssueScope(definingFiles, graph)
+      if (derived.size === 0) return { action: "allow" }
+      scope = derived
+      issueScopeStore.set(opts.sessionID, scope)
+    } catch {
+      return { action: "allow" }
+    }
+  }
+
+  for (const f of scope) {
+    if (pathsRefer(opts.filePath, f)) return { action: "allow" }
+  }
+
+  const reason = issueScopeReason(opts.filePath, Array.from(scope), opts.sessionID)
+  if (issueScopeDenyEnabled()) {
+    return { action: "deny", message: reason }
+  }
+  if (issueScopeNudgedStore.get(opts.sessionID)?.has(opts.filePath)) {
+    return { action: "allow" }
+  }
+  if (!issueScopeNudgedStore.has(opts.sessionID)) issueScopeNudgedStore.set(opts.sessionID, new Set())
+  issueScopeNudgedStore.get(opts.sessionID)!.add(opts.filePath)
+  return { action: "allow", nudge: `ur|rsk ${reason}` }
+}
+
+/** Clear a session's derived issue-scope + nudge-throttle state — called from `setHubEditGate`'s disarm branch so a fresh turn re-derives instead of reusing a stale scope. */
+export function clearIssueScopeState(sessionID: string): void {
+  issueScopeStore.delete(sessionID)
+  issueScopeNudgedStore.delete(sessionID)
 }

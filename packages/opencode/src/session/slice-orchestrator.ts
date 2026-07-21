@@ -27,7 +27,7 @@ import {
 } from "./prompts/seeds"
 import type { ReproVehicle } from "./prompts/nudges"
 import { getResolveAttempts, incResolveAttempts } from "./resolution-store"
-import { signalsFor } from "./signal-bus"
+import { signalsFor, escalationEarned } from "./signal-bus"
 import {
   runSliceLoop,
   tierModelRef,
@@ -2177,9 +2177,11 @@ export type OrchestrationGateTrigger =
 /**
  * H9's three deterministic signal-bus facts, derived by the caller from
  * `signalsFor(sessionID)` (never a slice field — same self-report guard as
- * `harnessSeeded`). All optional/absent-safe: a caller with no `sessionID`
- * (a legacy/test double) passes nothing and the gate falls through to its
- * original four checks unchanged.
+ * `harnessSeeded`), plus the `escalationEarned` latch each of the three now
+ * requires (escalation-economics.md §4/§10 Step 2) so the raw signal can no
+ * longer prove its own dispatch was earned. All optional/absent-safe: a
+ * caller with no `sessionID` (a legacy/test double) passes nothing and the
+ * gate falls through to its original four checks unchanged.
  *
  * @sem domain=routing role=type
  */
@@ -2190,6 +2192,17 @@ export interface OrchestrationGateSignals {
   probeGateExhausted?: boolean
   /** A reproduction stayed unresolved at finish-intent (`repro_unresolved`). */
   reproUnresolved?: boolean
+  /**
+   * escalation-economics.md §4/§10 Step 2 — the session's deferral ladder
+   * actually escalated this turn (signal-bus.ts's `escalationEarned` latch).
+   * REQUIRED alongside each of the three signals above: none of them alone
+   * opens the gate anymore, because they are the same signals that arm the
+   * deferral in the first place — accepting them unconditionally let the
+   * arming signal serve as its own proof of earning a dispatch (§4's
+   * circularity). The ladder (`deferral-policy.ts`) is now the only path
+   * that can set this latch.
+   */
+  escalationEarned?: boolean
 }
 
 /**
@@ -2197,7 +2210,10 @@ export interface OrchestrationGateSignals {
  * same order (harness-seed, breadth, goal-width, coupling-risk, then the H9
  * signal-bus triple), but returns WHICH one opened the gate instead of
  * collapsing to a boolean — so a caller can log WHY a benefit-gate decision
- * landed the way it did, not just the verdict.
+ * landed the way it did, not just the verdict. escalation-economics.md §4/§10
+ * Step 2: the H9 triple now ALSO requires `signals.escalationEarned` — the
+ * raw arming signal can no longer open the gate by itself, because it is the
+ * same fact that armed the deferral in the first place (the circularity).
  *
  * @sem domain=routing role=router
  */
@@ -2214,9 +2230,12 @@ export function explainOrchestrationGate(
   // H9 — checked last: none of these three is conductor-authored, but they
   // carry no structural signal about THIS batch of slices the way
   // coupling-risk does, so they only decide an otherwise-declined turn.
-  if (signals?.hubBounceRepeat) return { engage: true, trigger: "hub-bounce-repeat" }
-  if (signals?.probeGateExhausted) return { engage: true, trigger: "probe-gate-exhausted" }
-  if (signals?.reproUnresolved) return { engage: true, trigger: "repro-unresolved" }
+  // Each ALSO requires escalationEarned — the deferral ladder having actually
+  // escalated on this signal — so the signal can no longer serve as its own
+  // proof of earning a dispatch (§4).
+  if (signals?.escalationEarned && signals?.hubBounceRepeat) return { engage: true, trigger: "hub-bounce-repeat" }
+  if (signals?.escalationEarned && signals?.probeGateExhausted) return { engage: true, trigger: "probe-gate-exhausted" }
+  if (signals?.escalationEarned && signals?.reproUnresolved) return { engage: true, trigger: "repro-unresolved" }
   return { engage: false, trigger: "none" }
 }
 
@@ -2645,6 +2664,10 @@ export async function runConductorOrchestration(
             hubBounceRepeat: signalsFor(deps.sessionID).some((s) => s.name === "hub_bounce_repeat"),
             probeGateExhausted: signalsFor(deps.sessionID).some((s) => s.name === "probe_gate_exhausted"),
             reproUnresolved: signalsFor(deps.sessionID).some((s) => s.name === "repro_unresolved"),
+            // §4/§10 Step 2 — the deferral ladder's own latch, not a fresh
+            // read of the arming signal: breaks the circularity described
+            // on OrchestrationGateSignals.escalationEarned.
+            escalationEarned: escalationEarned(deps.sessionID),
           }
         : undefined
     const gate = explainOrchestrationGate(slices, deps.goalCount, h9Signals)

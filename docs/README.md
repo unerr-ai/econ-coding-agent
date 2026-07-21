@@ -51,6 +51,11 @@ seam table: [features/README.md](./features/README.md).
   implementation plan: witness-breadth/regression-reach/sanity-floor/TB waves (H1–H7), the
   tier + judge model strategy (one solver + one judge, oracle swap), and the parameterized
   cost model.
+- [escalation-economics.md](./design/escalation-economics.md) — the post-implementation
+  measurement of gap-closure-plan's H9 + §4.3: why the deferral cascade over-fires. The eight
+  deterministic arms, the circular earn-gate, and the measured null (6/6 escalations authored
+  **zero** source edits at 32–61% of all turns). Finds H9's own acceptance test never run —
+  trigger rate 60% against its ≤15% bar — and derives the fix plan + acceptance gates from it.
 - [agnostic-hands-eyes.md](./design/agnostic-hands-eyes.md) — the H5 implementation design:
   the language/framework/architecture-agnostic sensing layer (cached RepoProfile, parse
   formats-not-frameworks observation, graph/LSP parity, web-search-as-a-sense), with the
@@ -127,6 +132,11 @@ seam table: [features/README.md](./features/README.md).
   adjacent validator, and §5 on the **Grok 4.5 price shock**: how deep the frontier undercut
   actually goes, why it's cheap, whether it's subsidized, and which of econ's lanes it does and
   doesn't touch.
+- [AGENT_LANGUAGE_COVERAGE.md](./strategy/AGENT_LANGUAGE_COVERAGE.md) — coding agents × the
+  world's languages/frameworks, dissected into five segments (ancient / medieval / modern /
+  proprietary-platform / industrial): per-segment coverage, pain, and market; the four failure
+  modes (version drift, no runnable environment, context-in-platform, certification-not-tests);
+  and the LegacySWE-bench benchmark gap.
 - [FUNDRAISING.md](./strategy/FUNDRAISING.md) — the fundraising narrative: the three-part
   story, comparable-raise evidence (is "cheaper AI" fundable), the two-kinds-of-learning
   defensibility claim (memory vs trained dispatcher, say/never-say), projected benchmark

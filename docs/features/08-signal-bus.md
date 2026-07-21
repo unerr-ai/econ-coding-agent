@@ -138,7 +138,7 @@ brief, never "try again harder."
 **Slice shape**: seeded via `seeds.ts` `buildDeferralSliceContent(brief)` with constant
 prefix `DEFERRAL_SLICE_PREFIX`; `sliceType: "design"`-shaped like
 `GRIND_DESIGN_SLICE_CONTENT` so the allocator's design rule routes the author to the
-**reasoner** tier (`allocation.ts:240`) and `shouldOrchestrate` passes on the
+**oracle** tier (`allocation.ts:259`) and `shouldOrchestrate` passes on the
 reasoner-floor rule (`slice-orchestrator.ts:1931`). The degraded stand-down filter
 (`slice-orchestrator.ts:2220-2221`) gets a second escape hatch:
 `t.content.startsWith(DEFERRAL_SLICE_PREFIX)` alongside `GRIND_DESIGN_SLICE_CONTENT`.

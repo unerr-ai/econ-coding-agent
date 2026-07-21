@@ -340,6 +340,7 @@ export {
   type ReceiptGoal,
   type ReceiptEvaluation,
   type ReceiptContainment,
+  type ReceiptDeferralBreakdown,
   type TierSplitRow,
 } from "./receipt.js"
 // econ AC-0.4 cache-hit-rate meter + AC-8.4 per-tier rollup / cross-tier transitions

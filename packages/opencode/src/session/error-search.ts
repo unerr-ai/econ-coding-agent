@@ -337,7 +337,7 @@ export function versionMismatchWarning(resultText: string, dependency: Dependenc
   return `this answer targets ${dependency.name} ${found}; this repo resolves ${dependency.name} ${dependency.version}`
 }
 
-export type DocEcosystemHint = "rust" | "cargo" | "javascript" | "typescript" | "npm" | "python"
+export type DocEcosystemHint = "rust" | "cargo" | "javascript" | "typescript" | "npm" | "python" | "go" | "ruby"
 
 function majorMinor(version: string): string | undefined {
   const m = /^(\d+)\.(\d+)/.exec(version.trim())
@@ -345,26 +345,49 @@ function majorMinor(version: string): string | undefined {
 }
 
 /**
+ * The ecosystems with ONE canonical, version-pinned per-package doc host —
+ * docs.rs (rust), npmjs.com (JS/TS), pkg.go.dev (go — `go.mod`'s resolved
+ * version already carries its `v` prefix, matching pkg.go.dev's expected
+ * `@v1.2.3` shape), rubydoc.info (ruby). Adding another such ecosystem is one
+ * row here, never another branch in `docUrlForDependency`.
+ */
+const ECOSYSTEM_DOC_URL: Readonly<Partial<Record<DocEcosystemHint, (name: string, version: string) => string>>> = {
+  rust: (name, version) => `https://docs.rs/${name}/${version}/${name}/`,
+  cargo: (name, version) => `https://docs.rs/${name}/${version}/${name}/`,
+  javascript: (name, version) => `https://www.npmjs.com/package/${name}/v/${version}`,
+  typescript: (name, version) => `https://www.npmjs.com/package/${name}/v/${version}`,
+  npm: (name, version) => `https://www.npmjs.com/package/${name}/v/${version}`,
+  go: (name, version) => `https://pkg.go.dev/${name}@${version}`,
+  ruby: (name, version) => `https://www.rubydoc.info/gems/${name}/${version}`,
+}
+
+/**
+ * Well-known packages whose docs live at a framework-specific URL shape
+ * instead of their ecosystem's generic per-package host, keyed by lowercased
+ * name — adding another one (a Rails/Laravel-shaped case) is one row, never
+ * a `name.toLowerCase() === "..."` branch. `django`'s row reproduces the
+ * pre-table hardcoded output byte-for-byte.
+ */
+const FRAMEWORK_DOC_URL: Readonly<Record<string, (version: string) => string | undefined>> = {
+  django: (version) => {
+    const mm = majorMinor(version)
+    return mm ? `https://docs.djangoproject.com/en/${mm}/` : undefined
+  },
+}
+
+/**
  * Version-pinned documentation URL for the common ecosystems this repo
- * actually sees: docs.rs/<crate>/<version> for rust, npmjs.com package
- * pages pinned to <version> for JS/TS, and django's own /en/<X.Y>/ scheme
- * (major.minor) as the one well-known python-framework special case.
- * Returns undefined for every other name/ecosystem combination rather than
- * guessing a URL pattern that might not exist.
+ * actually sees (`ECOSYSTEM_DOC_URL`) plus the well-known single-package
+ * special cases no generic host covers (`FRAMEWORK_DOC_URL` — django's own
+ * /en/<X.Y>/ scheme, major.minor). Returns undefined for every other
+ * name/ecosystem combination rather than guessing a URL pattern that might
+ * not exist.
  *
  * @sem domain=intelligence role=discovery
  */
 export function docUrlForDependency(name: string, version: string, ecosystem?: DocEcosystemHint): string | undefined {
   if (!name || !version) return undefined
-  if (ecosystem === "rust" || ecosystem === "cargo") {
-    return `https://docs.rs/${name}/${version}/${name}/`
-  }
-  if (ecosystem === "javascript" || ecosystem === "typescript" || ecosystem === "npm") {
-    return `https://www.npmjs.com/package/${name}/v/${version}`
-  }
-  if (name.toLowerCase() === "django") {
-    const mm = majorMinor(version)
-    return mm ? `https://docs.djangoproject.com/en/${mm}/` : undefined
-  }
-  return undefined
+  const ecosystemUrl = ecosystem ? ECOSYSTEM_DOC_URL[ecosystem] : undefined
+  if (ecosystemUrl) return ecosystemUrl(name, version)
+  return FRAMEWORK_DOC_URL[name.toLowerCase()]?.(version)
 }

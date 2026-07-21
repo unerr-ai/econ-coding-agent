@@ -661,25 +661,63 @@ describe("explainOrchestrationGate — trigger attribution", () => {
 describe("explainOrchestrationGate — H9 signal-bus triggers", () => {
   const soloSlice = [{ id: "solo step", prompt: "" }]
 
-  it("hubBounceRepeat opens an otherwise-declined gate", () => {
-    expect(explainOrchestrationGate(soloSlice, undefined, { hubBounceRepeat: true })).toEqual({
+  // escalation-economics.md §4/§10 Step 2: each H9 signal now ALSO requires
+  // escalationEarned (the deferral ladder having actually escalated on it) —
+  // the raw signal alone can no longer serve as its own proof of earning a
+  // dispatch, which is what broke the circularity.
+  it("hubBounceRepeat + escalationEarned opens an otherwise-declined gate", () => {
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, { hubBounceRepeat: true, escalationEarned: true }),
+    ).toEqual({
       engage: true,
       trigger: "hub-bounce-repeat",
     })
   })
 
-  it("probeGateExhausted opens an otherwise-declined gate", () => {
-    expect(explainOrchestrationGate(soloSlice, undefined, { probeGateExhausted: true })).toEqual({
+  it("probeGateExhausted + escalationEarned opens an otherwise-declined gate", () => {
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, { probeGateExhausted: true, escalationEarned: true }),
+    ).toEqual({
       engage: true,
       trigger: "probe-gate-exhausted",
     })
   })
 
-  it("reproUnresolved opens an otherwise-declined gate", () => {
-    expect(explainOrchestrationGate(soloSlice, undefined, { reproUnresolved: true })).toEqual({
+  it("reproUnresolved + escalationEarned opens an otherwise-declined gate", () => {
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, { reproUnresolved: true, escalationEarned: true }),
+    ).toEqual({
       engage: true,
       trigger: "repro-unresolved",
     })
+  })
+
+  // §4's circularity, closed: the raw arming signal is present but the
+  // deferral ladder never actually escalated on it (e.g. it declined, or
+  // answered with a cheaper verify-inline/knowledge-fetch response) — the
+  // gate must stay closed. This is the regression guard for the defect the
+  // whole doc is about.
+  it("the raw signal ALONE, without escalationEarned, no longer engages the gate", () => {
+    expect(explainOrchestrationGate(soloSlice, undefined, { hubBounceRepeat: true })).toEqual({
+      engage: false,
+      trigger: "none",
+    })
+    expect(explainOrchestrationGate(soloSlice, undefined, { probeGateExhausted: true })).toEqual({
+      engage: false,
+      trigger: "none",
+    })
+    expect(explainOrchestrationGate(soloSlice, undefined, { reproUnresolved: true })).toEqual({
+      engage: false,
+      trigger: "none",
+    })
+    expect(
+      explainOrchestrationGate(soloSlice, undefined, {
+        hubBounceRepeat: true,
+        probeGateExhausted: true,
+        reproUnresolved: true,
+        escalationEarned: false,
+      }),
+    ).toEqual({ engage: false, trigger: "none" })
   })
 
   it("absent or all-false signals never open the gate on their own", () => {
@@ -690,13 +728,14 @@ describe("explainOrchestrationGate — H9 signal-bus triggers", () => {
         hubBounceRepeat: false,
         probeGateExhausted: false,
         reproUnresolved: false,
+        escalationEarned: true,
       }),
     ).toEqual({ engage: false, trigger: "none" })
   })
 
   it("the original four signals are checked first — a harness-seeded slice reports harness-seed even with an H9 signal also true", () => {
     const seeded = [{ id: "grind valve seed", prompt: "", harnessSeeded: true as const }]
-    expect(explainOrchestrationGate(seeded, undefined, { hubBounceRepeat: true })).toEqual({
+    expect(explainOrchestrationGate(seeded, undefined, { hubBounceRepeat: true, escalationEarned: true })).toEqual({
       engage: true,
       trigger: "harness-seed",
     })
@@ -708,13 +747,14 @@ describe("explainOrchestrationGate — H9 signal-bus triggers", () => {
         hubBounceRepeat: true,
         probeGateExhausted: true,
         reproUnresolved: true,
+        escalationEarned: true,
       }),
     ).toEqual({ engage: true, trigger: "hub-bounce-repeat" })
   })
 
   it("shouldOrchestrate threads the signals param through to the same verdict", () => {
-    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: true })).toBe(true)
-    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: false })).toBe(false)
+    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: true, escalationEarned: true })).toBe(true)
+    expect(shouldOrchestrate(soloSlice, undefined, { probeGateExhausted: false, escalationEarned: true })).toBe(false)
   })
 })
 

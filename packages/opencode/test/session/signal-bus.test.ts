@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   deferralAvailable,
+  deferralBreakdownFor,
   markDeferralUsed,
   publishSignal,
   resetSignals,
@@ -116,5 +117,65 @@ describe("turn summary", () => {
     expect(line.message).toBe("[signal] turn_summary")
     expect(line.payload["counts"]).toEqual({ probe_gate_reject: 2, unverified_finish: 1 })
     expect(line.payload["deferralAvailable"]).toBe(true)
+  })
+})
+
+describe("deferralBreakdownFor — §10 Step 3 receipt telemetry", () => {
+  test("empty session has zero total and a zero escalation rate", () => {
+    const sessionID = freshSession()
+    expect(deferralBreakdownFor(sessionID)).toEqual({ byComplaint: {}, byResponse: {}, escalationRate: 0 })
+  })
+
+  test("counts each consumer-record signal by its complaint (from evidence) and its response", () => {
+    const sessionID = freshSession()
+    publishSignal(
+      signal(sessionID, {
+        name: "deferral_verify_inline",
+        severity: "tail",
+        decision: "defer",
+        evidence: { consumed: "unverified_finish", complaint: "verification", reason: "verification gap" },
+      }),
+    )
+    publishSignal(
+      signal(sessionID, {
+        name: "deferral_declined",
+        severity: "tail",
+        decision: "surface",
+        evidence: { consumed: "hub_bounce_repeat", complaint: "corrected", reason: "already corrected" },
+      }),
+    )
+    const breakdown = deferralBreakdownFor(sessionID)
+    expect(breakdown.byComplaint).toEqual({ verification: 1, corrected: 1 })
+    expect(breakdown.byResponse).toEqual({ "verify-inline": 1, none: 1 })
+    expect(breakdown.escalationRate).toBe(0)
+  })
+
+  test("deferral_armed counts as escalate and drives the escalation rate", () => {
+    const sessionID = freshSession()
+    publishSignal(
+      signal(sessionID, {
+        name: "deferral_verify_inline",
+        severity: "tail",
+        decision: "defer",
+        evidence: { consumed: "unverified_finish", complaint: "verification", reason: "verification gap" },
+      }),
+    )
+    publishSignal(
+      signal(sessionID, {
+        name: "deferral_armed",
+        severity: "tail",
+        decision: "defer",
+        evidence: { consumed: "unverified_finish" },
+      }),
+    )
+    const breakdown = deferralBreakdownFor(sessionID)
+    expect(breakdown.byResponse).toEqual({ "verify-inline": 1, escalate: 1 })
+    expect(breakdown.escalationRate).toBeCloseTo(0.5)
+  })
+
+  test("non-deferral signals are ignored", () => {
+    const sessionID = freshSession()
+    publishSignal(signal(sessionID)) // "probe_gate_reject" — not a deferral consumer-record signal
+    expect(deferralBreakdownFor(sessionID)).toEqual({ byComplaint: {}, byResponse: {}, escalationRate: 0 })
   })
 })

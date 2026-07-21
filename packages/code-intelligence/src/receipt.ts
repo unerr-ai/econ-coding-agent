@@ -18,7 +18,10 @@
  * U6: optional goals/evaluations/contained trace sections (§1.8, §6 of
  * ORCHESTRATION_MECHANISM.md) pass through unchanged when the caller supplies
  * them, already folded across root + child slices upstream — additive, no
- * shape change to the existing per-tier drilldown.
+ * shape change to the existing per-tier drilldown. The optional `deferrals`
+ * section (escalation-economics.md §10 Step 3) follows the same idiom: the
+ * deferral ladder's own decision counts (by complaint class and by response),
+ * reported as-is — never re-derived or gated on here.
  *
  * @sem domain=observability role=accounting
  */
@@ -74,6 +77,23 @@ export interface ReceiptContainment {
   reverted: boolean
 }
 
+/**
+ * Escalation-decision breakdown for one run — counts by complaint class
+ * ("verification" | "knowledge" | "corrected" | "capability") and by response
+ * ("none" | "verify-inline" | "knowledge-fetch" | "escalate"), plus the
+ * resulting escalation rate. This is the receipt-side surface for the H9
+ * trigger-rate invariant (escalation-economics.md §10 Step 3) — it reports
+ * what the deferral ladder (`deferral-policy.ts`) actually decided, unchanged.
+ *
+ * @sem domain=observability role=accounting
+ */
+export interface ReceiptDeferralBreakdown {
+  byComplaint: Record<string, number>
+  byResponse: Record<string, number>
+  /** escalate count / total decisions this run; 0 when there were none. */
+  escalationRate: number
+}
+
 /** Inputs to {@link buildReceipt}. */
 export interface ReceiptInput {
   /** The session's recorded usage events. */
@@ -88,6 +108,8 @@ export interface ReceiptInput {
   evaluations?: ReceiptEvaluation[]
   /** Contained (reverted) attempts for the internal trace; optional, already folded across root + child slices. */
   contained?: ReceiptContainment[]
+  /** Escalation-decision breakdown for the internal trace; optional, same pass-through idiom as goals/evaluations/contained (§10 Step 3). */
+  deferrals?: ReceiptDeferralBreakdown
   /** Tiers counted as "large" for the reduction metric. Default: oracle, reasoner, frontier. */
   largeTiers?: UsageTier[]
   /** Currency label for display. Default "USD". */
@@ -135,6 +157,8 @@ export interface EconReceipt {
   evaluations?: ReceiptEvaluation[]
   /** Contained (reverted) attempts — internal trace only, present only when the caller supplied them (U6). */
   contained?: ReceiptContainment[]
+  /** Escalation-decision breakdown — internal trace only, present only when the caller supplied it (H9 trigger-rate invariant, §10 Step 3). */
+  deferrals?: ReceiptDeferralBreakdown
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +198,11 @@ function cacheAccountingFor(tier: UsageTier): "stream" | "nonstream-only" | "non
  * Compute the end-of-turn econ receipt from real recorded usage: overall
  * totals plus a per-tier drilldown, straight off `store.totals()` and
  * `store.cacheHitRatio()`, carrying through the optional goals/evaluations/
- * contained trace sections unchanged when the caller supplies them (already
- * folded across root + child slices upstream, same idiom as `catches`). No
- * baseline pricing, no savings math — the double-pay line is the ledger's
- * own accounting, not a subtraction from a frontier-derived figure.
+ * contained/deferrals trace sections unchanged when the caller supplies them
+ * (already folded across root + child slices upstream, same idiom as
+ * `catches`). No baseline pricing, no savings math — the double-pay line is
+ * the ledger's own accounting, not a subtraction from a frontier-derived
+ * figure.
  *
  * @sem domain=observability role=accounting
  */
@@ -234,6 +259,8 @@ export function buildReceipt(input: ReceiptInput): EconReceipt {
   if (input.goals !== undefined) receipt.goals = input.goals
   if (input.evaluations !== undefined) receipt.evaluations = input.evaluations
   if (input.contained !== undefined) receipt.contained = input.contained
+  // §10 Step 3 — same idiom: present only when the caller supplies it.
+  if (input.deferrals !== undefined) receipt.deferrals = input.deferrals
   return receipt
 }
 

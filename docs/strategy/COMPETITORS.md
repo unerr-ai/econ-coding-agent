@@ -1,9 +1,11 @@
 # econ — Competitive Landscape: India & Europe (and how we beat them)
 
-**Status:** Drafted 2026-07-01. The verified competitor map for econ's two near-term markets, with
-an explicit call on **which players are actually competitors** and **how econ beats each** — plus a
-dedicated teardown of **Mistral**, the one genuine wall in Europe, and a global **orchestration-layer**
-entry (**Sakana Fugu**, §4) that is an *adjacent validator*, not a competitor. Companion to
+**Status:** Drafted 2026-07-01; **§5 (Grok 4.5 price shock) added 2026-07-20.** The verified
+competitor map for econ's two near-term markets, with an explicit call on **which players are
+actually competitors** and **how econ beats each** — plus a dedicated teardown of **Mistral**, the one
+genuine wall in Europe, a global **orchestration-layer** entry (**Sakana Fugu**, §4) that is an
+*adjacent validator*, and the **frontier price war** (**Grok 4.5**, §5) that is a *supplier and
+price-setter* rather than a rival. Companion to
 [POSITIONING.md](./POSITIONING.md), [MARKET_ECONOMICS.md](./MARKET_ECONOMICS.md) (India) and
 [MARKET_ECONOMICS_EUROPE.md](./MARKET_ECONOMICS_EUROPE.md). All figures June–July 2026; sources §6.
 
@@ -229,7 +231,141 @@ real, not as a threat.
 
 ---
 
-## 5. econ's durable differentiation — what wins in both markets
+## 5. Grok 4.5 — the price shock (a supplier, not a rival, but it moves our pitch)
+
+**In plain terms:** on 8 July 2026 xAI launched Grok 4.5 at **$2 in / $6 out per million tokens** —
+roughly a fifth of Claude Fable 5's price for a model that lands in the same broad quality tier. The
+fair question is whether cheap frontier pricing erases econ's reason to exist. The short answer:
+**it takes a bite out of one of our three lanes and leaves the other two untouched — and Grok is a
+model we *route to*, not a product we compete with.** But it is the clearest signal yet that "we're
+cheaper than Claude" is a melting-ice pitch, and the doc says so plainly rather than pretending
+otherwise.
+
+**Tier: 🟢 Non-competitor (supplier + price-setter), 🟡 watch on repricing.**
+
+### 5.1 How big is the undercut, really
+
+Headline prices understate it in one direction and overstate it in another, so the honest number is
+**cost per finished task**, measured independently by Artificial Analysis on its Coding Agent Index:
+
+| Model (in its own harness) | Input /M | Output /M | Tokens per task | **Cost per task** |
+|---|---|---|---|---|
+| **Grok 4.5** (Grok Build) | $2.00 ($0.50 cached) | $6.00 | **1.9M** | **$2.49** |
+| GPT-5.5 (Codex) | $5.00 | $30.00 | 6.2M | $5.07 — 2.0× |
+| Claude Fable 5 (Claude Code) | $10.00 | $50.00 | 7.2M | $11.80 — 4.7× |
+| Claude Opus 4.8 | $5.00 | $25.00 | — | — |
+
+So it is ~5× cheaper than Anthropic's top model per task, but only ~2× cheaper than OpenAI's — and
+GPT-5.6's entry tier already matches Grok on price ($1/$6). This is a **general price war, not one
+vendor's stunt.** Two things worth noting: the quality is real but not top of the board (4th on the
+Intelligence Index, behind Fable 5, GPT-5.5 and Opus 4.8), and roughly **half the per-task advantage
+comes from using fewer tokens, not from cheaper tokens** — which matters enormously for us (§5.3).
+
+### 5.2 Why it's so cheap — and whether it lasts
+
+Three technical levers, in order of how much they actually contribute:
+
+1. **Token efficiency was trained in.** xAI co-trained with Cursor on *trillions of tokens of
+   interaction data* — not code, but the sequence of work: which files a developer opens before a
+   change, how they react to a failing test, how a patch gets revised. Then reinforcement learning
+   over hundreds of thousands of multi-step tasks **inside its own coding harness**. A model that
+   already knows the workflow wastes fewer exploratory turns: ~14k output tokens per task vs Opus
+   4.8's, over 60% fewer (independently measured).
+2. **Cache-first economics.** Automatic prefix caching with **90%+ hit rates** co-engineered with
+   launch partners, a 75% cache discount, and no cache-write fee. At a realistic agentic token mix
+   the effective price is **~$1.35/M, not $2**.
+3. **Throughput over latency.** Sparse mixture-of-experts served with deep batching — the tell is an
+   11.6-second time-to-first-token against a 2.75s peer median. They keep GPUs busy and let
+   interactive responsiveness pay for it. Musk has said the hardware-specific inference stack isn't
+   even deployed yet, so there is more headroom.
+
+**Are they selling below cost?** Two different answers, and the distinction matters:
+
+- **Per token, probably not.** Frontier inference gross margins run 70–80% industry-wide (DeepSeek
+  claimed >80% while charging $2.19/M output). Sparse MoE + deep batching + 90% cache hits plausibly
+  puts Grok's marginal cost well under $1.50/M output against a $6 price. The consensus read from
+  independent analysts is **thinner margins, not an efficiency breakthrough — OpenAI and Anthropic
+  could match this and choose not to.**
+- **As a business, massively.** xAI booked ~$3.2B revenue against a **$6.4B loss** in FY2025 (−200%
+  operating margin), with Q1 2026 annualizing near −300%, ~$1B/month burn and a ~$30B/year capex
+  pace. Training and datacenters are simply never priced into the token. It is an equity-funded land
+  grab with a real opportunity cost — Anthropic rents xAI's own Colossus 1 cluster for **$1.25B a
+  month**, so every subsidized token is compute that could have been sold at market rate.
+
+> **The practical read:** this price is a *strategic choice funded by investors*, not a new floor set
+> by physics. It can be withdrawn. Building a business that depends on Grok staying at $6 is unwise;
+> building one that can *switch* the moment it isn't is exactly the point of a router.
+
+### 5.3 What it does to econ — honest damage assessment
+
+**What it genuinely hurts: the raw cost-arbitrage headline.** Our savings model is
+`reduction ≈ f × (1 − 1/r)` — the boring-work share times the price ratio. When the frontier baseline
+itself gets cheap, `r` falls and the absolute dollars we save per task fall with it. A customer who
+only wants cheap frontier tokens can now buy them directly from the vendor. We should stop leading
+with a fixed multiple against Claude.
+
+This should not be a surprise: our own cost-curve research put ~70% odds on Fable-quality arriving
+3–4× cheaper within six months. **Grok 4.5 is that forecast landing on schedule, not a black swan.**
+
+**What survives, strongest first:**
+
+1. **Grok is an input to econ, not a substitute for it.** We are a model-agnostic harness; the
+   cheapest strong model on the market is our raw material. Slot it in as a tier and *our* cost per
+   task drops too — we hand xAI's subsidy to the customer, and when the subsidy ends we swap tiers
+   with no customer disruption. In a price war the router is the safest seat in the room.
+2. **Half of Grok's advantage is harness economy — which is our layer.** The 1.9M-vs-7.2M token gap
+   is not model weights, it's how the loop spends context. That is our second pillar (hand the model
+   the right slice) validated with someone else's published numbers, and it stacks *on top* of
+   whatever model we route to.
+3. **The lanes Grok structurally cannot enter.** Grok 4.5 is proprietary and US-hosted: no weights,
+   therefore **no in-region hosting, no data residency, no air-gapped deployment**. For RBI-regulated
+   banks, government buyers, and the defense/confidential-compute segment, the competitive set is
+   completely unchanged by this launch. See [CONFIDENTIAL_COMPUTE_MARKET.md](./CONFIDENTIAL_COMPUTE_MARKET.md)
+   and [DEFENSE_OPPORTUNITY.md](./DEFENSE_OPPORTUNITY.md).
+4. **Their quality trade-off is our governance pitch.** They bought cheapness with a **54%
+   hallucination rate** on AA-Omniscience and 53% on DeepSWE 1.1 against Fable 5's 70%. Cheap-but-
+   unverified is precisely what our in-loop governance gate and risk-escalation router exist to fix.
+   *"Grok-class economics with a gate that catches the tail"* is a sharper pitch after this launch,
+   not a weaker one. (Interesting counterpoint worth respecting: Grok **beats** Fable 5 on SWE
+   Marathon, 29% vs 24% — trained turn-discipline shows up on long-horizon work.)
+5. **Procurement friction is real.** Regulated buyers weighing a Musk-owned, X-adjacent vendor with
+   venture-subsidized pricing and single-region hosting face concentration, compliance and repricing
+   risk. The frontier-mode wedge — cutting a customer's *existing* Claude/Copilot bill with no vendor
+   switch — is untouched.
+6. **The trace moat has to be built locally.** Grok's edge came from Cursor's interaction traces. Our
+   equivalent — logged trajectories from Indian customers' real workloads, feeding finetuned worker
+   and junior tiers — is an asset xAI doesn't have and can't easily buy.
+
+### 5.4 What we actually do about it
+
+| Action | Why |
+|---|---|
+| **Add Grok 4.5 as a routable tier** | Cheapest strong model available; capture the subsidy on the customer's behalf, exit when it reprices |
+| **Lead with cost-per-finished-task, never $/M** | It's the metric the market's own referee now leads with, and it's what EconReceipt already measures |
+| **Make cache-hit-rate a first-class engineered number** | 90% hits at a 75–90% discount beats most routing wins; route on *effective blended* price, not list price (see [design/cross-tier-context.md](../design/cross-tier-context.md)) |
+| **Finetune our cheap tiers on our own logged trajectories** | The Cursor-traces playbook, applied to open weights — the one part of Grok's method a non-pretraining company can copy |
+| **Shift pitch weight from "cheaper" to "cheaper *and* governed *and* in-region"** | The cost lane compresses every quarter; the other two don't |
+
+> **Verdict in one line:** *Grok 4.5 lowers our input costs and proves our thesis in the same stroke.
+> What it kills is any strategy that assumed frontier vendors would stay expensive — which was never
+> our bet. We route to whoever is subsidizing tokens this quarter, and sell the governance and
+> sovereignty that a US-hosted proprietary model cannot offer at any price.*
+
+### 5.5 What to watch
+
+- **Grok repricing upward** once the land grab ends or funding tightens — the −300% operating margin
+  says this is not a stable price. Our exposure is a tier swap; a customer's is a bill shock.
+- **An open-weight model matching Grok's trained token-efficiency.** This is the genuinely important
+  one: if GLM/Qwen/DeepSeek ship harness-native RL trained for concise agentic trajectories, our
+  sovereign lane gets Grok economics *and* keeps residency. Watch for it.
+- **xAI open-weighting an older Grok** (they have precedent). That would put real pressure on the
+  sovereign lane's model shortlist — as an opportunity as much as a threat.
+- **Anthropic/OpenAI answering the price cut.** GPT-5.6 Luna at $1/$6 suggests it's already underway;
+  each round compresses `r` further and moves more weight onto governance and residency.
+
+---
+
+## 6. econ's durable differentiation — what wins in both markets
 
 Strip away what's commoditized or contested, and four things win in **both** India and Europe:
 
@@ -248,7 +384,7 @@ led + EU-resident deployment + the non-FR/DE segments**.
 
 ---
 
-## 6. Honest risks & what to watch
+## 7. Honest risks & what to watch
 
 1. **Sarvam pivots into coding** (govt + HCL-Tech backing) — the biggest India risk. Watch its model
    roadmap; move fast on the coding context moat.
@@ -266,7 +402,7 @@ led + EU-resident deployment + the non-FR/DE segments**.
 
 ---
 
-## 7. Sources
+## 8. Sources
 
 June–July 2026 (full URLs captured in the conversation that produced this doc):
 
@@ -283,6 +419,19 @@ June–July 2026 (full URLs captured in the conversation that produced this doc)
   Medium 3.5 $1.50/$7.50); mistral.ai/pricing (Team $24.99/$19.99)
 - **Coding model scores** — kilo.ai & promptquorum.com (GLM-5 77.8%, Qwen 77.2%, DeepSeek ~75%,
   Mistral Devstral ~73%)
+- **Grok 4.5 / xAI (§5)** — artificialanalysis.ai/articles/grok-4-5-brings-spacexai-to-the-the-intelligence-frontier
+  (independent: $2.49 vs $5.07 vs $11.80 per Coding Agent Index task; 1.9M vs 6.2M vs 7.2M tokens;
+  ~14k output tokens/task) & artificialanalysis.ai/models/grok-4-5 (Intelligence Index 54 → 4th;
+  11.6s TTFT; 76 t/s; $0.50 cache-hit price; $1.35 blended); we0.ai/articles-v2/grok-45-coding-benchmarks-token-efficiency
+  (Cursor interaction-data co-training, RL in the Grok Build harness, MoE, GB300 stack not yet
+  deployed); docs.x.ai/developers/advanced-api-usage/prompt-caching (75% cache discount, no write
+  fee); infoq.com (grok-code-fast-1 >90% partner cache-hit rates); techtimes.com (54% hallucination
+  rate; $2.49-vs-$11.80 framing); cryptobriefing.com (60%+ undercut, price war);
+  benchlm.ai/blog/posts/grok-4-5-cheaper-closed-future ("thinner margins, not an efficiency
+  breakthrough"); techcrunch.com 2026-05-20 + digitalapplied.com + sacra.com/c/xai (FY2025 $3.2B
+  revenue / $6.4B loss, −200% op margin, ~$1B/mo burn, ~$30B/yr capex pace);
+  actuia.com (Anthropic rents Colossus 1 at $1.25B/month); seangoedecke.com + intuitionlabs.ai
+  (70–80% industry inference gross margins; DeepSeek >80% at $2.19/M output)
 - **Sakana Fugu (§4)** — sakana.ai/fugu ("Multi-agent System as A Model"; TRINITY + Conductor ICLR
   2026 papers; routing proprietary/undisclosed); mindstudio.ai/blog/what-is-sakana-fugu-multi-agent-ai
   (MoA over Claude/GPT-4/Gemini in parallel + synthesis; complementary to LangChain/AutoGen — "reasoning

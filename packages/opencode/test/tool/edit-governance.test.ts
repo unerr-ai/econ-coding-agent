@@ -1090,7 +1090,18 @@ describe("Wave 9 — evaluateHubEditGate flags a retry against a non-candidate f
       filePath: "/repo/django/db/models/query_utils.py",
       graph: overThresholdGraph,
     })
-    expect(third).toEqual({ action: "allow", retried: true })
+    // Wave 9's own hub-coupling verdict is retried:true unconditionally — the
+    // hub gate has no opinion about scope-fit on this branch (it isn't the
+    // defining-site allowlist match), so §10 Step 4's issue-scope layer now
+    // adds its own opinion on top: query_utils.py isn't the resolved
+    // enums.py defining site or a neighbor of it, so it nudges.
+    expect(third.action).toBe("allow")
+    if (third.action === "allow") {
+      expect(third.retried).toBe(true)
+      expect(third.nudge).toContain("ur|rsk")
+      expect(third.nudge).toContain("query_utils.py")
+      expect(third.nudge).toContain("django/db/models/enums.py")
+    }
   })
 
   it("an empty allowlist retry never sets the flag (nothing was named to shop against)", async () => {
@@ -1487,5 +1498,250 @@ describe("P6 — couplingUnknownWarning", () => {
   it("defensive: a throwing graph fails open, never throws", () => {
     expect(() => couplingUnknownWarning("ses_coupling_f", "main.go", throwingGraph)).not.toThrow()
     expect(couplingUnknownWarning("ses_coupling_f", "main.go", throwingGraph)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §10 Step 4 — issue-scope boundary (docs/design/escalation-economics.md
+// §6/§6.1): evaluateIssueScopeGate + clearIssueScopeState. Fails open on
+// every axis that isn't itself the question (unresolved defining sites,
+// resolved-but-empty defining sites, a test file, a cold/throwing graph);
+// once a non-empty scope is derived, an in-scope edit allows silently, an
+// out-of-scope edit nudges once per (session, file) by default and denies
+// every time behind ECON_ISSUE_SCOPE_DENY.
+// ---------------------------------------------------------------------------
+
+import { evaluateIssueScopeGate, clearIssueScopeState } from "../../src/tool/edit-governance"
+import { recordPreExistingFailure } from "../../src/tool/issue-scope"
+
+function fakeScopeGraph(opts: {
+  entitiesByFile?: Record<string, string[]>
+  callersByEntityKey?: Record<string, string[]>
+  throwing?: boolean
+}): EditImpactGraph {
+  return {
+    getEntitiesInFile: async (filePath: string) => {
+      if (opts.throwing) throw new Error("graph unavailable")
+      const names = opts.entitiesByFile?.[filePath] ?? []
+      return names.map((name) => ({
+        key: `${filePath}:${name}:function`,
+        name,
+        kind: "function",
+        filePath,
+        lineStart: 1,
+        lineEnd: 2,
+        signature: "()",
+        contentHash: "fake",
+      }))
+    },
+    getCallers: async (entityKey: string) => {
+      if (opts.throwing) throw new Error("graph unavailable")
+      const fromFiles = opts.callersByEntityKey?.[entityKey] ?? []
+      return fromFiles.map((fromFile) => ({
+        fromEntity: "caller",
+        fromFile,
+        toEntity: entityKey,
+        kind: "call",
+      }))
+    },
+  }
+}
+
+describe("§10 Step 4 — evaluateIssueScopeGate", () => {
+  it("unresolved defining sites (never armed) → allow, no nudge", async () => {
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_unresolved",
+      filePath: "validators.py",
+      graph: fakeScopeGraph({}),
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("resolved but empty defining-site set → allow (nothing to derive a boundary from)", async () => {
+    setHubEditGate("ses_scope_empty", true, [])
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_empty",
+      filePath: "validators.py",
+      graph: fakeScopeGraph({}),
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("a test file always allows, even with a resolved scope it falls outside", async () => {
+    setHubEditGate("ses_scope_test", true, ["fields.py"])
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_test",
+      filePath: "tests/test_validators.py",
+      graph: fakeScopeGraph({}),
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("a resolved defining site itself is in scope → allow, no nudge", async () => {
+    setHubEditGate("ses_scope_defining", true, ["fields.py"])
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_defining",
+      filePath: "fields.py",
+      graph: fakeScopeGraph({}),
+    })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("a one-hop reverse-call neighbor of a defining site is in scope → allow", async () => {
+    setHubEditGate("ses_scope_neighbor", true, ["fields.py"])
+    const graph = fakeScopeGraph({
+      entitiesByFile: { "fields.py": ["CharField"] },
+      callersByEntityKey: { "fields.py:CharField:function": ["widgets.py"] },
+    })
+    const result = await evaluateIssueScopeGate({ sessionID: "ses_scope_neighbor", filePath: "widgets.py", graph })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("django-11880 shape: the defining site's own dependency (what it calls OUT to) stays out of scope — one-way neighborhood only", async () => {
+    setHubEditGate("ses_scope_oneway", true, ["fields.py"])
+    // fields.py calls INTO validators.py in real Django, but getCallers only
+    // ever answers "who calls fields.py's entities" — validators.py never
+    // appears as a caller here, so it is never pulled into scope.
+    const graph = fakeScopeGraph({
+      entitiesByFile: { "fields.py": ["CharField"] },
+      callersByEntityKey: { "fields.py:CharField:function": [] },
+    })
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_oneway",
+      filePath: "validators.py",
+      graph,
+    })
+    expect(result.action).toBe("allow")
+    if (result.action === "allow") {
+      expect(result.nudge).toContain("validators.py is outside the derived scope")
+    }
+  })
+
+  it("an out-of-scope file nudges once per (session, file); a second identical edit stays silent", async () => {
+    setHubEditGate("ses_scope_nudge_once", true, ["fields.py"])
+    const graph = fakeScopeGraph({})
+    const first = await evaluateIssueScopeGate({ sessionID: "ses_scope_nudge_once", filePath: "validators.py", graph })
+    expect(first.action).toBe("allow")
+    if (first.action === "allow") {
+      expect(first.nudge).toContain("ur|rsk")
+      expect(first.nudge).toContain("validators.py")
+      expect(first.nudge).toContain("fields.py")
+    }
+    const second = await evaluateIssueScopeGate({ sessionID: "ses_scope_nudge_once", filePath: "validators.py", graph })
+    expect(second).toEqual({ action: "allow" })
+  })
+
+  it("cites a recorded pre-existing-failure proof in the nudge (§6.1)", async () => {
+    setHubEditGate("ses_scope_preexisting", true, ["fields.py"])
+    recordPreExistingFailure("ses_scope_preexisting", "validators.tests.TestValidators [URLValidator]")
+    const result = await evaluateIssueScopeGate({
+      sessionID: "ses_scope_preexisting",
+      filePath: "validators.py",
+      graph: fakeScopeGraph({}),
+    })
+    expect(result.action).toBe("allow")
+    if (result.action === "allow") {
+      expect(result.nudge).toContain("already proved")
+      expect(result.nudge).toContain("validators.tests.TestValidators [URLValidator]")
+      expect(result.nudge).toContain("leave it alone")
+    }
+  })
+
+  it("ECON_ISSUE_SCOPE_DENY=1 denies an out-of-scope edit every time, not just once", async () => {
+    const previous = process.env.ECON_ISSUE_SCOPE_DENY
+    process.env.ECON_ISSUE_SCOPE_DENY = "1"
+    try {
+      setHubEditGate("ses_scope_deny", true, ["fields.py"])
+      const graph = fakeScopeGraph({})
+      const first = await evaluateIssueScopeGate({ sessionID: "ses_scope_deny", filePath: "validators.py", graph })
+      expect(first.action).toBe("deny")
+      if (first.action === "deny") expect(first.message).toContain("validators.py is outside the derived scope")
+      const second = await evaluateIssueScopeGate({ sessionID: "ses_scope_deny", filePath: "validators.py", graph })
+      expect(second.action).toBe("deny")
+    } finally {
+      if (previous === undefined) delete process.env.ECON_ISSUE_SCOPE_DENY
+      else process.env.ECON_ISSUE_SCOPE_DENY = previous
+    }
+  })
+
+  it("defensive: a throwing graph degrades to defining-sites-only scope, never throws", async () => {
+    setHubEditGate("ses_scope_throw", true, ["fields.py"])
+    const graph = fakeScopeGraph({ throwing: true })
+    const result = await evaluateIssueScopeGate({ sessionID: "ses_scope_throw", filePath: "fields.py", graph })
+    expect(result).toEqual({ action: "allow" })
+  })
+
+  it("clearIssueScopeState clears the memoized scope directly", async () => {
+    setHubEditGate("ses_scope_clear", true, ["fields.py"])
+    const graph = fakeScopeGraph({})
+    const before = await evaluateIssueScopeGate({ sessionID: "ses_scope_clear", filePath: "validators.py", graph })
+    expect(before.action).toBe("allow")
+    if (before.action === "allow") expect(before.nudge).toBeDefined()
+    clearIssueScopeState("ses_scope_clear")
+    // Nudge throttle was cleared too, so the same out-of-scope file nudges again.
+    const after = await evaluateIssueScopeGate({ sessionID: "ses_scope_clear", filePath: "validators.py", graph })
+    expect(after.action).toBe("allow")
+    if (after.action === "allow") expect(after.nudge).toBeDefined()
+  })
+
+  it("disarming the hub-edit gate clears the memoized scope so re-arming with a new defining set re-derives", async () => {
+    setHubEditGate("ses_scope_rearm", true, ["fields.py"])
+    const graph = fakeScopeGraph({})
+    const first = await evaluateIssueScopeGate({ sessionID: "ses_scope_rearm", filePath: "validators.py", graph })
+    expect(first.action).toBe("allow")
+    if (first.action === "allow") expect(first.nudge).toContain("outside the derived scope")
+
+    setHubEditGate("ses_scope_rearm", false) // disarm — must clear the stale scope
+    setHubEditGate("ses_scope_rearm", true, ["validators.py"]) // re-arm with a NEW defining set
+
+    const second = await evaluateIssueScopeGate({ sessionID: "ses_scope_rearm", filePath: "validators.py", graph })
+    expect(second).toEqual({ action: "allow" }) // now the defining site itself — in scope, no nudge
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §10 Step 4 wiring proof — evaluateHubEditGate (the exact name edit.ts and
+// write.ts import and call on every real edit) now layers
+// evaluateIssueScopeGate on top of its own hub-coupling verdict. Before this
+// wave evaluateIssueScopeGate had zero production callers (only its own
+// direct-call tests above) — these tests go through the real production
+// entry point instead, the thing a direct call to evaluateIssueScopeGate
+// cannot prove.
+// ---------------------------------------------------------------------------
+
+describe("§10 Step 4 — evaluateHubEditGate wires evaluateIssueScopeGate into the real edit path", () => {
+  it("an out-of-scope edit through evaluateHubEditGate (not evaluateIssueScopeGate directly) produces the nudge", async () => {
+    setHubEditGate("ses_wired_nudge", true, ["fields.py"])
+    const graph: HubFanInGraph & EditImpactGraph = {
+      ...fakeScopeGraph({}),
+      fileFanIn: () => 1, // under HUB_IMPORTER_THRESHOLD — the hub gate itself has no opinion on this file
+    }
+    const result = await evaluateHubEditGate({ sessionID: "ses_wired_nudge", filePath: "validators.py", graph })
+    expect(result.action).toBe("allow")
+    if (result.action === "allow") {
+      expect(result.nudge).toContain("ur|rsk")
+      expect(result.nudge).toContain("validators.py")
+      expect(result.nudge).toContain("fields.py")
+    }
+  })
+
+  it("a resolved defining-site edit through evaluateHubEditGate allows with no nudge — the hub gate's own allow always wins, issue-scope is never even consulted", async () => {
+    setHubEditGate("ses_wired_defining", true, ["fields.py"])
+    const graph: HubFanInGraph & EditImpactGraph = {
+      ...fakeScopeGraph({}),
+      fileFanIn: () => 1,
+    }
+    const result = await evaluateHubEditGate({ sessionID: "ses_wired_defining", filePath: "fields.py", graph })
+    expect(result).toEqual({ action: "allow", definingSite: true })
+  })
+
+  it("a hub-edit deny through evaluateHubEditGate is untouched by issue-scope", async () => {
+    setHubEditGate("ses_wired_deny", true, ["fields.py"])
+    const graph: HubFanInGraph & EditImpactGraph = {
+      ...fakeScopeGraph({}),
+      fileFanIn: () => 5, // clears HUB_IMPORTER_THRESHOLD
+    }
+    const result = await evaluateHubEditGate({ sessionID: "ses_wired_deny", filePath: "validators.py", graph })
+    expect(result.action).toBe("deny")
   })
 })

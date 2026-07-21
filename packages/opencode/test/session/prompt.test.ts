@@ -2208,8 +2208,27 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
     // own three-reject-then-loud sequence starts (S3 fires independently of
     // landedSourceEdits — its own condition is `!turnPinnedProbe`, still
     // true throughout: no repro is ever pinned or run). Once S3's bound is
-    // spent, round F plants its own one-shot deferral rung before the loud
-    // break — one more reply absorbs that too.
+    // spent, round F plants its own deferral rung before the loud break.
+    //
+    // That deferral rung is now a LADDER, not one hop (deferral-policy.ts,
+    // docs/design/escalation-economics.md §10 Step 1): S3's complaint is a
+    // verification gap, so the first firing answers it in place at the
+    // conductor (verify-inline) and does NOT spend the escalation budget
+    // (CHEAP_RESPONSE_BUDGET is irrelevant here — only one complaint class
+    // ever fires this turn, so the pre-existing per-complaint exhaustion
+    // check alone already forces the second `unverified_finish` firing to
+    // escalate; the turn-wide budget only matters once a SECOND, DIFFERENT
+    // complaint class tries to buy its own rung, see deferral-policy.test.ts).
+    // This mock never runs a repro, so the same complaint fires again, the
+    // ladder finds verify-inline already spent, and only THEN escalates.
+    // Two rungs instead of one — the extra reply below absorbs the second.
+    //
+    // A ninth call is also live-verified as necessary: the escalated finish
+    // attempt lands on P2b's build-first rung (regression-neighbors.ts's
+    // `runBuildCheckRung`, unrelated to the deferral ladder) — the written
+    // `src/parser.ts` fails this fixture's compile check once, which is its
+    // own independently-bounded reject-then-loud gate (`turnBuildCheckGateNudged`)
+    // and costs one more rung before the turn is finally let through loud.
     yield* llm.tool("write", {
       filePath: path.resolve(dir, "src/parser.ts"),
       content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
@@ -2218,8 +2237,10 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
     yield* llm.text("still investigating")
     yield* llm.text("still investigating")
     yield* llm.text("still investigating")
+    yield* llm.text("still investigating after verify-inline")
     yield* llm.text("still investigating after deferral")
     yield* llm.text("done, no repro run")
+    yield* llm.text("still not fixing the compile error")
 
     const result = yield* prompt.prompt({
       sessionID: session.id,
@@ -2229,10 +2250,11 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
 
     expect(result.info.role).toBe("assistant")
     if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
-    // 1 write + 6 text replies: wave-10 (1), S3's own 3 rejects, round F's
-    // one-shot deferral rung once S3's bound is spent, then the final loud
-    // accept.
-    expect(yield* llm.calls).toBe(7)
+    // 1 write + 8 text replies: wave-10 (1), S3's own 3 rejects, the deferral
+    // ladder's two rungs (verify-inline, then escalate on the repeat firing),
+    // P2b's build-check rung (1, unrelated to the ladder), then the final
+    // loud accept.
+    expect(yield* llm.calls).toBe(9)
 
     const msgs = yield* sessions.messages({ sessionID: session.id })
     const nudgeTexts = msgs
@@ -2247,6 +2269,10 @@ it.instance("S3 gate: silent bug-shaped finish rejects up to 3 times then fails 
     expect(nudgeTexts.some((text) => text.includes("rejection 3"))).toBe(true)
     expect(nudgeTexts.filter((text) => text.includes("cannot finish silently"))).toHaveLength(2)
   }),
+  // Nine real round trips including a live subprocess build check
+  // (regression-neighbors.ts's runBuildCheckRung, its own 5s runner budget)
+  // routinely exceed the default per-test timeout under load.
+  30_000,
 )
 
 it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with no nudge", () =>
@@ -2291,11 +2317,15 @@ it.instance("S3 gate: an explicitly cancelled repro todo passes immediately with
   }),
 )
 
-// H9 — hub_bounce_repeat arms the deferral escalation on an otherwise-clean
-// bug-shaped finish (tracker #30, django-11265 replay)
+// H9 — hub_bounce_repeat fires on an otherwise-clean bug-shaped finish
+// (tracker #30, django-11265 replay), but under the §10 response ladder
+// (escalation-economics.md) it is classified "corrected" — a lagging
+// indicator the deterministic hub gate already fixed — so it declines
+// instead of escalating (it never did, on any firing; see
+// deferral-policy.test.ts for the ladder's own unit coverage).
 
 it.instance(
-  "H9 gate: hub_bounce_repeat arms the deferral escalation on a bug-shaped root turn's clean finish",
+  "H9 gate: hub_bounce_repeat declines under the §10 response ladder — it is a lagging indicator, never an escalation",
   () =>
     Effect.gen(function* () {
       const { dir, llm } = yield* useServerConfig(providerCfg)
@@ -2370,20 +2400,25 @@ it.instance(
       // H9's own arm decision is what's under test — not the downstream
       // deferral-slice dispatch (a separate, heavier orchestration path).
       // Poll for the signal instead of awaiting the whole turn to finish.
+      // Under the §10 response ladder, hub_bounce_repeat's complaint class
+      // ("corrected") never escalates on any firing — it declines.
       yield* pollWithTimeout(
         Effect.sync(() =>
-          signalsFor(session.id).some((s) => s.name === "deferral_armed") ? (true as const) : undefined,
+          signalsFor(session.id).some((s) => s.name === "deferral_declined") ? (true as const) : undefined,
         ),
-        "H9 never published deferral_armed",
+        "H9 never published deferral_declined",
         "15 seconds",
       )
 
-      const armed = signalsFor(session.id).filter((s) => s.name === "deferral_armed")
-      expect(armed).toHaveLength(1)
-      expect(armed[0]?.evidence.consumed).toBe("hub_bounce_repeat")
+      const declined = signalsFor(session.id).filter((s) => s.name === "deferral_declined")
+      expect(declined).toHaveLength(1)
+      expect(declined[0]?.evidence.consumed).toBe("hub_bounce_repeat")
+      expect(declined[0]?.evidence.complaint).toBe("corrected")
 
+      // Never escalated: no deferral spent, no design/oracle seed planted.
+      expect(signalsFor(session.id).some((s) => s.name === "deferral_armed")).toBe(false)
       const finalTodos = yield* todos.get(session.id)
-      expect(finalTodos.some((t) => t.content.startsWith(DEFERRAL_SLICE_PREFIX))).toBe(true)
+      expect(finalTodos.some((t) => t.content.startsWith(DEFERRAL_SLICE_PREFIX))).toBe(false)
 
       yield* Fiber.interrupt(fiber)
     }),
