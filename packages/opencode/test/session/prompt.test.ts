@@ -7,6 +7,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { writeFileSync } from "node:fs"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -26,7 +27,7 @@ import { Image } from "../../src/image/image"
 import { Question } from "../../src/question"
 import { SessionTodo } from "@opencode-ai/core/session/todo"
 import { DEFERRAL_SLICE_PREFIX, reproSliceContent } from "../../src/session/prompts/seeds"
-import { publishSignal, signalsFor } from "../../src/session/signal-bus"
+import { publishSignal, recordDeferralVerdict, signalsFor } from "../../src/session/signal-bus"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
@@ -2424,6 +2425,350 @@ it.instance(
       yield* Fiber.interrupt(fiber)
     }),
   20_000,
+)
+
+// Round F livelock regression — the "verification" complaint class
+// (deferral-policy.ts) is TERMINAL: the first firing of ANY of its 7
+// signals in a turn returns "verify-inline"; a SECOND firing of the SAME (or
+// any other) verification signal in that turn finds verify-inline already
+// spent and returns "none". Every one of these call sites (prompt.ts) reads
+// `if (<name>Verdict.response !== "none") continue` — a "none" verdict
+// plants no nudge and spends no budget (only "escalate" calls
+// markDeferralUsed), so an unconditional `continue` there re-enters the
+// SAME branch forever against an unchanged transcript. This is the exact
+// shape a production livelock took: 4,424 iterations frozen on one step
+// before an external timeout. Each test below drives its signal to a
+// "none" verdict and asserts the turn still reaches a loud "stop" with a
+// bounded `llm.calls` — reverting the guard to an unconditional `continue`
+// makes the pinned probe (still red, unchanged) re-arm forever instead.
+
+it.instance(
+  "verification deferral: probe_gate_exhausted's second arming declines and the turn still terminates",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Bug report",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      const reproPath = path.resolve(dir, "repro_issue.sh")
+
+      // A real (non-test) source edit — landedSourceEdits together with the
+      // pin below skips the separate wave-10/S3 unverified-finish gates
+      // entirely (their own guard is `!turnPinnedProbe || (!landedSourceEdits
+      // && ...)`), keeping this turn's finish path scoped to the probe gate.
+      yield* llm.tool("write", {
+        filePath: path.resolve(dir, "src/parser.ts"),
+        content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
+      })
+      // A real repro script that always fails — pinned via the probe-from-red
+      // path (slice-orchestrator.ts's deriveTurnProbe re-runs it for real)
+      // once the bash call below fails for real, and never turns green. The
+      // step-observation failure tell (turn-supervisor.ts's FAILURE_RE) scans
+      // the tool's own captured output text, not just its exit code, so the
+      // script must print a recognized failure marker itself.
+      yield* llm.tool("write", {
+        filePath: reproPath,
+        content: "#!/bin/sh\necho 'FAILED: trailing comma mis-tokenized'\nexit 1\n",
+      })
+      yield* llm.tool("bash", {
+        command: `sh ${reproPath}`,
+        timeout: 10_000,
+        workdir: path.resolve(dir),
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        parts: [{ type: "text", text: "There is a bug in the parser — it mis-tokenizes trailing commas." }],
+      })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+      // The pinned repro never turns green: MAX_PROBE_GATE_RETRIES (3) bounded
+      // plain rejects, one verify-inline deferral arm, then a SECOND arm that
+      // declines ("none" — verify-inline already spent for the
+      // "verification" complaint) and must fall through instead of looping.
+      expect(yield* llm.calls).toBe(12)
+
+      // Content proof this is probe_gate_exhausted's OWN decline, not some
+      // other gate coincidentally landing on the same call count — the
+      // signal bus (not message text) is the reliable source: the pin
+      // gate's own bounded-reject reason is a live subprocess result (this
+      // repo's real git-diff state can also reject the pin's no-test-edit
+      // guard, which is a legitimate reject too — either way the SECOND
+      // arm's decline is what's under test).
+      const declined = signalsFor(session.id).filter((s) => s.name === "deferral_declined")
+      expect(declined.some((s) => s.evidence.consumed === "probe_gate_exhausted")).toBe(true)
+    }),
+  30_000,
+)
+
+it.instance(
+  "verification deferral: seen_red_unresolved's second arming declines and the turn still terminates",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Bug report",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      const testPath = path.resolve(dir, "test_seen_red.py")
+      // Pre-seeded directly to disk, not via a simulated model write — a
+      // completed model edit to a test-shaped path is its own "fake-green"
+      // stuck-detector tell (createStuckSupervisor, orchestration-fsm.ts)
+      // that jumps straight to a reasoner-tier model, unrelated to the
+      // verification-complaint ladder under test here. Only the RUN of
+      // the test needs to be part of the turn's own transcript. Prints its
+      // failure to stdout (seen-red.ts's TEST_FAILURE_SIGNATURE_RE scans the
+      // captured tool output, not a raw uncaught-exception stderr trace).
+      writeFileSync(
+        testPath,
+        "def test_tokenize():\n    assert 1 == 2, 'trailing comma mis-tokenized'\n\n" +
+          "try:\n    test_tokenize()\nexcept AssertionError as e:\n    print(f'FAILED: {e}')\n    raise SystemExit(1)\n",
+      )
+
+      // A real (non-test) source edit — landedSourceEdits is seen_red_
+      // unresolved's own outer guard.
+      yield* llm.tool("write", {
+        filePath: path.resolve(dir, "src/parser.ts"),
+        content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
+      })
+      // A real test execution the turn SAW fail red and never re-ran green
+      // — seen_red_unresolved's own precondition (seen-red.ts).
+      yield* llm.tool("bash", {
+        command: `python3 ${testPath}`,
+        timeout: 10_000,
+        workdir: path.resolve(dir),
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        parts: [{ type: "text", text: "There is a bug in the parser — it mis-tokenizes trailing commas." }],
+      })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+      // The seen-red test is never re-run green: one plain nudge, one
+      // verify-inline deferral arm, then a SECOND arm that declines
+      // ("none" — verify-inline already spent for the "verification"
+      // complaint) and must fall through instead of looping.
+      expect(yield* llm.calls).toBe(10)
+
+      const msgs = yield* sessions.messages({ sessionID: session.id })
+      const nudgeTexts = msgs
+        .filter((msg) => msg.info.role === "user")
+        .flatMap((msg) => msg.parts)
+        .filter((part): part is SessionV1.TextPart => part.type === "text")
+        .map((part) => part.text)
+      // Proves the seen-red branch itself was reached (not some other gate
+      // coincidentally landing on the same call count).
+      expect(nudgeTexts.some((text) => text.includes("never re-ran it green"))).toBe(true)
+    }),
+  30_000,
+)
+
+it.instance(
+  "verification deferral: oracle_inversion's second arming declines and the turn still terminates",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Bug report",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      const reproPath = path.resolve(dir, "repro_issue.sh")
+
+      // A real (non-test) source edit — landedSourceEdits.
+      yield* llm.tool("write", {
+        filePath: path.resolve(dir, "src/parser.ts"),
+        content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
+      })
+      // A repro that reproduces via the ISSUE'S OWN desired output — pinned
+      // via the probe-from-red path — but the pinned assertion still checks
+      // the buggy value: the code now PRODUCES what the issue calls for
+      // (`ab,cd`, appearing first) while the visible check still expects the
+      // value the issue calls wrong (`ab;cd`) — oracle_inversion's own shape.
+      yield* llm.tool("write", {
+        filePath: reproPath,
+        content: "#!/bin/sh\necho 'AssertionError: ab,cd != ab;cd'\nexit 1\n",
+      })
+      yield* llm.tool("bash", {
+        command: `sh ${reproPath}`,
+        timeout: 10_000,
+        workdir: path.resolve(dir),
+      })
+
+      // The turn-end probe gate's no-test-edit check shells out to a real
+      // `git diff` against process.cwd() (slice-orchestrator.ts's
+      // TEST_TREE_GUARD_COMMAND) and, unlike the probe-rung reject, returns
+      // no outputTail — leaving detectOracleInversion nothing to read and
+      // short-circuiting this whole branch before the probe is even re-run.
+      // Running from the fixture's own directory (no repo, no git diff to
+      // find) keeps this test's own working-tree state — irrelevant to the
+      // bug class under test — out of the pinned probe's own red-output path.
+      const originalCwd = process.cwd()
+      process.chdir(dir)
+      try {
+        const fiber = yield* prompt
+          .prompt({
+            sessionID: session.id,
+            agent: "build",
+            parts: [
+              { type: "text", text: "There is a bug in the parser: expected `ab,cd` but it returns `ab;cd`." },
+            ],
+          })
+          .pipe(Effect.forkChild)
+
+        // Turn-open (which resets the session's signal bus and deferral
+        // ledger — round F, prompt.ts) runs before the first scripted LLM
+        // request is even dispatched, so this must land AFTER it, not before
+        // (same ordering the H9 gate test relies on for its own mid-turn
+        // signal injection). Priming the "verification" complaint's one
+        // verify-inline rung as already spent stands in for an earlier
+        // verification signal having asked for it first — the shape that
+        // makes oracle_inversion's OWN (one-shot) arming attempt below find
+        // the rung already gone, without needing a whole separate ladder to
+        // run first.
+        yield* llm.wait(1)
+        recordDeferralVerdict(session.id, {
+          complaint: "verification",
+          response: "verify-inline",
+          reason: "priming — stands in for an earlier verification signal in this turn",
+          escalationEarned: false,
+        })
+
+        const result = yield* Fiber.join(fiber)
+
+        expect(result.info.role).toBe("assistant")
+        if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+        expect(yield* llm.calls).toBe(8)
+
+        const msgs = yield* sessions.messages({ sessionID: session.id })
+        const nudgeTexts = msgs
+          .filter((msg) => msg.info.role === "user")
+          .flatMap((msg) => msg.parts)
+          .filter((part): part is SessionV1.TextPart => part.type === "text")
+          .map((part) => part.text)
+        // The load-bearing assertion: oracle_inversion's OWN call site ends in
+        // an unconditional `continue` right after the guarded one (prompt.ts),
+        // so a revert there does NOT change the total call count — it only
+        // swallows this "Verification conflict" nudge, silently re-arming the
+        // same declined complaint every subsequent arrival instead of stating
+        // the conflict and falling through to the turn's loud finish.
+        expect(nudgeTexts.some((text) => text.includes("Verification conflict"))).toBe(true)
+      } finally {
+        process.chdir(originalCwd)
+      }
+    }),
+  30_000,
+)
+
+it.instance(
+  "verification deferral: fidelity_finish_reject's second arming declines and the turn still terminates",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Bug report",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      const reproPath = path.resolve(dir, "repro_issue.sh")
+
+      // A real (non-test) source edit — landedSourceEdits.
+      yield* llm.tool("write", {
+        filePath: path.resolve(dir, "src/parser.ts"),
+        content: "export function tokenize(input: string): string[] {\n  return input.split(\",\")\n}\n",
+      })
+      // A real repro that fails — pinned via the probe-from-red path.
+      yield* llm.tool("write", {
+        filePath: reproPath,
+        content: "#!/bin/sh\necho 'FAILED: maxlength mismatch'\nexit 1\n",
+      })
+      yield* llm.tool("bash", {
+        command: `sh ${reproPath}`,
+        timeout: 10_000,
+        workdir: path.resolve(dir),
+      })
+      // The repro is rewritten to go GREEN, but its own assertion is
+      // type-unfaithful (repro-fidelity-judge.ts's detectNumericStringConflict
+      // — the same digit sequence compared as a quoted STRING on one line and
+      // a bare integer elsewhere): a green run over this proves nothing, which
+      // is fidelity_finish_reject's own finish-time re-check (pure code, no
+      // judge). Guarded behind `if false` so the real run stays green.
+      yield* llm.tool("write", {
+        filePath: reproPath,
+        content:
+          "#!/bin/sh\n" +
+          "if false; then\n" +
+          "  if [ \"$widget_maxlength\" == '150' ]; then\n" +
+          "    echo unreachable\n" +
+          "  fi\n" +
+          "  field_max_length=150\n" +
+          "fi\n" +
+          "exit 0\n",
+      })
+
+      // The turn-end probe gate's no-test-edit check shells out to a real
+      // `git diff` against process.cwd() (TEST_TREE_GUARD_COMMAND) — running
+      // from the fixture's own directory keeps this test's own working-tree
+      // state out of the pinned probe's gate-green/red path (same fix as the
+      // oracle_inversion test above). Wraps the whole fork+join so every
+      // internal engine check the forked fiber makes sees it, not just the
+      // last one before Fiber.join.
+      const originalCwd = process.cwd()
+      process.chdir(dir)
+      try {
+        const fiber = yield* prompt
+          .prompt({
+            sessionID: session.id,
+            agent: "build",
+            parts: [{ type: "text", text: "There is a bug in the parser — it mis-tokenizes trailing commas." }],
+          })
+          .pipe(Effect.forkChild)
+
+        // Same ordering as the oracle_inversion injection above: land the
+        // priming verdict after turn-open's resetSignals but before the
+        // SECOND finish-gate arrival needs it.
+        yield* llm.wait(1)
+        recordDeferralVerdict(session.id, {
+          complaint: "verification",
+          response: "verify-inline",
+          reason: "priming — stands in for an earlier verification signal in this turn",
+          escalationEarned: false,
+        })
+
+        const result = yield* Fiber.join(fiber)
+
+        expect(result.info.role).toBe("assistant")
+        if (result.info.role === "assistant") expect(result.info.finish).toBe("stop")
+        // The repro never sheds its type-unfaithfulness: one bounded convert
+        // (nudge, no deferral spent), then a SECOND finish arrival that arms
+        // the deferral and finds it already declines ("none" — verify-inline
+        // already spent for the "verification" complaint) and must fall
+        // through instead of looping.
+        expect(yield* llm.calls).toBe(8)
+
+        const declined = signalsFor(session.id).filter((s) => s.name === "deferral_declined")
+        expect(declined.some((s) => s.evidence.consumed === "fidelity_finish_reject")).toBe(true)
+      } finally {
+        process.chdir(originalCwd)
+      }
+    }),
+  30_000,
 )
 
 // Agent variant

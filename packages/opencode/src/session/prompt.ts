@@ -3841,7 +3841,7 @@ export const layer = Layer.effect(
                     buggy: inversion.buggyLiteral ?? null,
                   })
                   if (!surfaceRoute && deferralAvailable(sessionID)) {
-                    yield* armDeferral({
+                    const oracleInversionVerdict = yield* armDeferral({
                       signal: "oracle_inversion",
                       gateEvidence:
                         `The pinned probe went red because the code now PRODUCES the issue's stated desired value ` +
@@ -3853,7 +3853,11 @@ export const layer = Layer.effect(
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                       statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                     })
-                    continue
+                    // A "none" verdict plants no nudge and spends no deferral budget, so
+                    // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                    // forever against an unchanged transcript. Decline => fall through, which is
+                    // the intended terminal semantics: ask once, then fail open loud.
+                    if (oracleInversionVerdict.response !== "none") continue
                   }
                   // SURFACE (interactive) or deferral spent: state the
                   // conflict as the turn's verdict — never the "make the
@@ -3998,7 +4002,7 @@ export const layer = Layer.effect(
                     decision: "defer",
                     evidence: { probe: turnPinnedProbe.probe.command, retries: probeGateRetries, exit: gate.exitCode ?? null },
                   })
-                  yield* armDeferral({
+                  const probeGateExhaustedVerdict = yield* armDeferral({
                     signal: "probe_gate_exhausted",
                     gateEvidence: gate.reason ?? `pinned probe still failing after ${probeGateRetries} bounded rejects`,
                     probeCommand: turnPinnedProbe.probe.command,
@@ -4007,7 +4011,11 @@ export const layer = Layer.effect(
                     expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                     statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                   })
-                  continue
+                  // A "none" verdict plants no nudge and spends no deferral budget, so
+                  // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                  // forever against an unchanged transcript. Decline => fall through, which is
+                  // the intended terminal semantics: ask once, then fail open loud.
+                  if (probeGateExhaustedVerdict.response !== "none") continue
                 } else {
                   yield* publishSignalFx({
                     name: "probe_gate_exhausted",
@@ -4118,7 +4126,7 @@ export const layer = Layer.effect(
                     decision: "defer",
                     evidence: { probe: turnPinnedProbe.probe.command, gap: finishTypeGap, convertFailed: true },
                   })
-                  yield* armDeferral({
+                  const fidelityRejectVerdict = yield* armDeferral({
                     signal: "fidelity_finish_reject",
                     gateEvidence:
                       `The pinned reproduction ran GREEN but is still TYPE-UNFAITHFUL after one bounded deny: ${finishTypeGap} ` +
@@ -4130,7 +4138,11 @@ export const layer = Layer.effect(
                     expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                     statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                   })
-                  continue
+                  // A "none" verdict plants no nudge and spends no deferral budget, so
+                  // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                  // forever against an unchanged transcript. Decline => fall through, which is
+                  // the intended terminal semantics: ask once, then fail open loud.
+                  if (fidelityRejectVerdict.response !== "none") continue
                 }
                 if (finishTypeGap !== undefined) {
                   yield* Effect.logWarning("finish_fidelity_unresolved", {
@@ -4160,7 +4172,7 @@ export const layer = Layer.effect(
                     evidence: { probe: turnPinnedProbe.probe.command, redExit: turnPinnedProbe.redEvidence?.exitCode ?? null },
                   })
                   if (promotedDeferralOpen) {
-                    yield* armDeferral({
+                    const promotedPinGreenVerdict = yield* armDeferral({
                       signal: "promoted_pin_green",
                       gateEvidence:
                         `This turn's fix regressed a previously-passing neighbor suite; that suite was promoted to the binding pin ` +
@@ -4174,7 +4186,11 @@ export const layer = Layer.effect(
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                       statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                     })
-                    continue
+                    // A "none" verdict plants no nudge and spends no deferral budget, so
+                    // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                    // forever against an unchanged transcript. Decline => fall through, which is
+                    // the intended terminal semantics: ask once, then fail open loud.
+                    if (promotedPinGreenVerdict.response !== "none") continue
                   }
                 }
                 // S1 — the accept fall-through: the pin's red evidence (logged
@@ -4487,7 +4503,7 @@ export const layer = Layer.effect(
                     evidence: { unresolved: bindingSeenRed.length },
                   })
                   if (deferralAvailable(sessionID)) {
-                    yield* armDeferral({
+                    const seenRedVerdict = yield* armDeferral({
                       signal: "seen_red_unresolved",
                       gateEvidence:
                         `This turn landed source edits while these test/repro runs it SAW fail red were never re-run green:\n` +
@@ -4497,7 +4513,11 @@ export const layer = Layer.effect(
                       expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                       statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                     })
-                    continue
+                    // A "none" verdict plants no nudge and spends no deferral budget, so
+                    // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                    // forever against an unchanged transcript. Decline => fall through, which is
+                    // the intended terminal semantics: ask once, then fail open loud.
+                    if (seenRedVerdict.response !== "none") continue
                   }
                   yield* Effect.logWarning("turn_seen_red_unverified", {
                     "session.id": sessionID,
@@ -5381,7 +5401,7 @@ export const layer = Layer.effect(
                         evidence: { failing: failingNeighbors.length },
                       })
                       if (deferralAvailable(sessionID)) {
-                        yield* armDeferral({
+                        const regressionRedVerdict = yield* armDeferral({
                           signal: "regression_red",
                           gateEvidence:
                             `The landed fix still regresses previously-passing neighbor tests after one bounded reject:\n` +
@@ -5392,7 +5412,11 @@ export const layer = Layer.effect(
                           expectations: getIssueExpectations(sessionID).map((l) => `${l.kind}: ${l.value}`),
                           statedRules: getIssueThresholds(sessionID).map((t) => t.quote),
                         })
-                        continue
+                        // A "none" verdict plants no nudge and spends no deferral budget, so
+                        // `deferralAvailable` stays true and a bare `continue` re-enters this branch
+                        // forever against an unchanged transcript. Decline => fall through, which is
+                        // the intended terminal semantics: ask once, then fail open loud.
+                        if (regressionRedVerdict.response !== "none") continue
                       }
                       yield* Effect.logWarning("turn_regression_unresolved", {
                         "session.id": sessionID,
