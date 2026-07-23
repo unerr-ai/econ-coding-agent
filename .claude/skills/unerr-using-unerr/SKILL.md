@@ -14,7 +14,7 @@ unerr serves a live code graph plus your team's rules through MCP tools. For any
 
 | To… | Use |
 |---|---|
-| Find code, or pull context for a change | `search_code({query})` — a task phrase returns a CODE-STRUCTURE recon bundle: focus entity (+ body for single-entity edits) + callers (blast radius) + top relevant entities + conventions. For additional bodies, use `file_read({entity})` or `search_code({query, include_body:true})` or `cache_ref` (zero recompute). Anchored notes come via prompt injection or on-demand recall, not inline. A bare symbol returns ranked matches. |
+| Find code, or pull context for a change | `search_code({query})` — a task phrase returns a CODE-STRUCTURE recon bundle: focus entity (+ body for single-entity edits) + callers (blast radius) + top relevant entities + conventions. For additional bodies, use `file_read({entity})` or `search_code({query, include_body:true})` or `cache_ref` (zero recompute). A bare symbol returns ranked matches. |
 | Exact string / regex across files | `search_code({query, mode:'literal'\|'regex'})` — match + surrounding lines, no follow-up read |
 | Who calls it / what it calls (before a risky edit) | `get_references({key, direction:'callers'\|'callees'})` |
 | Read a file or one function | `file_read` (`entity:` for one symbol); `file_outline` for structure |
@@ -33,7 +33,7 @@ Domain comment (Layer 8): when you `file_edit` an entity that carries an `@sem` 
 
 ## The hooks already do the protective work — don't pay a call to repeat it
 
-Anchored notes (on the prompt), conventions and drift (on read), and the blast-radius gate (on edit) arrive on their own as `ur|<tag>` lines. Read them. Don't spend a `search_code` / `get_references` / `file_read` to re-fetch context you were already handed.
+Conventions and drift (on read) and the blast-radius gate (on edit) arrive on their own as `ur|<tag>` lines. Read them. Don't spend a `search_code` / `get_references` / `file_read` to re-fetch context you were already handed.
 
 ## Delegate by default — the main thread routes and consolidates, sub-agents do the work
 
@@ -50,7 +50,7 @@ Same change across many files? One command (`prettier --write .`, a codemod) →
 
 ## Close-out (zero round-trip)
 
-Emit `unerr-save:` lines in your closing message — the Stop hook persists them, no tool call: `intent` (first), then `decision` / `blocker` / `resolution`, and `note <kind|anchor|polarity|content>` for a non-obvious convention. User rules ("remember / always / never") are captured automatically. When unerr shaped your answer, say so plainly ("unerr found <name>", "<N> places call <name>") — never echo `ur|<tag>` lines.
+Emit `unerr-save:` lines in your closing message — the Stop hook persists them, no tool call: `intent` (first), then `decision` / `blocker` / `resolution`. When the user states a durable rule ("remember", "always", "never", "from now on"), a hook nudge fires — write the rule verbatim into this repo's CLAUDE.md (or the agent's instruction file) immediately; unerr does not store user rules. When unerr shaped your answer, say so plainly ("unerr found <name>", "<N> places call <name>") — never echo `ur|<tag>` lines.
 
 ## Output discipline
 

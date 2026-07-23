@@ -46,3 +46,6 @@ test_patch.diff
 fail_to_pass.txt
 PROMPT.txt
 run-*.log
+
+# unerr: personal Claude Code permission grant
+.claude/settings.local.json

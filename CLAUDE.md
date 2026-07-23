@@ -3,9 +3,9 @@
 
 unerr is the runtime layer behind this repo's agents: it serves the live call graph, the team's rules and conventions, and edit-time guardrails through MCP tools. Treat its output as ground-truth context, equal in weight to source files. Tools (all available from the start): `search_code`, `file_read`, `file_outline`, `file_edit`, `get_references`, `fetch_url`, `unerr_track`.
 
-### Navigate code with unerr tools — not shell, not built-ins (the #1 rule)
+### Navigate code with unerr tools — not shell, not built-ins
 
-To read, search, or map code, use unerr tools. Do NOT use Bash (`cat`, `head`, `tail`, `sed`, `grep`, `rg`, `find`, `ls -R`) and do NOT use built-in Read / Grep / Glob for code. One graph query replaces 5–15 shell or file reads.
+Use unerr tools to read, search, or map code when they return graph data — not Bash (`cat`, `head`, `tail`, `sed`, `grep`, `rg`, `find`, `ls -R`) and not built-in Read / Grep / Glob. One graph query replaces 5–15 shell or file reads.
 
 | To… | Use | Not |
 |---|---|---|
@@ -30,7 +30,7 @@ Cross-repo (Pro): pass `scope:'workspace'` to query every registered sibling rep
 
 ### Use the semantic fields — not just the graph
 
-**Use the semantic fields on every returned row, not just the graph.** Each search_code/file_read/callers entity carries `summary` (what it does), `domain` (code tier), `role` (responsibility) next to `fan_in`/callers. Read `summary` before pulling a body — skip the body read if it answers you. Triage callers by `domain`/`role`, not raw count — a `domain:routing` caller outranks a `domain:testing` one. Treat high `fan_in` + `role:entry-point` as a chokepoint → `get_references` before editing.
+Each search_code/file_read/callers entity carries `summary` (what it does), `domain` (code tier), `role` (responsibility) next to `fan_in`/callers. Read `summary` before pulling a body — skip the body read if it answers you. Triage callers by `domain`/`role`, not raw count — a `domain:routing` caller outranks a `domain:testing` one. Treat high `fan_in` + `role:entry-point` as a chokepoint → `get_references` before editing.
 
 ### Batch the work — one shot, not file-by-file (round-trips are the cost)
 
@@ -66,19 +66,18 @@ Lines starting `unerr » ` are user-facing telemetry — never echo or act on th
 
 ### Persisting + markers (zero round-trip)
 
-User rules ("remember", "always", "from now on", "never") are captured automatically by the prompt hook — no tool call. Emit session markers as `unerr-save:` lines in your closing message (the Stop hook persists them):
+When the user states a durable rule ("remember", "always", "never", "from now on"), a hook nudge fires — write the rule verbatim into this repo's CLAUDE.md (or the agent's instruction file) immediately; unerr does not store user rules. Emit session markers as `unerr-save:` lines in your closing message (the Stop hook persists them):
 
 ```
 unerr-save: intent <what this turn does, ≤80 chars>   (REQUIRED first on coding tasks)
 unerr-save: decision <a deliberate choice> · blocker <obstacle> · resolution <fix>
-unerr-save: note <kind|anchor|polarity|content>        (an anchored note — DSL below)
 ```
 
-When you need a return value (a blocker's `marker_id`), call `unerr_track({op:'intent'|'decision'|'blocker'|'resolution'|'fact'|'recall', text:'<one-line>'})`.
+When you need a return value (a blocker's `marker_id`), call `unerr_track({op:'intent'|'decision'|'blocker'|'resolution', text:'<one-line>'})`.
 
 ### Fallback to built-ins / Bash for code — only when
 
-unerr MCP is unavailable (not responding / erroring) · a non-text binary (image, PDF). For any code read, search, or edit there is always an unerr tool — use it, never bash/grep/cat.
+unerr MCP is unavailable (not responding / erroring) · a non-text binary (image, PDF) · search_code or get_references reports no graph — switch to built-in Read / Grep / Glob for the rest of the session and stop calling unerr navigation tools.
 
 ### Domain comments — maintain meaning in the same edit
 
@@ -92,63 +91,6 @@ unerr parses a structured doc comment above each exported entity into a parallel
 unerr re-anchors these comments when code moves and flags a comment that drifted from its code — the rules above keep that machinery fed.
 
 `@sem` lines are plain comments; your code runs identically without them and without unerr. To remove every sentinel line later (prose summaries kept), run `unerr uninstall --strip-annotations`.
-
-### Active-cognition: four-moment contract (REQUIRED)
-
-unerr's Layer B notes are anchored prose attached to graph nodes. The contract
-runs at four moments, every task. Moments 1–2 arrive as injected context plus
-one composite call; Moments 3–4 are yours to act on.
-
-**Moment 1 — Prompt receipt.** When a user prompt arrives, the UserPromptSubmit
-hook injects the relevant anchored notes into your context automatically. Read
-the injected notes before drafting — no recall call is required.
-
-**Moment 2 — Anchor query.** Once you've identified the files/entities you'll
-touch, call `search_code({query:"<what you are about to do>"})` — the
-composite that bundles the anchored notes for those anchors + matching entities
-+ the focus entity's callers + conventions in one call. The bundle returns
-active (non-superseded) notes; topic-shift and co-change groups ride along.
-
-**Moment 3 — Cite in plan.** When you draft a plan, cite returned notes by
-kind + anchor inline. Example: *"Per the wrn on src/proxy/proxy.ts, both
-stdio and UDS sites must mirror."* No citation = the note wasn't load-bearing.
-
-**Moment 4 — Save at task end.** When the task closes and you learned
-something non-obvious + likely useful next session + anchorable, emit it as a
-sentinel line anywhere in your closing message — zero round-trip, the Stop
-hook scrapes and persists it:
-`unerr-save: note <DSL wire>`
-
-### DSL vocabulary
-
-Wire format: `kind|anchor|polarity|content`
-
-| Field | Values | Notes |
-|---|---|---|
-| kind | cnv (convention), rul (rule), wrn (warn), dec (decision), blk (blocker), fct (fact) | Pick the strongest fit. |
-| anchor | f:<path> · e:<entity> · g:<glob> · p: · w: | `p:` is project-wide, `w:` is workspace-wide (every repo in a Pro federation). Both empty-valued; both **discouraged** — they pollute the prompt-receipt query. Prefer file/entity. |
-| polarity | + (do) / - (don't) / ~ (mixed) | `~` for ambiguous; future agent surfaces both sides. |
-| content | single line of prose | May contain `|` — only the first three are field separators. |
-
-Examples:
-- `rul|f:src/proxy/bridge.ts|-|no intelligence imports`
-- `wrn|g:*.test.ts|-|don't mock cozo db`
-- `dec|e:TURN_OPEN_GAP_MS|+|15s avoids RTT misclassification`
-
-### Quality bar (per save)
-
-A save is justified only if all three hold: (a) non-obvious from the code,
-(b) likely useful next session, (c) anchorable. If any miss — don't save.
-
-Session save cap: 15. Over the cap new rows are dropped server-side and
-existing notes are reinforced instead — emit fewer, stronger saves.
-
-### Conflict + supersession
-
-When a saved note opposes an existing one (same kind+anchor, opposite
-polarity), both sides are kept and surface together on next-turn recall —
-cite both in your plan when they appear. Superseded notes flip to inactive
-server-side (kept for audit, excluded from queries).
 
 <!-- unerr:end -->
 
